@@ -247,6 +247,9 @@ buckets_iam_err buckets_iam_policy_update_sts(buckets_iam *iam, const char *name
 char *buckets_iam_existing_policies(buckets_iam *iam, const char *csv);
 /* doesPolicyAllow: the named policies (comma-separated) evaluated together. */
 bool buckets_iam_policies_allow(buckets_iam *iam, const char *csv, const buckets_policy_args *args);
+/* The policies a credential's claims name: its role ARN's (*from_role), or
+ * the OpenID policy claim's (*from_claim); "" when neither applies. */
+char *buckets_iam_ident_policies(buckets_iam *iam, const buckets_iam_ident *id, bool *from_role, bool *from_claim);
 /* PolicyDBGet(name, groups...): comma-separated ("" if none). */
 char *buckets_iam_policy_db_get(buckets_iam *iam, const char *name, char *const *groups, size_t ngroups);
 /* The mapped policies of a user (with its groups) or a group, comma-separated. */

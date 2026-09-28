@@ -157,6 +157,15 @@ denied mc anonymous set-json "$WORK/bp-wrong.json" root/photos # Resource outsid
 [[ $(code --aws-sigv4 "aws:amz:us-east-1:s3" --user rootadmin:rootsecret123 "$EP/photos?policy") == 404 ]] ||
   fail "GetBucketPolicy after delete"
 
+echo "== account info"
+out=$(curl -s --aws-sigv4 "aws:amz:us-east-1:s3" --user alice:alicesecret123 -H "X-Amz-Content-Sha256: UNSIGNED-PAYLOAD" \
+  "$EP/minio/admin/v3/accountinfo")
+python3 -c 'import json,sys; d=json.loads(sys.argv[1]); b={x["name"]:x["access"] for x in d["Buckets"]}
+assert d["AccountName"]=="alice", d["AccountName"]
+assert b=={"photos":{"read":True,"write":True}}, b
+assert d["Policy"]["Statement"][0]["Resource"]==["arn:aws:s3:::photos","arn:aws:s3:::photos/*"], d["Policy"]
+assert d["Server"]["DrivesPerSet"]==[4]' "$out" || fail "accountinfo: $out"
+
 echo "== disabled users"
 ok mc admin user disable root alice
 out=$(mc cat alice/photos/a.txt 2>&1 || true)

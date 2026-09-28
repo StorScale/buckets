@@ -15,6 +15,7 @@
 #include "crypto/madmin.h"
 #include "iam/ldapidp.h"
 #include "iam/openid.h"
+#include "iam/plugins.h"
 
 #define ADMIN_PREFIX "/minio/admin/v3"
 #define MAX_ECONFIG_JSON (262272) /* maxEConfigJSONSize */
@@ -1037,11 +1038,9 @@ out:
 }
 
 /* The effective policy of a service account, as InfoServiceAccount shows it. */
-static char *svc_policy_json(buckets_iam *iam, const buckets_iam_ident *svc, bool *implied) {
-  *implied = !svc->has_session_policy || !svc->session_policy || buckets_policy_is_blank(svc->session_policy);
-  if (!*implied) return buckets_xstrdup(svc->session_policy_json);
-  /* GetCombinedPolicy(PolicyDBGet(parent, groups...)) */
-  char *names = buckets_iam_mapped_policies(iam, svc->parent ? svc->parent : "", false);
+/* GetCombinedPolicy: the statements of the named policies (comma-separated)
+ * merged into one policy, as indented JSON. */
+static char *combined_policy_json(buckets_iam *iam, const char *names) {
   yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
   yyjson_mut_val *root = yyjson_mut_obj(d);
   yyjson_mut_doc_set_root(d, root);
@@ -1059,7 +1058,15 @@ static char *svc_policy_json(buckets_iam *iam, const buckets_iam_ident *svc, boo
       size_t i, max;
       yyjson_val *s;
       if (yyjson_is_arr(sts)) {
-        yyjson_arr_foreach(sts, i, max, s) { yyjson_mut_arr_append(st, yyjson_val_mut_copy(d, s)); }
+        yyjson_arr_foreach(sts, i, max, s) {
+          /* MergePolicies drops duplicate statements. */
+          bool dup = false;
+          yyjson_mut_val *copy = yyjson_val_mut_copy(d, s);
+          size_t k, kmax;
+          yyjson_mut_val *prev;
+          yyjson_mut_arr_foreach(st, k, kmax, prev) { dup |= yyjson_mut_equals(prev, copy); }
+          if (!dup) yyjson_mut_arr_append(st, copy);
+        }
       } else if (yyjson_is_obj(sts)) {
         yyjson_mut_arr_append(st, yyjson_val_mut_copy(d, sts));
       }
@@ -1069,9 +1076,18 @@ static char *svc_policy_json(buckets_iam *iam, const buckets_iam_ident *svc, boo
     free(one);
     p = e ? e + 1 : p + n;
   }
-  free(names);
   char *json = yyjson_mut_write(d, YYJSON_WRITE_PRETTY, NULL);
   yyjson_mut_doc_free(d);
+  return json;
+}
+
+static char *svc_policy_json(buckets_iam *iam, const buckets_iam_ident *svc, bool *implied) {
+  *implied = !svc->has_session_policy || !svc->session_policy || buckets_policy_is_blank(svc->session_policy);
+  if (!*implied) return buckets_xstrdup(svc->session_policy_json);
+  /* GetCombinedPolicy(PolicyDBGet(parent, groups...)) */
+  char *names = buckets_iam_policy_db_get(iam, svc->parent ? svc->parent : "", svc->groups, svc->ngroups);
+  char *json = combined_policy_json(iam, names);
+  free(names);
   return json;
 }
 
@@ -1407,6 +1423,112 @@ static void h_policy_entities(s3_ctx *c) {
   free(json);
   c->resp->status = 200;
   buckets_http_resp_header(c->resp, "Content-Type", "application/json");
+}
+
+/* ---- account info ---------------------------------------------------------------------------- */
+
+/* madmin.BackendInfo (ObjectLayer.BackendInfo). */
+static void add_backend_info(s3_ctx *c, yyjson_mut_doc *d, yyjson_mut_val *o) {
+  buckets_objlayer *L = c->s->layer;
+  yyjson_mut_obj_add_int(d, o, "Type", 2); /* madmin.Erasure */
+  yyjson_mut_obj_add_bool(d, o, "GatewayOnline", false);
+  yyjson_mut_obj_add_null(d, o, "OnlineDisks");
+  yyjson_mut_obj_add_null(d, o, "OfflineDisks");
+  yyjson_mut_val *sd = yyjson_mut_obj_add_arr(d, o, "StandardSCData");
+  yyjson_mut_obj_add_null(d, o, "StandardSCParities");
+  yyjson_mut_val *rd = yyjson_mut_obj_add_arr(d, o, "RRSCData");
+  yyjson_mut_obj_add_null(d, o, "RRSCParities");
+  yyjson_mut_val *ts = yyjson_mut_obj_add_arr(d, o, "TotalSets");
+  yyjson_mut_val *dps = yyjson_mut_obj_add_arr(d, o, "DrivesPerSet");
+  int parity = 0, rrs = 0;
+  for (size_t p = 0, first = 0; L && p < L->npools; p++) {
+    buckets_drive_place pl;
+    buckets_objlayer_place(L, first, &pl);
+    if (p == 0) {
+      parity = pl.parity;
+      rrs = pl.set_size > 1 ? 1 : 0;
+    }
+    yyjson_mut_arr_add_int(d, sd, (int)pl.set_size - parity);
+    yyjson_mut_arr_add_int(d, rd, (int)pl.set_size - rrs);
+    yyjson_mut_arr_add_int(d, dps, (int)pl.set_size);
+    yyjson_mut_arr_add_int(d, ts, (int)pl.nsets);
+    first += pl.pool_drives;
+  }
+  yyjson_mut_obj_add_int(d, o, "StandardSCParity", parity);
+  yyjson_mut_obj_add_int(d, o, "RRSCParity", rrs);
+}
+
+/* AccountInfoHandler: the requestor's effective policy and the buckets it
+ * can read or write. (Usage and bucket features come with the scanner and
+ * bucket metadata.) */
+static void h_account_info(s3_ctx *c) {
+  if (!admin_signed(c)) return;
+  buckets_iam *iam = c->s->iam;
+  buckets_s3_cond_override(c, "prefix", "");
+  buckets_s3_cond_override(c, "delimiter", "/");
+  buckets_bucket_info *bk = NULL;
+  size_t nb = 0;
+  if (buckets_obj_list_buckets(c->s->layer, &bk, &nb) != BUCKETS_OBJ_OK) {
+    buckets_admin_error(c, BUCKETS_ERR_INTERNAL_ERROR);
+    return;
+  }
+  const char *account = requestor(c);
+  if (buckets_iam_ident_is_temp(c->ident) || buckets_iam_ident_is_svc(c->ident)) account = requestor_parent(c);
+  buckets_plugins *pl = buckets_s3_plugins(c->s);
+  bool authz = buckets_authz_plugin_enabled(pl);
+  buckets_plugins_release(pl);
+  char *policy;
+  if (strcmp(account, buckets_iam_root_access_key(iam)) == 0 || authz) {
+    policy = combined_policy_json(iam, "consoleAdmin");
+  } else {
+    bool role, claim;
+    char *names = buckets_iam_ident_policies(iam, c->ident, &role, &claim);
+    if (!role && !claim) {
+      free(names);
+      names = buckets_iam_policy_db_get(iam, account, c->ident->groups, c->ident->ngroups);
+    }
+    policy = combined_policy_json(iam, names);
+    free(names);
+  }
+  yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
+  yyjson_mut_val *root = yyjson_mut_obj(d);
+  yyjson_mut_doc_set_root(d, root);
+  yyjson_mut_obj_add_strcpy(d, root, "AccountName", account);
+  add_backend_info(c, d, yyjson_mut_obj_add_obj(d, root, "Server"));
+  yyjson_doc *pd = yyjson_read(policy, strlen(policy), 0);
+  yyjson_mut_obj_add_val(d, root, "Policy", yyjson_val_mut_copy(d, yyjson_doc_get_root(pd)));
+  yyjson_doc_free(pd);
+  free(policy);
+  yyjson_mut_val *arr = NULL;
+  for (size_t i = 0; i < nb; i++) {
+    bool rd = buckets_s3_allowed(c, "s3:ListBucket", bk[i].name, "", false) ||
+              buckets_s3_allowed(c, "s3:GetBucketLocation", bk[i].name, "", false);
+    bool wr = buckets_s3_allowed(c, "s3:PutObject", bk[i].name, "", false);
+    if (!rd && !wr) continue;
+    if (!arr) arr = yyjson_mut_obj_add_arr(d, root, "Buckets");
+    yyjson_mut_val *b = yyjson_mut_arr_add_obj(d, arr);
+    yyjson_mut_obj_add_strcpy(d, b, "name", bk[i].name);
+    yyjson_mut_obj_add_uint(d, b, "size", 0);
+    yyjson_mut_obj_add_uint(d, b, "objects", 0);
+    yyjson_mut_obj_add_null(d, b, "objectHistogram");
+    yyjson_mut_obj_add_null(d, b, "objectsVersionsHistogram");
+    yyjson_mut_val *det = yyjson_mut_obj_add_obj(d, b, "details");
+    yyjson_mut_obj_add_bool(d, det, "versioning", false);
+    yyjson_mut_obj_add_bool(d, det, "versioningSuspended", false);
+    yyjson_mut_obj_add_bool(d, det, "locking", false);
+    yyjson_mut_obj_add_bool(d, det, "replication", false);
+    yyjson_mut_obj_add_null(d, det, "tags");
+    yyjson_mut_obj_add_null(d, det, "quota");
+    yyjson_mut_obj_add_null(d, b, "prefixUsage");
+    add_time(d, b, "created", (buckets_iam_time){(long long)bk[i].created, 0});
+    yyjson_mut_val *acc = yyjson_mut_obj_add_obj(d, b, "access");
+    yyjson_mut_obj_add_bool(d, acc, "read", rd);
+    yyjson_mut_obj_add_bool(d, acc, "write", wr);
+  }
+  if (!arr) yyjson_mut_obj_add_null(d, root, "Buckets");
+  write_json(c, d, false);
+  yyjson_mut_doc_free(d);
+  buckets_bucket_info_free(bk, nb);
 }
 
 /* ---- LDAP (admin-handlers-idp-ldap.go) --------------------------------------------------------- */
@@ -1938,6 +2060,7 @@ static const route k_routes[] = {
     {"DELETE", "/delete-service-account", h_delete_svc},
     {"GET", "/list-access-keys-bulk", h_list_access_keys_bulk},
     {"POST", "/revoke-tokens/*", h_revoke_tokens},
+    {"GET", "/accountinfo", h_account_info},
     {"GET", "/idp/openid/list-access-keys-bulk", h_openid_list_access_keys_bulk},
     {"GET", "/idp/ldap/policy-entities", h_ldap_policy_entities},
     {"POST", "/idp/ldap/policy/attach", h_ldap_attach},

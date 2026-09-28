@@ -1068,6 +1068,15 @@ static bool role_policies(buckets_iam *iam, const buckets_iam_ident *id, strset 
   return true;
 }
 
+char *buckets_iam_ident_policies(buckets_iam *iam, const buckets_iam_ident *id, bool *from_role, bool *from_claim) {
+  strset s = {0};
+  *from_role = role_policies(iam, id, &s);
+  *from_claim = !*from_role && policies_from_claims(iam, id, &s);
+  char *r = set_join(&s);
+  set_free(&s);
+  return r;
+}
+
 /* Evaluates the named policies that exist (MergePolicies + IsAllowed);
  * false when none of them exist. */
 static bool eval_named(const cache *c, const strset *names, const buckets_policy_args *a) {
