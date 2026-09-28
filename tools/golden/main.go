@@ -14,9 +14,11 @@ import (
 	"strings"
 
 	"github.com/cespare/xxhash/v2"
+	"github.com/dchest/siphash"
 	"github.com/minio/highwayhash"
 	"github.com/tinylib/msgp/msgp"
 	"github.com/zeebo/xxh3"
+	"encoding/binary"
 )
 
 // pattern returns n deterministic bytes; the C test regenerates the same input.
@@ -52,6 +54,36 @@ func main() {
 		p := pattern(n)
 		s1 := sha1.Sum(p)
 		fmt.Printf("  {%d, 0x%08xu, 0x%08xu, 0x%016xull, \"%s\"},\n", n, crc32.ChecksumIEEE(p), crc32.Checksum(p, castagnoli), crc64.Checksum(p, nvme), hexs(s1[:]))
+	}
+	fmt.Println("};")
+
+	// SipHash-2-4 as MinIO's sipHashMod uses it (key = deployment ID bytes).
+	fmt.Println("static const struct { size_t len; uint64_t k0, k1, sum; } golden_sip[] = {")
+	for _, n := range lens {
+		k0, k1 := uint64(0x0706050403020100), uint64(0x0f0e0d0c0b0a0908)
+		if n%2 == 1 {
+			k0, k1 = 0xdeadbeefcafebabe, 0x0123456789abcdef
+		}
+		fmt.Printf("  {%d, 0x%016xull, 0x%016xull, 0x%016xull},\n", n, k0, k1, siphash.Hash(k0, k1, pattern(n)))
+	}
+	fmt.Println("};")
+
+	// MinIO placement: sipHashMod(object, sets, deploymentID) and hashOrder(key, n).
+	id := [16]byte{0xa8, 0x9a, 0xd6, 0xa1, 0xf0, 0x17, 0x4e, 0x24, 0x9c, 0xf4, 0xe6, 0xfa, 0x82, 0x5e, 0xa2, 0x92}
+	k0, k1 := binary.LittleEndian.Uint64(id[0:8]), binary.LittleEndian.Uint64(id[8:16])
+	names := []string{"a", "photos/cat.jpg", "dir/big.bin", "bucket/object", "x/y/z/deep/key.txt", "unicode-\u00e9\u00e8", ""}
+	fmt.Println("static const struct { const char *key; unsigned sets; unsigned set; unsigned n; int order[16]; } golden_place[] = {")
+	for _, name := range names {
+		for _, sets := range []uint64{1, 2, 3, 7, 16} {
+			n := int(sets%15) + 2
+			crc := crc32.Checksum([]byte(name), crc32.IEEETable)
+			start := int(crc % uint32(n))
+			var order []string
+			for i := 1; i <= n; i++ {
+				order = append(order, fmt.Sprint(1+((start+i)%n)))
+			}
+			fmt.Printf("  {\"%s\", %d, %d, %d, {%s}},\n", name, sets, siphash.Hash(k0, k1, []byte(name))%sets, n, strings.Join(order, ", "))
+		}
 	}
 	fmt.Println("};")
 

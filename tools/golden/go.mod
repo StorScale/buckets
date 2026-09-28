@@ -4,6 +4,7 @@ go 1.27.1
 
 require (
 	github.com/cespare/xxhash/v2 v2.3.0
+	github.com/dchest/siphash v1.2.3
 	github.com/minio/highwayhash v1.0.4
 	github.com/tinylib/msgp v1.6.4
 	github.com/zeebo/xxh3 v1.1.0

@@ -15,6 +15,7 @@
 #include "crypto/crc.h"
 #include "crypto/hex.h"
 #include "crypto/sha1.h"
+#include "crypto/siphash.h"
 #include "crypto/highwayhash.h"
 #include "crypto/xxhash.h"
 
@@ -85,6 +86,16 @@ static void test_checksums(void **state) {
   assert_true(buckets_crc32_ieee(0, "123456789", 9) == 0xcbf43926u);
   assert_true(buckets_crc32c(0, "123456789", 9) == 0xe3069283u);
   assert_true(buckets_crc64_nvme(0, "123456789", 9) == 0xae8b14860a799888ull);
+}
+
+static void test_siphash(void **state) {
+  for (size_t i = 0; i < sizeof(golden_sip) / sizeof(golden_sip[0]); i++) {
+    uint8_t *p = pattern(golden_sip[i].len);
+    if (buckets_siphash24(golden_sip[i].k0, golden_sip[i].k1, p, golden_sip[i].len) != golden_sip[i].sum) {
+      fail_msg("siphash len %zu", golden_sip[i].len);
+    }
+    free(p);
+  }
 }
 
 static void test_highwayhash(void **state) {
@@ -208,6 +219,7 @@ int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_xxhash),
       cmocka_unit_test(test_checksums),
+      cmocka_unit_test(test_siphash),
       cmocka_unit_test(test_highwayhash),
       cmocka_unit_test(test_bitrot_selftest),
       cmocka_unit_test(test_msgpack_encodings),

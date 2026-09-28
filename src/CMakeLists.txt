@@ -18,6 +18,7 @@ add_library(buckets STATIC
   crypto/crc.c
   crypto/sha1.c
   crypto/cksum.c
+  crypto/siphash.c
   net/http.c
   s3/errors.c
   s3/errors_gen.c
@@ -36,6 +37,7 @@ add_library(buckets STATIC
   object/multipart.c
   bucket/metadata.c
   erasure/rs.c
+  erasure/layout.c
 )
 target_include_directories(buckets PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 # timegm, gmtime_r, arc4random_buf, strncasecmp live outside strict C17.
