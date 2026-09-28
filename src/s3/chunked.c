@@ -194,8 +194,9 @@ static bool read_trailers(buckets_chunked *ch) {
   const char *provided = sigline + sizeof(prefix) - 1;
   while (*provided == ' ') provided++;
 
+  /* Signed over the trailer line ending in exactly one '\n' (it may already have one). */
   char with_nl[MAX_LINE + 2];
-  snprintf(with_nl, sizeof(with_nl), "%s\n", line);
+  snprintf(with_nl, sizeof(with_nl), "%s%s", line, n && line[n - 1] == '\n' ? "" : "\n");
   uint8_t sum[32];
   char hashes[65];
   buckets_sha256(with_nl, strlen(with_nl), sum);

@@ -23,6 +23,7 @@ add_library(buckets STATIC
   s3/errors_gen.c
   s3/xml.c
   s3/sigv4.c
+  s3/sigv2.c
   s3/bucketname.c
   s3/server.c
   s3/objects.c

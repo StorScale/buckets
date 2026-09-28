@@ -8,9 +8,11 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <cmocka.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "core/timefmt.h"
+#include "s3/sigv2.h"
 #include "s3/sigv4.h"
 
 #define S3_AK "AKIAIOSFODNN7EXAMPLE"
@@ -217,12 +219,56 @@ static void test_canonical_uri_and_query(void **state) {
   buckets_buf_free(&b);
 }
 
+/* AWS "Signing and Authenticating REST Requests" (Signature Version 2) examples. */
+static void test_sigv2_examples(void **state) {
+  buckets_sigv4_config cfg = config("s3", "20070327T193642Z");
+  buckets_sigv4_result res;
+  buckets_http_request req;
+  static const char *const get[] = {"Host", "johnsmith.s3.amazonaws.com", "Date", "Tue, 27 Mar 2007 19:36:42 +0000",
+                                    "Authorization", "AWS AKIAIOSFODNN7EXAMPLE:bWq2s1WEIj+Ydj0vQ697zp+IXMU=", NULL};
+  make_request(&req, "GET", "/johnsmith/photos/puppy.jpg", get);
+  assert_int_equal(buckets_sigv2_verify_header(&cfg, &req, &res), BUCKETS_ERR_NONE);
+  assert_string_equal(res.access_key, S3_AK);
+
+  static const char *const put[] = {"Host", "johnsmith.s3.amazonaws.com", "Date", "Tue, 27 Mar 2007 21:15:45 +0000",
+                                    "Content-Type", "image/jpeg", "Content-Length", "94328", "Authorization",
+                                    "AWS AKIAIOSFODNN7EXAMPLE:MyyxeRY7whkBe+bq8fHCL/2kKUg=", NULL};
+  make_request(&req, "PUT", "/johnsmith/photos/puppy.jpg", put);
+  assert_int_equal(buckets_sigv2_verify_header(&cfg, &req, &res), BUCKETS_ERR_NONE);
+
+  /* Tampering with a signed header fails. */
+  static const char *const bad[] = {"Host", "johnsmith.s3.amazonaws.com", "Date", "Tue, 27 Mar 2007 21:15:46 +0000",
+                                    "Content-Type", "image/jpeg", "Authorization",
+                                    "AWS AKIAIOSFODNN7EXAMPLE:MyyxeRY7whkBe+bq8fHCL/2kKUg=", NULL};
+  make_request(&req, "PUT", "/johnsmith/photos/puppy.jpg", bad);
+  assert_int_equal(buckets_sigv2_verify_header(&cfg, &req, &res), BUCKETS_ERR_SIGNATURE_DOES_NOT_MATCH);
+
+  /* Presigned: signature over Expires instead of Date; expired links fail. */
+  char sig[32];
+  const char *sts = "GET\n\n\n1175139620\n/johnsmith/photos/puppy.jpg";
+  buckets_sigv2_sign(S3_SK, sts, strlen(sts), sig);
+  char target[256], enc[64] = "";
+  for (size_t i = 0, o = 0; sig[i]; i++) {
+    if (sig[i] == '+') o += (size_t)sprintf(enc + o, "%%2B");
+    else if (sig[i] == '/') o += (size_t)sprintf(enc + o, "%%2F");
+    else if (sig[i] == '=') o += (size_t)sprintf(enc + o, "%%3D");
+    else enc[o++] = sig[i];
+  }
+  snprintf(target, sizeof(target), "/johnsmith/photos/puppy.jpg?AWSAccessKeyId=%s&Expires=1175139620&Signature=%s",
+           S3_AK, enc);
+  static const char *const host_only[] = {"Host", "johnsmith.s3.amazonaws.com", NULL};
+  make_request(&req, "GET", target, host_only);
+  assert_int_equal(buckets_sigv2_verify_presigned(&cfg, &req, &res), BUCKETS_ERR_NONE);
+  buckets_sigv4_config late = config("s3", "20070329T040021Z");
+  assert_int_equal(buckets_sigv2_verify_presigned(&late, &req, &res), BUCKETS_ERR_EXPIRED_PRESIGN_REQUEST);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_suite_get_vanilla),      cmocka_unit_test(test_s3_get_object),
       cmocka_unit_test(test_s3_get_bucket_lifecycle), cmocka_unit_test(test_s3_list_objects),
       cmocka_unit_test(test_s3_presigned),            cmocka_unit_test(test_rejections),
-      cmocka_unit_test(test_canonical_uri_and_query),
+      cmocka_unit_test(test_canonical_uri_and_query), cmocka_unit_test(test_sigv2_examples),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

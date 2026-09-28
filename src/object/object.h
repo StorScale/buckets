@@ -61,6 +61,7 @@ typedef struct {
   bool delete_marker;
   uint8_t *checksum; /* stored x-minio-internal-crc bytes, or NULL */
   size_t checksum_len;
+  buckets_xl_part *parts; /* numbers and sizes, in object order (etags unset) */
 } buckets_object_info;
 
 void buckets_object_info_free(buckets_object_info *oi);

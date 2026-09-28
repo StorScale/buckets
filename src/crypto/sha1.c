@@ -83,3 +83,30 @@ void buckets_sha1_final(buckets_sha1_ctx *ctx, uint8_t out[BUCKETS_SHA1_LEN]) {
     out[4 * i + 3] = (uint8_t)ctx->state[i];
   }
 }
+
+void buckets_hmac_sha1(const void *key, size_t key_len, const void *msg, size_t msg_len,
+                       uint8_t out[BUCKETS_SHA1_LEN]) {
+  uint8_t k[64] = {0};
+  if (key_len > 64) {
+    buckets_sha1_ctx c;
+    buckets_sha1_init(&c);
+    buckets_sha1_update(&c, key, key_len);
+    buckets_sha1_final(&c, k);
+  } else if (key_len) {
+    memcpy(k, key, key_len);
+  }
+  uint8_t ipad[64], opad[64], inner[BUCKETS_SHA1_LEN];
+  for (int i = 0; i < 64; i++) {
+    ipad[i] = k[i] ^ 0x36;
+    opad[i] = k[i] ^ 0x5c;
+  }
+  buckets_sha1_ctx c;
+  buckets_sha1_init(&c);
+  buckets_sha1_update(&c, ipad, 64);
+  buckets_sha1_update(&c, msg, msg_len);
+  buckets_sha1_final(&c, inner);
+  buckets_sha1_init(&c);
+  buckets_sha1_update(&c, opad, 64);
+  buckets_sha1_update(&c, inner, sizeof(inner));
+  buckets_sha1_final(&c, out);
+}

@@ -532,11 +532,34 @@ static void reader_free(void *ud) { buckets_obj_reader_free(ud); }
 
 static void get_object(s3_ctx *c, bool head) {
   const char *version = buckets_query_get(&c->q, "versionId");
+  const char *pn_s = buckets_query_get(&c->q, "partNumber");
+  long part_number = 0;
+  if (pn_s) {
+    char *end;
+    part_number = strtol(pn_s, &end, 10);
+    if (!*pn_s || *end || part_number < 1 || part_number > BUCKETS_MAX_PARTS) {
+      buckets_s3_write_error(c, BUCKETS_ERR_INVALID_PART_NUMBER);
+      return;
+    }
+    if (buckets_http_header_get(c->req, "Range").p) {
+      buckets_s3_write_error(c, BUCKETS_ERR_INVALID_REQUEST); /* S3: Range and partNumber are exclusive */
+      return;
+    }
+  }
   buckets_object_info oi;
   buckets_obj_err err = buckets_obj_stat(c->s->drive, c->bucket, c->object, version, &oi);
   if (err) {
     buckets_s3_write_error(c, buckets_s3_obj_error(err));
     return;
+  }
+  if (part_number > 1) {
+    bool found = false;
+    for (size_t i = 0; i < oi.nparts; i++) found |= oi.parts[i].number == part_number;
+    if (!found || (size_t)part_number > oi.nparts) {
+      buckets_object_info_free(&oi);
+      buckets_s3_write_error(c, BUCKETS_ERR_INVALID_PART_NUMBER);
+      return;
+    }
   }
   if (check_preconditions(c, &oi)) {
     buckets_object_info_free(&oi);
@@ -544,7 +567,17 @@ static void get_object(s3_ctx *c, bool head) {
   }
   range_spec rs;
   int64_t off = 0, len = oi.size;
-  if (!parse_range(buckets_http_header_get(c->req, "Range"), &rs) || !resolve_range(&rs, oi.size, &off, &len)) {
+  if (part_number > 0) {
+    /* partNumberToRangeSpec: index-based over the object's parts. */
+    int64_t start = 0;
+    for (long i = 0; i < part_number - 1 && (size_t)i < oi.nparts; i++) start += oi.parts[i].actual_size;
+    int64_t plen = oi.nparts >= (size_t)part_number ? oi.parts[part_number - 1].actual_size : oi.size;
+    rs = (range_spec){true, false, start, start + plen - 1};
+    if (plen == 0) rs.end = -1;
+  } else if (!parse_range(buckets_http_header_get(c->req, "Range"), &rs)) {
+    rs.present = true, rs.start = INT64_MAX; /* force InvalidRange below */
+  }
+  if (!resolve_range(&rs, oi.size, &off, &len)) {
     buckets_http_resp_headerf(c->resp, "Content-Range", "bytes */%lld", (long long)oi.size);
     buckets_s3_write_error(c, BUCKETS_ERR_INVALID_RANGE);
     buckets_object_info_free(&oi);
@@ -567,12 +600,13 @@ static void get_object(s3_ctx *c, bool head) {
     buckets_http_resp_headerf(c->resp, "Content-Range", "bytes %lld-%lld/%lld", (long long)off,
                               (long long)(off + len - 1), (long long)oi.size);
   }
+  if (part_number > 0 && oi.nparts > 1) buckets_http_resp_headerf(c->resp, "X-Amz-Mp-Parts-Count", "%zu", oi.nparts);
   buckets_str cm = buckets_http_header_get(c->req, "X-Amz-Checksum-Mode");
-  if (cm.p && buckets_str_eq_c(cm, "ENABLED") && !rs.present && oi.checksum) {
-    buckets_checksum_write_headers(oi.checksum, oi.checksum_len, 0, c->resp);
+  if (cm.p && buckets_str_eq_c(cm, "ENABLED") && oi.checksum && (!rs.present || part_number > 0)) {
+    buckets_checksum_write_headers(oi.checksum, oi.checksum_len, (int)part_number, c->resp);
   }
   if (!head) response_overrides(c);
-  c->resp->status = rs.present ? 206 : 200;
+  c->resp->status = rs.present || part_number > 0 ? 206 : 200;
   c->resp->content_length = len;
   if (r) {
     c->resp->stream = (buckets_http_body_fn)reader_source;
@@ -1145,6 +1179,202 @@ void buckets_s3_list_uploads(s3_ctx *c) {
   buckets_s3_write_xml(c, 200);
 }
 
+/* ---- GetObjectAttributes / ACL -------------------------------------------- */
+
+/* ReadCheckSums via the header writer: returns the value for one algorithm. */
+static bool checksum_value(const buckets_object_info *oi, int part, const char *header, char *out, size_t cap,
+                           char *type_out, size_t type_cap) {
+  if (!oi->checksum) return false;
+  buckets_http_response tmp = {.content_length = -1};
+  buckets_checksum_write_headers(oi->checksum, oi->checksum_len, part, &tmp);
+  bool found = false;
+  buckets_str rest = buckets_buf_str(&tmp.headers), line;
+  while (rest.n) {
+    buckets_str_cut(rest, '\n', &line, &rest);
+    buckets_str name, value;
+    if (!buckets_str_cut(line, ':', &name, &value)) continue;
+    value = buckets_str_trim(value);
+    if (value.n && value.p[value.n - 1] == '\r') value.n--;
+    if (buckets_str_ieq_c(name, header)) {
+      snprintf(out, cap, BUCKETS_STR_FMT, BUCKETS_STR_ARG(value));
+      char *dash = strchr(out, '-');
+      if (dash) *dash = '\0'; /* attributes drop the "-N" suffix */
+      found = true;
+    } else if (type_out && buckets_str_ieq_c(name, "X-Amz-Checksum-Type")) {
+      snprintf(type_out, type_cap, BUCKETS_STR_FMT, BUCKETS_STR_ARG(value));
+    }
+  }
+  buckets_buf_free(&tmp.headers);
+  return found;
+}
+
+static void get_object_attributes(s3_ctx *c) {
+  static const char *const names[] = {"ETag", "Checksum", "ObjectParts", "StorageClass", "ObjectSize"};
+  bool want[5] = {false};
+  bool any = false;
+  for (size_t h = 0; h < c->req->nheaders; h++) {
+    if (!buckets_str_ieq_c(c->req->headers[h].name, "X-Amz-Object-Attributes")) continue;
+    buckets_str rest = c->req->headers[h].value, item;
+    while (rest.n) {
+      buckets_str_cut(rest, ',', &item, &rest);
+      item = buckets_str_trim(item);
+      if (!item.n) continue;
+      bool known = false;
+      for (size_t i = 0; i < 5; i++) {
+        if (buckets_str_eq_c(item, names[i])) want[i] = known = any = true;
+      }
+      if (!known) {
+        buckets_s3_write_error(c, BUCKETS_ERR_INVALID_ATTRIBUTE_NAME);
+        return;
+      }
+    }
+  }
+  if (!any) {
+    buckets_s3_write_error(c, BUCKETS_ERR_INVALID_ATTRIBUTE_NAME);
+    return;
+  }
+  long max_parts = 10000, marker = 0;
+  buckets_str mp = buckets_http_header_get(c->req, "X-Amz-Max-Parts");
+  buckets_str pm = buckets_http_header_get(c->req, "X-Amz-Part-Number-Marker");
+  if (mp.p) {
+    char *v = buckets_str_dup(mp), *end;
+    max_parts = strtol(v, &end, 10);
+    bool bad = !*v || *end;
+    free(v);
+    if (bad) {
+      buckets_s3_write_error(c, BUCKETS_ERR_INVALID_ARGUMENT);
+      return;
+    }
+    if (max_parts == 0) max_parts = 10000;
+  }
+  if (pm.p) {
+    char *v = buckets_str_dup(pm), *end;
+    marker = strtol(v, &end, 10);
+    bool bad = !*v || *end;
+    free(v);
+    if (bad) {
+      buckets_s3_write_error(c, BUCKETS_ERR_INVALID_ARGUMENT);
+      return;
+    }
+  }
+  const char *version = buckets_query_get(&c->q, "versionId");
+  buckets_object_info oi;
+  buckets_obj_err err = buckets_obj_stat(c->s->drive, c->bucket, c->object, version, &oi);
+  if (err) {
+    buckets_s3_write_error(c, buckets_s3_obj_error(err));
+    return;
+  }
+  if (check_preconditions(c, &oi)) {
+    buckets_object_info_free(&oi);
+    return;
+  }
+  char lm[BUCKETS_TIME_HTTP_LEN + 1];
+  buckets_time_http((time_t)(oi.mod_time_ns / 1000000000LL), lm);
+  buckets_http_resp_header(c->resp, "Last-Modified", lm);
+
+  static const char *const ck_headers[] = {"X-Amz-Checksum-Crc32", "X-Amz-Checksum-Crc32c", "X-Amz-Checksum-Sha1",
+                                           "X-Amz-Checksum-Sha256", "X-Amz-Checksum-Crc64nvme"};
+  static const char *const ck_tags[] = {"ChecksumCRC32", "ChecksumCRC32C", "ChecksumSHA1", "ChecksumSHA256",
+                                        "ChecksumCRC64NVME"};
+  buckets_buf *b = &c->resp->body;
+  buckets_xml_header(b);
+  buckets_xml_open(b, "getObjectAttributesResponse"); /* MinIO's (unexported Go type) element name */
+  if (want[0]) buckets_xml_elem(b, "ETag", oi.etag);
+  if (want[1] && oi.checksum) {
+    buckets_buf ck = BUCKETS_BUF_INIT;
+    char type[32] = "";
+    for (size_t i = 0; i < 5; i++) {
+      char v[64];
+      if (checksum_value(&oi, 0, ck_headers[i], v, sizeof(v), type, sizeof(type))) buckets_xml_elem(&ck, ck_tags[i], v);
+    }
+    if (ck.len) {
+      buckets_xml_open(b, "Checksum");
+      buckets_buf_append(b, ck.data, ck.len);
+      if (type[0]) buckets_xml_elem(b, "ChecksumType", type);
+      buckets_xml_close(b, "Checksum");
+    }
+    buckets_buf_free(&ck);
+  }
+  if (want[2]) {
+    buckets_buf parts = BUCKETS_BUF_INIT;
+    int next = 0, listed = 0;
+    for (size_t i = 0; i < oi.nparts; i++) {
+      if (oi.parts[i].number <= marker) continue;
+      if (listed == max_parts) break;
+      next = oi.parts[i].number;
+      listed++;
+      buckets_xml_open(&parts, "Part");
+      buckets_buf_appendf(&parts, "<PartNumber>%d</PartNumber><Size>%lld</Size>", oi.parts[i].number,
+                          (long long)oi.parts[i].size);
+      for (size_t k = 0; oi.nparts > 1 && k < 5; k++) {
+        char v[64];
+        if (checksum_value(&oi, oi.parts[i].number, ck_headers[k], v, sizeof(v), NULL, 0)) {
+          buckets_xml_elem(&parts, ck_tags[k], v);
+        }
+      }
+      buckets_xml_close(&parts, "Part");
+    }
+    buckets_xml_open(b, "ObjectParts");
+    buckets_xml_elem(b, "IsTruncated", (size_t)next != oi.nparts ? "true" : "false");
+    buckets_buf_appendf(b, "<MaxParts>%ld</MaxParts><NextPartNumberMarker>%d</NextPartNumberMarker>", max_parts, next);
+    buckets_buf_appendf(b, "<PartNumberMarker>%ld</PartNumberMarker><PartsCount>%zu</PartsCount>", marker, oi.nparts);
+    buckets_buf_append(b, parts.data, parts.len);
+    buckets_xml_close(b, "ObjectParts");
+    buckets_buf_free(&parts);
+  }
+  if (want[3]) {
+    const char *sc = buckets_object_meta(&oi, "x-amz-storage-class");
+    buckets_xml_elem(b, "StorageClass", sc ? sc : "STANDARD");
+  }
+  if (want[4] && oi.size) buckets_buf_appendf(b, "<ObjectSize>%lld</ObjectSize>", (long long)oi.size);
+  buckets_xml_close(b, "getObjectAttributesResponse");
+  buckets_object_info_free(&oi);
+  buckets_s3_write_xml(c, 200);
+}
+
+/* MinIO supports only the canned private ACL (acl-handlers.go). */
+void buckets_s3_write_private_acl(s3_ctx *c) {
+  buckets_buf_append_c(&c->resp->body,
+                       "<AccessControlPolicy><Owner><ID></ID><DisplayName></DisplayName></Owner><AccessControlList>"
+                       "<Grant><Grantee xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" "
+                       "xsi:type=\"CanonicalUser\"><Type>CanonicalUser</Type></Grantee>"
+                       "<Permission>FULL_CONTROL</Permission></Grant></AccessControlList></AccessControlPolicy>");
+  c->resp->status = 200;
+  buckets_http_resp_header(c->resp, "Content-Type", "text/xml; charset=utf-8");
+}
+
+void buckets_s3_put_acl(s3_ctx *c) {
+  buckets_str canned = buckets_http_header_get(c->req, "X-Amz-Acl");
+  if (canned.p && canned.n) {
+    if (!buckets_str_eq_c(canned, "private")) {
+      buckets_s3_write_error(c, BUCKETS_ERR_NOT_IMPLEMENTED);
+      return;
+    }
+    c->resp->status = 200;
+    return;
+  }
+  buckets_s3_error err = buckets_s3_read_doc(c);
+  if (err) {
+    buckets_s3_write_error(c, err);
+    return;
+  }
+  buckets_xml_doc doc;
+  if (!buckets_xml_parse(buckets_buf_str(&c->doc), &doc)) {
+    buckets_s3_write_error(c, BUCKETS_ERR_MALFORMED_XML);
+    return;
+  }
+  size_t acl = buckets_xml_child(&doc, 0, "AccessControlList");
+  size_t grant = acl ? buckets_xml_child(&doc, acl, "Grant") : 0;
+  size_t perm = grant ? buckets_xml_child(&doc, grant, "Permission") : 0;
+  bool ok = perm && buckets_str_eq_c(buckets_str_trim(doc.nodes[perm].text), "FULL_CONTROL");
+  buckets_xml_doc_free(&doc);
+  if (!ok) {
+    buckets_s3_write_error(c, BUCKETS_ERR_NOT_IMPLEMENTED);
+    return;
+  }
+  c->resp->status = 200;
+}
+
 /* ---- routing -------------------------------------------------------------- */
 
 void buckets_s3_route_object(s3_ctx *c) {
@@ -1162,8 +1392,24 @@ void buckets_s3_route_object(s3_ctx *c) {
     else buckets_s3_write_error(c, BUCKETS_ERR_METHOD_NOT_ALLOWED);
     return;
   }
-  static const char *const unsupported[] = {"tagging", "retention", "legal-hold", "acl", "attributes",
-                                            "select",  "restore",   "torrent",    "partNumber"};
+  if (buckets_query_has(&c->q, "attributes") && buckets_str_eq_c(m, "GET")) {
+    get_object_attributes(c);
+    return;
+  }
+  if (buckets_query_has(&c->q, "acl")) {
+    buckets_object_info oi;
+    buckets_obj_err err = buckets_obj_stat(c->s->drive, c->bucket, c->object, buckets_query_get(&c->q, "versionId"), &oi);
+    if (err) {
+      buckets_s3_write_error(c, buckets_s3_obj_error(err));
+      return;
+    }
+    buckets_object_info_free(&oi);
+    if (buckets_str_eq_c(m, "GET")) buckets_s3_write_private_acl(c);
+    else if (buckets_str_eq_c(m, "PUT")) buckets_s3_put_acl(c);
+    else buckets_s3_write_error(c, BUCKETS_ERR_METHOD_NOT_ALLOWED);
+    return;
+  }
+  static const char *const unsupported[] = {"tagging", "retention", "legal-hold", "select", "restore", "torrent"};
   for (size_t i = 0; i < BUCKETS_ARRAY_LEN(unsupported); i++) {
     if (buckets_query_has(&c->q, unsupported[i])) {
       buckets_s3_write_error(c, BUCKETS_ERR_NOT_IMPLEMENTED);

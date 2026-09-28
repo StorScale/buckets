@@ -233,6 +233,7 @@ void buckets_object_info_free(buckets_object_info *oi) {
   }
   free(oi->meta);
   free(oi->checksum);
+  free(oi->parts);
   memset(oi, 0, sizeof(*oi));
 }
 
@@ -248,6 +249,12 @@ void buckets_objx_fill_info(buckets_object_info *oi, const char *name, const buc
   oi->size = o->size;
   oi->mod_time_ns = o->mod_time;
   oi->nparts = o->nparts;
+  if (o->nparts) {
+    oi->parts = buckets_xcalloc(o->nparts, sizeof(buckets_xl_part));
+    for (size_t i = 0; i < o->nparts; i++) {
+      oi->parts[i] = (buckets_xl_part){o->parts[i].number, o->parts[i].size, o->parts[i].actual_size, NULL};
+    }
+  }
   oi->delete_marker = o->type == BUCKETS_XL_TYPE_DELETE;
   for (size_t i = 0; i < o->nmeta_user; i++) {
     if (strcmp(o->meta_user[i].key, "etag") == 0) {

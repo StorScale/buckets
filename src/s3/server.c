@@ -19,6 +19,7 @@
 #include "s3/errors.h"
 #include "s3/sigv4.h"
 #include "s3/internal.h"
+#include "s3/sigv2.h"
 #include "s3/xml.h"
 
 #define DEFAULT_REGION "us-east-1"
@@ -175,7 +176,11 @@ static buckets_s3_error authenticate(s3_ctx *c) {
       /* Anonymous access is governed by bucket policies, which are not implemented yet. */
       return BUCKETS_ERR_ACCESS_DENIED;
     case BUCKETS_AUTH_SIGV2:
+      err = buckets_sigv2_verify_header(&cfg, c->req, res);
+      break;
     case BUCKETS_AUTH_SIGV2_PRESIGNED:
+      err = buckets_sigv2_verify_presigned(&cfg, c->req, res);
+      break;
     case BUCKETS_AUTH_POST_POLICY:
     case BUCKETS_AUTH_JWT:
       return BUCKETS_ERR_NOT_IMPLEMENTED;
@@ -334,6 +339,18 @@ static void route_bucket(s3_ctx *c) {
     return;
   }
   buckets_str m = c->req->method;
+  if (buckets_query_has(&c->q, "acl")) {
+    if (!bucket_exists(c)) {
+      buckets_s3_write_error(c, BUCKETS_ERR_NO_SUCH_BUCKET);
+    } else if (buckets_str_eq_c(m, "GET")) {
+      buckets_s3_write_private_acl(c);
+    } else if (buckets_str_eq_c(m, "PUT")) {
+      buckets_s3_put_acl(c);
+    } else {
+      buckets_s3_write_error(c, BUCKETS_ERR_METHOD_NOT_ALLOWED);
+    }
+    return;
+  }
   if (buckets_str_eq_c(m, "PUT")) {
     if (c->q.n > 0) {
       buckets_s3_write_error(c, BUCKETS_ERR_NOT_IMPLEMENTED);
