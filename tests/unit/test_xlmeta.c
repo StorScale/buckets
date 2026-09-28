@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include "crypto/highwayhash.h"
+#include "bucket/metadata.h"
 #include "storage/xlmeta.h"
 
 static uint8_t *read_fixture(const char *name, size_t *n) {
@@ -191,11 +192,46 @@ static void test_version_ids(void **state) {
   assert_false(buckets_xl_version_id_parse("9e82e11d-6206-4445-b705-1c36ebcb40zz", id));
 }
 
+/* MinIO's .metadata.bin decodes and re-encodes to identical bytes. */
+static void test_bucket_metadata(void **state) {
+  size_t n;
+  uint8_t *raw = read_fixture("bucket-metadata.xl.meta", &n);
+  buckets_xlmeta x;
+  assert_int_equal(buckets_xlmeta_parse(raw, n, &x), BUCKETS_XL_OK);
+  buckets_str shard;
+  assert_true(buckets_xlmeta_inline_get(&x, "null", &shard));
+  buckets_str data = {shard.p + 32, shard.n - 32}; /* skip the bitrot hash */
+  buckets_bucket_meta m;
+  assert_true(buckets_bucket_meta_decode(data.p, data.n, &m));
+  assert_string_equal(m.name, "ref");
+  assert_true(buckets_bucket_meta_created_ns(&m) > 0);
+  assert_int_equal(m.updated[BUCKETS_BCFG_POLICY].sec, BUCKETS_GO_ZERO_TIME_SEC);
+  buckets_buf out = BUCKETS_BUF_INIT;
+  buckets_bucket_meta_encode(&m, &out);
+  assert_int_equal(out.len, data.n);
+  assert_memory_equal(out.data, data.p, data.n);
+
+  /* A fresh record for the same name/time encodes identically too. */
+  buckets_bucket_meta fresh;
+  buckets_bucket_meta_init(&fresh, "ref", buckets_bucket_meta_created_ns(&m));
+  buckets_buf out2 = BUCKETS_BUF_INIT;
+  buckets_bucket_meta_encode(&fresh, &out2);
+  assert_memory_equal(out2.data, data.p, data.n);
+
+  buckets_buf_free(&out);
+  buckets_buf_free(&out2);
+  buckets_bucket_meta_free(&m);
+  buckets_bucket_meta_free(&fresh);
+  buckets_xlmeta_free(&x);
+  free(raw);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_roundtrip_bytes),     cmocka_unit_test(test_reencode_header_and_signature),
       cmocka_unit_test(test_decode_fields),       cmocka_unit_test(test_corruption_detected),
       cmocka_unit_test(test_versions_and_inline), cmocka_unit_test(test_version_ids),
+      cmocka_unit_test(test_bucket_metadata),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

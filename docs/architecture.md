@@ -54,34 +54,45 @@ net/  core/      HTTP/1.1 server (llhttp), event loop (epoll/kqueue, io_uring pl
 | Internode protocol | **no** | mixed MinIO/Buckets clusters are unsupported |
 | SUBNET, callhome, self-update, gateway | dropped | not applicable on Kubernetes |
 
-## Current state (0.1.0)
+## Current state (0.2.0)
 
-**Built:**
-- core runtime: buffers, strings, time formats, query parsing, JSON logging, and an epoll/kqueue event loop
-- HTTP/1.1 server with keep-alive, pipelining, `Expect: 100-continue`, idle timeouts, and graceful drain on SIGTERM
-- SigV4 authentication for signed headers and presigned URLs, verified against AWS's published vectors and curl's independent signer
-- payload checks for `Content-MD5` and `x-amz-content-sha256`
-- MinIO's full generated error table
-- a strict XML reader that refuses DOCTYPE and entities
-- single-drive storage with a MinIO-compatible `format.json`
-- bucket operations: ListBuckets, CreateBucket, HeadBucket, DeleteBucket, GetBucketLocation, and GetBucketVersioning (always unversioned)
-- empty ListObjects v1 and v2 responses
-- MinIO health endpoints
+Single-node S3 is feature-complete for the core API. It is verified three ways:
+- **Conformance:** minio-go's functional suite (the Go suite inside MinIO's `mint`) gives 78 pass, 0 fail. The other 24 tests need later-phase features.
+- **On-disk compatibility:** a real MinIO build (`tests/integration/interop.sh`) reads what Buckets wrote, and Buckets reads what MinIO wrote. That covers single PUT, streaming PUT, multipart, checksums, folder objects, metadata and bucket creation times.
+- **Byte-level fixtures:** `tests/data/minio-ref` holds files written by MinIO, and `xl.meta` and `.metadata.bin` round-trip byte for byte.
+
+**Implemented:**
+- **Auth:**
+  - SigV4 headers, presigned URLs and aws-chunked streaming (signed chunks, signed and unsigned trailers)
+  - SigV2 headers and presigned URLs
+  - POST policy (V4 and V2)
+- **Objects:**
+  - Put, Get (ranges, `partNumber`, preconditions, `response-*` overrides), Head, Delete, DeleteObjects, Copy
+  - GetObjectAttributes
+  - canned-private ACLs
+- **Multipart:** create, upload part, copy part (with ranges), list parts, complete, abort, list uploads.
+- **Checksums:** CRC32, CRC32C, CRC64NVME, SHA1 and SHA256 via headers, trailers or form fields. Multipart uploads get composite and full-object checksums (merged with CRC combination).
+- **Listing:** v1, v2 and v2-with-metadata, with prefix, delimiter, marker, continuation token and url encoding.
+- **Storage:**
+  - `format.json`, `xl.meta` v2 with MinIO's signatures, and inline data under 128 KiB
+  - bitrot-framed part files
+  - `__XLDIR__` folder objects
+  - MinIO's multipart staging layout
+  - `.metadata.bin` bucket metadata
 
 **Known interim choices, each replaced in a later phase:**
-- SHA-256, MD5 and HMAC are portable C. The macOS dev toolchain has no OpenSSL, and TLS arrives with OpenSSL 3 in Phase 2. Payload hashing will then move to multi-buffer SIMD.
-- Request bodies are buffered in memory, up to 64 MiB. Streaming bodies come before PutObject and UploadPart.
-- Handlers run on the event-loop thread with blocking disk I/O. A disk thread pool, then io_uring, arrives with the object layer.
-- Bucket creation time is the directory's mtime, as in MinIO's `StatVol`. `.metadata.bin` bucket metadata lands with bucket features.
+- One event-loop thread handles all requests, with synchronous disk I/O. A disk thread pool, then io_uring, arrives with Phase 2's erasure layer.
+- Crypto primitives (SHA-256, MD5, SHA-1, HighwayHash, CRCs) are portable C, and all are verified against MinIO's Go libraries. SIMD and OpenSSL come later, with TLS in Phase 2.
 - Only the root credential is accepted. IAM comes in Phase 4.
+- Buckets are unversioned. Versioning, object lock, tagging and SSE come in Phase 5.
 
 ## Build phases
 
 | Phase | Deliverable | Exit gate |
 |---|---|---|
 | 0 ✅ | Repo, build, core runtime, HTTP server, CI script, Dockerfile | `ctest` green, fuzz corpora replay, ASan/UBSan clean |
-| 1 🚧 | Single-node S3 core: streaming bodies, xl.meta v2, objects, multipart, listing, checksums | `mint` core suites (awscli, aws-sdk-go, minio-go, mc, s3cmd) |
-| 2 | Erasure coding, multi-drive, distributed (RPC, dsync, pools, heal, scanner, MRF), TLS | Drive and node loss with no data loss; reads MinIO-written drives |
+| 1 ✅ | Single-node S3 core: streaming bodies, xl.meta v2, objects, multipart, listing, checksums, SigV2, POST policy | minio-go functional suite at 0 failures; MinIO interop both ways |
+| 2 🚧 | Erasure coding, multi-drive, distributed (RPC, dsync, pools, heal, scanner, MRF), TLS | Drive and node loss with no data loss; reads MinIO-written drives |
 | 3 | Operator and CRDs, K8s-aware server, kind e2e | `kubectl apply` gives a healthy 4×4 cluster; pod and PVC loss heals |
 | 4 | IAM, STS, policy, LDAP, OIDC, plugins, admin API core | `mc admin user/policy/svcacct`; mint IAM |
 | 5 | Versioning, object lock, tagging, CORS, quota, lifecycle, SSE-S3/KMS/C, compression | Full mint pass; ceph s3-tests at or above the MinIO baseline |

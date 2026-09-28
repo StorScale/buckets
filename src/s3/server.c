@@ -15,6 +15,7 @@
 #include "crypto/hex.h"
 #include "crypto/md5.h"
 #include "crypto/sha256.h"
+#include "bucket/metadata.h"
 #include "s3/bucketname.h"
 #include "s3/errors.h"
 #include "s3/sigv4.h"
@@ -214,8 +215,16 @@ static void list_buckets(s3_ctx *c) {
   buckets_xml_open(b, "Buckets");
   for (size_t i = 0; i < n; i++) {
     if (buckets_bucket_name_reserved(vols[i].name) || !buckets_bucket_name_valid(vols[i].name)) continue;
+    /* Creation time comes from bucket metadata (as in MinIO), else the directory. */
+    time_t created = vols[i].created;
+    buckets_bucket_meta bm;
+    if (buckets_bucket_meta_load(c->s->drive, vols[i].name, &bm)) {
+      int64_t ns = buckets_bucket_meta_created_ns(&bm);
+      if (ns) created = (time_t)(ns / 1000000000LL);
+      buckets_bucket_meta_free(&bm);
+    }
     char ts[BUCKETS_TIME_ISO8601_LEN + 1];
-    buckets_time_iso8601(vols[i].created, ts);
+    buckets_time_iso8601(created, ts);
     buckets_xml_open(b, "Bucket");
     buckets_xml_elem(b, "Name", vols[i].name);
     buckets_xml_elem(b, "CreationDate", ts);
@@ -274,10 +283,17 @@ static void create_bucket(s3_ctx *c) {
   }
 
   switch (buckets_drive_make_vol(c->s->drive, c->bucket)) {
-    case BUCKETS_DRIVE_OK:
+    case BUCKETS_DRIVE_OK: {
+      struct timespec ts;
+      clock_gettime(CLOCK_REALTIME, &ts);
+      buckets_bucket_meta bm;
+      buckets_bucket_meta_init(&bm, c->bucket, (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec);
+      if (!buckets_bucket_meta_save(c->s->drive, &bm)) buckets_log_warn("could not save metadata for bucket %s", c->bucket);
+      buckets_bucket_meta_free(&bm);
       buckets_http_resp_headerf(c->resp, "Location", "/%s", c->bucket);
       c->resp->status = 200;
       return;
+    }
     case BUCKETS_DRIVE_ERR_EXISTS:
       buckets_s3_write_error(c, BUCKETS_ERR_BUCKET_ALREADY_OWNED_BY_YOU);
       return;
@@ -289,7 +305,10 @@ static void create_bucket(s3_ctx *c) {
 
 static void delete_bucket(s3_ctx *c) {
   switch (buckets_drive_delete_vol(c->s->drive, c->bucket)) {
-    case BUCKETS_DRIVE_OK: c->resp->status = 204; return;
+    case BUCKETS_DRIVE_OK:
+      buckets_bucket_meta_delete(c->s->drive, c->bucket);
+      c->resp->status = 204;
+      return;
     case BUCKETS_DRIVE_ERR_NOT_FOUND: buckets_s3_write_error(c, BUCKETS_ERR_NO_SUCH_BUCKET); return;
     case BUCKETS_DRIVE_ERR_NOT_EMPTY: buckets_s3_write_error(c, BUCKETS_ERR_BUCKET_NOT_EMPTY); return;
     default: buckets_s3_write_error(c, BUCKETS_ERR_INTERNAL_ERROR); return;

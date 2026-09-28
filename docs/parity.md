@@ -5,18 +5,18 @@ registers is listed; statuses live in the script's `STATUS` table.
 
 ✅ done · 🟡 partial · ⬜ not started
 
-**Overall:** 5 done, 7 partial, 210 not started (222 handlers).
+**Overall:** 19 done, 13 partial, 190 not started (222 handlers).
 
-## S3 API (3/76)
+## S3 API (17/76)
 
 Source: `cmd/api-router.go`
 
 | | Handler | Notes |
 |---|---|---|
-| ⬜ | `AbortMultipartUploadHandler` |  |
-| ⬜ | `CompleteMultipartUploadHandler` |  |
-| ⬜ | `CopyObjectHandler` |  |
-| ⬜ | `CopyObjectPartHandler` |  |
+| ✅ | `AbortMultipartUploadHandler` |  |
+| ✅ | `CompleteMultipartUploadHandler` |  |
+| 🟡 | `CopyObjectHandler` | no SSE/tagging directives yet |
+| ✅ | `CopyObjectPartHandler` |  |
 | ⬜ | `DeleteBucketCorsHandler` |  |
 | ⬜ | `DeleteBucketEncryptionHandler` |  |
 | 🟡 | `DeleteBucketHandler` | no x-minio-force-delete |
@@ -25,10 +25,10 @@ Source: `cmd/api-router.go`
 | ⬜ | `DeleteBucketReplicationConfigHandler` |  |
 | ⬜ | `DeleteBucketTaggingHandler` |  |
 | ⬜ | `DeleteBucketWebsiteHandler` |  |
-| ⬜ | `DeleteMultipleObjectsHandler` |  |
-| ⬜ | `DeleteObjectHandler` |  |
+| 🟡 | `DeleteMultipleObjectsHandler` | unversioned buckets only |
+| 🟡 | `DeleteObjectHandler` | unversioned buckets only |
 | ⬜ | `DeleteObjectTaggingHandler` |  |
-| ⬜ | `GetBucketACLHandler` |  |
+| ✅ | `GetBucketACLHandler` | canned private, as MinIO |
 | ⬜ | `GetBucketAccelerateHandler` |  |
 | ⬜ | `GetBucketCorsHandler` |  |
 | ⬜ | `GetBucketEncryptionHandler` |  |
@@ -46,31 +46,31 @@ Source: `cmd/api-router.go`
 | ⬜ | `GetBucketTaggingHandler` |  |
 | 🟡 | `GetBucketVersioningHandler` | always reports unversioned |
 | ⬜ | `GetBucketWebsiteHandler` |  |
-| ⬜ | `GetObjectACLHandler` |  |
-| ⬜ | `GetObjectAttributesHandler` |  |
-| ⬜ | `GetObjectHandler` |  |
+| ✅ | `GetObjectACLHandler` | canned private, as MinIO |
+| ✅ | `GetObjectAttributesHandler` |  |
+| 🟡 | `GetObjectHandler` | no SSE/versioning/zip-extract yet |
 | ⬜ | `GetObjectLambdaHandler` |  |
 | ⬜ | `GetObjectLegalHoldHandler` |  |
 | ⬜ | `GetObjectRetentionHandler` |  |
 | ⬜ | `GetObjectTaggingHandler` |  |
 | ✅ | `HeadBucketHandler` |  |
-| ⬜ | `HeadObjectHandler` |  |
+| 🟡 | `HeadObjectHandler` | no SSE/versioning yet |
 | ✅ | `ListBucketsHandler` |  |
-| ⬜ | `ListMultipartUploadsHandler` |  |
-| ⬜ | `ListObjectPartsHandler` |  |
+| 🟡 | `ListMultipartUploadsHandler` | per-object listing, like MinIO; no pagination markers |
+| ✅ | `ListObjectPartsHandler` |  |
 | ⬜ | `ListObjectVersionsHandler` |  |
 | ⬜ | `ListObjectVersionsMHandler` |  |
-| 🟡 | `ListObjectsV1Handler` | validates params; always empty until the object layer lands |
-| 🟡 | `ListObjectsV2Handler` | validates params; always empty until the object layer lands |
-| ⬜ | `ListObjectsV2MHandler` |  |
+| ✅ | `ListObjectsV1Handler` |  |
+| ✅ | `ListObjectsV2Handler` |  |
+| ✅ | `ListObjectsV2MHandler` | metadata=true extension |
 | ⬜ | `ListenNotificationHandler` |  |
-| ⬜ | `NewMultipartUploadHandler` |  |
-| ⬜ | `PostPolicyBucketHandler` |  |
+| ✅ | `NewMultipartUploadHandler` |  |
+| 🟡 | `PostPolicyBucketHandler` | no SSE form fields yet |
 | ⬜ | `PostRestoreObjectHandler` |  |
-| ⬜ | `PutBucketACLHandler` |  |
+| ✅ | `PutBucketACLHandler` | canned private, as MinIO |
 | ⬜ | `PutBucketCorsHandler` |  |
 | ⬜ | `PutBucketEncryptionHandler` |  |
-| 🟡 | `PutBucketHandler` | no object-lock flag; bucket metadata (.metadata.bin) pending |
+| 🟡 | `PutBucketHandler` | object-lock flag pending |
 | ⬜ | `PutBucketLifecycleHandler` |  |
 | ⬜ | `PutBucketNotificationHandler` |  |
 | ⬜ | `PutBucketObjectLockConfigHandler` |  |
@@ -78,11 +78,11 @@ Source: `cmd/api-router.go`
 | ⬜ | `PutBucketReplicationConfigHandler` |  |
 | ⬜ | `PutBucketTaggingHandler` |  |
 | ⬜ | `PutBucketVersioningHandler` |  |
-| ⬜ | `PutObjectACLHandler` |  |
+| ✅ | `PutObjectACLHandler` | canned private, as MinIO |
 | ⬜ | `PutObjectExtractHandler` |  |
-| ⬜ | `PutObjectHandler` |  |
+| 🟡 | `PutObjectHandler` | no SSE/tagging/object-lock/versioning yet |
 | ⬜ | `PutObjectLegalHoldHandler` |  |
-| ⬜ | `PutObjectPartHandler` |  |
+| ✅ | `PutObjectPartHandler` |  |
 | ⬜ | `PutObjectRetentionHandler` |  |
 | ⬜ | `PutObjectTaggingHandler` |  |
 | ⬜ | `ResetBucketReplicationStartHandler` |  |

@@ -109,6 +109,10 @@ void buckets_mp_time(buckets_buf *b, int64_t unix_ns) {
     sec--;
     nsec += 1000000000LL;
   }
+  buckets_mp_time_sec(b, sec, (int32_t)nsec);
+}
+
+void buckets_mp_time_sec(buckets_buf *b, int64_t sec, int32_t nsec) {
   uint8_t t[15] = {0xc7, 12, 5};
   for (int i = 0; i < 8; i++) t[3 + i] = (uint8_t)((uint64_t)sec >> (8 * (7 - i)));
   for (int i = 0; i < 4; i++) t[11 + i] = (uint8_t)((uint32_t)nsec >> (8 * (3 - i)));
@@ -300,14 +304,21 @@ bool buckets_mp_read_array(buckets_mp_reader *r, uint32_t *n) { return read_cont
 
 bool buckets_mp_read_map(buckets_mp_reader *r, uint32_t *n) { return read_container(r, n, 0x80, 0xde, 0xdf); }
 
-bool buckets_mp_read_time(buckets_mp_reader *r, int64_t *unix_ns) {
+bool buckets_mp_read_time_sec(buckets_mp_reader *r, int64_t *sec, int32_t *nsec) {
   if (!need(r, 15) || r->p[0] != 0xc7 || r->p[1] != 12 || r->p[2] != 5) {
     r->err = true;
     return false;
   }
-  int64_t sec = (int64_t)get_be(r->p + 3, 8);
-  int64_t nsec = (int64_t)get_be(r->p + 11, 4);
+  *sec = (int64_t)get_be(r->p + 3, 8);
+  *nsec = (int32_t)get_be(r->p + 11, 4);
   r->p += 15;
+  return true;
+}
+
+bool buckets_mp_read_time(buckets_mp_reader *r, int64_t *unix_ns) {
+  int64_t sec;
+  int32_t nsec;
+  if (!buckets_mp_read_time_sec(r, &sec, &nsec)) return false;
   *unix_ns = sec * 1000000000LL + nsec;
   return true;
 }

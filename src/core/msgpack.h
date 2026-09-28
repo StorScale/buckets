@@ -21,6 +21,9 @@ void buckets_mp_array(buckets_buf *b, uint32_t n);
 void buckets_mp_map(buckets_buf *b, uint32_t n);
 /* msgp.AppendTime: ext8 type 5 carrying big-endian int64 seconds + int32 nanoseconds. */
 void buckets_mp_time(buckets_buf *b, int64_t unix_ns);
+/* Same with explicit seconds, which also covers Go's zero time (year 1). */
+void buckets_mp_time_sec(buckets_buf *b, int64_t sec, int32_t nsec);
+#define BUCKETS_GO_ZERO_TIME_SEC (-62135596800LL)
 
 /* ---- reader (cursor over an input slice) ---- */
 typedef struct {
@@ -59,6 +62,7 @@ bool buckets_mp_read_bin(buckets_mp_reader *r, buckets_str *out);
 bool buckets_mp_read_array(buckets_mp_reader *r, uint32_t *n);
 bool buckets_mp_read_map(buckets_mp_reader *r, uint32_t *n);
 bool buckets_mp_read_time(buckets_mp_reader *r, int64_t *unix_ns);
+bool buckets_mp_read_time_sec(buckets_mp_reader *r, int64_t *sec, int32_t *nsec);
 /* Skips one complete value of any type (bounded nesting). */
 bool buckets_mp_skip(buckets_mp_reader *r);
 

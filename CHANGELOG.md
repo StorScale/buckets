@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-27
+
 ### Changed
 - The error generator splits acronym boundaries (for example `ErrMalformedPOSTRequest` becomes `BUCKETS_ERR_MALFORMED_POST_REQUEST`).
 - Signed aws-chunked trailers are hashed with exactly one trailing newline, as in MinIO. minio-go already sends one.
@@ -42,6 +44,7 @@ All notable changes to this project are documented here. The format follows
 - `tests/integration/interop.sh`: round trips through `mc` and a real MinIO build in both directions. `tools/build-oracles.sh` builds the oracles.
 - aws-chunked uploads: signed chunks (chained chunk signatures), signed trailers, and unsigned trailers.
 - HTTP request bodies over 1 MiB spool to disk (up to 5 TiB), and responses stream from the object reader.
+- Bucket metadata (`.minio.sys/buckets/<b>/.metadata.bin`), byte-compatible with MinIO. It is written on CreateBucket, used for ListBuckets creation dates, and removed on DeleteBucket.
 - `tools/golden`, a Go program that generates reference vectors (`tests/unit/golden_vectors.inc`) from those libraries.
 
 ## [0.1.0] - 2026-09-27
