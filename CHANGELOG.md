@@ -42,6 +42,7 @@ All notable changes to this project are documented here. The format follows
     - parsing and evaluation, checked against 5,323 golden vectors from the Go package (`policygen bpvectors`)
     - `?policy` PUT, GET and DELETE
     - anonymous requests authorized against the policy; works with `mc anonymous`, and in both directions with MinIO
+  - `mc admin info` (ServerInfo). Every server reports its own drives (state, space, inodes, pool/set/drive index) over a new peer RPC, and the answer combines them with the backend's shape and per-set capacity. Unreachable servers show as offline.
   - Peer notifications (`src/dist/peer`): IAM and bucket-metadata changes are pushed asynchronously to every other server over internode RPC, so they take effect cluster-wide at once. `cluster.sh` checks this across nodes.
   - A bucket-metadata cache (`src/bucket/metasys`): refcounted snapshots, invalidated on local writes, with a TTL in distributed mode.
   - STS `AssumeRole`:

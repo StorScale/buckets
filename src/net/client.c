@@ -69,6 +69,7 @@ void buckets_http_client_free(buckets_http_client *c) {
 }
 
 const char *buckets_http_client_host(const buckets_http_client *c) { return c->host; }
+int buckets_http_client_port(const buckets_http_client *c) { return c->port; }
 
 static bool connect_timeout(int fd, const struct sockaddr *sa, socklen_t sl, int timeout_ms) {
   int flags = fcntl(fd, F_GETFL);

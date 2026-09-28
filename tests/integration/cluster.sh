@@ -122,6 +122,9 @@ if [[ -n "${MC_BIN:-}" ]]; then
   until_true '[[ $(dora "$(ep 4)/clusterbucket/small.bin") == 403 ]]' || true
   expect "disabled on node 3, refused on node 4" "$(dora "$(ep 4)/clusterbucket/small.bin")" 403
   mcc admin user rm n2 dora >/dev/null
+  info=$(mcc admin info n2 --json)
+  expect "admin info: servers online" "$(grep -o '"state":"online"' <<<"$info" | wc -l | tr -d ' ')" 4
+  expect "admin info: drives online" "$(sed -n 's/.*"onlineDisks":\([0-9]*\).*/\1/p' <<<"$info")" 8
 else
   echo "  (set MC_BIN for the admin API checks)"
 fi
@@ -134,6 +137,11 @@ expect "write with node 4 down" "$(status -T "$WORK/during" "$(ep 2)/clusterbuck
 expect "read it back" "$(curl -s "${S3[@]}" "$(ep 3)/clusterbucket/during.bin" | md5of)" "$(md5of <"$WORK/during")"
 expect "cluster still has write quorum" "$(curl -s -o /dev/null -w '%{http_code}' ${CURLTLS[@]+"${CURLTLS[@]}"} "$(ep 1)/minio/health/cluster")" 200
 expect "node 4 missed the write" "$([[ -e "$WORK/n4/d1/clusterbucket/during.bin" ]] && echo has || echo missing)" missing
+if [[ -n "${MC_BIN:-}" ]]; then
+  info=$(mcc admin info n1 --json)
+  expect "admin info: node 4 offline" "$(grep -o '"state":"offline","endpoint":"127.0.0.1:'"$((BASE + 4))"'"' <<<"$info" | wc -l | tr -d ' ')" 1
+  expect "admin info: drives offline" "$(sed -n 's/.*"offlineDisks":\([0-9]*\).*/\1/p' <<<"$info")" 2
+fi
 
 echo "== the node comes back"
 start 4

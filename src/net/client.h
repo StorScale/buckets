@@ -25,6 +25,7 @@ typedef struct {
 buckets_http_client *buckets_http_client_new(const char *host, int port, buckets_tls_client *tls, int timeout_ms);
 void buckets_http_client_free(buckets_http_client *c);
 const char *buckets_http_client_host(const buckets_http_client *c);
+int buckets_http_client_port(const buckets_http_client *c);
 
 /* Sends one request and reads the whole response. Returns false on a
  * transport failure (connect, send, receive, or a malformed response). A

@@ -16,6 +16,7 @@
 #include "dist/endpoint.h"
 #include "dist/internode.h"
 #include "dist/peer.h"
+#include "admin/info.h"
 #include "dist/storage_server.h"
 #include "storage/remote.h"
 #include "core/pool.h"
@@ -164,6 +165,49 @@ typedef struct {
   buckets_lock_server *lock_server;
   buckets_dsync *dsync;
 } topology;
+
+/* The deployment's nodes and drive endpoints, for the admin API. */
+static buckets_cluster_info *cluster_describe(const topology *t, const char *host, bool secure) {
+  buckets_cluster_info *ci = buckets_xcalloc(1, sizeof(*ci));
+  ci->secure = secure;
+  ci->distributed = t->distributed;
+  ci->started = time(NULL);
+  size_t total = 0;
+  for (size_t p = 0; p < t->npools; p++) total += t->layouts[p].ndrives;
+  ci->eps = buckets_xcalloc(total ? total : 1, sizeof(*ci->eps));
+  ci->nodes = buckets_xcalloc(total + 1, sizeof(char *));
+  char self[300];
+  snprintf(self, sizeof(self), "%s:%d", host && *host ? host : "127.0.0.1", t->port);
+  for (size_t p = 0; p < t->npools; p++) {
+    for (size_t i = 0; i < t->layouts[p].ndrives; i++) {
+      buckets_info_endpoint *ep = &ci->eps[ci->neps++];
+      ep->pool = p;
+      if (t->distributed) {
+        const buckets_endpoint *e = &t->eps[p][i];
+        char node[300];
+        snprintf(node, sizeof(node), "%s:%d", e->host, e->port);
+        ep->endpoint = buckets_xstrdup(e->url);
+        ep->path = buckets_xstrdup(e->path);
+        ep->node = buckets_xstrdup(node);
+        ep->local = e->local;
+        if (e->local) snprintf(self, sizeof(self), "%s", node);
+      } else {
+        ep->endpoint = buckets_xstrdup(t->layouts[p].drives[i]);
+        ep->path = buckets_xstrdup(t->layouts[p].drives[i]);
+        ep->local = true;
+      }
+      bool seen = false;
+      for (size_t k = 0; k < ci->nnodes && ep->node; k++) seen |= strcmp(ci->nodes[k], ep->node) == 0;
+      if (ep->node && !seen) ci->nodes[ci->nnodes++] = buckets_xstrdup(ep->node);
+    }
+  }
+  ci->self = buckets_xstrdup(self);
+  for (size_t i = 0; i < ci->neps; i++) {
+    if (!ci->eps[i].node) ci->eps[i].node = buckets_xstrdup(self);
+  }
+  if (!ci->nnodes) ci->nodes[ci->nnodes++] = buckets_xstrdup(self);
+  return ci;
+}
 
 static peer *peer_for(topology *t, const buckets_endpoint *e) {
   for (size_t i = 0; i < t->npeers; i++) {
@@ -528,7 +572,7 @@ int main(int argc, char **argv) {
   buckets_pool *internode_pool = NULL;
   buckets_storage_server *storage_srv = NULL;
   static buckets_peer_handlers peer_handlers;
-  peer_handlers = (buckets_peer_handlers){buckets_s3_peer_iam, buckets_s3_peer_bucket, &s3};
+  peer_handlers = (buckets_peer_handlers){buckets_s3_peer_iam, buckets_s3_peer_bucket, buckets_s3_peer_server_info, &s3};
   if (topo.distributed) {
     internode_pool = buckets_pool_new((int)BUCKETS_MAX(16L, 2 * ncpu));
     storage_srv = buckets_storage_server_new(topo.local_drives, topo.nlocal);
@@ -575,6 +619,7 @@ int main(int argc, char **argv) {
       return 1;
     }
   }
+  s3.cluster = cluster_describe(&topo, host, tls != NULL);
   if (topo.distributed) {
     topology_connect(&topo);
     buckets_http_client **pc = buckets_xcalloc(topo.npeers ? topo.npeers : 1, sizeof(*pc));
@@ -618,6 +663,7 @@ int main(int argc, char **argv) {
   buckets_loop_free(g_loop);
   if (boot.layer) buckets_objlayer_set_locker(boot.layer, NULL, NULL, NULL);
   buckets_peer_sys_free(s3.peers);
+  buckets_cluster_info_free(s3.cluster);
   buckets_dsync_free(topo.dsync);
   buckets_objlayer_free(boot.layer);
   buckets_storage_server_free(storage_srv);

@@ -10,7 +10,7 @@
 
 /* The S3 API front end: health probes, request authentication and routing.
  * Replaces MinIO's cmd/api-router.go + generic-handlers.go + auth-handler.go. */
-typedef struct {
+typedef struct buckets_s3_server {
   buckets_objlayer *_Atomic layer; /* NULL until bootstrap finishes */
   const char *root_user;
   const char *root_password;
@@ -19,6 +19,7 @@ typedef struct {
   struct buckets_metasys *meta; /* bucket metadata cache, once the layer is up */
   int meta_ttl_ms;              /* its snapshot lifetime (0: until invalidated) */
   struct buckets_peer_sys *peers; /* other servers, told about IAM and bucket changes */
+  struct buckets_cluster_info *cluster; /* nodes and drive endpoints, for the admin API */
   char host_id[65];   /* x-amz-id-2 */
   _Atomic uint64_t request_seq;
 } buckets_s3_server;
@@ -32,5 +33,6 @@ void buckets_s3_handle(const buckets_http_request *req, buckets_http_response *r
 /* Applies peers' notifications (the ud of buckets_peer_server_handle). */
 void buckets_s3_peer_iam(void *server, const char *kind, const char *name);
 void buckets_s3_peer_bucket(void *server, const char *bucket);
+char *buckets_s3_peer_server_info(void *server);
 
 #endif

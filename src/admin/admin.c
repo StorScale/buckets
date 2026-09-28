@@ -1005,10 +1005,15 @@ typedef struct {
   void (*fn)(s3_ctx *c);
 } route;
 
+static void h_server_info(s3_ctx *c) {
+  if (admin_req1(c, "admin:ServerInfo")) buckets_admin_server_info(c);
+}
+
 static void h_attach(s3_ctx *c) { h_attach_detach(c, true); }
 static void h_detach(s3_ctx *c) { h_attach_detach(c, false); }
 
 static const route k_routes[] = {
+    {"GET", "/info", h_server_info},
     {"PUT", "/add-user", h_add_user},
     {"DELETE", "/remove-user", h_remove_user},
     {"GET", "/list-users", h_list_users},

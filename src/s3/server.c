@@ -17,6 +17,7 @@
 #include "crypto/md5.h"
 #include "crypto/sha256.h"
 #include "admin/admin.h"
+#include "admin/info.h"
 #include "bucket/metadata.h"
 #include "bucket/metasys.h"
 #include "dist/peer.h"
@@ -49,6 +50,8 @@ void buckets_s3_peer_bucket(void *server, const char *bucket) {
   buckets_s3_server *s = server;
   if (s->meta) buckets_metasys_invalidate(s->meta, bucket);
 }
+
+char *buckets_s3_peer_server_info(void *server) { return buckets_admin_local_server_json(server); }
 
 void buckets_s3_server_init(buckets_s3_server *s, buckets_objlayer *layer, const char *root_user,
                             const char *root_password, const char *region) {

@@ -10,6 +10,9 @@
 bool buckets_admin_is_admin_path(buckets_str path);
 void buckets_admin_handle(s3_ctx *c);
 
+/* ServerInfo (info.c). */
+void buckets_admin_server_info(s3_ctx *c);
+
 /* A JSON error body (writeErrorResponseJSON). */
 void buckets_admin_error(s3_ctx *c, buckets_s3_error e);
 void buckets_admin_error_msg(s3_ctx *c, buckets_s3_error e, const char *message);
