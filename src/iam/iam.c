@@ -2640,3 +2640,72 @@ void buckets_iam_mappings_free(buckets_iam_mapping *m, size_t n) {
   }
   free(m);
 }
+
+/* ---- external identity sync -------------------------------------------------------------- */
+
+void buckets_iam_delete_users(buckets_iam *iam, char *const *users, size_t n) {
+  if (!n || need_ready(iam)) return;
+  pthread_mutex_lock(&iam->write_mu);
+  for (int pass = 0; pass < 2; pass++) {
+    buckets_iam_utype t = pass == 0 ? BUCKETS_IAM_STS : BUCKETS_IAM_SVC;
+    buckets_iam_ident **list;
+    size_t nl;
+    buckets_iam_list_derived(iam, NULL, t, &list, &nl);
+    for (size_t i = 0; i < nl; i++) {
+      bool hit = strv_has(users, n, list[i]->access_key) || (list[i]->parent && strv_has(users, n, list[i]->parent));
+      if (hit) {
+        delete_mapping(iam, list[i]->access_key, t, false);
+        delete_identity(iam, list[i]->access_key, t);
+      }
+      buckets_iam_ident_release(list[i]);
+    }
+    free(list);
+  }
+  pthread_mutex_unlock(&iam->write_mu);
+}
+
+buckets_iam_err buckets_iam_set_groups(buckets_iam *iam, const char *access_key, char *const *groups, size_t n) {
+  if (need_ready(iam)) return BUCKETS_IAM_ERR_NOT_INITIALIZED;
+  pthread_mutex_lock(&iam->write_mu);
+  buckets_iam_ident *cur = buckets_iam_get_ident(iam, access_key);
+  buckets_iam_err e = BUCKETS_IAM_OK;
+  buckets_iam_ident *id = NULL;
+  if (!cur || !(buckets_iam_ident_is_temp(cur) || buckets_iam_ident_is_svc(cur)) || !cur->session_token) {
+    e = BUCKETS_IAM_ERR_NO_SUCH_USER;
+    goto out;
+  }
+  id = ident_new();
+  id->type = cur->type;
+  id->access_key = buckets_xstrdup(cur->access_key);
+  id->secret_key = buckets_xstrdup(cur->secret_key);
+  id->session_token = buckets_xstrdup(cur->session_token);
+  id->parent = dupnz(cur->parent);
+  id->groups = strv_dup((const char *const *)groups, n);
+  id->ngroups = n;
+  id->name = dupnz(cur->name);
+  id->description = dupnz(cur->description);
+  id->claims_field = dupnz(cur->claims_field);
+  memcpy(id->status, cur->status, sizeof(id->status));
+  id->expiration = cur->expiration;
+  id->updated = now_time();
+  const char *key = cur->type == BUCKETS_IAM_STS ? iam->root->secret_key : cur->secret_key;
+  if (!ident_load_claims(id, key, iam->root->secret_key)) {
+    e = BUCKETS_IAM_ERR_INVALID_ARGUMENT;
+    goto out;
+  }
+  if (!save_identity(iam, id, cur->type)) {
+    e = BUCKETS_IAM_ERR_STORAGE;
+    goto out;
+  }
+  pthread_rwlock_wrlock(&iam->lock);
+  buckets_iam_ident_release(
+      buckets_strmap_put(cur->type == BUCKETS_IAM_STS ? &iam->c.sts : &iam->c.users, access_key, ident_ref(id)));
+  touch(iam);
+  pthread_rwlock_unlock(&iam->lock);
+  notify(iam, cur->type == BUCKETS_IAM_STS ? "sts" : "svc", access_key);
+out:
+  buckets_iam_ident_release(id);
+  buckets_iam_ident_release(cur);
+  pthread_mutex_unlock(&iam->write_mu);
+  return e;
+}

@@ -71,6 +71,7 @@ All notable changes to this project are documented here. The format follows
     - `AssumeRoleWithLDAPIdentity`, with the `ldapUser`/`ldapActualUser`/`ldapUsername`/`ldapAttrib_*` claims, DurationSeconds and session policies
     - IAM's LDAP mode: policies mapped on user and group DNs (`policydb/sts-users`, `policydb/groups`), and built-in user/group changes refused as in MinIO
     - admin `idp/ldap/policy/attach|detach`, `policy-entities`, `add-service-account`, `list-access-keys` and `list-access-keys-bulk`, and LDAP handling in `set-user-or-group-policy`
+    - an hourly sync (MinIO's purgeExpiredCredentialsForLDAP and updateGroupMembershipsForLDAP) removes the credentials of users gone from the directory and updates the groups of the rest
     - `tests/integration/ldap.sh` runs `mc idp ldap` against a mock directory (`ldapmock.py`), over plain LDAP, LDAPS and StartTLS
   - `mc admin accesskey sts-revoke` (`revoke-tokens`, by token type or all), `mc idp openid accesskey ls` (`idp/openid/list-access-keys-bulk`), and the provider details (`userProvider`, LDAP user, OpenID config and claims) in `info-access-key`
   - `mc admin cluster iam export|import` (`export-iam`, `import-iam`, `import-iam-v2`): the zip of policies, users, groups, service accounts and mappings, with MinIO's import semantics (LDAP DN normalization included); archives move between MinIO and bucketsd in both directions (`iam-interop.sh`). `src/core/zip.c` reads and writes the archives on libdeflate, now a dependency.

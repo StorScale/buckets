@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <strings.h>
 #include <time.h>
 
@@ -130,6 +131,93 @@ static void init_ldap(buckets_s3_server *s) {
     nanosleep(&ts, NULL);
     if (delay_ms < 3000) delay_ms *= 2;
   }
+}
+
+/* purgeExpiredCredentialsForLDAP + updateGroupMembershipsForLDAP: drop the
+ * credentials of users no longer in the directory, and bring the groups of
+ * the others' credentials up to date. */
+static void ldap_sync(buckets_s3_server *s) {
+  buckets_ldapidp *p = buckets_s3_ldap(s);
+  if (!buckets_ldapidp_enabled(p)) {
+    buckets_ldapidp_release(p);
+    return;
+  }
+  buckets_iam_ident **creds = NULL;
+  size_t ncreds = 0;
+  for (int t = 0; t < 2; t++) {
+    buckets_iam_ident **l;
+    size_t n;
+    buckets_iam_list_derived(s->iam, NULL, t ? BUCKETS_IAM_SVC : BUCKETS_IAM_STS, &l, &n);
+    creds = buckets_xrealloc(creds, (ncreds + n + 1) * sizeof(*creds));
+    memcpy(creds + ncreds, l, n * sizeof(*l));
+    ncreds += n;
+    free(l);
+  }
+  /* 1. users gone from the directory (asking with the actual DN) */
+  char **dns = NULL;
+  size_t ndns = 0;
+  for (size_t i = 0; i < ncreds; i++) {
+    const char *parent = creds[i]->parent;
+    if (!parent || !buckets_ldapidp_is_user_dn(p, parent)) continue;
+    const char *ask = buckets_iam_ident_claim(creds[i], "ldapActualUser");
+    if (!ask) ask = parent;
+    bool seen = false;
+    for (size_t k = 0; k < ndns && !seen; k++) seen = strcmp(dns[k], ask) == 0;
+    if (seen) continue;
+    dns = buckets_xrealloc(dns, (ndns + 1) * sizeof(char *));
+    dns[ndns++] = buckets_xstrdup(ask);
+  }
+  char err[1024];
+  char **gone = NULL;
+  size_t ngone = 0;
+  if (ndns && !buckets_ldapidp_non_eligible(p, dns, ndns, &gone, &ngone, err, sizeof(err))) {
+    buckets_log_warn("ldap sync: %s", err);
+  } else if (ngone) {
+    buckets_log_info("ldap sync: removing the credentials of %zu user%s no longer in the directory", ngone,
+                     ngone == 1 ? "" : "s");
+    buckets_iam_delete_users(s->iam, gone, ngone);
+  }
+  /* 2. group memberships of the remaining ones */
+  for (size_t i = 0; i < ncreds; i++) {
+    buckets_iam_ident *c = creds[i];
+    const char *parent = c->parent;
+    bool removed = false;
+    for (size_t k = 0; parent && k < ngone && !removed; k++) removed = strcmp(gone[k], parent) == 0;
+    if (!parent || removed || buckets_iam_ident_is_expired(c) || !buckets_ldapidp_is_user_dn(p, parent)) continue;
+    const char *user = buckets_iam_ident_claim(c, "ldapUsername"), *actual = buckets_iam_ident_claim(c, "ldapActualUser");
+    if (!user || !actual) continue;
+    char **groups;
+    size_t ng;
+    if (!buckets_ldapidp_user_groups(p, user, actual, &groups, &ng, err, sizeof(err))) {
+      buckets_log_warn("ldap sync: %s", err);
+      break;
+    }
+    bool same = ng == c->ngroups;
+    for (size_t k = 0; same && k < ng; k++) {
+      bool found = false;
+      for (size_t j = 0; j < c->ngroups && !found; j++) found = strcmp(groups[k], c->groups[j]) == 0;
+      same = found;
+    }
+    if (!same && buckets_iam_set_groups(s->iam, c->access_key, groups, ng) == BUCKETS_IAM_OK)
+      buckets_log_info("ldap sync: groups of %s updated", c->access_key);
+    buckets_ldap_strv_free(groups, ng);
+  }
+  buckets_ldap_strv_free(gone, ngone);
+  buckets_ldap_strv_free(dns, ndns);
+  for (size_t i = 0; i < ncreds; i++) buckets_iam_ident_release(creds[i]);
+  free(creds);
+  buckets_ldapidp_release(p);
+}
+
+static void *ldap_sync_main(void *arg) {
+  buckets_s3_server *s = arg;
+  const char *env = getenv("BUCKETS_LDAP_SYNC_INTERVAL");
+  int interval = env && atoi(env) > 0 ? atoi(env) : 3600; /* MinIO: once an hour */
+  for (;;) {
+    sleep((unsigned)interval);
+    ldap_sync(s);
+  }
+  return NULL;
 }
 
 static void rebuild_plugins(buckets_s3_server *s) {
@@ -283,6 +371,10 @@ static void *iam_start_main(void *arg) {
   if (!env) env = getenv("MINIO_IAM_REFRESH_INTERVAL");
   int interval = env ? atoi(env) : 600;
   buckets_iam_start_refresh(s->iam, interval > 0 ? interval : 600);
+  if (buckets_iam_ldap_mode(s->iam)) {
+    pthread_t t;
+    if (pthread_create(&t, NULL, ldap_sync_main, s) == 0) pthread_detach(t);
+  }
   return NULL;
 }
 

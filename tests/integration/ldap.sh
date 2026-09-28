@@ -36,7 +36,8 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -pkeyopt ec_p
   -days 1 -keyout "$WORK/ldap.key" -out "$WORK/ldap.crt" -subj /CN=localhost \
   -addext "subjectAltName=IP:127.0.0.1,DNS:localhost" 2>/dev/null
 cp "$WORK/ldap.crt" "$WORK/certs/CAs/ldap.crt"
-python3 "$HERE/ldapmock.py" "$LPORT" "$LSPORT" "$WORK/ldap.crt" "$WORK/ldap.key" 2>"$WORK/ldap.log" &
+LDAPMOCK_PATCH="$WORK/ldap-patch.json" python3 "$HERE/ldapmock.py" "$LPORT" "$LSPORT" "$WORK/ldap.crt" "$WORK/ldap.key" \
+  2>"$WORK/ldap.log" &
 PIDS+=($!)
 for _ in $(seq 50); do nc -z 127.0.0.1 "$LPORT" 2>/dev/null && break; sleep 0.1; done
 
@@ -175,6 +176,27 @@ as_creds "$(sts alice alice123)"
 [[ $(code -X PUT --data x "$EP/docs/after.txt") == 200 ]] || fail "mapping survives restart"
 AK=alicekey1 SK=alicesecret123 TK=
 [[ $(code "$EP/docs/a.txt") == 200 ]] || fail "access key survives restart"
+
+echo "== directory changes reach existing credentials (periodic sync)"
+stop
+start MINIO_IDENTITY_LDAP_SERVER_ADDR="127.0.0.1:$LPORT" MINIO_IDENTITY_LDAP_SERVER_INSECURE=on BUCKETS_LDAP_SYNC_INTERVAL=1
+as_creds "$(sts 'dave(jr)' dave123)"
+D1=($AK $SK $TK)
+[[ $(code -X PUT --data x "$EP/docs/dave2.txt") == 200 ]] || fail "dave writes through devs"
+as_creds "$(sts bob bob123)"
+B1=($AK $SK $TK)
+[[ $(code "$EP/docs/a.txt") == 200 ]] || fail "bob reads"
+cat >"$WORK/ldap-patch.json" <<JSON
+{"remove": ["uid=bob,ou=People,$BASE"], "members": {"cn=devs,ou=groups,$BASE": ["uid=alice,ou=People,$BASE"]}}
+JSON
+AK=${D1[0]} SK=${D1[1]} TK=${D1[2]}
+for _ in $(seq 60); do [[ $(code -X PUT --data x "$EP/docs/dave3.txt") == 403 ]] && break; sleep 0.2; done
+[[ $(code -X PUT --data x "$EP/docs/dave3.txt") == 403 ]] || fail "dave's credential lost devs"
+AK=${B1[0]} SK=${B1[1]} TK=${B1[2]}
+for _ in $(seq 60); do [[ $(code "$EP/docs/a.txt") == 403 ]] && break; sleep 0.2; done
+[[ $(code "$EP/docs/a.txt") == 403 ]] || fail "bob's credential removed"
+grep "no longer in the directory" "$WORK/log" >/dev/null || fail "sync log"
+rm -f "$WORK/ldap-patch.json"
 
 echo "== LDAPS (CA from certs/CAs) and StartTLS"
 stop

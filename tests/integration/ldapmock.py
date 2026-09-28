@@ -4,6 +4,9 @@ filter subset MinIO uses), StartTLS, and LDAPS.
 
   python3 ldapmock.py PLAIN_PORT [TLS_PORT CERT KEY]
 
+With LDAPMOCK_PATCH set to a JSON file, the directory is patched from it
+on every request: {"remove": [dn...], "members": {group-dn: [dn...]}}.
+
 The directory is fixed (see DIRECTORY). Searches need a bound (non-anonymous)
 connection, as most directories are configured."""
 import socket
@@ -59,7 +62,29 @@ def norm_dn(dn):
     return ",".join(out)
 
 
-ENTRIES = {norm_dn(dn): (dn, attrs) for dn, attrs in DIRECTORY}
+BASE_ENTRIES = {norm_dn(dn): (dn, attrs) for dn, attrs in DIRECTORY}
+ENTRIES = BASE_ENTRIES
+
+
+def load_patch():
+    """The directory with LDAPMOCK_PATCH applied."""
+    global ENTRIES
+    import json
+    import os
+    path = os.environ.get("LDAPMOCK_PATCH")
+    try:
+        with open(path) as f:
+            patch = json.load(f)
+    except (TypeError, OSError, ValueError):
+        ENTRIES = BASE_ENTRIES
+        return
+    entries = dict(BASE_ENTRIES)
+    for dn in patch.get("remove", []):
+        entries.pop(norm_dn(dn), None)
+    for g, members in patch.get("members", {}).items():
+        dn, attrs = entries[norm_dn(g)]
+        entries[norm_dn(g)] = (dn, dict(attrs, member=members))
+    ENTRIES = entries
 
 # ---- BER -------------------------------------------------------------------
 
@@ -195,6 +220,7 @@ class Conn:
             self.buf = self.buf[n:]
             (_, mid), (op, body) = dec_all(msg)[:2]
             mid = dec_int(mid)
+            load_patch()
             if op == 0x42:  # unbind
                 return
             if op == 0x60:

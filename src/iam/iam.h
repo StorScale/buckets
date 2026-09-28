@@ -336,6 +336,12 @@ buckets_iam_err buckets_iam_set_temp_user(buckets_iam *iam, const char *access_k
  * tokenRevokeType claim is type when type is set. */
 buckets_iam_err buckets_iam_revoke_tokens(buckets_iam *iam, const char *parent, const char *type);
 
+/* DeleteUsers: the STS and service account credentials whose key or
+ * parent is one of users (with their mappings). */
+void buckets_iam_delete_users(buckets_iam *iam, char *const *users, size_t n);
+/* UpdateUserIdentity for the groups of an STS or service account credential. */
+buckets_iam_err buckets_iam_set_groups(buckets_iam *iam, const char *access_key, char *const *groups, size_t n);
+
 /* Random credentials as auth.GenerateCredentials: a 20-character access
  * key (A-Z0-9) and a 40-character secret. */
 void buckets_iam_generate_credentials(char ak[21], char sk[41]);
