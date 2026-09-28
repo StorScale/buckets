@@ -22,6 +22,7 @@
 #include "bucket/metasys.h"
 #include "bucket/objectlock.h"
 #include "crypto/md5.h"
+#include "s3/compress.h"
 #include "s3/sse.h"
 #include "s3/xml.h"
 
@@ -292,7 +293,6 @@ static buckets_s3_error body_error(const body_src *b, buckets_obj_err err) {
 /* x-amz-checksum-* verification, run by the object layer before commit. */
 typedef struct {
   buckets_checksum want; /* from headers; TRAILING means "read it from the trailer" */
-  bool server_side;      /* algorithm given without a value: compute and store */
   buckets_chunked *ch;
   buckets_checksum result; /* what was stored / should be echoed */
 } cks_ctx;
@@ -303,14 +303,14 @@ static buckets_s3_error cks_open(s3_ctx *c, body_src *b, cks_ctx *x, buckets_put
   buckets_s3_error e = buckets_checksum_from_request(c->req, &x->want);
   if (e) return e;
   if (!x->want.type) {
+    /* getContentChecksum: an algorithm without its value asks for nothing,
+     * but must name a known algorithm. */
     buckets_str alg = buckets_http_header_get(c->req, "X-Amz-Checksum-Algorithm");
     if (alg.p && alg.n) {
       char *a = buckets_str_dup(alg);
       uint32_t t = buckets_cksum_type_parse(a, NULL);
       free(a);
       if (t == BUCKETS_CKSUM_INVALID) return BUCKETS_ERR_INVALID_CHECKSUM;
-      x->want.type = t;
-      x->server_side = true;
     }
   }
   if ((x->want.type & BUCKETS_CKSUM_TRAILING) && !b->ch) return BUCKETS_ERR_INVALID_CHECKSUM;
@@ -330,9 +330,6 @@ static buckets_obj_err cks_pre_commit(void *ud, const buckets_checksum *computed
     }
     memcpy(expect.raw, parsed.raw, parsed.raw_len);
     expect.raw_len = parsed.raw_len;
-  } else if (x->server_side) {
-    memcpy(expect.raw, computed->raw, computed->raw_len);
-    expect.raw_len = computed->raw_len;
   }
   if (expect.raw_len != computed->raw_len || memcmp(expect.raw, computed->raw, computed->raw_len) != 0) {
     return BUCKETS_OBJ_ERR_BAD_CHECKSUM;
@@ -354,18 +351,99 @@ static void cks_echo(buckets_http_response *resp, const cks_ctx *x) {
   buckets_http_resp_header(resp, buckets_cksum_header(x->result.type), enc);
 }
 
-/* Encrypted writes: the object layer stores DARE packages, so the digests,
- * checksum and ETag are computed over the plaintext here and settled just
- * before the version commits. */
+/* The plaintext of a compressed write, hashed as the compressor reads it. */
+typedef struct {
+  buckets_read_fn rd;
+  void *ud;
+  buckets_md5_ctx md5;
+  buckets_sha256_ctx sha;
+  buckets_cksum_hasher cks;
+  uint32_t cks_type;
+  int64_t size;
+} plain_hasher;
+
+static void plain_hasher_init(plain_hasher *h, buckets_read_fn rd, void *ud, uint32_t cks_type) {
+  memset(h, 0, sizeof(*h));
+  h->rd = rd, h->ud = ud;
+  buckets_md5_init(&h->md5);
+  buckets_sha256_init(&h->sha);
+  h->cks_type = cks_type;
+  if (cks_type) buckets_cksum_hasher_init(&h->cks, cks_type);
+}
+
+static long plain_hasher_read(void *ud, void *buf, size_t n) {
+  plain_hasher *h = ud;
+  long k = h->rd(h->ud, buf, n);
+  if (k > 0) {
+    buckets_md5_update(&h->md5, buf, (size_t)k);
+    buckets_sha256_update(&h->sha, buf, (size_t)k);
+    if (h->cks_type) buckets_cksum_hasher_update(&h->cks, buf, (size_t)k);
+    h->size += k;
+  }
+  return k;
+}
+
+/* Transformed writes (encrypted and/or compressed): the object layer stores
+ * DARE packages or S2 streams, so the digests, checksum and ETag are
+ * computed over the plaintext here and settled just before the version
+ * commits. Compressed writes hash in ph ahead of the compressor, encrypted
+ * ones otherwise in the SSE writer. */
 typedef struct {
   cks_ctx *cx;
-  buckets_sse_writer *w;
+  buckets_sse_writer *w; /* encrypted writes */
   const body_src *b;
   uint8_t key[32]; /* the object key (parts are sealed with it too) */
   buckets_xl_kv *sys;
   size_t nsys;
   uint8_t md5[16]; /* of the plaintext, once read */
+  plain_hasher ph;
+  buckets_s2_writer cw;
+  bool compressed;
+  buckets_buf index; /* a compressed part's index, as recorded */
 } sse_put;
+
+/* The read end of a transformed write over rd (size plaintext bytes, -1
+ * unknown): compress when p->compressed, then encrypt when p->nsys holds a
+ * new key (key given for parts: a part key and its nonce). Returns the read
+ * function; *size becomes the stored size (-1 when compressed). */
+static buckets_read_fn xform_open(sse_put *p, buckets_read_fn rd, void *ud, int64_t *size, uint32_t cks_type,
+                                  const uint8_t *enc_key, const uint8_t *nonce, bool encrypt, bool pad, void **out_ud) {
+  if (p->compressed) {
+    plain_hasher_init(&p->ph, rd, ud, cks_type);
+    buckets_s2_writer_init(&p->cw, plain_hasher_read, &p->ph, *size, pad ? BUCKETS_COMPRESS_PAD_ENCRYPTED : 0);
+    rd = buckets_s2_writer_read, ud = &p->cw;
+    *size = -1;
+  }
+  if (encrypt) {
+    buckets_sse_writer_init_nonce(p->w, enc_key, nonce, rd, ud, *size, p->compressed ? 0 : cks_type);
+    p->w->no_hash = p->compressed;
+    rd = buckets_sse_writer_read, ud = p->w;
+    if (*size >= 0) *size = (int64_t)buckets_dare_encrypted_size((uint64_t)*size);
+  } else {
+    p->w = NULL;
+  }
+  *out_ud = ud;
+  return rd;
+}
+
+static void xform_close(sse_put *p) {
+  if (p->w) buckets_sse_writer_free(p->w);
+  if (p->compressed) buckets_s2_writer_free(&p->cw);
+  buckets_buf_free(&p->index);
+}
+
+/* The compressed stream's index, sealed with the object key when encrypted
+ * (opts.IndexCB), into p->index; false when none is due. */
+static bool xform_index(sse_put *p) {
+  buckets_buf_free(&p->index);
+  if (!p->compressed) return false;
+  buckets_buf idx = BUCKETS_BUF_INIT;
+  if (!buckets_s2_writer_index(&p->cw, BUCKETS_COMPRESS_MIN_INDEX_SIZE, &idx)) return false;
+  if (p->w) buckets_s3_compress_seal_index(p->key, idx.data, idx.len, &p->index);
+  else buckets_buf_append(&p->index, idx.data, idx.len);
+  buckets_buf_free(&idx);
+  return p->index.len > 0;
+}
 
 /* metadataEncrypter(key)("object-checksum", ...) over the stored checksum. */
 static void seal_checksum_meta(const uint8_t key[32], buckets_xl_object *o) {
@@ -383,28 +461,46 @@ static void seal_checksum_meta(const uint8_t key[32], buckets_xl_object *o) {
 static buckets_obj_err sse_pre_commit(void *ud, const buckets_checksum *computed, buckets_xl_object *o) {
   (void)computed;
   sse_put *p = ud;
+  buckets_md5_ctx *mc = p->compressed ? &p->ph.md5 : &p->w->md5;
+  buckets_sha256_ctx *sc = p->compressed ? &p->ph.sha : &p->w->sha;
+  buckets_cksum_hasher *kc = p->compressed ? &p->ph.cks : &p->w->cks;
+  int64_t plain_size = p->compressed ? p->ph.size : p->w->plain_size;
   uint8_t *md5 = p->md5, sha[32];
-  buckets_md5_final(&p->w->md5, md5);
-  buckets_sha256_final(&p->w->sha, sha);
+  buckets_md5_final(mc, md5);
+  buckets_sha256_final(sc, sha);
   if (p->b->has_md5 && memcmp(md5, p->b->md5, 16) != 0) return BUCKETS_OBJ_ERR_BAD_DIGEST;
   if (p->b->want_sha && memcmp(sha, p->b->sha, 32) != 0) return BUCKETS_OBJ_ERR_SHA256_MISMATCH;
   if (p->cx->want.type) {
     buckets_checksum plain = {.type = p->cx->want.type & BUCKETS_CKSUM_BASE_MASK};
-    plain.raw_len = buckets_cksum_hasher_final(&p->w->cks, plain.raw);
+    plain.raw_len = buckets_cksum_hasher_final(kc, plain.raw);
     buckets_obj_err e = cks_pre_commit(p->cx, &plain, o);
     if (e) return e;
   }
   if (!o) return BUCKETS_OBJ_OK; /* a multipart part */
-  seal_checksum_meta(p->key, o);
-  buckets_buf sealed = BUCKETS_BUF_INIT;
-  buckets_objkey_seal_etag(p->key, md5, 16, &sealed);
-  char hex[200];
-  buckets_hex_encode((uint8_t *)sealed.data, sealed.len, hex);
-  buckets_xl_kv_set(&o->meta_user, &o->nmeta_user, "etag", hex, strlen(hex));
-  buckets_buf_free(&sealed);
-  for (size_t i = 0; i < p->nsys; i++)
-    buckets_xl_kv_set(&o->meta_sys, &o->nmeta_sys, p->sys[i].key, p->sys[i].value, p->sys[i].value_len);
-  if (o->nparts) o->parts[0].actual_size = p->w->plain_size;
+  if (p->w) {
+    seal_checksum_meta(p->key, o);
+    buckets_buf sealed = BUCKETS_BUF_INIT;
+    buckets_objkey_seal_etag(p->key, md5, 16, &sealed);
+    char hex[200];
+    buckets_hex_encode((uint8_t *)sealed.data, sealed.len, hex);
+    buckets_xl_kv_set(&o->meta_user, &o->nmeta_user, "etag", hex, strlen(hex));
+    buckets_buf_free(&sealed);
+    for (size_t i = 0; i < p->nsys; i++)
+      buckets_xl_kv_set(&o->meta_sys, &o->nmeta_sys, p->sys[i].key, p->sys[i].value, p->sys[i].value_len);
+  } else {
+    char hex[33];
+    buckets_hex_encode(md5, 16, hex);
+    buckets_xl_kv_set(&o->meta_user, &o->nmeta_user, "etag", hex, 32);
+  }
+  if (p->compressed) {
+    char as[32];
+    int n = snprintf(as, sizeof(as), "%lld", (long long)plain_size);
+    buckets_xl_kv_set(&o->meta_sys, &o->nmeta_sys, BUCKETS_COMPRESS_META, BUCKETS_COMPRESS_ALGO_V2,
+                      strlen(BUCKETS_COMPRESS_ALGO_V2));
+    buckets_xl_kv_set(&o->meta_sys, &o->nmeta_sys, BUCKETS_ACTUAL_SIZE_META, as, (size_t)n);
+    if (o->nparts && xform_index(p)) buckets_xl_part_set_index(&o->parts[0], p->index.data, p->index.len);
+  }
+  if (o->nparts) o->parts[0].actual_size = plain_size;
   return BUCKETS_OBJ_OK;
 }
 
@@ -412,11 +508,16 @@ static buckets_obj_err sse_pre_commit(void *ud, const buckets_checksum *computed
  * plaintext checksum (the object layer saw only DARE packages). */
 static void sse_part_commit(void *ud, buckets_part_info *pi) {
   sse_put *p = ud;
-  buckets_buf sealed = BUCKETS_BUF_INIT;
-  buckets_objkey_seal_etag(p->key, p->md5, 16, &sealed);
-  buckets_hex_encode((uint8_t *)sealed.data, sealed.len, pi->etag);
-  buckets_buf_free(&sealed);
-  pi->actual_size = p->w->plain_size;
+  if (p->w) {
+    buckets_buf sealed = BUCKETS_BUF_INIT;
+    buckets_objkey_seal_etag(p->key, p->md5, 16, &sealed);
+    buckets_hex_encode((uint8_t *)sealed.data, sealed.len, pi->etag);
+    buckets_buf_free(&sealed);
+  } else {
+    buckets_hex_encode(p->md5, 16, pi->etag);
+  }
+  pi->actual_size = p->compressed ? p->ph.size : p->w->plain_size;
+  if (xform_index(p)) pi->index = (const uint8_t *)p->index.data, pi->index_len = p->index.len;
   if (p->cx && p->cx->result.type) pi->cksum = p->cx->result;
   else memset(&pi->cksum, 0, sizeof(pi->cksum));
 }
@@ -537,7 +638,8 @@ static void put_object(s3_ctx *c) {
   serr = buckets_s3_sse_parse(c, &sse);
   sse_put sp = {.cx = &cx, .b = &b};
   buckets_sse_writer w;
-  if (!serr && sse.kind) serr = buckets_s3_sse_new_key(c, &sse, c->bucket, c->object, sp.key, &sp.sys, &sp.nsys);
+  bool encrypt = !serr && sse.kind;
+  if (encrypt) serr = buckets_s3_sse_new_key(c, &sse, c->bucket, c->object, sp.key, &sp.sys, &sp.nsys);
   buckets_sse_req_free(&sse);
   if (serr) {
     free_kvs(meta, nmeta);
@@ -549,24 +651,26 @@ static void put_object(s3_ctx *c) {
   buckets_read_fn rd = b.rd;
   void *rd_ud = b.rd_ud;
   int64_t size = b.size;
-  if (sp.nsys) {
-    buckets_sse_writer_init(&w, sp.key, b.rd, b.rd_ud, b.size, cx.want.type & BUCKETS_CKSUM_BASE_MASK);
+  sp.compressed = buckets_s3_compressible(c, c->object, encrypt) && b.size > BUCKETS_COMPRESS_MIN_SIZE;
+  bool xform = encrypt || sp.compressed;
+  if (xform) {
     sp.w = &w;
-    rd = buckets_sse_writer_read, rd_ud = &w;
-    size = (int64_t)buckets_dare_encrypted_size((uint64_t)b.size);
+    rd = xform_open(&sp, b.rd, b.rd_ud, &size, cx.want.type & BUCKETS_CKSUM_BASE_MASK, sp.key, NULL, encrypt,
+                    encrypt, &rd_ud);
     opts.want_md5 = opts.want_sha256 = NULL;
     opts.checksum_type = 0;
     opts.pre_commit = sse_pre_commit;
     opts.pre_commit_ud = &sp;
+    opts.actual_size = b.size;
   }
   buckets_object_info oi;
   buckets_obj_err err = buckets_obj_put(c->s->layer, c->bucket, c->object, rd, rd_ud, size, &opts, &oi);
   free_kvs(meta, nmeta);
-  if (sp.nsys) buckets_sse_writer_free(&w);
+  if (xform) xform_close(&sp);
   if (err) {
     buckets_s3_write_error(c, body_error(&b, err));
   } else {
-    if (sp.nsys) sse_put_response(c, &oi, sp.key);
+    if (encrypt) sse_put_response(c, &oi, sp.key);
     else etag_header(c->resp, oi.etag);
     buckets_s3_version_header(c, oi.version_id);
     oi.is_latest = true; /* the version just written */
@@ -645,6 +749,19 @@ static bool resolve_range(const range_spec *rs, int64_t size, int64_t *off, int6
   *off = rs->start;
   *len = end - rs->start + 1;
   return true;
+}
+
+/* InvalidRange from HTTPRangeSpec.GetLength: the range as given (an open end
+ * is -1) and the object's size. */
+static void write_invalid_range(s3_ctx *c, const range_spec *rs, int64_t size) {
+  char msg[160];
+  snprintf(msg, sizeof(msg), "The requested range 'bytes=%lld-%lld' is not satisfiable", (long long)rs->start,
+           (long long)rs->end);
+  buckets_s3_write_error_msg(c, BUCKETS_ERR_INVALID_RANGE, msg);
+  buckets_buf *b = &c->resp->body;
+  if (b->len >= 8 && memcmp(b->data + b->len - 8, "</Error>", 8) == 0) b->len -= 8;
+  buckets_buf_appendf(b, "<ActualObjectSize>%lld</ActualObjectSize><RangeRequested>%lld-%lld</RangeRequested></Error>",
+                      (long long)size, (long long)rs->start, (long long)rs->end);
 }
 
 /* canonicalizeETag + isETagEqual */
@@ -786,6 +903,12 @@ static void get_object(s3_ctx *c, bool head) {
       return;
     }
   }
+  /* A malformed range fails before the object is looked up. */
+  range_spec rs;
+  if (!part_number && !parse_range(buckets_http_header_get(c->req, "Range"), &rs)) {
+    buckets_s3_write_error(c, BUCKETS_ERR_INVALID_RANGE);
+    return;
+  }
   buckets_object_info oi;
   buckets_obj_err err = buckets_obj_stat(c->s->layer, c->bucket, c->object, version, &oi);
   if (err) {
@@ -816,12 +939,13 @@ static void get_object(s3_ctx *c, bool head) {
     return;
   }
   int64_t stored_size = oi.size;
+  bool compressed = buckets_s3_is_compressed(&oi);
   if (encrypted) {
     char etag[80];
     buckets_s3_sse_client_etag(c, &oi, have_key ? key : NULL, etag);
     snprintf(oi.etag, sizeof(oi.etag), "%s", etag);
-    oi.size = buckets_s3_sse_actual_size(&oi);
   }
+  if (encrypted || compressed) oi.size = buckets_s3_actual_size(&oi);
   if (part_number > 1) {
     bool found = false;
     for (size_t i = 0; i < oi.nparts; i++) found |= oi.parts[i].number == part_number;
@@ -835,7 +959,6 @@ static void get_object(s3_ctx *c, bool head) {
     buckets_object_info_free(&oi);
     return;
   }
-  range_spec rs;
   int64_t off = 0, len = oi.size;
   if (part_number > 0) {
     /* partNumberToRangeSpec: index-based over the object's parts. */
@@ -844,23 +967,27 @@ static void get_object(s3_ctx *c, bool head) {
     int64_t plen = oi.nparts >= (size_t)part_number ? oi.parts[part_number - 1].actual_size : oi.size;
     rs = (range_spec){true, false, start, start + plen - 1};
     if (plen == 0) rs.end = -1;
-  } else if (!parse_range(buckets_http_header_get(c->req, "Range"), &rs)) {
-    rs.present = true, rs.start = INT64_MAX; /* force InvalidRange below */
   }
   if (!resolve_range(&rs, oi.size, &off, &len)) {
-    buckets_http_resp_headerf(c->resp, "Content-Range", "bytes */%lld", (long long)oi.size);
-    buckets_s3_write_error(c, BUCKETS_ERR_INVALID_RANGE);
+    write_invalid_range(c, &rs, oi.size);
     buckets_object_info_free(&oi);
     return;
   }
 
   buckets_obj_reader *r = NULL;
   buckets_sse_reader *sr = NULL;
+  buckets_comp_reader *cr = NULL;
+  compressed = compressed && len > 0;
   if (!head) {
     buckets_object_info oi2;
     int64_t roff = off, rlen = len;
     buckets_sse_range rg;
-    if (encrypted) {
+    buckets_comp_range crg;
+    if (compressed) {
+      /* From the block (or part) holding off to the end of the stored object. */
+      buckets_s3_compressed_range(&oi, have_key ? key : NULL, off, &crg);
+      roff = crg.stored_off, rlen = stored_size - crg.stored_off;
+    } else if (encrypted) {
       int64_t plain = oi.size;
       oi.size = stored_size;
       buckets_s3_sse_range(&oi, off, len, &rg);
@@ -874,7 +1001,11 @@ static void get_object(s3_ctx *c, bool head) {
       return;
     }
     buckets_object_info_free(&oi2);
-    if (encrypted) {
+    if (compressed) {
+      cr = buckets_comp_reader_new(&oi, stored_size, have_key ? key : NULL, &crg, len, (buckets_read_fn)reader_source, r,
+                                   reader_free);
+      r = NULL;
+    } else if (encrypted) {
       int64_t plain = oi.size;
       oi.size = stored_size;
       sr = buckets_sse_reader_new(&oi, key, &rg, len, (buckets_read_fn)reader_source, r, reader_free);
@@ -920,6 +1051,10 @@ static void get_object(s3_ctx *c, bool head) {
     c->resp->stream = (buckets_http_body_fn)buckets_sse_reader_read;
     c->resp->stream_ud = sr;
     c->resp->stream_free = buckets_sse_reader_free;
+  } else if (cr) {
+    c->resp->stream = (buckets_http_body_fn)buckets_comp_reader_read;
+    c->resp->stream_ud = cr;
+    c->resp->stream_free = buckets_comp_reader_free;
   }
   buckets_object_info_free(&oi);
 }
@@ -965,15 +1100,18 @@ static void delete_object(s3_ctx *c) {
 typedef struct {
   buckets_obj_reader *r;
   buckets_sse_reader *sr;
+  buckets_comp_reader *cr;
 } src_stream;
 
 static long src_read(void *ud, void *buf, size_t n) {
   src_stream *s = ud;
+  if (s->cr) return buckets_comp_reader_read(s->cr, buf, n);
   return s->sr ? buckets_sse_reader_read(s->sr, buf, n) : buckets_obj_read(s->r, buf, n);
 }
 
 static void src_close(src_stream *s) {
-  if (s->sr) buckets_sse_reader_free(s->sr);
+  if (s->cr) buckets_comp_reader_free(s->cr);
+  else if (s->sr) buckets_sse_reader_free(s->sr);
   else if (s->r) buckets_obj_reader_free(s->r);
   memset(s, 0, sizeof(*s));
 }
@@ -1001,8 +1139,8 @@ static buckets_s3_error prepare_source(s3_ctx *c, const char *b, const char *o, 
     char etag[80];
     buckets_s3_sse_client_etag(c, oi, key, etag);
     snprintf(oi->etag, sizeof(oi->etag), "%s", etag);
-    oi->size = buckets_s3_sse_actual_size(oi);
   }
+  if (*encrypted || buckets_s3_is_compressed(oi)) oi->size = buckets_s3_actual_size(oi);
   return BUCKETS_ERR_NONE;
 }
 
@@ -1013,8 +1151,13 @@ static buckets_s3_error open_source(s3_ctx *c, const char *b, const char *o, con
   memset(s, 0, sizeof(*s));
   int64_t roff = off, rlen = len;
   buckets_sse_range rg;
+  buckets_comp_range crg;
   int64_t plain = oi->size;
-  if (encrypted) {
+  bool compressed = buckets_s3_is_compressed(oi) && len > 0;
+  if (compressed) {
+    buckets_s3_compressed_range(oi, encrypted ? key : NULL, off, &crg);
+    roff = crg.stored_off, rlen = stored_size - crg.stored_off;
+  } else if (encrypted) {
     oi->size = stored_size;
     buckets_s3_sse_range(oi, off, len, &rg);
     oi->size = plain;
@@ -1024,7 +1167,11 @@ static buckets_s3_error open_source(s3_ctx *c, const char *b, const char *o, con
   buckets_obj_err err = buckets_obj_open(c->s->layer, b, o, v, roff, rlen, &s->r, &tmp);
   if (err) return err == BUCKETS_OBJ_ERR_NO_SUCH_BUCKET ? BUCKETS_ERR_NO_SUCH_BUCKET : buckets_s3_obj_error(err);
   buckets_object_info_free(&tmp);
-  if (encrypted) {
+  if (compressed) {
+    s->cr = buckets_comp_reader_new(oi, stored_size, encrypted ? key : NULL, &crg, len, (buckets_read_fn)reader_source, s->r,
+                                    reader_free);
+    s->r = NULL;
+  } else if (encrypted) {
     oi->size = stored_size;
     s->sr = buckets_sse_reader_new(oi, key, &rg, len, (buckets_read_fn)reader_source, s->r, reader_free);
     oi->size = plain;
@@ -1175,7 +1322,8 @@ static void copy_object(s3_ctx *c) {
   cks_ctx cx = {0};
   body_src nob = {0};
   sse_put sp = {.cx = &cx, .b = &nob};
-  if (!serr && sse.kind) serr = buckets_s3_sse_new_key(c, &sse, c->bucket, c->object, dst_key, &sp.sys, &sp.nsys);
+  bool encrypt = !serr && sse.kind;
+  if (encrypt) serr = buckets_s3_sse_new_key(c, &sse, c->bucket, c->object, dst_key, &sp.sys, &sp.nsys);
   buckets_sse_req_free(&sse);
   memcpy(sp.key, dst_key, 32);
   src_stream ss = {0};
@@ -1189,16 +1337,17 @@ static void copy_object(s3_ctx *c) {
     buckets_read_fn rd = src_read;
     void *rd_ud = &ss;
     int64_t size = src.size;
-    if (sp.nsys) {
-      buckets_sse_writer_init(&w, dst_key, src_read, &ss, src.size, 0);
+    sp.compressed = buckets_s3_compressible(c, c->object, encrypt) && src.size > BUCKETS_COMPRESS_MIN_SIZE;
+    bool xform = encrypt || sp.compressed;
+    if (xform) {
       sp.w = &w;
-      rd = buckets_sse_writer_read, rd_ud = &w;
-      size = (int64_t)buckets_dare_encrypted_size((uint64_t)src.size);
+      rd = xform_open(&sp, src_read, &ss, &size, 0, dst_key, NULL, encrypt, encrypt, &rd_ud);
       opts.pre_commit = sse_pre_commit;
       opts.pre_commit_ud = &sp;
+      opts.actual_size = src.size;
     }
     err = buckets_obj_put(c->s->layer, c->bucket, c->object, rd, rd_ud, size, &opts, &oi);
-    if (sp.nsys) buckets_sse_writer_free(&w);
+    if (xform) xform_close(&sp);
     serr = buckets_s3_obj_error(err);
   }
   src_close(&ss);
@@ -1254,6 +1403,9 @@ static void mpu_create(s3_ctx *c) {
     return;
   }
   if (nsys) buckets_xl_kv_set(&sys, &nsys, BUCKETS_SSE_META_MULTIPART, "", 0);
+  /* Parts compress when the upload qualifies (no size threshold here). */
+  if (buckets_s3_compressible(c, c->object, nsys > 0))
+    buckets_xl_kv_set(&sys, &nsys, BUCKETS_COMPRESS_META, BUCKETS_COMPRESS_ALGO_V2, strlen(BUCKETS_COMPRESS_ALGO_V2));
   buckets_xl_kv *meta = NULL;
   size_t nmeta = 0;
   serr = extract_metadata(c, &meta, &nmeta);
@@ -1414,11 +1566,13 @@ static void mpu_put_part(s3_ctx *c, const char *upload_id) {
     buckets_part_info pi;
     buckets_object_info ui;
     bool upload_known = buckets_obj_mpu_stat(c->s->layer, c->bucket, c->object, upload_id, &ui) == BUCKETS_OBJ_OK;
-    if (upload_known && buckets_s3_sse_encrypted(&ui)) {
+    bool upload_enc = upload_known && buckets_s3_sse_encrypted(&ui);
+    bool upload_comp = upload_known && buckets_s3_is_compressed(&ui);
+    if (upload_enc || upload_comp) {
       body_src nob = {0};
       cks_ctx cx = {0};
-      sse_put sp = {.cx = &cx, .b = &nob};
-      buckets_s3_error ke = buckets_s3_sse_object_key(c, &ui, c->bucket, c->object, false, sp.key);
+      sse_put sp = {.cx = &cx, .b = &nob, .compressed = upload_comp};
+      buckets_s3_error ke = upload_enc ? buckets_s3_sse_object_key(c, &ui, c->bucket, c->object, false, sp.key) : BUCKETS_ERR_NONE;
       if (ke) {
         buckets_object_info_free(&ui);
         src_close(&ss);
@@ -1426,17 +1580,22 @@ static void mpu_put_part(s3_ctx *c, const char *upload_id) {
         return;
       }
       uint8_t pk[32], nonce[12];
-      buckets_objkey_part_key(sp.key, (uint32_t)part, pk);
-      part_nonce(upload_id, part, nonce);
+      if (upload_enc) {
+        buckets_objkey_part_key(sp.key, (uint32_t)part, pk);
+        part_nonce(upload_id, part, nonce);
+      }
       buckets_sse_writer w;
-      buckets_sse_writer_init_nonce(&w, pk, nonce, src_read, &ss, len, 0);
-      OPENSSL_cleanse(pk, sizeof(pk));
       sp.w = &w;
-      buckets_put_opts po = {.pre_commit = sse_pre_commit, .pre_commit_ud = &sp, .part_commit = sse_part_commit, .part_commit_ud = &sp};
-      err = buckets_obj_mpu_put_part(c->s->layer, c->bucket, c->object, upload_id, part, buckets_sse_writer_read, &w,
-                                     (int64_t)buckets_dare_encrypted_size((uint64_t)len), &po, &pi);
-      buckets_sse_writer_free(&w);
-      if (!err) {
+      int64_t size = len;
+      void *ud;
+      buckets_read_fn rd = xform_open(&sp, src_read, &ss, &size, 0, pk, nonce, upload_enc,
+                                      buckets_s3_sse_requested(c) || upload_enc, &ud);
+      OPENSSL_cleanse(pk, sizeof(pk));
+      buckets_put_opts po = {.pre_commit = sse_pre_commit, .pre_commit_ud = &sp, .part_commit = sse_part_commit,
+                             .part_commit_ud = &sp, .actual_size = len};
+      err = buckets_obj_mpu_put_part(c->s->layer, c->bucket, c->object, upload_id, part, rd, ud, size, &po, &pi);
+      xform_close(&sp);
+      if (!err && upload_enc) {
         char shown[128];
         sse_part_etag(sp.key, buckets_s3_sse_kind_of(&ui) == BUCKETS_SSE_S3, pi.etag, shown);
         snprintf(pi.etag, sizeof(pi.etag), "%s", shown);
@@ -1489,11 +1648,13 @@ static void mpu_put_part(s3_ctx *c, const char *upload_id) {
   buckets_object_info ui;
   bool upload_known = buckets_obj_mpu_stat(c->s->layer, c->bucket, c->object, upload_id, &ui) == BUCKETS_OBJ_OK;
   bool part_enc = upload_known && buckets_s3_sse_encrypted(&ui);
-  sse_put sp = {.cx = &cx, .b = &bsrc};
+  bool part_comp = upload_known && buckets_s3_is_compressed(&ui);
+  sse_put sp = {.cx = &cx, .b = &bsrc, .compressed = part_comp};
   buckets_sse_writer w;
   buckets_read_fn rd = bsrc.rd;
   void *rd_ud = bsrc.rd_ud;
   int64_t size = bsrc.size;
+  uint8_t pk[32], nonce[12];
   if (part_enc) {
     buckets_sse_kind kind = buckets_s3_sse_kind_of(&ui);
     bool ssec = buckets_http_header_get(c->req, "X-Amz-Server-Side-Encryption-Customer-Algorithm").p != NULL;
@@ -1505,14 +1666,16 @@ static void mpu_put_part(s3_ctx *c, const char *upload_id) {
       buckets_s3_sse_write_error(c, serr);
       return;
     }
-    uint8_t pk[32], nonce[12];
     buckets_objkey_part_key(sp.key, (uint32_t)part, pk);
     part_nonce(upload_id, part, nonce);
-    buckets_sse_writer_init_nonce(&w, pk, nonce, bsrc.rd, bsrc.rd_ud, bsrc.size, cx.want.type & BUCKETS_CKSUM_BASE_MASK);
-    OPENSSL_cleanse(pk, sizeof(pk));
+  }
+  if (part_enc || part_comp) {
     sp.w = &w;
-    rd = buckets_sse_writer_read, rd_ud = &w;
-    size = (int64_t)buckets_dare_encrypted_size((uint64_t)bsrc.size);
+    /* PutObjectPart pads only when the part request itself carries SSE headers. */
+    rd = xform_open(&sp, bsrc.rd, bsrc.rd_ud, &size, cx.want.type & BUCKETS_CKSUM_BASE_MASK, pk, nonce, part_enc,
+                    buckets_s3_sse_requested(c), &rd_ud);
+    OPENSSL_cleanse(pk, sizeof(pk));
+    opts.actual_size = bsrc.size;
     opts.want_md5 = opts.want_sha256 = NULL;
     opts.checksum_type = 0;
     opts.pre_commit = sse_pre_commit;
@@ -1523,8 +1686,8 @@ static void mpu_put_part(s3_ctx *c, const char *upload_id) {
   buckets_part_info pi;
   buckets_obj_err err = buckets_obj_mpu_put_part(c->s->layer, c->bucket, c->object, upload_id, part, rd, rd_ud, size,
                                                  &opts, &pi);
+  if (part_enc || part_comp) xform_close(&sp);
   if (part_enc) {
-    buckets_sse_writer_free(&w);
     if (!err) {
       char shown[128];
       sse_part_etag(sp.key, buckets_s3_sse_kind_of(&ui) == BUCKETS_SSE_S3, pi.etag, shown);
@@ -1579,7 +1742,7 @@ static void mpu_list_parts(s3_ctx *c, const char *upload_id) {
   }
   /* an encrypted upload: SSE-S3 parts are unsealed with the object key */
   uint8_t key[32];
-  bool upload_enc = false, have_key = false, sse_s3 = false;
+  bool upload_enc = false, upload_comp = false, have_key = false, sse_s3 = false;
   buckets_object_info ui;
   char ck_alg[32] = "", ck_type[32] = "";
   if (buckets_obj_mpu_stat(c->s->layer, c->bucket, c->object, upload_id, &ui) == BUCKETS_OBJ_OK) {
@@ -1587,6 +1750,7 @@ static void mpu_list_parts(s3_ctx *c, const char *upload_id) {
     snprintf(ck_alg, sizeof(ck_alg), "%s", a ? a : "");
     snprintf(ck_type, sizeof(ck_type), "%s", t ? t : "");
     upload_enc = buckets_s3_sse_encrypted(&ui);
+    upload_comp = buckets_s3_is_compressed(&ui);
     sse_s3 = buckets_s3_sse_kind_of(&ui) == BUCKETS_SSE_S3;
     if (upload_enc && sse_s3) {
       buckets_s3_error ke = buckets_s3_sse_object_key(c, &ui, c->bucket, c->object, false, key);
@@ -1629,8 +1793,8 @@ static void mpu_list_parts(s3_ctx *c, const char *upload_id) {
       char shown[128];
       sse_part_etag(have_key ? key : NULL, sse_s3, parts[i].etag, shown);
       snprintf(parts[i].etag, sizeof(parts[i].etag), "%s", shown);
-      parts[i].size = parts[i].actual_size;
     }
+    if (upload_enc || upload_comp) parts[i].size = parts[i].actual_size;
     buckets_buf_appendf(b, "<ETag>&#34;%s&#34;</ETag>", parts[i].etag);
     buckets_buf_appendf(b, "<Size>%lld</Size>", (long long)parts[i].size);
     if (parts[i].cksum.type) {
@@ -1890,16 +2054,19 @@ void buckets_s3_list_uploads(s3_ctx *c) {
     buckets_s3_write_error(c, buckets_s3_obj_error(err));
     return;
   }
-  if (n) qsort(ups, n, sizeof(*ups), upload_cmp);
+  /* Without a prefix, MinIO answers from its upload cache: every upload,
+   * oldest first, markers and max-uploads aside. */
+  bool from_cache = !*prefix;
+  if (n && !from_cache) qsort(ups, n, sizeof(*ups), upload_cmp);
   size_t start = 0;
-  if (id_marker && *id_marker) {
+  if (!from_cache && id_marker && *id_marker) {
     while (start < n && strcmp(ups[start].upload_id, id_marker) != 0) start++;
     if (start < n) start++;
   }
   size_t end = start;
   while (end < n) {
     end++;
-    if ((long)(end - start) == max) break;
+    if (!from_cache && (long)(end - start) == max) break;
   }
   bool truncated = end < n;
   bool url = encoding && strcasecmp(encoding, "url") == 0;
@@ -2035,12 +2202,11 @@ static void get_object_attributes(s3_ctx *c) {
       char etag[80];
       buckets_s3_sse_client_etag(c, &oi, key, etag);
       snprintf(oi.etag, sizeof(oi.etag), "%s", etag);
-      oi.size = buckets_s3_sse_actual_size(&oi);
-      for (size_t k = 0; k < oi.nparts; k++) oi.parts[k].size = oi.parts[k].actual_size;
       buckets_s3_sse_unseal_checksum(key, &oi);
       OPENSSL_cleanse(key, sizeof(key));
     }
   }
+  if (!serr && (buckets_s3_sse_encrypted(&oi) || buckets_s3_is_compressed(&oi))) oi.size = buckets_s3_actual_size(&oi);
   if (serr) {
     buckets_object_info_free(&oi);
     buckets_s3_sse_write_error(c, serr);
@@ -2469,11 +2635,15 @@ static void xml_key(buckets_buf *b, const char *tag, const char *value, bool url
 static void sse_list_view(s3_ctx *c, buckets_obj_listing *l) {
   for (size_t i = 0; i < l->nobjects; i++) {
     buckets_object_info *o = &l->objects[i];
-    if (o->delete_marker || !buckets_s3_sse_encrypted(o)) continue;
-    char etag[80];
-    buckets_s3_sse_client_etag(c, o, NULL, etag);
-    int64_t size = buckets_s3_sse_actual_size(o);
-    snprintf(o->etag, sizeof(o->etag), "%s", etag);
+    if (o->delete_marker) continue;
+    bool enc = buckets_s3_sse_encrypted(o);
+    if (!enc && !buckets_s3_is_compressed(o)) continue;
+    if (enc) {
+      char etag[80];
+      buckets_s3_sse_client_etag(c, o, NULL, etag);
+      snprintf(o->etag, sizeof(o->etag), "%s", etag);
+    }
+    int64_t size = buckets_s3_actual_size(o);
     if (size >= 0) o->size = size;
   }
 }

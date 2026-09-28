@@ -678,5 +678,74 @@
   "show": [
    "x-amz-server-side-encryption"
   ]
+ },
+ {
+  "method": "POST",
+  "path": "/ssebkt/e.bin",
+  "query": "uploads",
+  "headers": {
+   "X-Amz-Server-Side-Encryption": "AES256"
+  },
+  "save": {
+   "au": "xml:UploadId"
+  },
+  "label": "e.bin uploads"
+ },
+ {
+  "method": "PUT",
+  "path": "/ssebkt/e.bin",
+  "query": "partNumber=1&uploadId=$au",
+  "body": "the quick brown fox jumps over the lazy dog 0123456789\n",
+  "repeat": 100000,
+  "save": {
+   "aa": "etag"
+  },
+  "label": "e.bin partNumber=1&uploadI"
+ },
+ {
+  "method": "PUT",
+  "path": "/ssebkt/e.bin",
+  "query": "partNumber=2&uploadId=$au",
+  "body": "the quick brown fox jumps over the lazy dog 0123456789\n",
+  "repeat": 10,
+  "save": {
+   "ab": "etag"
+  },
+  "label": "e.bin partNumber=2&uploadI"
+ },
+ {
+  "method": "POST",
+  "path": "/ssebkt/e.bin",
+  "query": "uploadId=$au",
+  "body": "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>$aa</ETag></Part><Part><PartNumber>2</PartNumber><ETag>$ab</ETag></Part></CompleteMultipartUpload>",
+  "label": "e.bin uploadId=$au"
+ },
+ {
+  "method": "GET",
+  "path": "/ssebkt/e.bin",
+  "label": "attrs",
+  "query": "attributes",
+  "headers": {
+   "X-Amz-Object-Attributes": "ETag,ObjectSize,ObjectParts"
+  }
+ },
+ {
+  "method": "PUT",
+  "path": "/ssebkt/s.bin",
+  "body": "the quick brown fox jumps over the lazy dog 0123456789\n",
+  "repeat": 100,
+  "headers": {
+   "X-Amz-Server-Side-Encryption": "AES256"
+  },
+  "label": "s.bin "
+ },
+ {
+  "method": "GET",
+  "path": "/ssebkt/s.bin",
+  "label": "attrs single",
+  "query": "attributes",
+  "headers": {
+   "X-Amz-Object-Attributes": "ETag,ObjectSize,ObjectParts"
+  }
  }
 ]

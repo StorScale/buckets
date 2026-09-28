@@ -27,6 +27,7 @@
 #include "bucket/metasys.h"
 #include "kms/kms.h"
 #include "bucket/objectlock.h"
+#include "s3/compress.h"
 #include "s3/sse.h"
 #include "scanner/scanner.h"
 #include "scanner/usage.h"
@@ -418,6 +419,11 @@ static int scanner_cycle_seconds(void *ud) {
   return secs;
 }
 
+static int64_t scanner_actual_size(void *ud, const buckets_object_info *oi) {
+  (void)ud;
+  return buckets_s3_actual_size(oi);
+}
+
 static bool scanner_versioned(void *ud, const char *bucket, const char *object) {
   bool enabled, suspended;
   s3_ctx c = {.s = ud, .bucket = (char *)bucket};
@@ -511,6 +517,7 @@ void buckets_s3_scanner_hooks(buckets_s3_server *s, void *hooks) {
   memset(h, 0, sizeof(*h));
   h->cycle_seconds = scanner_cycle_seconds;
   h->versioned = scanner_versioned;
+  h->actual_size = scanner_actual_size;
   h->object = scanner_object;
   h->ud = s;
 }

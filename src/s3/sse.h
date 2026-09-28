@@ -51,6 +51,8 @@ buckets_s3_error buckets_s3_sse_parse_copy_dest(s3_ctx *c, buckets_sse_req *r);
 /* putOptsFromHeaders: the SSE-KMS (else SSE-C) headers must parse; false
  * with MinIO's crypto message, which the caller wraps in InvalidArgument. */
 bool buckets_s3_sse_put_opts(s3_ctx *c, char *why, size_t cap);
+/* crypto.Requested: SSE-S3, SSE-KMS or SSE-C headers. */
+bool buckets_s3_sse_requested(s3_ctx *c);
 /* SSE-S3 or SSE-KMS headers (GET and HEAD refuse them with BadRequest). */
 bool buckets_s3_sse_s3_or_kms_requested(s3_ctx *c);
 /* SSE-C headers on a read: they must parse (getOpts). */
@@ -82,6 +84,10 @@ void buckets_s3_sse_client_etag(s3_ctx *c, const buckets_object_info *oi, const 
  * key, metadataEncrypter "object-checksum") with its plaintext; false when
  * it does not open. */
 bool buckets_s3_sse_unseal_checksum(const uint8_t key[32], buckets_object_info *oi);
+/* metadataEncrypter(key)(base, data): DARE under HMAC-SHA256(key, base);
+ * empty data stays empty. meta_open reverses it (false when it does not open). */
+void buckets_s3_meta_seal(const uint8_t key[32], const char *base, const void *data, size_t n, buckets_buf *out);
+bool buckets_s3_meta_open(const uint8_t key[32], const char *base, const void *data, size_t n, buckets_buf *out);
 /* x-amz-server-side-encryption* response headers for an encrypted object. */
 void buckets_s3_sse_headers(s3_ctx *c, const buckets_object_info *oi);
 /* The KMS key ID as AWS shows it ("arn:aws:kms:" + id), or "". */
@@ -106,10 +112,13 @@ typedef struct {
   uint8_t *in, *out;
   size_t out_pos, out_len;
   int64_t plain_size;
+  bool unknown, eof, have_peek; /* size -1: read to EOF, looking one byte ahead */
+  uint8_t peek;
+  bool no_hash; /* the plaintext is hashed upstream (compressed writes) */
 } buckets_sse_writer;
 
-/* key: the object key, or a part key. cks_type: a checksum to compute over
- * the plaintext (0 none). */
+/* key: the object key, or a part key. size: the plaintext length, or -1 to
+ * read to EOF. cks_type: a checksum to compute over the plaintext (0 none). */
 void buckets_sse_writer_init(buckets_sse_writer *w, const uint8_t key[32], buckets_read_fn rd, void *rd_ud, int64_t size,
                              uint32_t cks_type);
 /* The same with a given DARE nonce (multipart parts use a derived one). */

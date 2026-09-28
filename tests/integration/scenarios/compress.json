@@ -1,0 +1,568 @@
+[
+ {
+  "method": "PUT",
+  "path": "/cbkt"
+ },
+ {
+  "method": "PUT",
+  "path": "/cbkt/a.txt",
+  "label": "put compressible",
+  "body": "the quick brown fox jumps over the lazy dog 0123456789\n",
+  "repeat": 400,
+  "headers": {
+   "Content-Type": "text/plain"
+  },
+  "show": [
+   "etag"
+  ]
+ },
+ {
+  "method": "HEAD",
+  "path": "/cbkt/a.txt",
+  "label": "head",
+  "show": [
+   "etag",
+   "content-length",
+   "content-type"
+  ]
+ },
+ {
+  "method": "GET",
+  "path": "/cbkt/a.txt",
+  "label": "range",
+  "headers": {
+   "Range": "bytes=10000-10099"
+  },
+  "show": [
+   "content-range",
+   "content-length",
+   "etag"
+  ]
+ },
+ {
+  "method": "GET",
+  "path": "/cbkt/a.txt",
+  "label": "suffix range",
+  "headers": {
+   "Range": "bytes=-60"
+  },
+  "show": [
+   "content-range",
+   "content-length"
+  ]
+ },
+ {
+  "method": "GET",
+  "path": "/cbkt/a.txt",
+  "label": "range past end",
+  "headers": {
+   "Range": "bytes=22000-"
+  },
+  "show": [
+   "content-range"
+  ]
+ },
+ {
+  "method": "GET",
+  "path": "/cbkt/a.txt",
+  "label": "part 1",
+  "query": "partNumber=1",
+  "show": [
+   "content-length",
+   "content-range",
+   "x-amz-mp-parts-count"
+  ]
+ },
+ {
+  "method": "GET",
+  "path": "/cbkt/a.txt",
+  "label": "attributes",
+  "query": "attributes",
+  "headers": {
+   "X-Amz-Object-Attributes": "ETag,ObjectSize,ObjectParts,StorageClass,Checksum"
+  }
+ },
+ {
+  "method": "PUT",
+  "path": "/cbkt/small.txt",
+  "label": "put below threshold",
+  "body": "the quick brown fox jumps over the lazy dog 0123456789\n",
+  "repeat": 10,
+  "show": [
+   "etag"
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/cbkt/img.jpg",
+  "label": "put excluded ext",
+  "body": "the quick brown fox jumps over the lazy dog 0123456789\n",
+  "repeat": 400,
+  "show": [
+   "etag"
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/cbkt/data.bin",
+  "label": "put octet-stream",
+  "body": "the quick brown fox jumps over the lazy dog 0123456789\n",
+  "repeat": 100,
+  "headers": {
+   "Content-Type": "binary/octet-stream"
+  },
+  "show": [
+   "etag"
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/cbkt/other.dat",
+  "label": "put unlisted",
+  "body": "the quick brown fox jumps over the lazy dog 0123456789\n",
+  "repeat": 100,
+  "headers": {
+   "Content-Type": "application/x-foo"
+  },
+  "show": [
+   "etag"
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/cbkt/md5.txt",
+  "label": "put bad md5",
+  "body": "the quick brown fox jumps over the lazy dog 0123456789\n",
+  "repeat": 200,
+  "headers": {
+   "Content-MD5": "1B2M2Y8AsgTpgAmY7PhCfg=="
+  }
+ },
+ {
+  "method": "PUT",
+  "path": "/cbkt/md5ok.txt",
+  "label": "put good md5",
+  "body": "the quick brown fox jumps over the lazy dog 0123456789\n",
+  "repeat": 200,
+  "md5": true,
+  "show": [
+   "etag"
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/cbkt/crc.txt",
+  "label": "put checksum",
+  "body": "the quick brown fox jumps over the lazy dog 0123456789\n",
+  "repeat": 200,
+  "headers": {
+   "X-Amz-Checksum-Algorithm": "CRC32"
+  },
+  "show": [
+   "etag",
+   "x-amz-checksum-crc32"
+  ]
+ },
+ {
+  "method": "HEAD",
+  "path": "/cbkt/crc.txt",
+  "label": "head checksum",
+  "headers": {
+   "X-Amz-Checksum-Mode": "ENABLED"
+  },
+  "show": [
+   "etag",
+   "content-length",
+   "x-amz-checksum-crc32"
+  ]
+ },
+ {
+  "method": "GET",
+  "path": "/cbkt",
+  "label": "list v2",
+  "query": "list-type=2"
+ },
+ {
+  "method": "GET",
+  "path": "/cbkt",
+  "label": "list v1",
+  "query": ""
+ },
+ {
+  "method": "GET",
+  "path": "/cbkt",
+  "label": "list versions",
+  "query": "versions"
+ },
+ {
+  "method": "GET",
+  "path": "/cbkt",
+  "label": "list metadata",
+  "query": "list-type=2&metadata=true"
+ },
+ {
+  "method": "PUT",
+  "path": "/cbkt/copy.txt",
+  "label": "copy compressed",
+  "headers": {
+   "X-Amz-Copy-Source": "/cbkt/a.txt"
+  }
+ },
+ {
+  "method": "HEAD",
+  "path": "/cbkt/copy.txt",
+  "label": "head copy",
+  "show": [
+   "etag",
+   "content-length"
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/cbkt/copy.jpg",
+  "label": "copy to excluded",
+  "headers": {
+   "X-Amz-Copy-Source": "/cbkt/a.txt"
+  }
+ },
+ {
+  "method": "HEAD",
+  "path": "/cbkt/copy.jpg",
+  "label": "head copy.jpg",
+  "show": [
+   "etag",
+   "content-length"
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/cbkt/fromjpg.txt",
+  "label": "copy uncompressed to compressible",
+  "headers": {
+   "X-Amz-Copy-Source": "/cbkt/img.jpg"
+  }
+ },
+ {
+  "method": "GET",
+  "path": "/cbkt/fromjpg.txt",
+  "label": "range of copy",
+  "headers": {
+   "Range": "bytes=5000-5020"
+  },
+  "show": [
+   "content-range"
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/cbkt/a.txt",
+  "label": "copy onto itself",
+  "headers": {
+   "X-Amz-Copy-Source": "/cbkt/a.txt",
+   "X-Amz-Metadata-Directive": "REPLACE",
+   "Content-Type": "text/x-log"
+  }
+ },
+ {
+  "method": "HEAD",
+  "path": "/cbkt/a.txt",
+  "label": "head after self copy",
+  "show": [
+   "etag",
+   "content-length",
+   "content-type"
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/cbkt/mp.txt",
+  "label": "create upload",
+  "query": "uploads",
+  "headers": {
+   "Content-Type": "text/plain"
+  },
+  "save": {
+   "up": "xml:UploadId"
+  }
+ },
+ {
+  "method": "PUT",
+  "path": "/cbkt/mp.txt",
+  "label": "part 1",
+  "query": "partNumber=1&uploadId=$up",
+  "body": "the quick brown fox jumps over the lazy dog 0123456789\n",
+  "repeat": 100000,
+  "show": [
+   "etag"
+  ],
+  "save": {
+   "e1": "etag"
+  }
+ },
+ {
+  "method": "PUT",
+  "path": "/cbkt/mp.txt",
+  "label": "part 2",
+  "query": "partNumber=2&uploadId=$up",
+  "body": "the quick brown fox jumps over the lazy dog 0123456789\n",
+  "repeat": 300,
+  "show": [
+   "etag"
+  ],
+  "save": {
+   "e2": "etag"
+  }
+ },
+ {
+  "method": "PUT",
+  "path": "/cbkt/mp.txt",
+  "label": "part 3 copy",
+  "query": "partNumber=3&uploadId=$up",
+  "headers": {
+   "X-Amz-Copy-Source": "/cbkt/a.txt",
+   "X-Amz-Copy-Source-Range": "bytes=100-5099"
+  },
+  "save": {
+   "e3": "xml:ETag"
+  }
+ },
+ {
+  "method": "GET",
+  "path": "/cbkt/mp.txt",
+  "label": "list parts",
+  "query": "uploadId=$up"
+ },
+ {
+  "method": "GET",
+  "path": "/cbkt",
+  "label": "list uploads",
+  "query": "uploads"
+ },
+ {
+  "method": "POST",
+  "path": "/cbkt/mp.txt",
+  "label": "complete too small",
+  "query": "uploadId=$up",
+  "body": "<CompleteMultipartUpload><Part><PartNumber>2</PartNumber><ETag>$e2</ETag></Part><Part><PartNumber>3</PartNumber><ETag>$e3</ETag></Part></CompleteMultipartUpload>"
+ },
+ {
+  "method": "POST",
+  "path": "/cbkt/mp.txt",
+  "label": "complete",
+  "query": "uploadId=$up",
+  "body": "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>$e1</ETag></Part><Part><PartNumber>2</PartNumber><ETag>$e2</ETag></Part><Part><PartNumber>3</PartNumber><ETag>$e3</ETag></Part></CompleteMultipartUpload>"
+ },
+ {
+  "method": "HEAD",
+  "path": "/cbkt/mp.txt",
+  "label": "head mp",
+  "show": [
+   "etag",
+   "content-length"
+  ]
+ },
+ {
+  "method": "GET",
+  "path": "/cbkt/mp.txt",
+  "label": "mp part 2",
+  "query": "partNumber=2",
+  "show": [
+   "content-length",
+   "content-range",
+   "x-amz-mp-parts-count",
+   "etag"
+  ]
+ },
+ {
+  "method": "GET",
+  "path": "/cbkt/mp.txt",
+  "label": "mp range across parts",
+  "headers": {
+   "Range": "bytes=5499990-5500100"
+  },
+  "show": [
+   "content-range",
+   "content-length"
+  ]
+ },
+ {
+  "method": "GET",
+  "path": "/cbkt/mp.txt",
+  "label": "mp attributes",
+  "query": "attributes",
+  "headers": {
+   "X-Amz-Object-Attributes": "ETag,ObjectSize,ObjectParts,StorageClass,Checksum"
+  }
+ },
+ {
+  "method": "PUT",
+  "path": "/cbkt/enc.txt",
+  "label": "put sse-s3",
+  "body": "the quick brown fox jumps over the lazy dog 0123456789\n",
+  "repeat": 400,
+  "headers": {
+   "X-Amz-Server-Side-Encryption": "AES256"
+  },
+  "show": [
+   "etag",
+   "x-amz-server-side-encryption"
+  ]
+ },
+ {
+  "method": "HEAD",
+  "path": "/cbkt/enc.txt",
+  "label": "head sse-s3",
+  "show": [
+   "etag",
+   "content-length",
+   "x-amz-server-side-encryption"
+  ]
+ },
+ {
+  "method": "GET",
+  "path": "/cbkt/enc.txt",
+  "label": "range sse-s3",
+  "headers": {
+   "Range": "bytes=20000-20054"
+  },
+  "show": [
+   "content-range",
+   "content-length"
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/cbkt/kms.txt",
+  "label": "put sse-kms",
+  "body": "the quick brown fox jumps over the lazy dog 0123456789\n",
+  "repeat": 400,
+  "headers": {
+   "X-Amz-Server-Side-Encryption": "aws:kms"
+  },
+  "show": [
+   "x-amz-server-side-encryption"
+  ]
+ },
+ {
+  "method": "HEAD",
+  "path": "/cbkt/kms.txt",
+  "label": "head sse-kms",
+  "show": [
+   "content-length",
+   "x-amz-server-side-encryption"
+  ]
+ },
+ {
+  "method": "GET",
+  "path": "/cbkt/kms.txt",
+  "label": "range sse-kms",
+  "headers": {
+   "Range": "bytes=55-109"
+  },
+  "show": [
+   "content-range"
+  ]
+ },
+ {
+  "method": "DELETE",
+  "path": "/cbkt/kms.txt",
+  "label": "delete sse-kms (its ETag is random)"
+ },
+ {
+  "method": "POST",
+  "path": "/cbkt/encmp.txt",
+  "label": "create sse upload",
+  "query": "uploads",
+  "headers": {
+   "X-Amz-Server-Side-Encryption": "AES256"
+  },
+  "save": {
+   "eu": "xml:UploadId"
+  }
+ },
+ {
+  "method": "PUT",
+  "path": "/cbkt/encmp.txt",
+  "label": "sse part 1",
+  "query": "partNumber=1&uploadId=$eu",
+  "body": "the quick brown fox jumps over the lazy dog 0123456789\n",
+  "repeat": 100000,
+  "show": [
+   "etag"
+  ],
+  "save": {
+   "f1": "etag"
+  }
+ },
+ {
+  "method": "PUT",
+  "path": "/cbkt/encmp.txt",
+  "label": "sse part 2",
+  "query": "partNumber=2&uploadId=$eu",
+  "body": "the quick brown fox jumps over the lazy dog 0123456789\n",
+  "repeat": 10,
+  "show": [
+   "etag"
+  ],
+  "save": {
+   "f2": "etag"
+  }
+ },
+ {
+  "method": "GET",
+  "path": "/cbkt/encmp.txt",
+  "label": "sse list parts",
+  "query": "uploadId=$eu"
+ },
+ {
+  "method": "POST",
+  "path": "/cbkt/encmp.txt",
+  "label": "sse complete",
+  "query": "uploadId=$eu",
+  "body": "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>$f1</ETag></Part><Part><PartNumber>2</PartNumber><ETag>$f2</ETag></Part></CompleteMultipartUpload>"
+ },
+ {
+  "method": "HEAD",
+  "path": "/cbkt/encmp.txt",
+  "label": "head sse mp",
+  "show": [
+   "content-length",
+   "x-amz-server-side-encryption"
+  ]
+ },
+ {
+  "method": "GET",
+  "path": "/cbkt/encmp.txt",
+  "label": "sse mp range",
+  "headers": {
+   "Range": "bytes=5499990-5500100"
+  },
+  "show": [
+   "content-range",
+   "content-length"
+  ]
+ },
+ {
+  "method": "GET",
+  "path": "/cbkt/encmp.txt",
+  "label": "sse mp attributes",
+  "query": "attributes",
+  "headers": {
+   "X-Amz-Object-Attributes": "ETag,ObjectSize,ObjectParts,StorageClass,Checksum"
+  }
+ },
+ {
+  "method": "GET",
+  "path": "/cbkt",
+  "label": "final list",
+  "query": "list-type=2"
+ },
+ {
+  "sleep": 8
+ },
+ {
+  "method": "GET",
+  "path": "/minio/admin/v3/datausageinfo",
+  "label": "usage counts plaintext sizes"
+ }
+]

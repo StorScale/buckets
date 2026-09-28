@@ -6,8 +6,11 @@
  *  - writes go to the pool already holding the object, else to a pool picked
  *    at random weighted by the free space of the set the object hashes to;
  *  - buckets exist on every pool; listings merge all pools. */
+#include <pthread.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "core/log.h"
 #include "core/uuid.h"
@@ -41,8 +44,104 @@ buckets_objlayer *buckets_objlayer_new(buckets_format_result *f, size_t npools, 
   return L;
 }
 
+/* ---- the node's upload cache ----
+ * erasureServerPools.mpCache: uploads created through this node, dropped
+ * when completed or aborted, or after a day (stale_uploads_expiry). A
+ * ListMultipartUploads without a prefix answers from it, as MinIO does. */
+
+#define MP_CACHE_EXPIRY_NS (24LL * 3600 * 1000000000LL)
+
+typedef struct {
+  char *bucket;
+  buckets_upload_info info;
+} mp_entry;
+
+struct buckets_mp_cache {
+  pthread_mutex_t mu;
+  mp_entry *e;
+  size_t n, cap;
+};
+
+static struct buckets_mp_cache *mp_cache(buckets_objlayer *L) {
+  static pthread_mutex_t init = PTHREAD_MUTEX_INITIALIZER;
+  pthread_mutex_lock(&init);
+  if (!L->mp_cache) {
+    L->mp_cache = buckets_xcalloc(1, sizeof(*L->mp_cache));
+    pthread_mutex_init(&L->mp_cache->mu, NULL);
+  }
+  pthread_mutex_unlock(&init);
+  return L->mp_cache;
+}
+
+static void mp_entry_free(mp_entry *e) {
+  free(e->bucket);
+  free(e->info.object);
+}
+
+static void mp_cache_add(buckets_objlayer *L, const char *bucket, const char *object, const char *upload_id) {
+  struct buckets_mp_cache *c = mp_cache(L);
+  struct timespec ts;
+  clock_gettime(CLOCK_REALTIME, &ts);
+  pthread_mutex_lock(&c->mu);
+  if (c->n == c->cap) {
+    c->cap = c->cap ? c->cap * 2 : 16;
+    c->e = buckets_xrealloc(c->e, c->cap * sizeof(mp_entry));
+  }
+  mp_entry *e = &c->e[c->n++];
+  memset(e, 0, sizeof(*e));
+  e->bucket = buckets_xstrdup(bucket);
+  e->info.object = buckets_xstrdup(object);
+  snprintf(e->info.upload_id, sizeof(e->info.upload_id), "%s", upload_id);
+  e->info.initiated_ns = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+  pthread_mutex_unlock(&c->mu);
+}
+
+static void mp_cache_remove(buckets_objlayer *L, const char *upload_id) {
+  struct buckets_mp_cache *c = mp_cache(L);
+  pthread_mutex_lock(&c->mu);
+  for (size_t i = 0; i < c->n; i++) {
+    if (strcmp(c->e[i].info.upload_id, upload_id) != 0) continue;
+    mp_entry_free(&c->e[i]);
+    memmove(&c->e[i], &c->e[i + 1], (c->n - i - 1) * sizeof(mp_entry));
+    c->n--;
+    break;
+  }
+  pthread_mutex_unlock(&c->mu);
+}
+
+/* The bucket's cached uploads, oldest first (entries are kept in creation order). */
+static void mp_cache_list(buckets_objlayer *L, const char *bucket, buckets_upload_info **out, size_t *n) {
+  struct buckets_mp_cache *c = mp_cache(L);
+  struct timespec ts;
+  clock_gettime(CLOCK_REALTIME, &ts);
+  int64_t now = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+  pthread_mutex_lock(&c->mu);
+  size_t k = 0;
+  for (size_t i = 0; i < c->n; i++) { /* cleanupStaleMPCache */
+    if (now - c->e[i].info.initiated_ns >= MP_CACHE_EXPIRY_NS) mp_entry_free(&c->e[i]);
+    else c->e[k++] = c->e[i];
+  }
+  c->n = k;
+  *out = NULL;
+  *n = 0;
+  for (size_t i = 0; i < c->n; i++) {
+    if (strcmp(c->e[i].bucket, bucket) != 0) continue;
+    *out = buckets_xrealloc(*out, (*n + 1) * sizeof(buckets_upload_info));
+    (*out)[*n] = c->e[i].info;
+    (*out)[*n].object = buckets_xstrdup(c->e[i].info.object);
+    (*n)++;
+  }
+  pthread_mutex_unlock(&c->mu);
+}
+
 void buckets_objlayer_free(buckets_objlayer *L) {
   if (!L) return;
+  if (L->mp_cache) {
+    for (size_t i = 0; i < L->mp_cache->n; i++) mp_entry_free(&L->mp_cache->e[i]);
+    free(L->mp_cache->e);
+    pthread_mutex_destroy(&L->mp_cache->mu);
+    free(L->mp_cache);
+  }
   for (size_t p = 0; p < L->npools; p++) buckets_epool_free(L->pools[p]);
   free(L->pools);
   free(L->all);
@@ -473,7 +572,9 @@ buckets_obj_err buckets_obj_mpu_new(buckets_objlayer *L, const char *bucket, con
   buckets_obj_err err;
   int p = write_pool(L, bucket, object, -1, &err);
   if (p < 0) return err;
-  return buckets_ep_mpu_new(L->pools[p], bucket, object, meta, nmeta, upload_id);
+  err = buckets_ep_mpu_new(L->pools[p], bucket, object, meta, nmeta, upload_id);
+  if (!err) mp_cache_add(L, bucket, object, upload_id);
+  return err;
 }
 
 /* The upload lives in exactly one pool: try each until one knows it. */
@@ -514,15 +615,29 @@ buckets_obj_err buckets_obj_mpu_list_parts(buckets_objlayer *L, const char *buck
   IN_UPLOAD_POOL(buckets_ep_mpu_list_parts(P, bucket, object, upload_id, marker, max, parts, n, truncated));
 }
 
-buckets_obj_err buckets_obj_mpu_abort(buckets_objlayer *L, const char *bucket, const char *object, const char *upload_id) {
+static buckets_obj_err mpu_abort(buckets_objlayer *L, const char *bucket, const char *object, const char *upload_id) {
   IN_UPLOAD_POOL(buckets_ep_mpu_abort(P, bucket, object, upload_id));
+}
+
+buckets_obj_err buckets_obj_mpu_abort(buckets_objlayer *L, const char *bucket, const char *object, const char *upload_id) {
+  buckets_obj_err err = mpu_abort(L, bucket, object, upload_id);
+  if (!err) mp_cache_remove(L, upload_id);
+  return err;
+}
+
+static buckets_obj_err mpu_complete(buckets_objlayer *L, const char *bucket, const char *object, const char *upload_id,
+                                    const buckets_complete_part *parts, size_t nparts, const buckets_checksum *want,
+                                    const buckets_complete_opts *co, buckets_object_info *out) {
+  IN_UPLOAD_POOL(buckets_ep_mpu_complete(P, bucket, object, upload_id, parts, nparts, want, co, out));
 }
 
 buckets_obj_err buckets_obj_mpu_complete(buckets_objlayer *L, const char *bucket, const char *object,
                                          const char *upload_id, const buckets_complete_part *parts, size_t nparts,
                                          const buckets_checksum *want, const buckets_complete_opts *co,
                                          buckets_object_info *out) {
-  IN_UPLOAD_POOL(buckets_ep_mpu_complete(P, bucket, object, upload_id, parts, nparts, want, co, out));
+  buckets_obj_err err = mpu_complete(L, bucket, object, upload_id, parts, nparts, want, co, out);
+  if (!err) mp_cache_remove(L, upload_id);
+  return err;
 }
 
 buckets_obj_err buckets_obj_mpu_stat(buckets_objlayer *L, const char *bucket, const char *object, const char *upload_id,
@@ -539,6 +654,14 @@ static int upload_cmp(const void *a, const void *b) {
 
 buckets_obj_err buckets_obj_mpu_list_uploads(buckets_objlayer *L, const char *bucket, const char *object,
                                              buckets_upload_info **uploads, size_t *n) {
+  if (!object || !*object) { /* no prefix: this node's upload cache */
+    *uploads = NULL;
+    *n = 0;
+    buckets_obj_err err = buckets_obj_stat_bucket(L, bucket);
+    if (err) return err;
+    mp_cache_list(L, bucket, uploads, n);
+    return BUCKETS_OBJ_OK;
+  }
   if (L->npools == 1) return buckets_ep_mpu_list_uploads(L->pools[0], bucket, object, uploads, n);
   *uploads = NULL;
   *n = 0;

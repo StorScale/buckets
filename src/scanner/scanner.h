@@ -26,6 +26,9 @@ typedef struct {
    * before it is counted; sets removed[i] for the versions it deleted.
    * NULL: nothing to apply. */
   void (*object)(void *ud, const char *bucket, const buckets_object_info *versions, size_t n, bool *removed);
+  /* The size a version counts with (GetActualSize: plaintext sizes of
+   * compressed and encrypted objects). NULL: the stored size. */
+  int64_t (*actual_size)(void *ud, const buckets_object_info *version);
   void *ud;
 } buckets_scanner_hooks;
 

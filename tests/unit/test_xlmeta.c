@@ -226,12 +226,46 @@ static void test_bucket_metadata(void **state) {
   free(raw);
 }
 
+/* PartIdx (compressed parts' S2 indexes): omitempty, one bin per part, empty
+ * for parts without one, and back only when there is one per part. */
+static void test_part_indexes(void **state) {
+  (void)state;
+  for (int with = 0; with < 2; with++) {
+    buckets_xl_object o = {0};
+    o.type = BUCKETS_XL_TYPE_OBJECT;
+    o.ec_m = 1;
+    o.ec_block_size = 1048576;
+    o.ec_index = 1;
+    o.ec_dist[0] = 1;
+    o.ec_dist_n = 1;
+    buckets_xl_part_add(&o, 1, 100, 9000000, NULL);
+    buckets_xl_part_add(&o, 2, 50, 70, NULL);
+    if (with) buckets_xl_part_set_index(&o.parts[0], "\x01\x02\x03", 3);
+    buckets_buf meta = BUCKETS_BUF_INIT;
+    buckets_xl_header hdr;
+    buckets_xl_object_encode(&o, &meta, &hdr);
+    bool has_key = memmem(meta.data, meta.len, "\xa7PartIdx\x92\xc4\x03\x01\x02\x03\xc4\x00", 15) != NULL;
+    assert_int_equal(has_key, with);
+    buckets_xl_version v = {.hdr = hdr, .meta = (uint8_t *)meta.data, .meta_len = meta.len};
+    buckets_xl_object back;
+    assert_int_equal(buckets_xl_object_decode(&v, &back), BUCKETS_XL_OK);
+    assert_int_equal(back.nparts, 2);
+    assert_int_equal(back.parts[0].actual_size, 9000000);
+    assert_int_equal(back.parts[0].index_len, with ? 3 : 0);
+    if (with) assert_memory_equal(back.parts[0].index, "\x01\x02\x03", 3);
+    assert_null(back.parts[1].index);
+    buckets_xl_object_free(&back);
+    buckets_xl_object_free(&o);
+    buckets_buf_free(&meta);
+  }
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_roundtrip_bytes),     cmocka_unit_test(test_reencode_header_and_signature),
       cmocka_unit_test(test_decode_fields),       cmocka_unit_test(test_corruption_detected),
       cmocka_unit_test(test_versions_and_inline), cmocka_unit_test(test_version_ids),
-      cmocka_unit_test(test_bucket_metadata),
+      cmocka_unit_test(test_bucket_metadata),     cmocka_unit_test(test_part_indexes),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

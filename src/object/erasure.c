@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 
 #include "core/buf.h"
@@ -367,6 +368,7 @@ void buckets_object_info_free(buckets_object_info *oi) {
   }
   free(oi->meta_sys);
   free(oi->checksum);
+  for (size_t i = 0; i < oi->nparts; i++) free(oi->parts[i].index);
   free(oi->parts);
   memset(oi, 0, sizeof(*oi));
 }
@@ -390,7 +392,8 @@ static void fill_info(buckets_object_info *oi, const char *name, const buckets_x
   if (o->nparts) {
     oi->parts = buckets_xcalloc(o->nparts, sizeof(buckets_xl_part));
     for (size_t i = 0; i < o->nparts; i++) {
-      oi->parts[i] = (buckets_xl_part){o->parts[i].number, o->parts[i].size, o->parts[i].actual_size, NULL};
+      oi->parts[i] = (buckets_xl_part){o->parts[i].number, o->parts[i].size, o->parts[i].actual_size, NULL, NULL, 0};
+      buckets_xl_part_set_index(&oi->parts[i], o->parts[i].index, o->parts[i].index_len);
     }
   }
   oi->delete_marker = o->type == BUCKETS_XL_TYPE_DELETE;
@@ -425,6 +428,9 @@ typedef struct {
   bool want_sha;
   buckets_cksum_hasher cks;
   bool want_cks;
+  bool unknown; /* size -1: read to EOF (compressed streams) */
+  bool eof;
+  int64_t total; /* bytes read */
   buckets_obj_err err;
 } source;
 
@@ -437,12 +443,17 @@ static size_t source_read(source *s, uint8_t *buf, size_t n) {
       return got;
     }
     if (r == 0) {
+      if (s->unknown) {
+        s->eof = true;
+        break;
+      }
       s->err = BUCKETS_OBJ_ERR_INCOMPLETE_BODY;
       return got;
     }
     got += (size_t)r;
   }
   s->remaining -= (int64_t)got;
+  s->total += (int64_t)got;
   return got; /* hashed by source_hash, in parallel with the block's writes */
 }
 
@@ -652,16 +663,17 @@ static buckets_obj_err encode_stream(encoder *e, source *src, int64_t size, cons
   for (int k = 0; k < total; k++) shards[k] = buckets_xmalloc(shard_cap);
   e->shards = shards;
   hasher h;
-  hasher_init(&h, src, size > BUCKETS_BLOCK_SIZE);
+  hasher_init(&h, src, size < 0 || size > BUCKETS_BLOCK_SIZE);
   buckets_obj_err err = BUCKETS_OBJ_OK;
   int wq = write_quorum(e->data, e->parity);
-  while (src->remaining > 0 && !err) {
+  while (src->remaining > 0 && !src->eof && !err) {
     uint8_t *block = hasher_next_buffer(&h);
     size_t n = source_read(src, block, BUCKETS_BLOCK_SIZE);
     if (src->err) {
       err = src->err;
       break;
     }
+    if (n == 0) break; /* a stream of unknown size ended at a block boundary */
     size_t sl = (size_t)ceil_div((int64_t)n, e->data);
     for (int k = 0; k < e->data; k++) {
       size_t off = (size_t)k * sl;
@@ -868,13 +880,18 @@ buckets_obj_err buckets_ep_put(buckets_epool *L, const char *bucket, const char 
   if (err) return err;
   if ((err = buckets_obj_check_name(object)) != BUCKETS_OBJ_OK) return err;
   buckets_eset *s = buckets_ep_set_for(L, object);
-  if (size < 0) return BUCKETS_OBJ_ERR_INCOMPLETE_BODY;
 
   encoder e = {.set = s, .parity = s->parity, .data = set_data(s)};
   char *key = join(bucket, object);
   buckets_hash_order(key, (int)s->n, e.dist);
   free(key);
-  e.inline_mode = shard_file_size(size, e.data) <= BUCKETS_INLINE_THRESHOLD;
+  if (size >= 0) {
+    e.inline_mode = shard_file_size(size, e.data) <= BUCKETS_INLINE_THRESHOLD;
+  } else {
+    /* A compressed stream: decide by the plaintext size, as MinIO does. */
+    int64_t sz = opts && opts->actual_size > 0 ? shard_file_size(opts->actual_size, e.data) : -1;
+    e.inline_mode = sz > 0 && sz <= BUCKETS_INLINE_THRESHOLD;
+  }
 
   uint8_t data_dir[16];
   char data_dir_s[37];
@@ -885,7 +902,8 @@ buckets_obj_err buckets_ep_put(buckets_epool *L, const char *bucket, const char 
   buckets_buf_appendf(&file, "tmp/%s/%s/part.1", tmp_id, data_dir_s);
   free(tmp_id);
 
-  source src = {.rd = rd, .ud = rd_ud, .remaining = size, .want_sha = opts && opts->want_sha256};
+  source src = {.rd = rd, .ud = rd_ud, .remaining = size < 0 ? INT64_MAX : size, .unknown = size < 0,
+                .want_sha = opts && opts->want_sha256};
   buckets_md5_init(&src.md5);
   buckets_sha256_init(&src.sha);
   uint32_t ctype = opts ? opts->checksum_type & BUCKETS_CKSUM_BASE_MASK : 0;
@@ -893,6 +911,7 @@ buckets_obj_err buckets_ep_put(buckets_epool *L, const char *bucket, const char 
   buckets_cksum_hasher_init(&src.cks, ctype);
 
   err = encode_stream(&e, &src, size, file.data);
+  size = src.total;
   uint8_t md5[16], sha[32];
   buckets_md5_final(&src.md5, md5);
   buckets_sha256_final(&src.sha, sha);
@@ -1083,7 +1102,7 @@ static buckets_obj_reader *reader_new(buckets_epool *L, buckets_eset *s, const c
   }
   r->parts = buckets_xcalloc(o->nparts ? o->nparts : 1, sizeof(buckets_xl_part));
   for (size_t i = 0; i < o->nparts; i++) {
-    r->parts[i] = (buckets_xl_part){o->parts[i].number, o->parts[i].size, o->parts[i].actual_size, NULL};
+    r->parts[i] = (buckets_xl_part){o->parts[i].number, o->parts[i].size, o->parts[i].actual_size, NULL, NULL, 0};
     r->total_size += o->parts[i].size;
   }
   r->nparts = o->nparts;
@@ -2183,7 +2202,7 @@ buckets_obj_err buckets_ep_mpu_new(buckets_epool *L, const char *bucket, const c
 }
 
 static void encode_part_meta(buckets_buf *b, const buckets_part_info *p) {
-  buckets_mp_map(b, p->cksum.type ? 6 : 5);
+  buckets_mp_map(b, 5 + (p->index_len > 0) + (p->cksum.type != 0));
   buckets_mp_cstr(b, "e");
   buckets_mp_cstr(b, p->etag);
   buckets_mp_cstr(b, "n");
@@ -2194,6 +2213,10 @@ static void encode_part_meta(buckets_buf *b, const buckets_part_info *p) {
   buckets_mp_int(b, p->actual_size);
   buckets_mp_cstr(b, "mt");
   buckets_mp_time(b, p->mod_time_ns);
+  if (p->index_len) {
+    buckets_mp_cstr(b, "i");
+    buckets_mp_bin(b, p->index, p->index_len);
+  }
   if (p->cksum.type) {
     char enc[64];
     buckets_checksum_encode(&p->cksum, enc);
@@ -2273,11 +2296,13 @@ static buckets_obj_err mpu_put_part(buckets_epool *L, const char *bucket, const 
   buckets_buf_appendf(&tmp_dir, "tmp/%s", tmp_id);
   buckets_buf_appendf(&tmp_file, "tmp/%s/part.%d", tmp_id, part_number);
   free(tmp_id);
-  source src = {.rd = rd, .ud = rd_ud, .remaining = size, .want_sha = opts && opts->want_sha256, .want_cks = ctype != 0};
+  source src = {.rd = rd, .ud = rd_ud, .remaining = size < 0 ? INT64_MAX : size, .unknown = size < 0,
+                .want_sha = opts && opts->want_sha256, .want_cks = ctype != 0};
   buckets_md5_init(&src.md5);
   buckets_sha256_init(&src.sha);
   buckets_cksum_hasher_init(&src.cks, ctype);
   err = encode_stream(&e, &src, size, tmp_file.data);
+  size = src.total;
   uint8_t md5[16], sha[32];
   buckets_md5_final(&src.md5, md5);
   buckets_sha256_final(&src.sha, sha);
@@ -2295,6 +2320,7 @@ static buckets_obj_err mpu_put_part(buckets_epool *L, const char *bucket, const 
     if (opts && opts->part_commit) opts->part_commit(opts->part_commit_ud, &pi);
     buckets_buf pm = BUCKETS_BUF_INIT, dst = BUCKETS_BUF_INIT, dstmeta = BUCKETS_BUF_INIT;
     encode_part_meta(&pm, &pi);
+    pi.index = NULL, pi.index_len = 0; /* borrowed from the hook */
     buckets_buf_appendf(&dst, "%s/%s/part.%d", dir, u.data_dir, part_number);
     buckets_buf_appendf(&dstmeta, "%s.meta", dst.data);
     int ok = 0;
@@ -2319,6 +2345,34 @@ static buckets_obj_err mpu_put_part(buckets_epool *L, const char *bucket, const 
   buckets_xl_object_free(&u.up);
   free(dir);
   return err;
+}
+
+/* The compression index ("i") of a part record, from the first drive that has it. */
+static void read_part_index(const upload *u, const char *dir, int number, buckets_buf *out) {
+  for (size_t i = 0; i < u->set->n; i++) {
+    if (!u->has[i] || !u->set->drives[i]) continue;
+    buckets_buf mp = BUCKETS_BUF_INIT, raw = BUCKETS_BUF_INIT;
+    buckets_buf_appendf(&mp, "%s/%s/part.%d.meta", dir, u->data_dir, number);
+    bool read = buckets_drive_read_all(u->set->drives[i], BUCKETS_META_BUCKET, mp.data, &raw) == BUCKETS_DRIVE_OK;
+    if (read) {
+      buckets_mp_reader r = buckets_mp_reader_init(raw.data, raw.len);
+      uint32_t fields;
+      if (buckets_mp_read_map(&r, &fields)) {
+        for (uint32_t f = 0; f < fields; f++) {
+          buckets_str k, v;
+          if (!buckets_mp_read_str(&r, &k)) break;
+          if (buckets_str_eq_c(k, "i")) {
+            if (buckets_mp_read_bin(&r, &v)) buckets_buf_append(out, v.p, v.n);
+            break;
+          }
+          if (!buckets_mp_skip(&r)) break;
+        }
+      }
+    }
+    buckets_buf_free(&mp);
+    buckets_buf_free(&raw);
+    if (read) return;
+  }
 }
 
 static int part_cmp(const void *a, const void *b) {
@@ -2460,6 +2514,9 @@ static buckets_obj_err mpu_complete(buckets_epool *L, const char *bucket, const 
   buckets_md5_ctx etag_md5;
   buckets_md5_init(&etag_md5);
   int64_t total = 0, actual_total = 0;
+  bool compressed = false;
+  for (size_t i = 0; i < u.up.nmeta_sys && !compressed; i++)
+    compressed = strcasecmp(u.up.meta_sys[i].key, "X-Minio-Internal-compression") == 0;
   if (nreq == 0) err = BUCKETS_OBJ_ERR_INVALID_PART;
   for (size_t i = 0; i < nreq && !err; i++) {
     if (i > 0 && req[i].number <= req[i - 1].number) {
@@ -2504,6 +2561,12 @@ static buckets_obj_err mpu_complete(buckets_epool *L, const char *bucket, const 
     }
     buckets_md5_update(&etag_md5, raw, 16);
     buckets_xl_part_add(&o, p->number, p->size, p->actual_size, NULL);
+    if (compressed) {
+      buckets_buf idx = BUCKETS_BUF_INIT;
+      read_part_index(&u, dir, p->number, &idx);
+      buckets_xl_part_set_index(&o.parts[o.nparts - 1], idx.data, idx.len);
+      buckets_buf_free(&idx);
+    }
     total += p->size;
     actual_total += p->actual_size;
   }

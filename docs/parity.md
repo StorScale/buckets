@@ -5,9 +5,9 @@ registers is listed; statuses live in the script's `STATUS` table.
 
 ✅ done · 🟡 partial · ⬜ not started
 
-**Overall:** 131 done, 6 partial, 85 not started (222 handlers).
+**Overall:** 133 done, 4 partial, 85 not started (222 handlers).
 
-## S3 API (57/76)
+## S3 API (59/76)
 
 Source: `cmd/api-router.go`
 
@@ -48,13 +48,13 @@ Source: `cmd/api-router.go`
 | ✅ | `GetBucketWebsiteHandler` | dummy, as MinIO |
 | ✅ | `GetObjectACLHandler` | canned private, as MinIO |
 | ✅ | `GetObjectAttributesHandler` |  |
-| 🟡 | `GetObjectHandler` | no compression/zip-extract yet |
+| 🟡 | `GetObjectHandler` | no zip-extract yet |
 | ⬜ | `GetObjectLambdaHandler` |  |
 | ✅ | `GetObjectLegalHoldHandler` |  |
 | ✅ | `GetObjectRetentionHandler` |  |
 | ✅ | `GetObjectTaggingHandler` |  |
 | ✅ | `HeadBucketHandler` |  |
-| 🟡 | `HeadObjectHandler` | no compression yet |
+| ✅ | `HeadObjectHandler` |  |
 | ✅ | `ListBucketsHandler` |  |
 | ✅ | `ListMultipartUploadsHandler` | per-object listing, like MinIO |
 | ✅ | `ListObjectPartsHandler` |  |
@@ -80,7 +80,7 @@ Source: `cmd/api-router.go`
 | ✅ | `PutBucketVersioningHandler` |  |
 | ✅ | `PutObjectACLHandler` | canned private, as MinIO |
 | ⬜ | `PutObjectExtractHandler` |  |
-| 🟡 | `PutObjectHandler` | no compression yet |
+| ✅ | `PutObjectHandler` |  |
 | ✅ | `PutObjectLegalHoldHandler` |  |
 | ✅ | `PutObjectPartHandler` |  |
 | ✅ | `PutObjectRetentionHandler` |  |
@@ -274,7 +274,7 @@ Source: `cmd/healthcheck-router.go`
 ## Beyond the routers
 
 Subsystems with no single handler, tracked by phase in `docs/architecture.md`:
-erasure coding + bitrot, xl.meta v2, pools, distributed locking and healing (done), scanner usage/ILM, healing, scanner,
-ILM/tiering, bucket + site replication, notifications (10 targets), audit,
-SSE-S3/KMS/C, compression, S3 Select, SFTP/FTP, batch jobs, decommission/rebalance,
-operator, console (IAM with LDAP, OpenID, plugins and OPA is done).
+erasure coding + bitrot, xl.meta v2, pools, distributed locking, healing, the scanner with data usage and
+lifecycle expiry, SSE-S3/KMS/C with the builtin KMS, and S2 compression (done); ILM transitions/tiering,
+bucket + site replication, notifications (10 targets), audit, KES/MinIO KMS backends, S3 Select, SFTP/FTP,
+batch jobs, decommission/rebalance, operator, console (IAM with LDAP, OpenID, plugins and OPA is done).

@@ -89,6 +89,8 @@ typedef struct {
   int64_t size;
   int64_t actual_size;
   char *etag; /* NULL when unset */
+  uint8_t *index; /* S2 index of a compressed part (headers removed), or NULL */
+  size_t index_len;
 } buckets_xl_part;
 
 typedef struct {
@@ -118,6 +120,8 @@ void buckets_xl_object_free(buckets_xl_object *o);
 void buckets_xl_kv_set(buckets_xl_kv **kvs, size_t *n, const char *key, const void *value, size_t len);
 const buckets_xl_kv *buckets_xl_kv_get(const buckets_xl_kv *kvs, size_t n, const char *key);
 void buckets_xl_part_add(buckets_xl_object *o, int number, int64_t size, int64_t actual_size, const char *etag);
+/* Sets (a copy of) part i's compression index. */
+void buckets_xl_part_set_index(buckets_xl_part *p, const void *index, size_t len);
 
 /* "null" for the zero ID, otherwise the canonical UUID string (out: 37 bytes). */
 void buckets_xl_version_id_string(const uint8_t id[16], char *out);

@@ -100,7 +100,10 @@ static void scan_key(buckets_scanner *s, const char *bucket, buckets_object_info
     uint64_t size = 0, versions = 0, markers = 0;
     for (size_t i = 0; i < n; i++) {
       if (removed[i]) continue;
-      size += (uint64_t)(v[i].delete_marker ? 0 : v[i].size);
+      if (!v[i].delete_marker) {
+        int64_t sz = s->hooks.actual_size ? s->hooks.actual_size(s->hooks.ud, &v[i]) : v[i].size;
+        if (sz > 0) size += (uint64_t)sz;
+      }
       markers += v[i].delete_marker;
       /* ToObjectInfo leaves VersionID empty for a null version when the
        * bucket is not versioned; those are not counted as versions. */

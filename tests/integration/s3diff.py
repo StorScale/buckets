@@ -9,7 +9,9 @@ replaced -- so two servers can be diffed.
 A scenario is a JSON list of steps:
   {"method": "PUT", "path": "/b/k", "query": "versionId=$v1", "body": "x",
    "headers": {...}, "save": {"v1": "x-amz-version-id"}, "show": ["x-amz-delete-marker"]}
-"$name" in path, query or body is replaced by a value saved earlier.
+"$name" in path, query or body is replaced by a value saved earlier; "repeat": N
+sends the body N times over. SCENARIO.env next to a scenario holds extra
+server environment (VAR=value lines), applied by s3diff.sh.
 """
 import datetime
 import hashlib
@@ -98,7 +100,7 @@ for i, st in enumerate(steps):
     open("/tmp/.s3diff.body", "w").close()
     verb = ["-I"] if st["method"] == "HEAD" else ["-X", st["method"]]  # -X HEAD waits for a body
     hdrs_in = {k: sub(v) for k, v in st.get("headers", {}).items()}
-    body = sub(st["body"]).encode() if "body" in st else b""
+    body = sub(st["body"]).encode() * st.get("repeat", 1) if "body" in st else b""
     if st.get("md5"):
         import base64
         hdrs_in["Content-MD5"] = base64.b64encode(hashlib.md5(body).digest()).decode()

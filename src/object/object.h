@@ -76,6 +76,7 @@ typedef struct buckets_objlayer {
   struct buckets_nslock *locks;
   void (*on_degraded)(void *ud, const char *bucket, const char *object, const char *version_id, bool deep);
   void *on_degraded_ud;
+  struct buckets_mp_cache *mp_cache; /* uploads started through this node (MinIO's mpCache) */
 } buckets_objlayer;
 
 /* Called (from any thread) for objects found or left short of a drive: reads
@@ -178,6 +179,9 @@ typedef struct {
   bool versioned;
   const char *version_id;
   int64_t mod_time_ns; /* 0: now */
+  /* Puts of unknown size (-1, compressed streams): the plaintext size, which
+   * decides inlining. */
+  int64_t actual_size;
 } buckets_put_opts;
 
 buckets_obj_err buckets_obj_check_name(const char *object);
@@ -302,6 +306,10 @@ typedef struct buckets_part_info_s {
   int64_t actual_size;
   int64_t mod_time_ns;
   buckets_checksum cksum; /* type 0 when the part has none */
+  /* The S2 index of a compressed part, set by a part_commit hook for the
+   * part record only (borrowed; never set in results). */
+  const uint8_t *index;
+  size_t index_len;
 } buckets_part_info;
 
 typedef struct {

@@ -26,6 +26,7 @@ add_library(buckets STATIC
   crypto/dare.c
   crypto/objkey.c
   kms/kms.c
+  compress/s2.c
   net/http.c
   net/tls.c
   net/client.c
@@ -82,6 +83,7 @@ add_library(buckets STATIC
   s3/tagging.c
   s3/lifecycle.c
   s3/sse.c
+  s3/compress.c
   admin/admin.c
   admin/info.c
   admin/config.c

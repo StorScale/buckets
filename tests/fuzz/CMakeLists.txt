@@ -25,3 +25,4 @@ endfunction()
 
 buckets_fuzz_target(fuzz_sigv4)
 buckets_fuzz_target(fuzz_xml)
+buckets_fuzz_target(fuzz_s2)

@@ -144,6 +144,8 @@ bool buckets_s3_sse_put_opts(s3_ctx *c, char *why, size_t cap) {
   return !e;
 }
 
+bool buckets_s3_sse_requested(s3_ctx *c) { return s3_requested(c) || kms_requested(c) || ssec_requested(c); }
+
 bool buckets_s3_sse_s3_or_kms_requested(s3_ctx *c) { return s3_requested(c) || kms_requested(c); }
 
 buckets_s3_error buckets_s3_sse_get_opts(s3_ctx *c) {
@@ -455,7 +457,8 @@ void buckets_sse_writer_init_nonce(buckets_sse_writer *w, const uint8_t key[32],
   memset(w, 0, sizeof(*w));
   w->rd = rd;
   w->rd_ud = rd_ud;
-  w->remaining = size;
+  w->remaining = size < 0 ? INT64_MAX : size;
+  w->unknown = size < 0;
   buckets_dare_enc_init(&w->enc, key, nonce, 0);
   buckets_md5_init(&w->md5);
   buckets_sha256_init(&w->sha);
@@ -475,19 +478,47 @@ void buckets_sse_writer_free(buckets_sse_writer *w) {
 long buckets_sse_writer_read(void *ud, void *buf, size_t n) {
   buckets_sse_writer *w = ud;
   if (w->out_pos == w->out_len) {
-    if (w->remaining <= 0) return 0;
+    if (!w->unknown && w->remaining <= 0 && !w->eof) {
+      /* The source must end here (and chunked sources read their trailers). */
+      uint8_t one;
+      w->eof = true;
+      if (w->rd(w->rd_ud, &one, 1) != 0) return -1;
+    }
+    if (w->remaining <= 0 || w->eof) return 0;
     size_t want = w->remaining < BUCKETS_DARE_PAYLOAD ? (size_t)w->remaining : BUCKETS_DARE_PAYLOAD, got = 0;
+    if (w->have_peek) {
+      w->in[got++] = w->peek;
+      w->have_peek = false;
+    }
     while (got < want) {
       long r = w->rd(w->rd_ud, w->in + got, want - got);
-      if (r <= 0) return -1; /* short body */
+      if (r < 0 || (r == 0 && !w->unknown)) return -1; /* short body */
+      if (r == 0) {
+        w->eof = true;
+        break;
+      }
       got += (size_t)r;
     }
-    buckets_md5_update(&w->md5, w->in, got);
-    buckets_sha256_update(&w->sha, w->in, got);
-    if (w->cks_type) buckets_cksum_hasher_update(&w->cks, w->in, got);
+    bool final;
+    if (!w->unknown) {
+      final = w->remaining - (int64_t)got == 0;
+    } else if (w->eof) {
+      final = true;
+    } else { /* a full package: final only when nothing follows */
+      long r = w->rd(w->rd_ud, &w->peek, 1);
+      if (r < 0) return -1;
+      w->have_peek = r == 1;
+      w->eof = final = r == 0;
+    }
+    if (!got) return 0; /* an empty stream has no packages */
+    if (!w->no_hash) {
+      buckets_md5_update(&w->md5, w->in, got);
+      buckets_sha256_update(&w->sha, w->in, got);
+      if (w->cks_type) buckets_cksum_hasher_update(&w->cks, w->in, got);
+    }
     w->remaining -= (int64_t)got;
     w->plain_size += (int64_t)got;
-    w->out_len = buckets_dare_seal(&w->enc, w->in, got, w->remaining == 0, w->out);
+    w->out_len = buckets_dare_seal(&w->enc, w->in, got, final, w->out);
     w->out_pos = 0;
   }
   size_t k = w->out_len - w->out_pos < n ? w->out_len - w->out_pos : n;
@@ -581,7 +612,7 @@ buckets_sse_reader *buckets_sse_reader_new(const buckets_object_info *oi, const 
   if (r->multipart && oi->nparts) {
     r->parts_own = buckets_xcalloc(oi->nparts, sizeof(buckets_xl_part));
     memcpy(r->parts_own, oi->parts, oi->nparts * sizeof(buckets_xl_part));
-    for (size_t i = 0; i < oi->nparts; i++) r->parts_own[i].etag = NULL;
+    for (size_t i = 0; i < oi->nparts; i++) r->parts_own[i].etag = NULL, r->parts_own[i].index = NULL;
     r->parts = r->parts_own;
     r->nparts = oi->nparts;
   }
@@ -659,6 +690,30 @@ void buckets_sse_reader_free(void *ud) {
   free(r->pkg);
   free(r->plain);
   free(r);
+}
+
+void buckets_s3_meta_seal(const uint8_t key[32], const char *base, const void *data, size_t n, buckets_buf *out) {
+  if (!n) return;
+  uint8_t k[32];
+  buckets_hmac_sha256(key, 32, base, strlen(base), k);
+  size_t len = buckets_dare_encrypted_size(n);
+  uint8_t *enc = buckets_xmalloc(len);
+  buckets_dare_encrypt_buffer(k, data, n, enc);
+  OPENSSL_cleanse(k, sizeof(k));
+  buckets_buf_append(out, enc, len);
+  free(enc);
+}
+
+bool buckets_s3_meta_open(const uint8_t key[32], const char *base, const void *data, size_t n, buckets_buf *out) {
+  if (!n) return true;
+  uint8_t k[32];
+  buckets_hmac_sha256(key, 32, base, strlen(base), k);
+  uint8_t *plain = buckets_xmalloc(n);
+  long got = buckets_dare_decrypt_buffer(k, data, n, plain);
+  OPENSSL_cleanse(k, sizeof(k));
+  if (got >= 0) buckets_buf_append(out, plain, (size_t)got);
+  free(plain);
+  return got >= 0;
 }
 
 bool buckets_s3_sse_unseal_checksum(const uint8_t key[32], buckets_object_info *oi) {

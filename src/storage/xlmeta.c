@@ -84,11 +84,24 @@ static void kv_free(buckets_xl_kv *kvs, size_t n) {
 
 void buckets_xl_part_add(buckets_xl_object *o, int number, int64_t size, int64_t actual_size, const char *etag) {
   o->parts = buckets_xrealloc(o->parts, (o->nparts + 1) * sizeof(buckets_xl_part));
-  o->parts[o->nparts++] = (buckets_xl_part){number, size, actual_size, etag && *etag ? buckets_xstrdup(etag) : NULL};
+  o->parts[o->nparts++] = (buckets_xl_part){number, size, actual_size, etag && *etag ? buckets_xstrdup(etag) : NULL, NULL, 0};
+}
+
+void buckets_xl_part_set_index(buckets_xl_part *p, const void *index, size_t len) {
+  free(p->index);
+  p->index = NULL;
+  p->index_len = 0;
+  if (!len) return;
+  p->index = buckets_xmalloc(len);
+  memcpy(p->index, index, len);
+  p->index_len = len;
 }
 
 void buckets_xl_object_free(buckets_xl_object *o) {
-  for (size_t i = 0; i < o->nparts; i++) free(o->parts[i].etag);
+  for (size_t i = 0; i < o->nparts; i++) {
+    free(o->parts[i].etag);
+    free(o->parts[i].index);
+  }
   free(o->parts);
   kv_free(o->meta_sys, o->nmeta_sys);
   kv_free(o->meta_user, o->nmeta_user);
@@ -371,10 +384,13 @@ static uint64_t hash_det_kv(const buckets_xl_kv *kvs, size_t n, uint64_t seed) {
 /* Encodes xlMetaV2Object with tinylib/msgp's field order. With for_signature
  * set, applies the normalizations of xlMetaV2Object.Signature(). */
 static void encode_v2obj(buckets_buf *b, const buckets_xl_object *o, bool for_signature) {
-  bool any_etag = false;
-  for (size_t i = 0; i < o->nparts; i++) any_etag |= o->parts[i].etag != NULL;
+  bool any_etag = false, any_index = false;
+  for (size_t i = 0; i < o->nparts; i++) {
+    any_etag |= o->parts[i].etag != NULL;
+    any_index |= o->parts[i].index_len > 0;
+  }
 
-  buckets_mp_map(b, 17); /* 18 fields, PartIdx omitted (no compression yet) */
+  buckets_mp_map(b, any_index ? 18 : 17); /* PartIdx is omitempty */
   buckets_mp_cstr(b, "ID");
   buckets_mp_bin(b, o->version_id, 16);
   buckets_mp_cstr(b, "DDir");
@@ -413,6 +429,11 @@ static void encode_v2obj(buckets_buf *b, const buckets_xl_object *o, bool for_si
   } else {
     buckets_mp_array(b, (uint32_t)o->nparts);
     for (size_t i = 0; i < o->nparts; i++) buckets_mp_int(b, o->parts[i].actual_size);
+  }
+  if (any_index) {
+    buckets_mp_cstr(b, "PartIdx");
+    buckets_mp_array(b, (uint32_t)o->nparts);
+    for (size_t i = 0; i < o->nparts; i++) buckets_mp_bin(b, o->parts[i].index, o->parts[i].index_len);
   }
   buckets_mp_cstr(b, "Size");
   buckets_mp_int(b, o->size);
@@ -547,6 +568,8 @@ static buckets_xl_err decode_v2obj(buckets_mp_reader *r, buckets_xl_object *o) {
   size_t nnums = 0, nsizes = 0, nasizes = 0;
   char **etags = NULL;
   size_t netags = 0;
+  buckets_str *idx = NULL;
+  size_t nidx = 0;
   buckets_xl_err err = BUCKETS_XL_OK;
   for (uint32_t f = 0; f < fields && err == BUCKETS_XL_OK; f++) {
     buckets_str key, s;
@@ -597,6 +620,16 @@ static buckets_xl_err decode_v2obj(buckets_mp_reader *r, buckets_xl_object *o) {
           if (ok) etags[netags++] = buckets_str_dup(s);
         }
       }
+    } else if (buckets_str_eq_c(key, "PartIdx")) {
+      if (!buckets_mp_read_nil(r)) {
+        uint32_t cnt;
+        ok = buckets_mp_read_array(r, &cnt) && cnt <= buckets_mp_remaining(r);
+        if (ok) idx = buckets_xcalloc(cnt ? cnt : 1, sizeof(buckets_str));
+        for (uint32_t i = 0; ok && i < cnt; i++) {
+          ok = buckets_mp_read_nil(r) || buckets_mp_read_bin(r, &idx[i]);
+          nidx++;
+        }
+      }
     } else if (buckets_str_eq_c(key, "Size")) {
       ok = buckets_mp_read_int(r, &o->size);
     } else if (buckets_str_eq_c(key, "MTime")) {
@@ -606,7 +639,7 @@ static buckets_xl_err decode_v2obj(buckets_mp_reader *r, buckets_xl_object *o) {
     } else if (buckets_str_eq_c(key, "MetaUsr")) {
       ok = read_kv_map(r, &o->meta_user, &o->nmeta_user);
     } else {
-      ok = buckets_mp_skip(r); /* PartIdx and future fields */
+      ok = buckets_mp_skip(r); /* future fields */
     }
     if (!ok) err = BUCKETS_XL_ERR_CORRUPT;
   }
@@ -615,7 +648,10 @@ static buckets_xl_err decode_v2obj(buckets_mp_reader *r, buckets_xl_object *o) {
   }
   for (size_t i = 0; err == BUCKETS_XL_OK && i < nnums; i++) {
     buckets_xl_part_add(o, (int)nums[i], sizes[i], nasizes ? asizes[i] : sizes[i], netags ? etags[i] : NULL);
+    /* Indexes are kept only when there is one per part (xlMetaV2Object.ToFileInfo). */
+    if (nidx == nnums) buckets_xl_part_set_index(&o->parts[o->nparts - 1], idx[i].p, idx[i].n);
   }
+  free(idx);
   for (size_t i = 0; i < netags; i++) free(etags[i]);
   free(etags);
   free(nums);
