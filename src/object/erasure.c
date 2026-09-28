@@ -18,6 +18,7 @@
 #include "crypto/sha256.h"
 #include "erasure/layout.h"
 #include "erasure/rs.h"
+#include "object/nslock.h"
 #include "object/object.h"
 
 #define XL_META "xl.meta"
@@ -32,7 +33,8 @@ const char *buckets_obj_strerror(buckets_obj_err e) {
       "object name has a leading slash", "object name conflicts with a directory", "content-md5 mismatch",
       "content-sha256 mismatch", "incomplete body", "data source failed", "corrupt data", "I/O error",
       "no such upload", "invalid part", "parts out of order", "part too small", "checksum mismatch",
-      "read quorum not met", "write quorum not met", "bucket exists", "bucket not empty"};
+      "read quorum not met", "write quorum not met", "bucket exists", "bucket not empty",
+      "namespace lock timed out"};
   return (size_t)e < BUCKETS_ARRAY_LEN(names) ? names[e] : "unknown";
 }
 
@@ -108,6 +110,7 @@ buckets_objlayer *buckets_objlayer_new(buckets_format_result *f, int parity) {
   L->nall = f->nsets * f->set_size;
   L->all = f->slots;
   f->slots = NULL;
+  L->locks = buckets_nslock_new();
   for (size_t s = 0; s < f->nsets; s++) {
     L->sets[s].drives = L->all + s * f->set_size;
     L->sets[s].n = f->set_size;
@@ -125,6 +128,7 @@ void buckets_objlayer_free(buckets_objlayer *L) {
   for (size_t i = 0; i < L->nall; i++) buckets_drive_close(L->all[i]);
   free(L->all);
   free(L->sets);
+  buckets_nslock_free(L->locks);
   free(L);
 }
 
@@ -221,6 +225,16 @@ buckets_obj_err buckets_obj_list_buckets(buckets_objlayer *L, buckets_bucket_inf
   *n = w;
   free(votes);
   return any ? BUCKETS_OBJ_OK : BUCKETS_OBJ_ERR_READ_QUORUM;
+}
+
+/* ---- namespace locks ------------------------------------------------------ */
+
+#define LOCK_TIMEOUT_MS 30000
+
+static buckets_nslock_entry *lock_ns(buckets_objlayer *L, const char *vol, const char *path, bool write) {
+  buckets_nslock_entry *e = buckets_nslock_lock(L->locks, vol, path, write, LOCK_TIMEOUT_MS);
+  if (!e) buckets_log_warn("timed out waiting for %s lock on %s/%s", write ? "write" : "read", vol, path);
+  return e;
 }
 
 /* ---- metadata quorum ------------------------------------------------------- */
@@ -730,8 +744,12 @@ buckets_obj_err buckets_obj_put(buckets_objlayer *L, const char *bucket, const c
     if (e.inline_mode) buckets_xl_kv_set(&o.meta_sys, &o.nmeta_sys, BUCKETS_XL_META_INLINE, "true", 4);
     if (opts && opts->pre_commit) err = opts->pre_commit(opts->pre_commit_ud, &cks, &o);
     if (!err) {
-      err = commit_version(s, bucket, object, &o, e.dist, e.alive, e.inline_mode ? e.ibuf : NULL, tmp_dir.data,
-                           !e.inline_mode, write_quorum(e.data, e.parity));
+      /* Like MinIO, only the commit is locked: the data is already staged. */
+      buckets_nslock_entry *lk = lock_ns(L, bucket, object, true);
+      err = lk ? commit_version(s, bucket, object, &o, e.dist, e.alive, e.inline_mode ? e.ibuf : NULL, tmp_dir.data,
+                                !e.inline_mode, write_quorum(e.data, e.parity))
+               : BUCKETS_OBJ_ERR_TIMEOUT;
+      buckets_nslock_unlock(lk);
     }
     if (!err && out) {
       o.ec_index = 1;
@@ -768,10 +786,12 @@ struct buckets_obj_reader {
   uint8_t *block;
   int64_t block_index;
   size_t block_len;
+  buckets_nslock_entry *lk; /* read lock, held until EOF or free */
 };
 
 void buckets_obj_reader_free(buckets_obj_reader *r) {
   if (!r) return;
+  buckets_nslock_unlock(r->lk);
   for (int i = 0; i < MAX_SET; i++) {
     free(r->inl[i]);
     free(r->frames[i]);
@@ -798,8 +818,8 @@ static buckets_obj_err resolve(buckets_objlayer *L, const char *bucket, const ch
   return err;
 }
 
-buckets_obj_err buckets_obj_stat(buckets_objlayer *L, const char *bucket, const char *object, const char *version_id,
-                                 buckets_object_info *out) {
+static buckets_obj_err obj_stat(buckets_objlayer *L, const char *bucket, const char *object, const char *version_id,
+                                buckets_object_info *out) {
   buckets_eset *s;
   dmeta m[MAX_SET];
   long vidx[MAX_SET];
@@ -812,9 +832,8 @@ buckets_obj_err buckets_obj_stat(buckets_objlayer *L, const char *bucket, const 
   return BUCKETS_OBJ_OK;
 }
 
-buckets_obj_err buckets_obj_open(buckets_objlayer *L, const char *bucket, const char *object, const char *version_id,
-                                 int64_t offset, int64_t length, buckets_obj_reader **out,
-                                 buckets_object_info *info) {
+static buckets_obj_err obj_open(buckets_objlayer *L, const char *bucket, const char *object, const char *version_id,
+                                int64_t offset, int64_t length, buckets_obj_reader **out, buckets_object_info *info) {
   buckets_eset *s;
   dmeta m[MAX_SET];
   long vidx[MAX_SET];
@@ -973,6 +992,32 @@ static bool load_block(buckets_obj_reader *r, int64_t bi) {
   return true;
 }
 
+buckets_obj_err buckets_obj_stat(buckets_objlayer *L, const char *bucket, const char *object, const char *version_id,
+                                 buckets_object_info *out) {
+  buckets_nslock_entry *lk = lock_ns(L, bucket, object, false);
+  if (!lk) return BUCKETS_OBJ_ERR_TIMEOUT;
+  buckets_obj_err err = obj_stat(L, bucket, object, version_id, out);
+  buckets_nslock_unlock(lk);
+  return err;
+}
+
+buckets_obj_err buckets_obj_open(buckets_objlayer *L, const char *bucket, const char *object, const char *version_id,
+                                 int64_t offset, int64_t length, buckets_obj_reader **out,
+                                 buckets_object_info *info) {
+  buckets_nslock_entry *lk = lock_ns(L, bucket, object, false);
+  if (!lk) return BUCKETS_OBJ_ERR_TIMEOUT;
+  buckets_obj_err err = obj_open(L, bucket, object, version_id, offset, length, out, info);
+  if (err) {
+    buckets_nslock_unlock(lk);
+    return err;
+  }
+  /* Released at EOF, so a reader drained before a write (CopyObject onto
+   * itself) never blocks that write's commit. */
+  if ((*out)->remaining > 0) (*out)->lk = lk;
+  else buckets_nslock_unlock(lk);
+  return BUCKETS_OBJ_OK;
+}
+
 long buckets_obj_read(buckets_obj_reader *r, void *buf, size_t n) {
   size_t done = 0;
   while (done < n && r->remaining > 0) {
@@ -998,6 +1043,10 @@ long buckets_obj_read(buckets_obj_reader *r, void *buf, size_t n) {
     done += take;
     r->part_off += (int64_t)take;
     r->remaining -= (int64_t)take;
+  }
+  if (r->remaining == 0 && r->lk) {
+    buckets_nslock_unlock(r->lk);
+    r->lk = NULL;
   }
   return (long)done;
 }
@@ -1052,7 +1101,7 @@ static void delete_one(void *ctx, size_t i) {
   c->done[i] = de == BUCKETS_DRIVE_OK;
 }
 
-buckets_obj_err buckets_obj_delete(buckets_objlayer *L, const char *bucket, const char *object, const char *version_id) {
+static buckets_obj_err obj_delete(buckets_objlayer *L, const char *bucket, const char *object, const char *version_id) {
   buckets_obj_err err = buckets_obj_stat_bucket(L, bucket);
   if (err) return err;
   if ((err = buckets_obj_check_name(object)) != BUCKETS_OBJ_OK) return err;
@@ -1076,6 +1125,14 @@ buckets_obj_err buckets_obj_delete(buckets_objlayer *L, const char *bucket, cons
   if (found == 0) return version_id && *version_id ? BUCKETS_OBJ_ERR_NO_SUCH_VERSION : BUCKETS_OBJ_ERR_NO_SUCH_KEY;
   return (int)done >= write_quorum(set_data(s), s->parity) || done == found ? BUCKETS_OBJ_OK
                                                                               : BUCKETS_OBJ_ERR_WRITE_QUORUM;
+}
+
+buckets_obj_err buckets_obj_delete(buckets_objlayer *L, const char *bucket, const char *object, const char *version_id) {
+  buckets_nslock_entry *lk = lock_ns(L, bucket, object, true);
+  if (!lk) return BUCKETS_OBJ_ERR_TIMEOUT;
+  buckets_obj_err err = obj_delete(L, bucket, object, version_id);
+  buckets_nslock_unlock(lk);
+  return err;
 }
 
 /* ---- listing ------------------------------------------------------------------------- */
@@ -1516,8 +1573,8 @@ static bool decode_part_meta(const buckets_buf *raw, buckets_part_info *p) {
   return !r.err;
 }
 
-buckets_obj_err buckets_obj_mpu_put_part(buckets_objlayer *L, const char *bucket, const char *object, const char *upload_id,
-                                         int part_number, buckets_read_fn rd, void *rd_ud, int64_t size,
+static buckets_obj_err mpu_put_part(buckets_objlayer *L, const char *bucket, const char *object, const char *upload_id,
+                                    int part_number, buckets_read_fn rd, void *rd_ud, int64_t size,
                                          const buckets_put_opts *opts, buckets_part_info *out) {
   buckets_obj_err err = buckets_obj_stat_bucket(L, bucket);
   if (err) return err;
@@ -1669,7 +1726,7 @@ buckets_obj_err buckets_obj_mpu_list_parts(buckets_objlayer *L, const char *buck
   return BUCKETS_OBJ_OK;
 }
 
-buckets_obj_err buckets_obj_mpu_abort(buckets_objlayer *L, const char *bucket, const char *object, const char *upload_id) {
+static buckets_obj_err mpu_abort(buckets_objlayer *L, const char *bucket, const char *object, const char *upload_id) {
   buckets_obj_err err = buckets_obj_stat_bucket(L, bucket);
   if (err) return err;
   char *dir = upload_dir(bucket, object, upload_id);
@@ -1692,9 +1749,9 @@ static void canonical_etag(const char *in, char *out, size_t cap) {
   snprintf(out, cap, "%.*s", (int)n, in);
 }
 
-buckets_obj_err buckets_obj_mpu_complete(buckets_objlayer *L, const char *bucket, const char *object,
-                                         const char *upload_id, const buckets_complete_part *req, size_t nreq,
-                                         const buckets_checksum *want, buckets_object_info *out) {
+static buckets_obj_err mpu_complete(buckets_objlayer *L, const char *bucket, const char *object,
+                                    const char *upload_id, const buckets_complete_part *req, size_t nreq,
+                                    const buckets_checksum *want, buckets_object_info *out) {
   buckets_obj_err err = buckets_obj_stat_bucket(L, bucket);
   if (err) return err;
   if ((err = buckets_obj_check_name(object)) != BUCKETS_OBJ_OK) return err;
@@ -1828,8 +1885,11 @@ buckets_obj_err buckets_obj_mpu_complete(buckets_objlayer *L, const char *bucket
         buckets_buf_free(&f);
       }
     }
-    err = commit_version(u.set, bucket, object, &o, u.dist, u.has, NULL, dir, true,
-                         write_quorum(u.up.ec_m, u.up.ec_n));
+    buckets_nslock_entry *lk = lock_ns(L, bucket, object, true);
+    err = lk ? commit_version(u.set, bucket, object, &o, u.dist, u.has, NULL, dir, true,
+                              write_quorum(u.up.ec_m, u.up.ec_n))
+             : BUCKETS_OBJ_ERR_TIMEOUT;
+    buckets_nslock_unlock(lk);
     if (!err) {
       for (size_t i = 0; i < u.set->n; i++) {
         if (u.set->drives[i]) buckets_drive_delete(u.set->drives[i], BUCKETS_META_BUCKET, dir, true, true);
@@ -1845,6 +1905,46 @@ buckets_obj_err buckets_obj_mpu_complete(buckets_objlayer *L, const char *bucket
   buckets_buf_free(&combined);
   free(have);
   free(dir);
+  return err;
+}
+
+/* Upload-ID locks: parts share a read lock, abort/complete take it exclusively. */
+static buckets_nslock_entry *lock_upload(buckets_objlayer *L, const char *bucket, const char *object,
+                                        const char *upload_id, bool write, buckets_obj_err *err) {
+  char *dir = upload_dir(bucket, object, upload_id);
+  *err = BUCKETS_OBJ_OK;
+  if (!dir) return NULL; /* invalid ID: the operation reports NoSuchUpload */
+  buckets_nslock_entry *lk = lock_ns(L, BUCKETS_META_BUCKET, dir, write);
+  if (!lk) *err = BUCKETS_OBJ_ERR_TIMEOUT;
+  free(dir);
+  return lk;
+}
+
+buckets_obj_err buckets_obj_mpu_put_part(buckets_objlayer *L, const char *bucket, const char *object, const char *upload_id,
+                                         int part_number, buckets_read_fn rd, void *rd_ud, int64_t size,
+                                         const buckets_put_opts *opts, buckets_part_info *out) {
+  buckets_obj_err err;
+  buckets_nslock_entry *lk = lock_upload(L, bucket, object, upload_id, false, &err);
+  if (!err) err = mpu_put_part(L, bucket, object, upload_id, part_number, rd, rd_ud, size, opts, out);
+  buckets_nslock_unlock(lk);
+  return err;
+}
+
+buckets_obj_err buckets_obj_mpu_abort(buckets_objlayer *L, const char *bucket, const char *object, const char *upload_id) {
+  buckets_obj_err err;
+  buckets_nslock_entry *lk = lock_upload(L, bucket, object, upload_id, true, &err);
+  if (!err) err = mpu_abort(L, bucket, object, upload_id);
+  buckets_nslock_unlock(lk);
+  return err;
+}
+
+buckets_obj_err buckets_obj_mpu_complete(buckets_objlayer *L, const char *bucket, const char *object,
+                                         const char *upload_id, const buckets_complete_part *req, size_t nreq,
+                                         const buckets_checksum *want, buckets_object_info *out) {
+  buckets_obj_err err;
+  buckets_nslock_entry *lk = lock_upload(L, bucket, object, upload_id, true, &err);
+  if (!err) err = mpu_complete(L, bucket, object, upload_id, req, nreq, want, out);
+  buckets_nslock_unlock(lk);
   return err;
 }
 

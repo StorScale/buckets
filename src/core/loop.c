@@ -3,6 +3,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -17,6 +18,12 @@
 #else
 #error "unsupported platform: need epoll or kqueue"
 #endif
+
+typedef struct post {
+  buckets_tick_cb cb;
+  void *ud;
+  struct post *next;
+} post;
 
 typedef struct {
   buckets_io_cb cb;
@@ -37,6 +44,8 @@ struct buckets_loop {
     void *ud;
   } ticks[BUCKETS_LOOP_MAX_TICKS];
   size_t nticks;
+  pthread_mutex_t post_mu;
+  post *post_head, *post_tail;
   volatile bool stopping;
 };
 
@@ -60,6 +69,16 @@ static void drain_wake_pipe(buckets_loop *loop, int fd, unsigned events, void *u
   char tmp[64];
   while (read(fd, tmp, sizeof(tmp)) > 0) {
   }
+  pthread_mutex_lock(&loop->post_mu);
+  post *p = loop->post_head;
+  loop->post_head = loop->post_tail = NULL;
+  pthread_mutex_unlock(&loop->post_mu);
+  while (p) {
+    post *next = p->next;
+    p->cb(loop, p->ud);
+    free(p);
+    p = next;
+  }
   if (loop->wake_cb) loop->wake_cb(loop, loop->wake_ud);
 }
 
@@ -80,6 +99,7 @@ buckets_loop *buckets_loop_new(void) {
     free(loop);
     return NULL;
   }
+  pthread_mutex_init(&loop->post_mu, NULL);
   set_nonblock_cloexec(loop->wake_pipe[0]);
   set_nonblock_cloexec(loop->wake_pipe[1]);
   buckets_loop_watch(loop, loop->wake_pipe[0], BUCKETS_EV_READ, drain_wake_pipe, NULL);
@@ -88,6 +108,11 @@ buckets_loop *buckets_loop_new(void) {
 
 void buckets_loop_free(buckets_loop *loop) {
   if (!loop) return;
+  for (post *p = loop->post_head, *next; p; p = next) {
+    next = p->next;
+    free(p);
+  }
+  pthread_mutex_destroy(&loop->post_mu);
   close(loop->wake_pipe[0]);
   close(loop->wake_pipe[1]);
   close(loop->pfd);
@@ -161,6 +186,18 @@ void buckets_loop_wake(buckets_loop *loop) {
   ssize_t r = write(loop->wake_pipe[1], "x", 1);
   (void)r;
   errno = saved;
+}
+
+void buckets_loop_post(buckets_loop *loop, buckets_tick_cb cb, void *ud) {
+  post *p = buckets_xcalloc(1, sizeof(*p));
+  p->cb = cb;
+  p->ud = ud;
+  pthread_mutex_lock(&loop->post_mu);
+  if (loop->post_tail) loop->post_tail->next = p;
+  else loop->post_head = p;
+  loop->post_tail = p;
+  pthread_mutex_unlock(&loop->post_mu);
+  buckets_loop_wake(loop);
 }
 
 void buckets_loop_stop(buckets_loop *loop) {

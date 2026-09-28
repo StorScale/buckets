@@ -36,6 +36,7 @@ add_library(buckets STATIC
   storage/xlmeta.c
   storage/format.c
   object/erasure.c
+  object/nslock.c
   bucket/metadata.c
   erasure/rs.c
   erasure/layout.c

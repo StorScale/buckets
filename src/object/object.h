@@ -49,6 +49,7 @@ typedef enum {
   BUCKETS_OBJ_ERR_WRITE_QUORUM,       /* too few drives accepted the write */
   BUCKETS_OBJ_ERR_BUCKET_EXISTS,
   BUCKETS_OBJ_ERR_BUCKET_NOT_EMPTY,
+  BUCKETS_OBJ_ERR_TIMEOUT, /* a namespace lock was not granted in time */
 } buckets_obj_err;
 
 const char *buckets_obj_strerror(buckets_obj_err e);
@@ -68,6 +69,7 @@ typedef struct buckets_objlayer {
   char deployment_id_str[BUCKETS_UUID_STR_LEN + 1];
   buckets_drive **all; /* every slot, set-major */
   size_t nall;
+  struct buckets_nslock *locks;
 } buckets_objlayer;
 
 /* Takes ownership of the drives in f (f->slots is cleared). parity < 0 uses

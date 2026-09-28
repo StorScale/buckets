@@ -2,6 +2,8 @@
 #ifndef BUCKETS_S3_SERVER_H
 #define BUCKETS_S3_SERVER_H
 
+#include <stdatomic.h>
+
 #include "net/http.h"
 #include "object/object.h"
 
@@ -13,7 +15,7 @@ typedef struct {
   const char *root_password;
   const char *region; /* "" accepts any region in signatures */
   char host_id[65];   /* x-amz-id-2 */
-  uint64_t request_seq;
+  _Atomic uint64_t request_seq;
 } buckets_s3_server;
 
 void buckets_s3_server_init(buckets_s3_server *s, buckets_objlayer *layer, const char *root_user,

@@ -16,6 +16,10 @@ void buckets_pool_free(buckets_pool *p);
 /* With a NULL pool, or n <= 1, runs inline on the caller. */
 void buckets_parallel(buckets_pool *p, size_t n, buckets_par_fn fn, void *ctx);
 
+/* Queues fn(ctx, 0) to run on a worker (inline when p is NULL or has no
+ * threads). Tasks still queued when the pool is freed run before it returns. */
+void buckets_pool_submit(buckets_pool *p, buckets_par_fn fn, void *ctx);
+
 /* The process-wide drive I/O pool (NULL until set: everything runs inline). */
 void buckets_io_pool_set(buckets_pool *p);
 buckets_pool *buckets_io_pool(void);

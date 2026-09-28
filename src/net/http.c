@@ -55,6 +55,10 @@ typedef struct conn {
   bool too_large;
   bool closing;  /* close once out is flushed */
   bool peer_eof; /* client half-closed; answer what we have, then close */
+  /* A handler or stream pull runs on a worker: the loop leaves the connection
+   * alone (unwatched, never closed) until the worker posts back. */
+  bool busy;
+  long fill_got;
   time_t last_active;
   char remote[INET6_ADDRSTRLEN + 8];
 } conn;
@@ -73,6 +77,7 @@ struct buckets_http_server {
 };
 
 static void conn_io(buckets_loop *loop, int fd, unsigned events, void *ud);
+static bool conn_process(conn *c);
 
 /* ---- response helpers ---------------------------------------------------- */
 
@@ -183,6 +188,25 @@ static void conn_close(conn *c) {
 
 /* Writes as much of c->out as the socket takes. Returns false if the
  * connection was closed. */
+static void start_fill(conn *c);
+
+/* Installs a pulled stream chunk into c->out. Returns -1 if the connection
+ * was closed, 0 when the stream ended, 1 when there is data to send. */
+static int take_chunk(conn *c, long got) {
+  if (got < 0) {
+    conn_close(c); /* mid-body failure: the client sees a short response */
+    return -1;
+  }
+  if (got == 0) {
+    stream_end(c);
+    if (c->stream_close_after) c->closing = true;
+    return 0;
+  }
+  c->out.len = (size_t)got;
+  c->out.data[c->out.len] = '\0';
+  return 1;
+}
+
 static bool conn_flush(conn *c) {
   for (;;) {
     if (c->out_off >= c->out.len) {
@@ -190,18 +214,13 @@ static bool conn_flush(conn *c) {
       buckets_buf_reset(&c->out);
       c->out_off = 0;
       buckets_buf_reserve(&c->out, 256 * 1024);
-      long got = c->stream(c->stream_ud, c->out.data, c->out.cap - 1);
-      if (got < 0) {
-        conn_close(c); /* mid-body failure: the client sees a short response */
-        return false;
+      if (c->srv->cfg.workers) {
+        start_fill(c);
+        return true;
       }
-      if (got == 0) {
-        stream_end(c);
-        if (c->stream_close_after) c->closing = true;
-        break;
-      }
-      c->out.len = (size_t)got;
-      c->out.data[c->out.len] = '\0';
+      int r = take_chunk(c, c->stream(c->stream_ud, c->out.data, c->out.cap - 1));
+      if (r < 0) return false;
+      if (r == 0) break;
       continue;
     }
     ssize_t n = send(c->fd, c->out.data + c->out_off, c->out.len - c->out_off, SEND_FLAGS);
@@ -285,41 +304,109 @@ static void split_target(buckets_str target, buckets_str *path, buckets_str *que
   buckets_str_cut(target, '?', path, query);
 }
 
-static void dispatch_request(conn *c) {
-  buckets_http_server *srv = c->srv;
-  buckets_http_request req;
-  memset(&req, 0, sizeof(req));
-  req.method = buckets_buf_str(&c->method);
-  req.target = buckets_buf_str(&c->url);
-  split_target(req.target, &req.path, &req.query);
-  for (size_t i = 0; i < c->nspans; i++) {
-    req.headers[i].name = (buckets_str){c->hdr.data + c->spans[i].name_off, c->spans[i].name_len};
-    req.headers[i].value =
-        buckets_str_trim((buckets_str){c->hdr.data + c->spans[i].value_off, c->spans[i].value_len});
-  }
-  req.nheaders = c->nspans;
-  req.body = buckets_buf_str(&c->body);
-  req.body_fd = c->body_fd;
-  req.body_len = c->body_fd >= 0 ? c->body_len : (int64_t)c->body.len;
-  req.keep_alive = llhttp_should_keep_alive(&c->parser) && !srv->shutting_down;
-  req.remote_addr = c->remote;
+/* ---- worker hand-off ------------------------------------------------------ */
 
-  buckets_http_response resp = {.status = 200, .content_length = -1};
-  resp.head_only = buckets_str_eq_c(req.method, "HEAD");
-  srv->handler(&req, &resp, srv->ud);
-  write_response(c, &resp, req.keep_alive);
-  buckets_buf_free(&resp.headers);
-  buckets_buf_free(&resp.body);
-  if (!req.keep_alive) {
+static void set_busy(conn *c) {
+  c->busy = true;
+  buckets_loop_unwatch(c->srv->loop, c->fd); /* even HUP/ERR: nothing may close it now */
+}
+
+/* Back on the loop thread after a worker finished: resume sending, then
+ * any pipelined requests. */
+static void resume(conn *c) {
+  c->busy = false;
+  if (conn_flush(c)) conn_process(c);
+}
+
+static void fill_done(buckets_loop *loop, void *ud) {
+  conn *c = ud;
+  (void)loop;
+  c->busy = false;
+  if (take_chunk(c, c->fill_got) < 0) return;
+  resume(c);
+}
+
+static void fill_task(void *ud, size_t i) {
+  conn *c = ud;
+  (void)i;
+  c->fill_got = c->stream(c->stream_ud, c->out.data, c->out.cap - 1);
+  buckets_loop_post(c->srv->loop, fill_done, c);
+}
+
+static void start_fill(conn *c) {
+  set_busy(c);
+  buckets_pool_submit(c->srv->cfg.workers, fill_task, c);
+}
+
+typedef struct {
+  conn *c;
+  buckets_http_request req;
+  buckets_http_response resp;
+} job;
+
+static void finish_request(conn *c, buckets_http_request *req, buckets_http_response *resp) {
+  write_response(c, resp, req->keep_alive);
+  buckets_buf_free(&resp->headers);
+  buckets_buf_free(&resp->body);
+  if (!req->keep_alive) {
     if (c->stream) c->stream_close_after = true;
     else c->closing = true;
   }
   request_reset(c);
 }
 
+static void job_done(buckets_loop *loop, void *ud) {
+  job *j = ud;
+  conn *c = j->c;
+  (void)loop;
+  finish_request(c, &j->req, &j->resp);
+  free(j);
+  resume(c);
+}
+
+static void job_task(void *ud, size_t i) {
+  job *j = ud;
+  (void)i;
+  buckets_http_server *srv = j->c->srv;
+  srv->handler(&j->req, &j->resp, srv->ud);
+  buckets_loop_post(srv->loop, job_done, j);
+}
+
+static void dispatch_request(conn *c) {
+  buckets_http_server *srv = c->srv;
+  job *j = buckets_xcalloc(1, sizeof(*j));
+  j->c = c;
+  buckets_http_request *rq = &j->req;
+  rq->method = buckets_buf_str(&c->method);
+  rq->target = buckets_buf_str(&c->url);
+  split_target(rq->target, &rq->path, &rq->query);
+  for (size_t i = 0; i < c->nspans; i++) {
+    rq->headers[i].name = (buckets_str){c->hdr.data + c->spans[i].name_off, c->spans[i].name_len};
+    rq->headers[i].value =
+        buckets_str_trim((buckets_str){c->hdr.data + c->spans[i].value_off, c->spans[i].value_len});
+  }
+  rq->nheaders = c->nspans;
+  rq->body = buckets_buf_str(&c->body);
+  rq->body_fd = c->body_fd;
+  rq->body_len = c->body_fd >= 0 ? c->body_len : (int64_t)c->body.len;
+  rq->keep_alive = llhttp_should_keep_alive(&c->parser) && !srv->shutting_down;
+  rq->remote_addr = c->remote;
+  j->resp = (buckets_http_response){.status = 200, .content_length = -1};
+  j->resp.head_only = buckets_str_eq_c(rq->method, "HEAD");
+  if (srv->cfg.workers) {
+    set_busy(c);
+    buckets_pool_submit(srv->cfg.workers, job_task, j);
+    return;
+  }
+  srv->handler(rq, &j->resp, srv->ud);
+  finish_request(c, rq, &j->resp);
+  free(j);
+}
+
 /* Feeds buffered input to the parser, dispatching complete requests one at a
  * time. Stops while a response is still being written (pipelining backpressure). */
 static bool conn_process(conn *c) {
+  if (c->busy) return true;
   while (c->in.len > 0 && !conn_writing(c) && !c->closing) {
     llhttp_errno_t err = llhttp_execute(&c->parser, c->in.data, c->in.len);
     if (err == HPE_OK) {
@@ -331,6 +418,7 @@ static bool conn_process(conn *c) {
       buckets_buf_consume(&c->in, (size_t)(pos - c->in.data));
       dispatch_request(c);
       llhttp_resume(&c->parser);
+      if (c->busy) return true; /* job_done resumes */
       if (!conn_flush(c)) return false;
       continue;
     }
@@ -575,7 +663,7 @@ static void on_tick(buckets_http_server *srv) {
   time_t now = time(NULL);
   for (conn *c = srv->conns, *next; c; c = next) {
     next = c->next;
-    bool idle = c->in.len == 0 && !conn_writing(c);
+    bool idle = !c->busy && c->in.len == 0 && !conn_writing(c);
     if (idle && (srv->shutting_down || now - c->last_active > srv->cfg.idle_timeout_sec)) conn_close(c);
   }
 }

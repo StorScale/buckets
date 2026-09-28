@@ -10,6 +10,7 @@ typedef struct batch {
   buckets_par_fn fn;
   void *ctx;
   size_t n, next, remaining;
+  bool detached; /* heap-allocated by buckets_pool_submit; freed when done */
   struct batch *prev, *nextb; /* queue links while indexes are left to hand out */
 } batch;
 
@@ -39,7 +40,9 @@ static size_t take(buckets_pool *p, batch *b) {
 }
 
 static void finish(buckets_pool *p, batch *b) {
-  if (--b->remaining == 0) pthread_cond_broadcast(&p->done);
+  if (--b->remaining) return;
+  if (b->detached) free(b);
+  else pthread_cond_broadcast(&p->done);
 }
 
 static void *worker(void *arg) {
@@ -106,6 +109,22 @@ void buckets_parallel(buckets_pool *p, size_t n, buckets_par_fn fn, void *ctx) {
     finish(p, &b);
   }
   while (b.remaining) pthread_cond_wait(&p->done, &p->mu);
+  pthread_mutex_unlock(&p->mu);
+}
+
+void buckets_pool_submit(buckets_pool *p, buckets_par_fn fn, void *ctx) {
+  if (!p || p->nthreads == 0) {
+    fn(ctx, 0);
+    return;
+  }
+  batch *b = buckets_xcalloc(1, sizeof(*b));
+  *b = (batch){.fn = fn, .ctx = ctx, .n = 1, .remaining = 1, .detached = true};
+  pthread_mutex_lock(&p->mu);
+  b->prev = p->tail;
+  if (p->tail) p->tail->nextb = b;
+  else p->head = b;
+  p->tail = b;
+  pthread_cond_signal(&p->work);
   pthread_mutex_unlock(&p->mu);
 }
 

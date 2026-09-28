@@ -39,4 +39,9 @@ void buckets_loop_stop(buckets_loop *loop);
 void buckets_loop_set_wake(buckets_loop *loop, buckets_tick_cb cb, void *ud);
 void buckets_loop_wake(buckets_loop *loop);
 
+/* Thread-safe: runs cb(loop, ud) on the loop thread, in posting order. This is
+ * how worker threads hand results back to the loop. Posts still queued when
+ * the loop is freed are dropped. */
+void buckets_loop_post(buckets_loop *loop, buckets_tick_cb cb, void *ud);
+
 #endif

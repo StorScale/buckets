@@ -4,6 +4,7 @@
 
 #include "core/buf.h"
 #include "core/loop.h"
+#include "core/pool.h"
 #include "core/str.h"
 
 #define BUCKETS_HTTP_MAX_HEADERS 128
@@ -77,6 +78,10 @@ typedef struct {
   const char *spool_dir;  /* where larger bodies are spooled */
   int idle_timeout_sec;
   const char *server_header; /* value of the Server response header */
+  /* Runs handlers and response-stream pulls, so the loop thread only moves
+   * bytes. NULL runs them inline on the loop thread. Must outlive the server's
+   * connections: free the pool (draining it) before the server. */
+  buckets_pool *workers;
 } buckets_http_config;
 
 typedef struct buckets_http_server buckets_http_server;

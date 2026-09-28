@@ -6,6 +6,7 @@
 #include <string.h>
 #include <strings.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "core/log.h"
 #include "core/pool.h"
@@ -80,6 +81,7 @@ static void usage(FILE *f) {
           "  BUCKETS_ROOT_PASSWORD / MINIO_ROOT_PASSWORD  root secret key (default minioadmin)\n"
           "  BUCKETS_REGION / MINIO_REGION                server region (default: accept any)\n"
           "  BUCKETS_LOG_LEVEL                            debug|info|warn|error\n"
+          "  BUCKETS_API_THREADS                          request handler threads (default: 2 x CPUs, min 8)\n"
           "  BUCKETS_IO_THREADS                           drive I/O threads (default: set size - 1)\n");
 }
 
@@ -233,6 +235,13 @@ int main(int argc, char **argv) {
       .idle_timeout_sec = 30,
       .server_header = "Buckets",
   };
+  /* Request workers run the S3 handlers; the loop thread only moves bytes. */
+  const char *apit = getenv("BUCKETS_API_THREADS");
+  long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+  long napi = apit ? strtol(apit, NULL, 10) : BUCKETS_MAX(8L, 2 * ncpu);
+  buckets_pool *api_pool = napi > 0 ? buckets_pool_new((int)BUCKETS_MIN(napi, 4096L)) : NULL;
+  hcfg.workers = api_pool;
+
   app_state app = {0};
   app.http = buckets_http_server_start(g_loop, &hcfg, buckets_s3_handle, &s3);
   if (!app.http) return 1;
@@ -251,6 +260,7 @@ int main(int argc, char **argv) {
                    buckets_http_server_port(app.http));
   int rc = buckets_loop_run(g_loop);
 
+  buckets_pool_free(api_pool); /* finishes in-flight handlers before their connections go */
   buckets_http_server_free(app.http);
   buckets_loop_free(g_loop);
   buckets_objlayer_free(layer);
