@@ -25,6 +25,7 @@
 #include "iam/plugins.h"
 #include "bucket/metadata.h"
 #include "bucket/metasys.h"
+#include "bucket/objectlock.h"
 #include "scanner/scanner.h"
 #include "scanner/usage.h"
 #include "dist/peer.h"
@@ -418,11 +419,93 @@ static bool scanner_versioned(void *ud, const char *bucket, const char *object) 
   return enabled || suspended;
 }
 
+/* Evaluator.IsObjectLocked: a legal hold, or retention not yet over. */
+static bool version_locked(const buckets_object_info *oi, int64_t now_ns) {
+  const char *hold = buckets_object_meta(oi, BUCKETS_LOCK_HOLD_META);
+  if (hold && strcmp(hold, "ON") == 0) return true;
+  const char *mode = buckets_object_meta(oi, BUCKETS_LOCK_MODE_META);
+  const char *until = buckets_object_meta(oi, BUCKETS_LOCK_UNTIL_META);
+  long long sec;
+  long nsec;
+  if (mode && (strcmp(mode, "COMPLIANCE") == 0 || strcmp(mode, "GOVERNANCE") == 0) && until &&
+      buckets_time_parse_rfc3339(until, &sec, &nsec))
+    return sec * 1000000000LL + nsec > now_ns;
+  return false;
+}
+
+static void expire(buckets_s3_server *s, const char *bucket, const char *object, const char *version_id,
+                   bool enabled, bool suspended) {
+  buckets_delete_opts o = {.version_id = version_id, .versioned = enabled, .suspended = suspended};
+  buckets_delete_result r;
+  buckets_obj_err err = buckets_obj_delete_ex(s->layer, bucket, object, &o, &r);
+  if (err && err != BUCKETS_OBJ_ERR_NO_SUCH_KEY && err != BUCKETS_OBJ_ERR_NO_SUCH_VERSION)
+    buckets_log_warn("lifecycle: expiring %s/%s: %s", bucket, object, buckets_obj_strerror(err));
+}
+
+/* The scanner's lifecycle step (scannerItem.applyActions): evaluate every
+ * version of one object and expire what is due. Transitions wait for tiers. */
+static void scanner_object(void *ud, const char *bucket, const buckets_object_info *v, size_t n, bool *removed) {
+  buckets_s3_server *s = ud;
+  if (!s->meta || !n) return;
+  buckets_bucket_state *st = buckets_metasys_get(s->meta, bucket);
+  if (!st->has_lifecycle) {
+    buckets_bucket_state_release(st);
+    return;
+  }
+  const char *name = v[0].name;
+  bool enabled = buckets_versioning_enabled_for(&st->versioning, name);
+  bool suspended = buckets_versioning_suspended_for(&st->versioning, name);
+  struct timespec ts;
+  clock_gettime(CLOCK_REALTIME, &ts);
+  int64_t now = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+  buckets_lc_obj *objs = buckets_xcalloc(n, sizeof(*objs));
+  buckets_lc_event *ev = buckets_xcalloc(n, sizeof(*ev));
+  for (size_t i = 0; i < n; i++) {
+    objs[i].name = v[i].name;
+    objs[i].user_tags = buckets_object_meta(&v[i], "X-Amz-Tagging");
+    objs[i].mod_time_ns = v[i].mod_time_ns;
+    objs[i].size = v[i].size;
+    /* ToObjectInfo: the null version of an unversioned object has no ID */
+    objs[i].version_id = strcmp(v[i].version_id, "null") == 0 && !enabled && !suspended ? "" : v[i].version_id;
+    objs[i].is_latest = i == 0;
+    objs[i].delete_marker = v[i].delete_marker;
+    objs[i].num_versions = n;
+    objs[i].successor_mod_time_ns = i ? v[i - 1].mod_time_ns : 0;
+    objs[i].locked = version_locked(&v[i], now);
+  }
+  buckets_lifecycle_eval_versions(&st->lifecycle, st->lock_enabled, objs, n, now, ev);
+  for (size_t i = 0; i < n; i++) {
+    switch (ev[i].action) {
+    case BUCKETS_LC_DELETE_ALL_VERSIONS:
+    case BUCKETS_LC_DELMARKER_DELETE_ALL_VERSIONS:
+      for (size_t j = 0; j < n; j++) {
+        expire(s, bucket, name, v[j].version_id, false, false);
+        removed[j] = true;
+      }
+      i = n;
+      break;
+    case BUCKETS_LC_DELETE:
+      if (!enabled) removed[i] = true; /* a versioned bucket only gains a marker */
+      expire(s, bucket, name, NULL, enabled, suspended);
+      break;
+    case BUCKETS_LC_DELETE_VERSION:
+      expire(s, bucket, name, v[i].version_id, false, false);
+      removed[i] = true;
+      break;
+    default: break;
+    }
+  }
+  free(objs);
+  free(ev);
+  buckets_bucket_state_release(st);
+}
+
 void buckets_s3_scanner_hooks(buckets_s3_server *s, void *hooks) {
   buckets_scanner_hooks *h = hooks;
   memset(h, 0, sizeof(*h));
   h->cycle_seconds = scanner_cycle_seconds;
   h->versioned = scanner_versioned;
+  h->object = scanner_object;
   h->ud = s;
 }
 
@@ -489,8 +572,8 @@ void buckets_s3_write_rejected(s3_ctx *c) {
 /* Real MinIO sub-resources not implemented yet: NotImplemented rather than
  * falling through to the catch-all bucket routes. */
 static bool pending_subresource(const s3_ctx *c, bool put) {
-  static const char *const put_pending[] = {"encryption", "lifecycle", "notification", "replication", "replication-reset"};
-  static const char *const del_pending[] = {"encryption", "lifecycle", "replication"};
+  static const char *const put_pending[] = {"encryption", "notification", "replication", "replication-reset"};
+  static const char *const del_pending[] = {"encryption", "replication"};
   const char *const *list = put ? put_pending : del_pending;
   size_t n = put ? BUCKETS_ARRAY_LEN(put_pending) : BUCKETS_ARRAY_LEN(del_pending);
   for (size_t i = 0; i < n; i++)
@@ -1009,6 +1092,7 @@ static bool authorize_bucket_request(s3_ctx *c) {
     if (buckets_query_has(&c->q, "versioning")) action = "s3:PutBucketVersioning";
     else if (buckets_query_has(&c->q, "object-lock")) action = "s3:PutBucketObjectLockConfiguration";
     else if (buckets_query_has(&c->q, "tagging")) action = "s3:PutBucketTagging";
+    else if (buckets_query_has(&c->q, "lifecycle")) action = "s3:PutLifecycleConfiguration";
     else if (!pending_subresource(c, true)) action = "s3:CreateBucket"; /* the catch-all PUT route */
   } else if (buckets_str_eq_c(m, "HEAD")) {
     if (buckets_s3_authorize(c, "s3:HeadBucket", c->bucket, NULL, NULL) == BUCKETS_ERR_NONE) return true;
@@ -1016,6 +1100,7 @@ static bool authorize_bucket_request(s3_ctx *c) {
   } else if (buckets_str_eq_c(m, "DELETE")) {
     buckets_str force = buckets_http_header_get(c->req, "X-Minio-Force-Delete");
     if (buckets_query_has(&c->q, "tagging")) action = "s3:PutBucketTagging"; /* as MinIO */
+    else if (buckets_query_has(&c->q, "lifecycle")) action = "s3:PutLifecycleConfiguration"; /* as MinIO */
     else if (!pending_subresource(c, false))
       action = force.p && buckets_str_ieq_c(force, "true") ? "s3:ForceDeleteBucket" : "s3:DeleteBucket";
   } else if (buckets_str_eq_c(m, "GET")) {
@@ -1024,6 +1109,7 @@ static bool authorize_bucket_request(s3_ctx *c) {
     else if (buckets_query_has(&c->q, "versions")) action = "s3:ListBucketVersions";
     else if (buckets_query_has(&c->q, "object-lock")) action = "s3:GetBucketObjectLockConfiguration";
     else if (buckets_query_has(&c->q, "tagging")) action = "s3:GetBucketTagging";
+    else if (buckets_query_has(&c->q, "lifecycle")) action = "s3:GetLifecycleConfiguration";
     else if (buckets_query_has(&c->q, "uploads")) action = "s3:ListBucketMultipartUploads";
     else if (!has_unhandled_subresource(&c->q)) action = "s3:ListBucket";
   }
@@ -1159,6 +1245,11 @@ static void route_bucket(s3_ctx *c) {
       else buckets_s3_put_bucket_tagging(c);
       return;
     }
+    if (buckets_query_has(&c->q, "lifecycle")) {
+      if (!bucket_exists(c)) buckets_s3_write_error(c, BUCKETS_ERR_NO_SUCH_BUCKET);
+      else buckets_s3_put_bucket_lifecycle(c);
+      return;
+    }
     if (pending_subresource(c, true)) {
       buckets_s3_write_error(c, BUCKETS_ERR_NOT_IMPLEMENTED);
       return;
@@ -1189,6 +1280,10 @@ static void route_bucket(s3_ctx *c) {
       buckets_s3_delete_bucket_tagging(c);
       return;
     }
+    if (buckets_query_has(&c->q, "lifecycle")) {
+      buckets_s3_delete_bucket_lifecycle(c);
+      return;
+    }
     if (pending_subresource(c, false)) {
       buckets_s3_write_error(c, BUCKETS_ERR_NOT_IMPLEMENTED);
       return;
@@ -1207,6 +1302,8 @@ static void route_bucket(s3_ctx *c) {
       buckets_s3_get_bucket_object_lock(c);
     } else if (buckets_query_has(&c->q, "tagging")) {
       buckets_s3_get_bucket_tagging(c);
+    } else if (buckets_query_has(&c->q, "lifecycle")) {
+      buckets_s3_get_bucket_lifecycle(c);
     } else if (buckets_query_has(&c->q, "uploads")) {
       buckets_s3_list_uploads(c);
     } else if (has_unhandled_subresource(&c->q)) {

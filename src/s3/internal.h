@@ -86,6 +86,13 @@ buckets_s3_error buckets_s3_read_checked_doc(s3_ctx *c);
  * more bytes to bucket would exceed its hard quota. */
 bool buckets_s3_enforce_quota(s3_ctx *c, const char *bucket, int64_t size);
 
+/* ---- lifecycle (lifecycle.c) ---- */
+void buckets_s3_put_bucket_lifecycle(s3_ctx *c);
+void buckets_s3_get_bucket_lifecycle(s3_ctx *c);
+void buckets_s3_delete_bucket_lifecycle(s3_ctx *c);
+/* x-amz-expiration (or x-minio-transition) for an object, from the bucket's lifecycle. */
+void buckets_s3_expiration_header(s3_ctx *c, const buckets_object_info *oi);
+
 /* ---- tagging (tagging.c) ---- */
 /* Writes the S3 error for a tags parse error (buckets_tags_error). */
 void buckets_s3_write_tags_error(s3_ctx *c, const void *tags_error);

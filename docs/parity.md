@@ -5,9 +5,9 @@ registers is listed; statuses live in the script's `STATUS` table.
 
 ✅ done · 🟡 partial · ⬜ not started
 
-**Overall:** 113 done, 8 partial, 101 not started (222 handlers).
+**Overall:** 116 done, 8 partial, 98 not started (222 handlers).
 
-## S3 API (49/76)
+## S3 API (52/76)
 
 Source: `cmd/api-router.go`
 
@@ -20,7 +20,7 @@ Source: `cmd/api-router.go`
 | ✅ | `DeleteBucketCorsHandler` | dummy, as MinIO |
 | ⬜ | `DeleteBucketEncryptionHandler` |  |
 | 🟡 | `DeleteBucketHandler` | no x-minio-force-delete |
-| ⬜ | `DeleteBucketLifecycleHandler` |  |
+| ✅ | `DeleteBucketLifecycleHandler` |  |
 | ✅ | `DeleteBucketPolicyHandler` |  |
 | ⬜ | `DeleteBucketReplicationConfigHandler` |  |
 | ✅ | `DeleteBucketTaggingHandler` |  |
@@ -32,7 +32,7 @@ Source: `cmd/api-router.go`
 | ✅ | `GetBucketAccelerateHandler` | dummy, as MinIO |
 | ✅ | `GetBucketCorsHandler` | dummy, as MinIO; CORS is the global api cors_allow_origin |
 | ⬜ | `GetBucketEncryptionHandler` |  |
-| ⬜ | `GetBucketLifecycleHandler` |  |
+| ✅ | `GetBucketLifecycleHandler` |  |
 | ✅ | `GetBucketLocationHandler` |  |
 | ✅ | `GetBucketLoggingHandler` | dummy, as MinIO |
 | ⬜ | `GetBucketNotificationHandler` |  |
@@ -71,7 +71,7 @@ Source: `cmd/api-router.go`
 | ✅ | `PutBucketCorsHandler` | dummy, as MinIO |
 | ⬜ | `PutBucketEncryptionHandler` |  |
 | ✅ | `PutBucketHandler` |  |
-| ⬜ | `PutBucketLifecycleHandler` |  |
+| ✅ | `PutBucketLifecycleHandler` | expiry; transitions with tiering |
 | ⬜ | `PutBucketNotificationHandler` |  |
 | ✅ | `PutBucketObjectLockConfigHandler` |  |
 | ✅ | `PutBucketPolicyHandler` |  |

@@ -1,0 +1,416 @@
+[
+ {
+  "method": "PUT",
+  "path": "/lcbkt"
+ },
+ {
+  "method": "GET",
+  "path": "/lcbkt",
+  "query": "lifecycle",
+  "label": "no lifecycle"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcbkt",
+  "query": "lifecycle",
+  "label": "no md5",
+  "body": "<LifecycleConfiguration><Rule><ID>a</ID><Status>Enabled</Status><Expiration><Days>1</Days></Expiration></Rule></LifecycleConfiguration>"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcbkt",
+  "query": "lifecycle",
+  "label": "bad root",
+  "md5": true,
+  "body": "<Lifecycle><Rule/></Lifecycle>"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcbkt",
+  "query": "lifecycle",
+  "label": "bucket root accepted",
+  "md5": true,
+  "body": "<BucketLifecycleConfiguration><Rule><ID>x</ID><Status>Enabled</Status><Filter><Prefix>p/</Prefix></Filter><Expiration><Days>3</Days></Expiration></Rule></BucketLifecycleConfiguration>"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcbkt",
+  "query": "lifecycle",
+  "label": "unknown root child",
+  "md5": true,
+  "body": "<LifecycleConfiguration><Foo/></LifecycleConfiguration>"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcbkt",
+  "query": "lifecycle",
+  "label": "no rules",
+  "md5": true,
+  "body": "<LifecycleConfiguration></LifecycleConfiguration>"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcbkt",
+  "query": "lifecycle",
+  "label": "empty status",
+  "md5": true,
+  "body": "<LifecycleConfiguration><Rule><ID>a</ID><Expiration><Days>1</Days></Expiration></Rule></LifecycleConfiguration>"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcbkt",
+  "query": "lifecycle",
+  "label": "bad status",
+  "md5": true,
+  "body": "<LifecycleConfiguration><Rule><ID>a</ID><Status>On</Status><Expiration><Days>1</Days></Expiration></Rule></LifecycleConfiguration>"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcbkt",
+  "query": "lifecycle",
+  "label": "zero days",
+  "md5": true,
+  "body": "<LifecycleConfiguration><Rule><ID>a</ID><Status>Enabled</Status><Expiration><Days>0</Days></Expiration></Rule></LifecycleConfiguration>"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcbkt",
+  "query": "lifecycle",
+  "label": "days not a number",
+  "md5": true,
+  "body": "<LifecycleConfiguration><Rule><ID>a</ID><Status>Enabled</Status><Expiration><Days>ten</Days></Expiration></Rule></LifecycleConfiguration>"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcbkt",
+  "query": "lifecycle",
+  "label": "date not midnight",
+  "md5": true,
+  "body": "<LifecycleConfiguration><Rule><ID>a</ID><Status>Enabled</Status><Expiration><Date>2030-01-01T10:00:00Z</Date></Expiration></Rule></LifecycleConfiguration>"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcbkt",
+  "query": "lifecycle",
+  "label": "bad date",
+  "md5": true,
+  "body": "<LifecycleConfiguration><Rule><ID>a</ID><Status>Enabled</Status><Expiration><Date>soon</Date></Expiration></Rule></LifecycleConfiguration>"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcbkt",
+  "query": "lifecycle",
+  "label": "days and date",
+  "md5": true,
+  "body": "<LifecycleConfiguration><Rule><ID>a</ID><Status>Enabled</Status><Expiration><Days>1</Days><Date>2030-01-01T00:00:00Z</Date></Expiration></Rule></LifecycleConfiguration>"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcbkt",
+  "query": "lifecycle",
+  "label": "marker with days",
+  "md5": true,
+  "body": "<LifecycleConfiguration><Rule><ID>a</ID><Status>Enabled</Status><Expiration><Days>1</Days><ExpiredObjectDeleteMarker>true</ExpiredObjectDeleteMarker></Expiration></Rule></LifecycleConfiguration>"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcbkt",
+  "query": "lifecycle",
+  "label": "empty expiration",
+  "md5": true,
+  "body": "<LifecycleConfiguration><Rule><ID>a</ID><Status>Enabled</Status><Expiration></Expiration></Rule></LifecycleConfiguration>"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcbkt",
+  "query": "lifecycle",
+  "label": "no action",
+  "md5": true,
+  "body": "<LifecycleConfiguration><Rule><ID>a</ID><Status>Enabled</Status><Filter><Prefix>x</Prefix></Filter></Rule></LifecycleConfiguration>"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcbkt",
+  "query": "lifecycle",
+  "label": "dup ids",
+  "md5": true,
+  "body": "<LifecycleConfiguration><Rule><ID>a</ID><Status>Enabled</Status><Expiration><Days>1</Days></Expiration></Rule><Rule><ID>a</ID><Status>Enabled</Status><Expiration><Days>2</Days></Expiration></Rule></LifecycleConfiguration>"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcbkt",
+  "query": "lifecycle",
+  "label": "filter prefix and tag",
+  "md5": true,
+  "body": "<LifecycleConfiguration><Rule><ID>a</ID><Status>Enabled</Status><Filter><Prefix>x</Prefix><Tag><Key>k</Key><Value>v</Value></Tag></Filter><Expiration><Days>1</Days></Expiration></Rule></LifecycleConfiguration>"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcbkt",
+  "query": "lifecycle",
+  "label": "filter unknown child",
+  "md5": true,
+  "body": "<LifecycleConfiguration><Rule><ID>a</ID><Status>Enabled</Status><Filter><Size>3</Size></Filter><Expiration><Days>1</Days></Expiration></Rule></LifecycleConfiguration>"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcbkt",
+  "query": "lifecycle",
+  "label": "and with one predicate",
+  "md5": true,
+  "body": "<LifecycleConfiguration><Rule><ID>a</ID><Status>Enabled</Status><Filter><And><Prefix>x</Prefix></And></Filter><Expiration><Days>1</Days></Expiration></Rule></LifecycleConfiguration>"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcbkt",
+  "query": "lifecycle",
+  "label": "and duplicate tags",
+  "md5": true,
+  "body": "<LifecycleConfiguration><Rule><ID>a</ID><Status>Enabled</Status><Filter><And><Tag><Key>k</Key><Value>1</Value></Tag><Tag><Key>k</Key><Value>2</Value></Tag></And></Filter><Expiration><Days>1</Days></Expiration></Rule></LifecycleConfiguration>"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcbkt",
+  "query": "lifecycle",
+  "label": "tag duplicate key element",
+  "md5": true,
+  "body": "<LifecycleConfiguration><Rule><ID>a</ID><Status>Enabled</Status><Filter><Tag><Key>k</Key><Key>j</Key></Tag></Filter><Expiration><Days>1</Days></Expiration></Rule></LifecycleConfiguration>"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcbkt",
+  "query": "lifecycle",
+  "label": "rule prefix and filter prefix",
+  "md5": true,
+  "body": "<LifecycleConfiguration><Rule><ID>a</ID><Status>Enabled</Status><Prefix>a</Prefix><Filter><Prefix>b</Prefix></Filter><Expiration><Days>1</Days></Expiration></Rule></LifecycleConfiguration>"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcbkt",
+  "query": "lifecycle",
+  "label": "transition to unknown tier",
+  "md5": true,
+  "body": "<LifecycleConfiguration><Rule><ID>a</ID><Status>Enabled</Status><Transition><Days>1</Days><StorageClass>WARM</StorageClass></Transition></Rule></LifecycleConfiguration>"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcbkt",
+  "query": "lifecycle",
+  "label": "noncurrent without days",
+  "md5": true,
+  "body": "<LifecycleConfiguration><Rule><ID>a</ID><Status>Enabled</Status><NoncurrentVersionExpiration></NoncurrentVersionExpiration></Rule></LifecycleConfiguration>"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcbkt",
+  "query": "lifecycle",
+  "label": "delmarker zero",
+  "md5": true,
+  "body": "<LifecycleConfiguration><Rule><ID>a</ID><Status>Enabled</Status><DelMarkerExpiration><Days>0</Days></DelMarkerExpiration></Rule></LifecycleConfiguration>"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcbkt",
+  "query": "lifecycle",
+  "label": "delmarker with tag",
+  "md5": true,
+  "body": "<LifecycleConfiguration><Rule><ID>a</ID><Status>Enabled</Status><Filter><Tag><Key>k</Key><Value>v</Value></Tag></Filter><DelMarkerExpiration><Days>3</Days></DelMarkerExpiration></Rule></LifecycleConfiguration>"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcbkt",
+  "query": "lifecycle",
+  "label": "all versions without days",
+  "md5": true,
+  "body": "<LifecycleConfiguration><Rule><ID>a</ID><Status>Enabled</Status><Expiration><ExpiredObjectAllVersions>true</ExpiredObjectAllVersions></Expiration></Rule></LifecycleConfiguration>"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcbkt",
+  "query": "lifecycle",
+  "label": "negative size",
+  "md5": true,
+  "body": "<LifecycleConfiguration><Rule><ID>a</ID><Status>Enabled</Status><Filter><ObjectSizeGreaterThan>-5</ObjectSizeGreaterThan></Filter><Expiration><Days>1</Days></Expiration></Rule></LifecycleConfiguration>"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcbkt",
+  "query": "lifecycle",
+  "label": "huge days",
+  "md5": true,
+  "body": "<LifecycleConfiguration><Rule><ID>a</ID><Status>Enabled</Status><Expiration><Days>99999999999999999999</Days></Expiration></Rule></LifecycleConfiguration>"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcbkt",
+  "query": "lifecycle",
+  "label": "valid config",
+  "md5": true,
+  "body": "<LifecycleConfiguration><Rule><Status>Enabled</Status><Filter><And><Prefix>logs/</Prefix><Tag><Key>t</Key><Value>1</Value></Tag><ObjectSizeGreaterThan>10</ObjectSizeGreaterThan></And></Filter><Expiration><Days>30</Days></Expiration></Rule><Rule><ID>future</ID><Status>Enabled</Status><Filter><Prefix>keep/</Prefix></Filter><Expiration><Date>2100-01-01T00:00:00Z</Date></Expiration><NoncurrentVersionExpiration><NoncurrentDays>7</NoncurrentDays><MaxNoncurrentVersions>2</MaxNoncurrentVersions></NoncurrentVersionExpiration></Rule><Rule><ID>legacy</ID><Status>Disabled</Status><Prefix>legacy/</Prefix><Expiration><ExpiredObjectDeleteMarker>true</ExpiredObjectDeleteMarker></Expiration></Rule><Rule><ID>past</ID><Status>Enabled</Status><Filter><Prefix>old/</Prefix></Filter><Expiration><Date>2020-01-01T00:00:00Z</Date></Expiration></Rule><Rule><ID>dm</ID><Status>Enabled</Status><Filter><Prefix>dm/</Prefix></Filter><DelMarkerExpiration><Days>5</Days></DelMarkerExpiration></Rule><Rule><ID>sized</ID><Status>Enabled</Status><Filter><ObjectSizeLessThan>100</ObjectSizeLessThan></Filter><Expiration><Days>400</Days><ExpiredObjectAllVersions>true</ExpiredObjectAllVersions></Expiration></Rule></LifecycleConfiguration>"
+ },
+ {
+  "method": "GET",
+  "path": "/lcbkt",
+  "query": "lifecycle",
+  "label": "get config"
+ },
+ {
+  "method": "GET",
+  "path": "/lcbkt",
+  "query": "lifecycle&withUpdatedAt=maybe",
+  "label": "bad withUpdatedAt"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcbkt/keep/a.txt",
+  "body": "x",
+  "label": "put under future rule",
+  "show": [
+   "x-amz-expiration"
+  ]
+ },
+ {
+  "method": "HEAD",
+  "path": "/lcbkt/keep/a.txt",
+  "label": "head under future rule",
+  "show": [
+   "x-amz-expiration"
+  ]
+ },
+ {
+  "method": "GET",
+  "path": "/lcbkt/other.txt",
+  "label": "get unmatched"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcbkt/old/a.txt",
+  "body": "x"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcbkt/old/b.txt",
+  "body": "y"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcbkt/new/c.txt",
+  "body": "z"
+ },
+ {
+  "sleep": 8
+ },
+ {
+  "method": "GET",
+  "path": "/lcbkt",
+  "query": "list-type=2",
+  "label": "after expiry"
+ },
+ {
+  "method": "DELETE",
+  "path": "/lcbkt",
+  "query": "lifecycle",
+  "label": "delete config"
+ },
+ {
+  "method": "GET",
+  "path": "/lcbkt",
+  "query": "lifecycle",
+  "label": "after delete"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcvbkt"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcvbkt",
+  "query": "versioning",
+  "body": "<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcvbkt/old/v.txt",
+  "body": "one"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcvbkt",
+  "query": "lifecycle",
+  "label": "versioned config",
+  "md5": true,
+  "body": "<LifecycleConfiguration><Rule><ID>past</ID><Status>Enabled</Status><Filter><Prefix>old/</Prefix></Filter><Expiration><Date>2020-01-01T00:00:00Z</Date></Expiration></Rule></LifecycleConfiguration>"
+ },
+ {
+  "sleep": 8
+ },
+ {
+  "method": "GET",
+  "path": "/lcvbkt",
+  "query": "versions",
+  "label": "versioned after expiry"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcnbkt"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcnbkt",
+  "query": "versioning",
+  "body": "<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcnbkt/multi.txt",
+  "body": "v0"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcnbkt/multi.txt",
+  "body": "v1"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcnbkt/multi.txt",
+  "body": "v2"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcnbkt/multi.txt",
+  "body": "v3"
+ },
+ {
+  "method": "DELETE",
+  "path": "/lcnbkt/lonely.txt",
+  "label": "lone delete marker"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcnbkt/kept.txt",
+  "body": "k"
+ },
+ {
+  "method": "PUT",
+  "path": "/lcnbkt",
+  "query": "lifecycle",
+  "label": "noncurrent and marker rules",
+  "md5": true,
+  "body": "<LifecycleConfiguration><Rule><ID>newer</ID><Status>Enabled</Status><Filter><Prefix>multi</Prefix></Filter><NoncurrentVersionExpiration><NewerNoncurrentVersions>1</NewerNoncurrentVersions></NoncurrentVersionExpiration></Rule><Rule><ID>markers</ID><Status>Enabled</Status><Filter><Prefix>lonely</Prefix></Filter><Expiration><ExpiredObjectDeleteMarker>true</ExpiredObjectDeleteMarker></Expiration></Rule></LifecycleConfiguration>"
+ },
+ {
+  "method": "GET",
+  "path": "/lcnbkt",
+  "query": "lifecycle",
+  "label": "noncurrent config"
+ },
+ {
+  "sleep": 8
+ },
+ {
+  "method": "GET",
+  "path": "/lcnbkt",
+  "query": "versions",
+  "label": "after noncurrent expiry"
+ }
+]

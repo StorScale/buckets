@@ -1,49 +1,290 @@
 [
-  {"method": "PUT", "path": "/vbkt"},
-  {"method": "GET", "path": "/vbkt", "query": "versioning", "label": "versioning (unset)"},
-  {"method": "PUT", "path": "/vbkt", "query": "versioning", "label": "versioning bad status",
-   "body": "<VersioningConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Status>Maybe</Status></VersioningConfiguration>"},
-  {"method": "PUT", "path": "/vbkt", "query": "versioning", "label": "enable",
-   "body": "<VersioningConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Status>Enabled</Status></VersioningConfiguration>"},
-  {"method": "GET", "path": "/vbkt", "query": "versioning", "label": "versioning (enabled)"},
-  {"method": "PUT", "path": "/vbkt/a.txt", "body": "one", "save": {"v1": "x-amz-version-id"}},
-  {"method": "PUT", "path": "/vbkt/a.txt", "body": "two", "save": {"v2": "x-amz-version-id"}},
-  {"method": "GET", "path": "/vbkt/a.txt", "label": "get latest"},
-  {"method": "GET", "path": "/vbkt/a.txt", "query": "versionId=$v1", "label": "get v1"},
-  {"method": "HEAD", "path": "/vbkt/a.txt", "query": "versionId=$v2", "label": "head v2"},
-  {"method": "GET", "path": "/vbkt/a.txt", "query": "versionId=not-a-uuid", "label": "get bad version"},
-  {"method": "GET", "path": "/vbkt/a.txt", "query": "versionId=00000000-0000-4000-8000-000000000000", "label": "get missing version"},
-  {"method": "DELETE", "path": "/vbkt/a.txt", "save": {"dm": "x-amz-version-id"}, "label": "delete -> marker"},
-  {"method": "GET", "path": "/vbkt/a.txt", "label": "get after marker"},
-  {"method": "HEAD", "path": "/vbkt/a.txt", "label": "head after marker"},
-  {"method": "GET", "path": "/vbkt/a.txt", "query": "versionId=$dm", "label": "get the marker"},
-  {"method": "GET", "path": "/vbkt", "query": "list-type=2", "label": "list v2"},
-  {"method": "GET", "path": "/vbkt", "query": "versions", "label": "list versions"},
-  {"method": "GET", "path": "/vbkt", "query": "versions&max-keys=2", "label": "list versions page 1",
-   "save": {"nk": "xml:NextKeyMarker", "nv": "xml:NextVersionIdMarker"}},
-  {"method": "GET", "path": "/vbkt", "query": "versions&max-keys=2&key-marker=$nk&version-id-marker=$nv",
-   "label": "list versions page 2"},
-  {"method": "DELETE", "path": "/vbkt/a.txt", "query": "versionId=$dm", "label": "delete the marker"},
-  {"method": "GET", "path": "/vbkt/a.txt", "label": "get after marker removed"},
-  {"method": "DELETE", "path": "/vbkt/a.txt", "query": "versionId=$v1", "label": "delete v1"},
-  {"method": "GET", "path": "/vbkt", "query": "versions", "label": "versions after v1 gone"},
-  {"method": "PUT", "path": "/vbkt/dir/b.txt", "body": "bee"},
-  {"method": "GET", "path": "/vbkt", "query": "versions&delimiter=/", "label": "versions with delimiter"},
-  {"method": "PUT", "path": "/vbkt", "query": "versioning", "label": "suspend",
-   "body": "<VersioningConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Status>Suspended</Status></VersioningConfiguration>"},
-  {"method": "GET", "path": "/vbkt", "query": "versioning", "label": "versioning (suspended)"},
-  {"method": "PUT", "path": "/vbkt/a.txt", "body": "three", "label": "put null version"},
-  {"method": "PUT", "path": "/vbkt/a.txt", "body": "four", "label": "overwrite null version"},
-  {"method": "GET", "path": "/vbkt", "query": "versions&prefix=a", "label": "versions (null latest)"},
-  {"method": "GET", "path": "/vbkt/a.txt", "query": "versionId=null", "label": "get null"},
-  {"method": "DELETE", "path": "/vbkt/a.txt", "label": "delete (suspended) -> null marker"},
-  {"method": "GET", "path": "/vbkt/a.txt", "label": "get after null marker"},
-  {"method": "GET", "path": "/vbkt", "query": "versions&prefix=a", "label": "versions (null marker)"},
-  {"method": "POST", "path": "/vbkt", "query": "delete", "label": "delete objects without md5",
-   "headers": {"Content-Type": "application/xml"}, "body": "<Delete><Object><Key>x</Key></Object></Delete>"},
-  {"method": "POST", "path": "/vbkt", "query": "delete", "label": "delete objects", "md5": true, "body_out": true,
-   "headers": {"Content-Type": "application/xml"},
-   "body": "<Delete><Object><Key>a.txt</Key><VersionId>$v2</VersionId></Object><Object><Key>dir/b.txt</Key></Object><Object><Key>nope</Key><VersionId>bad</VersionId></Object></Delete>"},
-  {"method": "GET", "path": "/vbkt", "query": "versions", "label": "versions after multi-delete"},
-  {"method": "DELETE", "path": "/vbkt", "label": "delete non-empty bucket"}
+ {
+  "method": "PUT",
+  "path": "/vbkt"
+ },
+ {
+  "method": "GET",
+  "path": "/vbkt",
+  "query": "versioning",
+  "label": "versioning (unset)"
+ },
+ {
+  "method": "PUT",
+  "path": "/vbkt",
+  "query": "versioning",
+  "label": "versioning bad status",
+  "body": "<VersioningConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Status>Maybe</Status></VersioningConfiguration>"
+ },
+ {
+  "method": "PUT",
+  "path": "/vbkt",
+  "query": "versioning",
+  "label": "enable",
+  "body": "<VersioningConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Status>Enabled</Status></VersioningConfiguration>"
+ },
+ {
+  "method": "GET",
+  "path": "/vbkt",
+  "query": "versioning",
+  "label": "versioning (enabled)"
+ },
+ {
+  "method": "PUT",
+  "path": "/vbkt/a.txt",
+  "body": "one",
+  "save": {
+   "v1": "x-amz-version-id"
+  }
+ },
+ {
+  "method": "PUT",
+  "path": "/vbkt/a.txt",
+  "body": "two",
+  "save": {
+   "v2": "x-amz-version-id"
+  }
+ },
+ {
+  "method": "GET",
+  "path": "/vbkt/a.txt",
+  "label": "get latest"
+ },
+ {
+  "method": "GET",
+  "path": "/vbkt/a.txt",
+  "query": "versionId=$v1",
+  "label": "get v1"
+ },
+ {
+  "method": "HEAD",
+  "path": "/vbkt/a.txt",
+  "query": "versionId=$v2",
+  "label": "head v2"
+ },
+ {
+  "method": "GET",
+  "path": "/vbkt/a.txt",
+  "query": "versionId=not-a-uuid",
+  "label": "get bad version"
+ },
+ {
+  "method": "GET",
+  "path": "/vbkt/a.txt",
+  "query": "versionId=00000000-0000-4000-8000-000000000000",
+  "label": "get missing version"
+ },
+ {
+  "method": "DELETE",
+  "path": "/vbkt/a.txt",
+  "save": {
+   "dm": "x-amz-version-id"
+  },
+  "label": "delete -> marker"
+ },
+ {
+  "method": "GET",
+  "path": "/vbkt/a.txt",
+  "label": "get after marker"
+ },
+ {
+  "method": "HEAD",
+  "path": "/vbkt/a.txt",
+  "label": "head after marker"
+ },
+ {
+  "method": "GET",
+  "path": "/vbkt/a.txt",
+  "query": "versionId=$dm",
+  "label": "get the marker"
+ },
+ {
+  "method": "GET",
+  "path": "/vbkt",
+  "query": "list-type=2",
+  "label": "list v2"
+ },
+ {
+  "method": "GET",
+  "path": "/vbkt",
+  "query": "versions",
+  "label": "list versions"
+ },
+ {
+  "method": "GET",
+  "path": "/vbkt",
+  "query": "versions&max-keys=2",
+  "label": "list versions page 1",
+  "save": {
+   "nk": "xml:NextKeyMarker",
+   "nv": "xml:NextVersionIdMarker"
+  }
+ },
+ {
+  "method": "GET",
+  "path": "/vbkt",
+  "query": "versions&max-keys=2&key-marker=$nk&version-id-marker=$nv",
+  "label": "list versions page 2"
+ },
+ {
+  "method": "DELETE",
+  "path": "/vbkt/a.txt",
+  "query": "versionId=$dm",
+  "label": "delete the marker"
+ },
+ {
+  "method": "GET",
+  "path": "/vbkt/a.txt",
+  "label": "get after marker removed"
+ },
+ {
+  "method": "DELETE",
+  "path": "/vbkt/a.txt",
+  "query": "versionId=$v1",
+  "label": "delete v1"
+ },
+ {
+  "method": "GET",
+  "path": "/vbkt",
+  "query": "versions",
+  "label": "versions after v1 gone"
+ },
+ {
+  "method": "PUT",
+  "path": "/vbkt/dir/b.txt",
+  "body": "bee"
+ },
+ {
+  "method": "GET",
+  "path": "/vbkt",
+  "query": "versions&delimiter=/",
+  "label": "versions with delimiter"
+ },
+ {
+  "method": "PUT",
+  "path": "/vbkt",
+  "query": "versioning",
+  "label": "suspend",
+  "body": "<VersioningConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Status>Suspended</Status></VersioningConfiguration>"
+ },
+ {
+  "method": "GET",
+  "path": "/vbkt",
+  "query": "versioning",
+  "label": "versioning (suspended)"
+ },
+ {
+  "method": "PUT",
+  "path": "/vbkt/a.txt",
+  "body": "three",
+  "label": "put null version"
+ },
+ {
+  "method": "PUT",
+  "path": "/vbkt/a.txt",
+  "body": "four",
+  "label": "overwrite null version"
+ },
+ {
+  "method": "GET",
+  "path": "/vbkt",
+  "query": "versions&prefix=a",
+  "label": "versions (null latest)"
+ },
+ {
+  "method": "GET",
+  "path": "/vbkt/a.txt",
+  "query": "versionId=null",
+  "label": "get null"
+ },
+ {
+  "method": "DELETE",
+  "path": "/vbkt/a.txt",
+  "label": "delete (suspended) -> null marker"
+ },
+ {
+  "method": "GET",
+  "path": "/vbkt/a.txt",
+  "label": "get after null marker"
+ },
+ {
+  "method": "GET",
+  "path": "/vbkt",
+  "query": "versions&prefix=a",
+  "label": "versions (null marker)"
+ },
+ {
+  "method": "POST",
+  "path": "/vbkt",
+  "query": "delete",
+  "label": "delete objects without md5",
+  "headers": {
+   "Content-Type": "application/xml"
+  },
+  "body": "<Delete><Object><Key>x</Key></Object></Delete>"
+ },
+ {
+  "method": "POST",
+  "path": "/vbkt",
+  "query": "delete",
+  "label": "delete objects",
+  "md5": true,
+  "body_out": true,
+  "headers": {
+   "Content-Type": "application/xml"
+  },
+  "body": "<Delete><Object><Key>a.txt</Key><VersionId>$v2</VersionId></Object><Object><Key>dir/b.txt</Key></Object><Object><Key>nope</Key><VersionId>bad</VersionId></Object></Delete>"
+ },
+ {
+  "method": "GET",
+  "path": "/vbkt",
+  "query": "versions",
+  "label": "versions after multi-delete"
+ },
+ {
+  "method": "DELETE",
+  "path": "/vbkt/never-existed.txt",
+  "label": "delete missing key (suspended)"
+ },
+ {
+  "method": "PUT",
+  "path": "/vbkt",
+  "query": "versioning",
+  "label": "re-enable",
+  "body": "<VersioningConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Status>Enabled</Status></VersioningConfiguration>"
+ },
+ {
+  "method": "DELETE",
+  "path": "/vbkt/never-existed.txt",
+  "label": "delete missing key (enabled)"
+ },
+ {
+  "method": "POST",
+  "path": "/vbkt",
+  "query": "delete",
+  "label": "delete objects missing keys",
+  "md5": true,
+  "body_out": true,
+  "headers": {
+   "Content-Type": "application/xml"
+  },
+  "body": "<Delete><Object><Key>also-missing.txt</Key></Object></Delete>"
+ },
+ {
+  "method": "GET",
+  "path": "/vbkt",
+  "query": "versions&prefix=also",
+  "label": "markers for missing keys?"
+ },
+ {
+  "method": "GET",
+  "path": "/vbkt",
+  "query": "versions&prefix=never",
+  "label": "markers for never-existed?"
+ },
+ {
+  "method": "DELETE",
+  "path": "/vbkt",
+  "label": "delete non-empty bucket"
+ }
 ]

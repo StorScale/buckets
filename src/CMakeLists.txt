@@ -55,6 +55,7 @@ add_library(buckets STATIC
   bucket/versioning.c
   bucket/tags.c
   bucket/quota.c
+  bucket/lifecycle.c
   bucket/objectlock.c
   erasure/rs.c
   erasure/layout.c
@@ -74,6 +75,7 @@ add_library(buckets STATIC
   s3/sts.c
   s3/objectlock.c
   s3/tagging.c
+  s3/lifecycle.c
   admin/admin.c
   admin/info.c
   admin/config.c

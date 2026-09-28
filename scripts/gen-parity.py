@@ -142,6 +142,9 @@ STATUS = {
     "GetBucketQuotaConfigHandler": (DONE, ""),
     "PutBucketQuotaConfigHandler": (DONE, ""),
     "DataUsageInfoHandler": (DONE, ""),
+    "PutBucketLifecycleHandler": (DONE, "expiry; transitions with tiering"),
+    "GetBucketLifecycleHandler": (DONE, ""),
+    "DeleteBucketLifecycleHandler": (DONE, ""),
 }
 
 SOURCES = [

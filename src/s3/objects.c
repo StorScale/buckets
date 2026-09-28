@@ -10,6 +10,7 @@
 
 #include "core/log.h"
 #include "core/timefmt.h"
+#include "core/uuid.h"
 #include "crypto/base64.h"
 #include "crypto/hex.h"
 #include "s3/checksum.h"
@@ -402,6 +403,8 @@ static void put_object(s3_ctx *c) {
   } else {
     etag_header(c->resp, oi.etag);
     buckets_s3_version_header(c, oi.version_id);
+    oi.is_latest = true; /* the version just written */
+    buckets_s3_expiration_header(c, &oi);
     cks_echo(c->resp, &cx);
     c->resp->status = 200;
     buckets_object_info_free(&oi);
@@ -666,6 +669,7 @@ static void get_object(s3_ctx *c, bool head) {
   buckets_s3_lock_filter_meta(c, &oi);
   write_object_headers(c, &oi);
   buckets_s3_version_header(c, oi.version_id);
+  buckets_s3_expiration_header(c, &oi);
   if (rs.present) {
     buckets_http_resp_headerf(c->resp, "Content-Range", "bytes %lld-%lld/%lld", (long long)off,
                               (long long)(off + len - 1), (long long)oi.size);
@@ -864,6 +868,8 @@ static void copy_object(s3_ctx *c) {
   }
   if (strcmp(src_vid, "null") != 0) buckets_http_resp_header(c->resp, "X-Amz-Copy-Source-Version-Id", src_vid);
   buckets_s3_version_header(c, oi.version_id);
+  oi.is_latest = true; /* the version just written */
+  buckets_s3_expiration_header(c, &oi);
   char lm[BUCKETS_TIME_ISO8601_LEN + 1];
   buckets_time_iso8601_ns(oi.mod_time_ns, lm);
   buckets_buf *b = &c->resp->body;
@@ -1244,6 +1250,8 @@ static void mpu_complete(s3_ctx *c, const char *upload_id) {
     return;
   }
   buckets_s3_version_header(c, oi.version_id);
+  oi.is_latest = true; /* the version just written */
+  buckets_s3_expiration_header(c, &oi);
   buckets_buf *b = &c->resp->body;
   buckets_xml_header(b);
   buckets_xml_open_ns(b, "CompleteMultipartUploadResult", BUCKETS_S3_XMLNS);
@@ -1826,6 +1834,13 @@ void buckets_s3_delete_objects(s3_ctx *c) {
       buckets_s3_versioning(c, key.data, &o.versioned, &o.suspended);
       buckets_obj_err oe = buckets_obj_delete_ex(c->s->layer, c->bucket, key.data, &o, &res);
       if (oe && oe != BUCKETS_OBJ_ERR_NO_SUCH_KEY && oe != BUCKETS_OBJ_ERR_NO_SUCH_VERSION) e = buckets_s3_obj_error(oe);
+      if (oe == BUCKETS_OBJ_ERR_NO_SUCH_KEY && !ver.len && (o.versioned || o.suspended)) {
+        /* MinIO's DeleteObjects reports the marker it would have made for a
+         * key with no versions (a fresh ID when versioned), though none is stored. */
+        res.delete_marker = true;
+        if (o.versioned) buckets_uuid_v4(res.version_id);
+        else snprintf(res.version_id, sizeof(res.version_id), "null");
+      }
     }
     if (e) {
       /* DeleteError: Code, Message, Key, VersionId */

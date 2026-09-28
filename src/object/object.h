@@ -139,7 +139,9 @@ typedef struct {
   size_t nmeta;
   size_t nparts;
   bool delete_marker;
-  bool is_latest; /* version listings: the newest version of its key */
+  bool is_latest; /* the newest version of its key (listings, stat and open) */
+  size_t num_versions;          /* versions of its key (stat and open) */
+  int64_t successor_mod_time_ns; /* the next newer version's modification time, or 0 */
   uint8_t *checksum; /* stored x-minio-internal-crc bytes, or NULL */
   size_t checksum_len;
   buckets_xl_part *parts; /* numbers and sizes, in object order (etags unset) */

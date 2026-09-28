@@ -342,6 +342,18 @@ static buckets_obj_err quorum_version(const dmeta *m, size_t n, const char *vers
 
 /* ---- object info ------------------------------------------------------------ */
 
+/* Where the resolved version sits among its key's versions (FileInfo's
+ * IsLatest, NumVersions and SuccessorModTime). */
+static void fill_position(buckets_object_info *oi, const dmeta *m, const long *vidx, size_t n) {
+  for (size_t i = 0; i < n; i++) {
+    if (vidx[i] < 0) continue;
+    oi->is_latest = vidx[i] == 0;
+    oi->num_versions = m[i].x.n;
+    oi->successor_mod_time_ns = vidx[i] > 0 ? m[i].x.versions[vidx[i] - 1].hdr.mod_time : 0;
+    return;
+  }
+}
+
 void buckets_object_info_free(buckets_object_info *oi) {
   free(oi->name);
   for (size_t i = 0; i < oi->nmeta; i++) {
@@ -1014,6 +1026,7 @@ static buckets_obj_err obj_stat(buckets_epool *L, const char *bucket, const char
   buckets_obj_err err = resolve(L, bucket, object, version_id, &s, m, vidx, &o);
   if (err) return err;
   fill_info(out, object, &o);
+  fill_position(out, m, vidx, s->n);
   buckets_xl_object_free(&o);
   free_metas(m, s->n);
   return BUCKETS_OBJ_OK;
@@ -1089,7 +1102,10 @@ static buckets_obj_err obj_open(buckets_epool *L, const char *bucket, const char
     return version_id && *version_id ? BUCKETS_OBJ_ERR_METHOD_NOT_ALLOWED : BUCKETS_OBJ_ERR_NO_SUCH_KEY;
   }
   buckets_obj_reader *r = reader_new(L, s, bucket, object, m, vidx, &o);
-  if (info) fill_info(info, object, &o);
+  if (info) {
+    fill_info(info, object, &o);
+    fill_position(info, m, vidx, s->n);
+  }
   buckets_xl_object_free(&o);
   free_metas(m, s->n);
 
@@ -1546,7 +1562,12 @@ buckets_obj_err buckets_ep_delete_ex(buckets_epool *L, const char *bucket, const
     if (vid) buckets_xl_version_id_string(id, res->version_id);
     err = obj_delete(L, bucket, object, vid ? vid : NULL);
   } else {
-    err = add_delete_marker(L, bucket, object, opts->versioned, res);
+    /* MinIO's DeleteObject: a key with no versions at all gets no marker
+     * (a key whose latest version is a marker does). */
+    buckets_object_info oi;
+    err = obj_stat(L, bucket, object, NULL, &oi);
+    if (!err) buckets_object_info_free(&oi);
+    if (!err) err = add_delete_marker(L, bucket, object, opts->versioned, res);
   }
   buckets_nslock_unlock(lk);
   return err;

@@ -30,6 +30,7 @@ void buckets_bucket_state_release(buckets_bucket_state *st) {
   buckets_bucket_meta_free(&st->meta);
   buckets_policy_free(st->policy);
   buckets_versioning_free(&st->versioning);
+  if (st->has_lifecycle) buckets_lifecycle_free(&st->lifecycle);
   free(st);
 }
 
@@ -74,6 +75,12 @@ static buckets_bucket_state *build(const char *bucket, buckets_bucket_meta *meta
       buckets_log_warn("bucket %s: stored object lock configuration does not parse: %s", bucket, err);
   }
   st->lock_enabled = st->meta.lock_enabled || st->object_lock.enabled;
+  const buckets_buf *lcx = &st->meta.config[BUCKETS_BCFG_LIFECYCLE];
+  if (lcx->len) {
+    buckets_lc_error lerr;
+    st->has_lifecycle = buckets_lifecycle_parse(lcx->data, lcx->len, false, &st->lifecycle, &lerr);
+    if (!st->has_lifecycle) buckets_log_warn("bucket %s: stored lifecycle configuration does not parse: %s", bucket, lerr.msg);
+  }
   const buckets_buf *qt = &st->meta.config[BUCKETS_BCFG_QUOTA];
   if (qt->len) {
     char err[256];
