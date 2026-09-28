@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-28
+
 ### Added
 - Kubernetes (Phase 3):
   - CRDs: `BucketsCluster` (with status and printer columns), `BucketsUser`, `BucketsPolicy` and `Bucket`.

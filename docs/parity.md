@@ -5,9 +5,9 @@ registers is listed; statuses live in the script's `STATUS` table.
 
 ✅ done · 🟡 partial · ⬜ not started
 
-**Overall:** 21 done, 11 partial, 190 not started (222 handlers).
+**Overall:** 81 done, 13 partial, 128 not started (222 handlers).
 
-## S3 API (17/76)
+## S3 API (20/76)
 
 Source: `cmd/api-router.go`
 
@@ -21,7 +21,7 @@ Source: `cmd/api-router.go`
 | ⬜ | `DeleteBucketEncryptionHandler` |  |
 | 🟡 | `DeleteBucketHandler` | no x-minio-force-delete |
 | ⬜ | `DeleteBucketLifecycleHandler` |  |
-| ⬜ | `DeleteBucketPolicyHandler` |  |
+| ✅ | `DeleteBucketPolicyHandler` |  |
 | ⬜ | `DeleteBucketReplicationConfigHandler` |  |
 | ⬜ | `DeleteBucketTaggingHandler` |  |
 | ⬜ | `DeleteBucketWebsiteHandler` |  |
@@ -37,7 +37,7 @@ Source: `cmd/api-router.go`
 | ⬜ | `GetBucketLoggingHandler` |  |
 | ⬜ | `GetBucketNotificationHandler` |  |
 | ⬜ | `GetBucketObjectLockConfigHandler` |  |
-| ⬜ | `GetBucketPolicyHandler` |  |
+| ✅ | `GetBucketPolicyHandler` |  |
 | ⬜ | `GetBucketPolicyStatusHandler` |  |
 | ⬜ | `GetBucketReplicationConfigHandler` |  |
 | ⬜ | `GetBucketReplicationMetricsHandler` |  |
@@ -74,7 +74,7 @@ Source: `cmd/api-router.go`
 | ⬜ | `PutBucketLifecycleHandler` |  |
 | ⬜ | `PutBucketNotificationHandler` |  |
 | ⬜ | `PutBucketObjectLockConfigHandler` |  |
-| ⬜ | `PutBucketPolicyHandler` |  |
+| ✅ | `PutBucketPolicyHandler` |  |
 | ⬜ | `PutBucketReplicationConfigHandler` |  |
 | ⬜ | `PutBucketTaggingHandler` |  |
 | ⬜ | `PutBucketVersioningHandler` |  |
@@ -90,77 +90,77 @@ Source: `cmd/api-router.go`
 | ⬜ | `SelectObjectContentHandler` |  |
 | ⬜ | `ValidateBucketReplicationCredsHandler` |  |
 
-## Admin API (madmin / mc admin) (0/123)
+## Admin API (madmin / mc admin) (50/123)
 
 Source: `cmd/admin-router.go`
 
 | | Handler | Notes |
 |---|---|---|
-| ⬜ | `AccountInfoHandler` |  |
-| ⬜ | `AddCannedPolicy` |  |
-| ⬜ | `AddIdentityProviderCfg` |  |
-| ⬜ | `AddServiceAccount` |  |
-| ⬜ | `AddServiceAccountLDAP` |  |
+| 🟡 | `AccountInfoHandler` | usage and bucket feature details wait for the scanner and bucket metadata |
+| ✅ | `AddCannedPolicy` |  |
+| ✅ | `AddIdentityProviderCfg` |  |
+| ✅ | `AddServiceAccount` |  |
+| ✅ | `AddServiceAccountLDAP` |  |
 | ⬜ | `AddTierHandler` |  |
-| ⬜ | `AddUser` |  |
-| ⬜ | `AttachDetachPolicyBuiltin` |  |
-| ⬜ | `AttachDetachPolicyLDAP` |  |
+| ✅ | `AddUser` |  |
+| ✅ | `AttachDetachPolicyBuiltin` |  |
+| ✅ | `AttachDetachPolicyLDAP` |  |
 | ⬜ | `BackgroundHealStatusHandler` |  |
 | ⬜ | `BatchJobStatus` |  |
 | ⬜ | `CancelBatchJob` |  |
 | ⬜ | `CancelDecommission` |  |
-| ⬜ | `ClearConfigHistoryKVHandler` |  |
+| ✅ | `ClearConfigHistoryKVHandler` |  |
 | ⬜ | `ClientDevNull` |  |
 | ⬜ | `ClientDevNullExtraTime` |  |
 | ⬜ | `ConsoleLogHandler` |  |
 | ⬜ | `DataUsageInfoHandler` |  |
-| ⬜ | `DelConfigKVHandler` |  |
-| ⬜ | `DeleteIdentityProviderCfg` |  |
-| ⬜ | `DeleteServiceAccount` |  |
+| ✅ | `DelConfigKVHandler` |  |
+| ✅ | `DeleteIdentityProviderCfg` |  |
+| ✅ | `DeleteServiceAccount` |  |
 | ⬜ | `DescribeBatchJob` |  |
 | ⬜ | `DownloadProfilingHandler` |  |
 | ⬜ | `DriveSpeedtestHandler` |  |
 | ⬜ | `EditTierHandler` |  |
 | ⬜ | `ExportBucketMetadataHandler` |  |
-| ⬜ | `ExportIAM` |  |
+| ✅ | `ExportIAM` |  |
 | ⬜ | `ForceUnlockHandler` |  |
 | ⬜ | `GetBucketQuotaConfigHandler` |  |
-| ⬜ | `GetConfigHandler` |  |
-| ⬜ | `GetConfigKVHandler` |  |
-| ⬜ | `GetGroup` |  |
-| ⬜ | `GetIdentityProviderCfg` |  |
-| ⬜ | `GetUserInfo` |  |
+| ✅ | `GetConfigHandler` |  |
+| ✅ | `GetConfigKVHandler` |  |
+| ✅ | `GetGroup` |  |
+| ✅ | `GetIdentityProviderCfg` |  |
+| ✅ | `GetUserInfo` |  |
 | ⬜ | `HealHandler` |  |
 | ⬜ | `HealthInfoHandler` |  |
-| ⬜ | `HelpConfigKVHandler` |  |
+| ✅ | `HelpConfigKVHandler` |  |
 | ⬜ | `ImportBucketMetadataHandler` |  |
-| ⬜ | `ImportIAM` |  |
-| ⬜ | `ImportIAMV2` |  |
-| ⬜ | `InfoAccessKey` |  |
-| ⬜ | `InfoCannedPolicy` |  |
-| ⬜ | `InfoServiceAccount` |  |
+| ✅ | `ImportIAM` |  |
+| ✅ | `ImportIAMV2` |  |
+| ✅ | `InfoAccessKey` |  |
+| ✅ | `InfoCannedPolicy` |  |
+| ✅ | `InfoServiceAccount` |  |
 | ⬜ | `InspectDataHandler` |  |
 | ⬜ | `KMSCreateKeyHandler` |  |
 | ⬜ | `KMSKeyStatusHandler` |  |
 | ⬜ | `KMSStatusHandler` |  |
-| ⬜ | `ListAccessKeysBulk` |  |
-| ⬜ | `ListAccessKeysLDAP` |  |
-| ⬜ | `ListAccessKeysLDAPBulk` |  |
-| ⬜ | `ListAccessKeysOpenIDBulk` |  |
+| ✅ | `ListAccessKeysBulk` |  |
+| ✅ | `ListAccessKeysLDAP` |  |
+| ✅ | `ListAccessKeysLDAPBulk` |  |
+| ✅ | `ListAccessKeysOpenIDBulk` |  |
 | ⬜ | `ListBatchJobs` |  |
 | ⬜ | `ListBucketPolicies` |  |
 | ⬜ | `ListBucketUsers` |  |
-| ⬜ | `ListCannedPolicies` |  |
-| ⬜ | `ListConfigHistoryKVHandler` |  |
-| ⬜ | `ListGroups` |  |
-| ⬜ | `ListIdentityProviderCfg` |  |
-| ⬜ | `ListLDAPPolicyMappingEntities` |  |
-| ⬜ | `ListPolicyMappingEntities` |  |
+| ✅ | `ListCannedPolicies` |  |
+| ✅ | `ListConfigHistoryKVHandler` |  |
+| ✅ | `ListGroups` |  |
+| ✅ | `ListIdentityProviderCfg` |  |
+| ✅ | `ListLDAPPolicyMappingEntities` |  |
+| ✅ | `ListPolicyMappingEntities` |  |
 | ⬜ | `ListPools` |  |
 | ⬜ | `ListRemoteTargetsHandler` |  |
-| ⬜ | `ListServiceAccounts` |  |
+| ✅ | `ListServiceAccounts` |  |
 | ⬜ | `ListTierHandler` |  |
-| ⬜ | `ListUsers` |  |
+| ✅ | `ListUsers` |  |
 | ⬜ | `MetricsHandler` |  |
 | ⬜ | `NetperfHandler` |  |
 | ⬜ | `ObjectSpeedTestHandler` |  |
@@ -169,14 +169,14 @@ Source: `cmd/admin-router.go`
 | ⬜ | `RebalanceStart` |  |
 | ⬜ | `RebalanceStatus` |  |
 | ⬜ | `RebalanceStop` |  |
-| ⬜ | `RemoveCannedPolicy` |  |
+| ✅ | `RemoveCannedPolicy` |  |
 | ⬜ | `RemoveRemoteTargetHandler` |  |
 | ⬜ | `RemoveTierHandler` |  |
-| ⬜ | `RemoveUser` |  |
+| ✅ | `RemoveUser` |  |
 | ⬜ | `ReplicationDiffHandler` |  |
 | ⬜ | `ReplicationMRFHandler` |  |
-| ⬜ | `RestoreConfigHistoryKVHandler` |  |
-| ⬜ | `RevokeTokens` |  |
+| ✅ | `RestoreConfigHistoryKVHandler` |  |
+| ✅ | `RevokeTokens` |  |
 | ⬜ | `SRPeerBucketOps` |  |
 | ⬜ | `SRPeerEdit` |  |
 | ⬜ | `SRPeerGetIDPSettings` |  |
@@ -185,17 +185,17 @@ Source: `cmd/admin-router.go`
 | ⬜ | `SRPeerReplicateBucketItem` |  |
 | ⬜ | `SRPeerReplicateIAMItem` |  |
 | ⬜ | `SRStateEdit` |  |
-| ⬜ | `ServerInfoHandler` |  |
+| 🟡 | `ServerInfoHandler` | usage figures wait for the scanner |
 | ⬜ | `ServerUpdateHandler` |  |
 | ⬜ | `ServerUpdateV2Handler` |  |
-| ⬜ | `ServiceHandler` |  |
-| ⬜ | `ServiceV2Handler` |  |
-| ⬜ | `SetConfigHandler` |  |
-| ⬜ | `SetConfigKVHandler` |  |
-| ⬜ | `SetGroupStatus` |  |
-| ⬜ | `SetPolicyForUserOrGroup` |  |
+| ✅ | `ServiceHandler` |  |
+| ✅ | `ServiceV2Handler` |  |
+| ✅ | `SetConfigHandler` |  |
+| ✅ | `SetConfigKVHandler` |  |
+| ✅ | `SetGroupStatus` |  |
+| ✅ | `SetPolicyForUserOrGroup` |  |
 | ⬜ | `SetRemoteTargetHandler` |  |
-| ⬜ | `SetUserStatus` |  |
+| ✅ | `SetUserStatus` |  |
 | ⬜ | `SitePerfHandler` |  |
 | ⬜ | `SiteReplicationAdd` |  |
 | ⬜ | `SiteReplicationDevNull` |  |
@@ -211,28 +211,28 @@ Source: `cmd/admin-router.go`
 | ⬜ | `StartProfilingHandler` |  |
 | ⬜ | `StatusPool` |  |
 | ⬜ | `StorageInfoHandler` |  |
-| ⬜ | `TemporaryAccountInfo` |  |
+| ✅ | `TemporaryAccountInfo` |  |
 | ⬜ | `TierStatsHandler` |  |
 | ⬜ | `TopLocksHandler` |  |
 | ⬜ | `TraceHandler` |  |
-| ⬜ | `UpdateGroupMembers` |  |
-| ⬜ | `UpdateIdentityProviderCfg` |  |
-| ⬜ | `UpdateServiceAccount` |  |
+| ✅ | `UpdateGroupMembers` |  |
+| ✅ | `UpdateIdentityProviderCfg` |  |
+| ✅ | `UpdateServiceAccount` |  |
 | ⬜ | `VerifyTierHandler` |  |
 
-## STS (0/7)
+## STS (7/7)
 
 Source: `cmd/sts-handlers.go`
 
 | | Handler | Notes |
 |---|---|---|
-| ⬜ | `AssumeRole` |  |
-| ⬜ | `AssumeRoleWithCertificate` |  |
-| ⬜ | `AssumeRoleWithClientGrants` |  |
-| ⬜ | `AssumeRoleWithCustomToken` |  |
-| ⬜ | `AssumeRoleWithLDAPIdentity` |  |
-| ⬜ | `AssumeRoleWithSSO` |  |
-| ⬜ | `AssumeRoleWithWebIdentity` |  |
+| ✅ | `AssumeRole` |  |
+| ✅ | `AssumeRoleWithCertificate` |  |
+| ✅ | `AssumeRoleWithClientGrants` |  |
+| ✅ | `AssumeRoleWithCustomToken` |  |
+| ✅ | `AssumeRoleWithLDAPIdentity` |  |
+| ✅ | `AssumeRoleWithSSO` | WebIdentity and ClientGrants from a form body |
+| ✅ | `AssumeRoleWithWebIdentity` |  |
 
 ## KMS API (0/7)
 
@@ -277,4 +277,4 @@ Subsystems with no single handler, tracked by phase in `docs/architecture.md`:
 erasure coding + bitrot, xl.meta v2, pools, distributed locking and healing (done), scanner usage/ILM, healing, scanner,
 ILM/tiering, bucket + site replication, notifications (10 targets), audit,
 SSE-S3/KMS/C, compression, S3 Select, SFTP/FTP, batch jobs, decommission/rebalance,
-IAM (LDAP/OIDC/plugins/OPA), operator, console.
+operator, console (IAM with LDAP, OpenID, plugins and OPA is done).
