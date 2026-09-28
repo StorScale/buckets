@@ -1,0 +1,25 @@
+# TLS for S3 and internode traffic with a cert-manager Certificate. The DNS
+# names cover the S3 Service and every server's stable name.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: store-tls
+spec:
+  secretName: store-tls
+  issuerRef: {name: my-ca-issuer, kind: ClusterIssuer}
+  dnsNames:
+    - store
+    - store.default.svc
+    - store.default.svc.cluster.local
+    - "*.store-hl.default.svc.cluster.local"
+---
+apiVersion: buckets.io/v1alpha1
+kind: BucketsCluster
+metadata:
+  name: store
+spec:
+  tls:
+    certSecret: {name: store-tls} # tls.crt, tls.key and ca.crt
+  pools:
+    - servers: 4
+      volumesPerServer: 2

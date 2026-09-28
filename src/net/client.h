@@ -6,8 +6,9 @@
 #include "net/tls.h"
 
 /* A blocking HTTP/1.1 client for one peer, with a pool of keep-alive
- * connections shared by all threads. Used for internode RPC; responses must
- * carry Content-Length (as bucketsd's always do). */
+ * connections shared by all threads. Used for internode RPC and by the
+ * operator for the Kubernetes API; responses are Content-Length delimited or
+ * chunked. */
 typedef struct buckets_http_client buckets_http_client;
 
 typedef struct {

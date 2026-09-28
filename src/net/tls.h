@@ -46,8 +46,9 @@ long buckets_tls_send(buckets_tls_conn *c, const void *buf, size_t n);
 bool buckets_tls_pending(const buckets_tls_conn *c);
 /* ---- client side (internode) ---- */
 typedef struct buckets_tls_client buckets_tls_client;
-/* Trusts the system roots plus every PEM file in ca_dir (MinIO's certs/CAs);
- * ca_dir may be NULL. */
+/* Trusts the system roots plus every PEM file in ca_dir (MinIO's certs/CAs),
+ * or the certificates in ca_dir when it names a file (a CA bundle such as a
+ * Kubernetes service account's ca.crt); ca_dir may be NULL. */
 buckets_tls_client *buckets_tls_client_new(const char *ca_dir, char *err, size_t errlen);
 void buckets_tls_client_free(buckets_tls_client *t);
 /* Handshakes on a connected blocking socket, verifying host; NULL on failure. */

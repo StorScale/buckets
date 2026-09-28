@@ -24,6 +24,7 @@ run tests/integration/heal.sh build-ci/src/bucketsd
 run tests/integration/pools.sh build-ci/src/bucketsd
 run tests/integration/tls.sh build-ci/src/bucketsd
 run tests/integration/cluster.sh build-ci/src/bucketsd
+run tests/e2e-k8s/envtest.sh build-ci/operator/buckets-operator
 
 build build-ci-asan -DCMAKE_BUILD_TYPE=Debug -DBUCKETS_SANITIZE=address,undefined
 run tests/integration/smoke.sh build-ci-asan/src/bucketsd

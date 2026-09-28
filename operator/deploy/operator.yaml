@@ -1,0 +1,116 @@
+# buckets-operator: namespace, RBAC and Deployment. Install the CRDs first:
+#   kubectl apply -f operator/deploy/crds/
+#   kubectl apply -f operator/deploy/operator.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: buckets-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: buckets-operator
+  namespace: buckets-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: buckets-operator
+rules:
+  - apiGroups: [buckets.io]
+    resources: [bucketsclusters, bucketsusers, bucketspolicies, buckets]
+    verbs: [get, list, watch]
+  - apiGroups: [buckets.io]
+    resources: [bucketsclusters/status, bucketsusers/status, bucketspolicies/status, buckets/status]
+    verbs: [get, patch, update]
+  - apiGroups: [apps]
+    resources: [statefulsets]
+    verbs: [get, list, watch, create, patch, update]
+  - apiGroups: [""]
+    resources: [services]
+    verbs: [get, list, watch, create, patch, update]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, create]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch, delete]
+  - apiGroups: [policy]
+    resources: [poddisruptionbudgets]
+    verbs: [get, list, watch, create, patch, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: buckets-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: buckets-operator
+subjects:
+  - kind: ServiceAccount
+    name: buckets-operator
+    namespace: buckets-system
+---
+# Leader election lease, in the operator's own namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: buckets-operator-leader
+  namespace: buckets-system
+rules:
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, create, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: buckets-operator-leader
+  namespace: buckets-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: buckets-operator-leader
+subjects:
+  - kind: ServiceAccount
+    name: buckets-operator
+    namespace: buckets-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: buckets-operator
+  namespace: buckets-system
+  labels: {app.kubernetes.io/name: buckets-operator}
+spec:
+  replicas: 2 # one leader, one standby
+  selector:
+    matchLabels: {app.kubernetes.io/name: buckets-operator}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: buckets-operator}
+    spec:
+      serviceAccountName: buckets-operator
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: operator
+          image: ghcr.io/buckets-io/buckets-operator:0.3.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: POD_NAME
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - name: POD_NAMESPACE
+              valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
+            # - name: BUCKETS_OPERATOR_NAMESPACE   # watch a single namespace
+            #   value: my-namespace
+          resources:
+            requests: {cpu: 50m, memory: 32Mi}
+            limits: {memory: 128Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}

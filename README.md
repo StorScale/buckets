@@ -43,6 +43,19 @@ bucketsd server http://node{1...4}.example.net:9000/mnt/disk{1...4}
 
 For HTTPS, put `public.crt` and `private.key` in `~/.buckets/certs` or a `--certs-dir`. Certificates in its subdirectories are served by SNI, and nodes trust CAs in its `CAs/` directory.
 
+### On Kubernetes
+
+The operator runs `BucketsCluster` objects as StatefulSets (one per pool), with a Service, root credentials, and PodDisruptionBudgets:
+
+```bash
+kubectl apply -f operator/deploy/crds/
+kubectl apply -f operator/deploy/operator.yaml
+kubectl apply -f operator/examples/cluster.yaml     # 4 servers x 4 drives
+kubectl get bucketsclusters                          # SERVERS 4/4, PHASE Ready
+```
+
+Root credentials land in the Secret `<name>-root` unless `spec.credsSecret` names your own. Pools can be appended to expand a cluster; the operator then restarts every server together. Image changes roll one server at a time. `operator/examples/cluster-tls.yaml` shows TLS with cert-manager.
+
 Any S3 client works:
 
 ```bash
@@ -61,6 +74,8 @@ aws --endpoint-url http://localhost:9000 s3 ls
 | `tests/integration/interop.sh` | Round trips with `mc` and a real MinIO build in both directions (needs `MC_BIN` and `MINIO_BIN`; `tools/build-oracles.sh` builds them) |
 | `tests/conformance/minio-go.sh` | minio-go's functional suite (MinIO mint's Go suite); needs Go |
 | `tests/integration/{erasure,heal,concurrency,pools,tls,cluster}.sh` | Drive loss and bitrot; healing; racing writers; pool expansion; HTTPS; a 4-node cluster losing and regaining nodes (`MINIO_BIN` adds MinIO interop) |
+| `tests/e2e-k8s/envtest.sh` | The operator against a real kube-apiserver and etcd (envtest binaries, downloaded on first use), running as its own ServiceAccount |
+| `tests/e2e-k8s/kind.sh` | Full end to end on kind: images, operator, a 4-server cluster, pod and PVC loss, pool expansion, image rollout (needs docker and kind) |
 | `scripts/ci.sh` | The full gate: release, ASan/UBSan and TSan builds, unit, smoke and interop tests |
 
 ## Layout
@@ -82,7 +97,9 @@ scripts/     generators (S3 error table, parity checklist), CI
 docker/      container images
 ```
 
-Coming in later phases: `operator/` (the BucketsCluster operator) and `console/` (the web UI, deployed separately from storage).
+operator/    the Kubernetes operator (C): CRDs, RBAC, manifests, examples
+
+Coming in later phases: `console/` (the web UI, deployed separately from storage).
 
 ## License
 

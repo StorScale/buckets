@@ -1,0 +1,19 @@
+# syntax=docker/dockerfile:1
+# Build:  docker build -f docker/Dockerfile.operator -t buckets/buckets-operator .
+# Deploy: kubectl apply -f operator/deploy/crds/ -f operator/deploy/operator.yaml
+
+FROM debian:bookworm-slim AS build
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends build-essential cmake ninja-build git ca-certificates libssl-dev perl \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY . .
+RUN cmake -S . -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+      -DBUCKETS_BUILD_TESTS=OFF -DBUCKETS_BUILD_FUZZ=OFF \
+ && ninja -C /build buckets-operator \
+ && strip /build/operator/buckets-operator
+
+FROM gcr.io/distroless/cc-debian12:nonroot
+COPY --from=build /build/operator/buckets-operator /usr/local/bin/buckets-operator
+USER nonroot:nonroot
+ENTRYPOINT ["/usr/local/bin/buckets-operator"]

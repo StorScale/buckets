@@ -1,5 +1,6 @@
 /* bucketsd - Buckets storage server.
  * SPDX-License-Identifier: AGPL-3.0-or-later */
+#include <errno.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdatomic.h>
@@ -79,6 +80,27 @@ static const char *env2(const char *primary, const char *compat) {
   return (v && *v) ? v : NULL;
 }
 
+/* A secret from <NAME>_FILE (a mounted Kubernetes or Docker secret) when set,
+ * else from <NAME>, with the MINIO_* fallback for both. Trailing newlines in
+ * the file are dropped. The result is never freed (it lives for the process). */
+static const char *env_secret(const char *primary, const char *compat) {
+  char pf[128], cf[128];
+  snprintf(pf, sizeof(pf), "%s_FILE", primary);
+  snprintf(cf, sizeof(cf), "%s_FILE", compat);
+  const char *path = env2(pf, cf);
+  if (!path) return env2(primary, compat);
+  FILE *f = fopen(path, "r");
+  if (!f) {
+    buckets_log_error("cannot read %s: %s", path, strerror(errno));
+    exit(1);
+  }
+  char *buf = buckets_xcalloc(1, 4096);
+  size_t n = fread(buf, 1, 4095, f);
+  fclose(f);
+  while (n && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) buf[--n] = '\0';
+  return buf;
+}
+
 static void usage(FILE *f) {
   fprintf(f,
           "Usage: bucketsd server [--address [HOST]:PORT] [--certs-dir DIR] DRIVE...\n"
@@ -90,6 +112,8 @@ static void usage(FILE *f) {
           "  BUCKETS_ROOT_USER / MINIO_ROOT_USER          root access key (default minioadmin)\n"
           "  BUCKETS_ROOT_PASSWORD / MINIO_ROOT_PASSWORD  root secret key (default minioadmin)\n"
           "  BUCKETS_REGION / MINIO_REGION                server region (default: accept any)\n"
+          "  BUCKETS_VOLUMES / MINIO_VOLUMES              drives, space separated, when none are given\n"
+          "  *_ROOT_USER_FILE / *_ROOT_PASSWORD_FILE      read the root credentials from files\n"
           "  BUCKETS_LOG_LEVEL                            debug|info|warn|error\n"
           "  BUCKETS_API_THREADS                          request handler threads (default: 2 x CPUs, min 8)\n"
           "  BUCKETS_IO_THREADS                           drive I/O threads (default: set size + 2)\n");
@@ -344,7 +368,7 @@ int main(int argc, char **argv) {
     printf("bucketsd %s\n", BUCKETS_VERSION);
     return 0;
   }
-  if (argc < 3 || strcmp(argv[1], "server") != 0) {
+  if (argc < 2 || strcmp(argv[1], "server") != 0) {
     usage(stderr);
     return 2;
   }
@@ -368,6 +392,18 @@ int main(int argc, char **argv) {
       drive_args[ndrive_args++] = argv[i];
     }
   }
+  /* No drive arguments: BUCKETS_VOLUMES (or MINIO_VOLUMES) holds them,
+   * separated by spaces -- how the operator configures its pods. */
+  if (!ndrive_args) {
+    const char *vols = env2("BUCKETS_VOLUMES", "MINIO_VOLUMES");
+    if (vols) {
+      char *copy = buckets_xstrdup(vols), *save = NULL;
+      for (char *t = strtok_r(copy, " \t\n", &save); t; t = strtok_r(NULL, " \t\n", &save)) {
+        drive_args = buckets_xrealloc(drive_args, (ndrive_args + 1) * sizeof(char *));
+        drive_args[ndrive_args++] = t; /* copy lives for the process */
+      }
+    }
+  }
   if (!ndrive_args) {
     usage(stderr);
     return 2;
@@ -380,8 +416,8 @@ int main(int argc, char **argv) {
     return 2;
   }
 
-  const char *root_user = env2("BUCKETS_ROOT_USER", "MINIO_ROOT_USER");
-  const char *root_password = env2("BUCKETS_ROOT_PASSWORD", "MINIO_ROOT_PASSWORD");
+  const char *root_user = env_secret("BUCKETS_ROOT_USER", "MINIO_ROOT_USER");
+  const char *root_password = env_secret("BUCKETS_ROOT_PASSWORD", "MINIO_ROOT_PASSWORD");
   if (!root_user && !root_password) {
     root_user = DEFAULT_ROOT_USER;
     root_password = DEFAULT_ROOT_PASSWORD;

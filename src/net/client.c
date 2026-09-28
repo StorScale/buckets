@@ -207,6 +207,51 @@ static int exchange(hconn *h, const buckets_buf *head, const void *body, size_t 
   const char *eol = strstr(in.data, "\r\n");
   res->status = status;
   buckets_buf_append(&res->headers, eol + 2, hend - (size_t)(eol + 2 - in.data));
+  size_t te_len;
+  const char *te = buckets_http_result_header(res, "Transfer-Encoding", &te_len);
+  if (te && te_len >= 7 && strncasecmp(te + te_len - 7, "chunked", 7) == 0) {
+    /* Chunked body: <hex size>\r\n<data>\r\n ... 0\r\n[trailers]\r\n */
+    buckets_buf raw = BUCKETS_BUF_INIT;
+    buckets_buf_append(&raw, in.data + hend, in.len - hend);
+    buckets_buf_free(&in);
+    size_t pos = 0;
+    for (;;) {
+      char *nl;
+      while (!(nl = raw.len > pos ? memmem(raw.data + pos, raw.len - pos, "\r\n", 2) : NULL)) {
+        buckets_buf_reserve(&raw, 65536);
+        long r = recv_some(h, raw.data + raw.len, raw.cap - raw.len - 1);
+        if (r <= 0) goto chunk_bad;
+        raw.len += (size_t)r;
+      }
+      unsigned long long sz = strtoull(raw.data + pos, NULL, 16);
+      size_t data_at = (size_t)(nl - raw.data) + 2;
+      if (sz == 0) { /* last chunk; drain the (empty) trailer section */
+        pos = data_at;
+        while (!(raw.len >= pos + 2 && memmem(raw.data + pos, raw.len - pos, "\r\n", 2))) {
+          buckets_buf_reserve(&raw, 1024);
+          long r = recv_some(h, raw.data + raw.len, raw.cap - raw.len - 1);
+          if (r <= 0) goto chunk_bad;
+          raw.len += (size_t)r;
+        }
+        break;
+      }
+      while (raw.len < data_at + sz + 2) {
+        buckets_buf_reserve(&raw, (size_t)sz + 2);
+        long r = recv_some(h, raw.data + raw.len, raw.cap - raw.len - 1);
+        if (r <= 0) goto chunk_bad;
+        raw.len += (size_t)r;
+      }
+      buckets_buf_append(&res->body, raw.data + data_at, (size_t)sz);
+      pos = data_at + (size_t)sz + 2;
+    }
+    buckets_buf_free(&raw);
+    if (res->body.data) res->body.data[res->body.len] = '\0';
+    *reusable = false; /* simplest: never reuse after a chunked body */
+    return 1;
+  chunk_bad:
+    buckets_buf_free(&raw);
+    return -1;
+  }
   size_t cl_len;
   const char *cl = buckets_http_result_header(res, "Content-Length", &cl_len);
   if (!cl) goto bad;

@@ -285,6 +285,17 @@ buckets_tls_client *buckets_tls_client_new(const char *ca_dir, char *err, size_t
   SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
   SSL_CTX_set_default_verify_paths(ctx);
   X509_STORE *store = SSL_CTX_get_cert_store(ctx);
+  struct stat cst;
+  if (ca_dir && stat(ca_dir, &cst) == 0 && S_ISREG(cst.st_mode)) { /* a single CA bundle file */
+    FILE *f = fopen(ca_dir, "r");
+    for (X509 *x; f && (x = PEM_read_X509(f, NULL, NULL, NULL)) != NULL;) {
+      X509_STORE_add_cert(store, x);
+      X509_free(x);
+    }
+    if (f) fclose(f);
+    ERR_clear_error();
+    ca_dir = NULL;
+  }
   DIR *d = ca_dir ? opendir(ca_dir) : NULL;
   for (struct dirent *e; d && (e = readdir(d)) != NULL;) {
     if (e->d_name[0] == '.') continue;

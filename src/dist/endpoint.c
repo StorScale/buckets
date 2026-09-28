@@ -10,6 +10,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/socket.h>
+#include <unistd.h>
 
 bool buckets_endpoint_parse(const char *s, int default_port, buckets_endpoint *out, char *err, size_t errlen) {
   memset(out, 0, sizeof(*out));
@@ -106,6 +107,19 @@ bool buckets_host_is_local(const char *host) {
   return local;
 }
 
+/* A StatefulSet pod's endpoint is "<pod>.<service>.<ns>.svc...": its first
+ * label is the pod's hostname. Matching on it works before cluster DNS has
+ * published the pod's address. */
+static bool host_is_me(const char *host) {
+  char me[256];
+  if (gethostname(me, sizeof(me)) != 0) return false;
+  me[sizeof(me) - 1] = '\0';
+  size_t n = strlen(me);
+  if (!n) return false;
+  if (strcasecmp(host, me) == 0) return true;
+  return strncasecmp(host, me, n) == 0 && host[n] == '.';
+}
+
 void buckets_endpoint_resolve_local(buckets_endpoint *e, int server_port) {
-  e->local = e->port == server_port && buckets_host_is_local(e->host);
+  e->local = e->port == server_port && (host_is_me(e->host) || buckets_host_is_local(e->host));
 }

@@ -106,12 +106,29 @@ The S3 core runs on one drive, many drives, several pools, or a cluster of nodes
 - **HTTPS:** SNI and hot certificate reload.
 - **Health:** `/minio/health/cluster` reports per-set write and read quorum.
 
+**Phase 3 (Kubernetes), code complete; the kind gate is pending (see below):**
+- **CRDs:**
+  - `BucketsCluster` has pools, image, credentials, parity, TLS, env and service type, with a status subresource and printer columns.
+  - `BucketsUser`, `BucketsPolicy` and `Bucket` are defined, and reconcile once the admin API exists.
+- **Operator:** `buckets-operator` (C, `operator/src`) server-side-applies per cluster:
+  - a headless Service (publishing unready pods, which bootstrap needs) and the S3 Service
+  - one StatefulSet per pool (`Parallel`, `OnDelete`, and `BUCKETS_VOLUMES` naming every pool's pods)
+  - PodDisruptionBudgets
+  - generated root credentials, which deliberately outlive the cluster
+- **Restarts:** a topology change (pools, erasure settings) restarts every server together. Any other template change rolls one server at a time, only while all are ready.
+- **Status:** phase, servers ready, and a `Ready` condition.
+- **Leader election:** on a Lease.
+- **Server awareness:** bucketsd reads `BUCKETS_VOLUMES`, takes credentials from `*_FILE` secrets, and recognizes its own endpoints by pod hostname before cluster DNS publishes it.
+- **Verified here:** manifest unit tests, and the operator against a real kube-apiserver and etcd (`tests/e2e-k8s/envtest.sh`, 34 checks, running as its own ServiceAccount under the shipped RBAC).
+- **Pending:** the Phase 3 gate (`kubectl apply` gives a healthy cluster; pod and PVC loss heal) is `tests/e2e-k8s/kind.sh`. It needs a container runtime, which the development machine does not have, so it has not run yet.
+
 **Known interim choices, each replaced in a later phase:**
 - One event-loop thread moves bytes for all connections (per node). Handlers and stream pulls run on a worker pool, and each fans out per-drive work to the drive I/O pool. Request bodies are still spooled synchronously on the loop thread. Multiple reactors, then io_uring, follow.
 - Crypto primitives (SHA-256, MD5, SHA-1, HighwayHash, CRCs) are portable C, and all are verified against MinIO's Go libraries. OpenSSL is linked for TLS; moving the hashes onto it (and SIMD) comes with performance work.
 - Only the root credential is accepted. IAM comes in Phase 4.
 - Buckets are unversioned. Versioning, object lock, tagging and SSE come in Phase 5.
 - Remote listings walk peers' directories with one RPC per directory, and remote writes are buffered appends. A streaming walk RPC and streamed uploads come with performance work.
+- The operator resyncs every 5 s instead of watching (level-triggered either way). Watches come later.
 - Bucket metadata is read from the drives on each use (there is no cache yet), so nodes need no invalidation messages.
 
 ## Build phases
@@ -121,7 +138,7 @@ The S3 core runs on one drive, many drives, several pools, or a cluster of nodes
 | 0 ✅ | Repo, build, core runtime, HTTP server, CI script, Dockerfile | `ctest` green, fuzz corpora replay, ASan/UBSan clean |
 | 1 ✅ | Single-node S3 core: streaming bodies, xl.meta v2, objects, multipart, listing, checksums, SigV2, POST policy | minio-go functional suite at 0 failures; MinIO interop both ways |
 | 2 ✅ | Erasure coding, multi-drive, distributed (RPC, dsync, pools, heal, scanner, MRF), TLS | Drive and node loss with no data loss; reads MinIO-written drives |
-| 3 | Operator and CRDs, K8s-aware server, kind e2e | `kubectl apply` gives a healthy 4×4 cluster; pod and PVC loss heals |
+| 3 🚧 | Operator and CRDs, K8s-aware server, kind e2e | `kubectl apply` gives a healthy 4×4 cluster; pod and PVC loss heals |
 | 4 | IAM, STS, policy, LDAP, OIDC, plugins, admin API core | `mc admin user/policy/svcacct`; mint IAM |
 | 5 | Versioning, object lock, tagging, CORS, quota, lifecycle, SSE-S3/KMS/C, compression | Full mint pass; ceph s3-tests at or above the MinIO baseline |
 | 6 | Console (web + consoled) as its own Deployment | Playwright e2e on kind |

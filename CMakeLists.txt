@@ -22,10 +22,14 @@ include(Sanitizers)
 include(Dependencies)
 include(OpenSSL)
 
+if(BUCKETS_BUILD_TESTS)
+  enable_testing() # before any add_test, in any directory
+endif()
+
 add_subdirectory(src)
+add_subdirectory(operator)
 
 if(BUCKETS_BUILD_TESTS)
-  enable_testing()
   add_subdirectory(tests/unit)
 endif()
 

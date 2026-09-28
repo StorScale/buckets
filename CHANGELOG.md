@@ -6,6 +6,28 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- Kubernetes (Phase 3):
+  - CRDs: `BucketsCluster` (with status and printer columns), `BucketsUser`, `BucketsPolicy` and `Bucket`.
+  - `buckets-operator` in C:
+    - server-side-applies a headless Service (publishing unready pods), the S3 Service, a StatefulSet per pool and PodDisruptionBudgets
+    - generates root credentials that outlive the cluster
+    - restarts every server together on a topology change, and rolls other changes one server at a time
+    - reports status, and elects a leader on a Lease
+  - Manifests: `operator/deploy/operator.yaml` (namespace, least-privilege RBAC, a 2-replica Deployment), `docker/Dockerfile.operator`, and examples, including TLS with cert-manager.
+  - bucketsd:
+    - reads drives from `BUCKETS_VOLUMES`/`MINIO_VOLUMES`
+    - reads root credentials from `*_FILE`
+    - treats endpoints whose first DNS label is the pod's hostname as local
+  - Tests:
+    - operator manifest unit tests
+    - `tests/e2e-k8s/envtest.sh`: 34 checks against a real kube-apiserver and etcd, as the operator's own ServiceAccount
+    - `tests/e2e-k8s/kind.sh`: the full kind end to end (not yet run: needs docker)
+- HTTP client: chunked responses, and CA bundles given as a file.
+
+### Fixed
+- ctest now registers tests outside `tests/unit` (`enable_testing()` moved before the subdirectories).
+
 ### Changed
 - PUT and GET throughput. Single-stream PUT went from 2.6–3.3× MinIO's time to MinIO's speed or better, at the MD5 floor. GET is 30–50% faster than MinIO warm and 2–4× faster cold. Details and numbers are in `docs/performance.md`.
   - MD5 and SHA-256 use OpenSSL's optimized block functions, with value-type contexts and no allocation.

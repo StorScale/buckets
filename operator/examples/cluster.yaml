@@ -1,0 +1,18 @@
+# A 4-server cluster with 4 drives each: one 16-drive erasure set (EC 12+4 by
+# default), surviving the loss of any server.
+apiVersion: buckets.io/v1alpha1
+kind: BucketsCluster
+metadata:
+  name: store
+spec:
+  image: ghcr.io/buckets-io/bucketsd:0.3.0
+  pools:
+    - servers: 4
+      volumesPerServer: 4
+      volumeClaimTemplate:
+        storageClassName: standard
+        resources:
+          requests:
+            storage: 100Gi
+      resources:
+        requests: {cpu: "1", memory: 2Gi}
