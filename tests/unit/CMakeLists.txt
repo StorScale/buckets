@@ -1,6 +1,7 @@
 function(buckets_unit_test name)
   add_executable(${name} ${name}.c)
   target_link_libraries(${name} PRIVATE buckets cmocka::cmocka)
+  target_compile_definitions(${name} PRIVATE BUCKETS_TEST_DATA_DIR="${PROJECT_SOURCE_DIR}/tests/data")
   add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
@@ -10,3 +11,4 @@ buckets_unit_test(test_xml)
 buckets_unit_test(test_sigv4)
 buckets_unit_test(test_drive)
 buckets_unit_test(test_golden)
+buckets_unit_test(test_xlmeta)
