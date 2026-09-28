@@ -23,6 +23,9 @@ void buckets_admin_config_history_clear(s3_ctx *c);
 void buckets_admin_config_history_restore(s3_ctx *c);
 void buckets_admin_config_export(s3_ctx *c);
 void buckets_admin_config_import(s3_ctx *c);
+/* mc idp openid|ldap: /idp-config/{type}[/{name}] (config.c). */
+bool buckets_admin_is_idp_config(buckets_str path);
+void buckets_admin_idp_config(s3_ctx *c);
 
 /* A JSON error body (writeErrorResponseJSON). */
 void buckets_admin_error(s3_ctx *c, buckets_s3_error e);

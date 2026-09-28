@@ -1684,6 +1684,11 @@ void buckets_admin_handle(s3_ctx *c) {
   buckets_str path = c->req->path;
   buckets_str rest = {path.p + strlen(ADMIN_PREFIX), path.n - strlen(ADMIN_PREFIX)};
   bool path_known = false;
+  if (buckets_admin_is_idp_config(path)) {
+    if (!c->s->layer) buckets_admin_error(c, BUCKETS_ERR_SERVER_NOT_INITIALIZED);
+    else buckets_admin_idp_config(c);
+    return;
+  }
   for (size_t i = 0; i < BUCKETS_ARRAY_LEN(k_routes); i++) {
     if (!buckets_str_eq_c(rest, k_routes[i].path)) continue;
     path_known = true;

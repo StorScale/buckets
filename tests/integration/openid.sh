@@ -163,4 +163,29 @@ c=${tok: -10:1}
 [[ $c == A ]] && r=B || r=A
 bad="${tok:0:${#tok}-10}$r${tok: -9}"
 sts AssumeRoleWithWebIdentity "$bad" | grep "InvalidParameterValue" >/dev/null || fail "bad signature"
+
+if [[ -n "${MC_BIN:-}" ]]; then
+  echo "== mc idp openid"
+  mc() { "$MC_BIN" --config-dir "$WORK/mc" --no-color "$@"; }
+  mc alias set root "$EP" rootadmin rootsecret123 >/dev/null || fail "alias"
+  out=$(mc idp openid add root dex config_url="$ISS/.well-known/openid-configuration" client_id=dex-app client_secret=dexsecret \
+    role_policy=readonly 2>&1) || fail "idp openid add: $out"
+  out=$(mc idp openid add root dex client_id=x 2>&1 || true)
+  grep "already exists" >/dev/null <<<"$out" || fail "add twice: $out"
+  out=$(mc --json idp openid ls root 2>&1) || fail "idp openid ls: $out"
+  arn=$(python3 "$WORK/idp.py" arn "$WORK" "$ISS" dex-app)
+  grep '"name":"dex"' >/dev/null <<<"$out" || fail "ls dex: $out"
+  grep -F "\"roleARN\":\"$arn\"" >/dev/null <<<"$out" || fail "ls role ARN: $out"
+  grep '"name":"ROLES"\|"name":"roles"' >/dev/null <<<"$out" || fail "ls env target: $out"
+  out=$(mc idp openid info root dex 2>&1) || fail "idp openid info: $out"
+  grep "client_id.*dex-app" >/dev/null <<<"$out" || fail "info: $out"
+  tok=$(mint '{"sub":"u10","iss":"'"$ISS"'","aud":"dex-app","exp":"+600"}')
+  as_creds "$(sts AssumeRoleWithWebIdentity "$tok" --data-urlencode "RoleArn=$arn")"
+  [[ $(code "$EP/docs/a.txt") == 200 ]] || fail "provider added by mc idp openid"
+  out=$(mc idp openid rm root ROLES 2>&1 || true)
+  grep "overridden\|environment" >/dev/null <<<"$out" || fail "rm env-defined: $out"
+  out=$(mc idp openid rm root dex 2>&1) || fail "idp openid rm: $out"
+  out=$(mc idp openid info root dex 2>&1 || true)
+  grep "does not exist\|not found\|No such" >/dev/null <<<"$out" || fail "info after rm: $out"
+fi
 echo "PASS"

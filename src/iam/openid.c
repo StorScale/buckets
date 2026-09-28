@@ -66,6 +66,16 @@ void buckets_openid_release(buckets_openid *o) {
 bool buckets_openid_enabled(const buckets_openid *o) { return o && o->n > 0; }
 const char *buckets_openid_claim_name(const buckets_openid *o) { return o && o->claim_name ? o->claim_name : ""; }
 
+bool buckets_openid_target(const buckets_openid *o, const char *name, const char **role_arn) {
+  *role_arn = NULL;
+  for (size_t i = 0; o && i < o->n; i++) {
+    if (strcmp(o->p[i].name, name) != 0) continue;
+    if (o->p[i].role_policy && *o->p[i].role_policy) *role_arn = o->p[i].arn;
+    return true;
+  }
+  return false;
+}
+
 const char *buckets_openid_role_policy(const buckets_openid *o, const char *arn) {
   for (size_t i = 0; o && i < o->n; i++) {
     if (o->p[i].role_policy && *o->p[i].role_policy && strcmp(o->p[i].arn, arn) == 0) return o->p[i].role_policy;

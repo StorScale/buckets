@@ -925,3 +925,47 @@ int buckets_config_parse_bool(const char *s) {
   }
   return -1;
 }
+
+size_t buckets_config_resolved(const buckets_config *c, const char *name, const char *tgt, bool redact,
+                               buckets_config_kvsrc **out) {
+  *out = NULL;
+  const subsys *s = cfind(c, name);
+  if (!s) return 0;
+  if (!tgt || !*tgt) tgt = DEF;
+  const target *t = tfind(s, tgt);
+  const cfg_subsys_def *d = s->def;
+  buckets_config_kvsrc *v = buckets_xcalloc(d->nkeys + 2, sizeof(*v));
+  size_t n = 0;
+  for (size_t i = 0; i <= d->nkeys; i++) {
+    bool comment = i == d->nkeys;
+    const char *key = comment ? "comment" : d->keys[i].key;
+    if (!comment && strcmp(key, "comment") == 0) continue;
+    const char *def = comment ? "" : d->keys[i].def;
+    char en[512];
+    env_name(name, tgt, key, en, sizeof(en));
+    const char *val = buckets_config_getenv(en);
+    buckets_config_src src = BUCKETS_CFG_SRC_ENV;
+    if (!val || !*val) {
+      val = t ? kvs_lookup(&t->k, key) : NULL;
+      src = BUCKETS_CFG_SRC_CFG;
+    }
+    if (!val) {
+      val = def;
+      src = BUCKETS_CFG_SRC_DEF;
+    }
+    if (strcmp(val, def) == 0) src = BUCKETS_CFG_SRC_DEF;
+    if (comment && src == BUCKETS_CFG_SRC_DEF) continue;
+    if (!comment && redact && d->keys[i].secret) continue;
+    v[n++] = (buckets_config_kvsrc){buckets_xstrdup(key), buckets_xstrdup(val), src};
+  }
+  *out = v;
+  return n;
+}
+
+void buckets_config_kvsrc_free(buckets_config_kvsrc *v, size_t n) {
+  for (size_t i = 0; i < n; i++) {
+    free(v[i].key);
+    free(v[i].value);
+  }
+  free(v);
+}

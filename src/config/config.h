@@ -60,6 +60,18 @@ typedef bool (*buckets_config_validator)(const buckets_config *c, char *err, siz
 void buckets_config_register_validator(const char *subsys, buckets_config_validator fn);
 bool buckets_config_validate(const buckets_config *c, const char *subsys, char *err, size_t errlen);
 
+/* GetResolvedConfigParams: every key of subsys with its resolved value and
+ * where it came from, plus the comment when set. With redact, secret keys
+ * are left out. */
+typedef enum { BUCKETS_CFG_SRC_DEF = 1, BUCKETS_CFG_SRC_ENV, BUCKETS_CFG_SRC_CFG } buckets_config_src;
+typedef struct {
+  char *key, *value;
+  buckets_config_src src;
+} buckets_config_kvsrc;
+size_t buckets_config_resolved(const buckets_config *c, const char *subsys, const char *target, bool redact,
+                               buckets_config_kvsrc **out);
+void buckets_config_kvsrc_free(buckets_config_kvsrc *v, size_t n);
+
 /* config.ParseBool: 1, 0, or -1 when s is not a boolean. */
 int buckets_config_parse_bool(const char *s);
 

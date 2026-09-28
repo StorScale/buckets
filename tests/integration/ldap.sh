@@ -191,11 +191,28 @@ has "$out" "LDAP Lookup Bind Error" "bad lookup password rejected"
 out=$(mc admin config set root identity_ldap server_addr=127.0.0.1:$LPORT server_insecure=on "${L[@]}" lookup_bind_password=lookup123 \
   user_dn_search_base_dn="ou=nosuch,$BASE" user_dn_search_filter="(uid=%s)" 2>&1 || true)
 has "$out" "not found in the LDAP server" "missing base DN rejected"
-out=$(mc admin config set root identity_ldap server_addr=127.0.0.1:$LPORT server_insecure=on "${L[@]}" user_dn_search_base_dn="ou=people,$BASE" lookup_bind_password=lookup123 \
-  user_dn_search_filter="(uid=%s)" 2>&1) || fail "valid config: $out"
+out=$(mc idp ldap update root server_addr=127.0.0.1:$LPORT 2>&1 || true)
+has "$out" "No such IDP configuration exists" "update before add"
+out=$(mc idp ldap add root server_addr=127.0.0.1:$LPORT server_insecure=on "${L[@]}" user_dn_search_base_dn="ou=people,$BASE" \
+  lookup_bind_password=lookup123 user_dn_search_filter="(uid=%s)" 2>&1) || fail "mc idp ldap add: $out"
+out=$(mc idp ldap add root server_addr=127.0.0.1:$LPORT 2>&1 || true)
+has "$out" "already exists" "add twice"
+out=$(mc idp ldap info root 2>&1) || fail "idp ldap info: $out"
+has "$out" "user_dn_search_filter.*(uid=%s)" "info shows the filter"
+if grep lookup123 >/dev/null <<<"$out"; then fail "info leaks the lookup password"; fi
+out=$(mc idp ldap update root group_search_filter="(&(objectclass=groupOfNames)(member=%d)(cn=*))" 2>&1) ||
+  fail "idp ldap update: $out"
+out=$(mc idp ldap update root lookup_bind_password=wrong 2>&1 || true)
+has "$out" "LDAP Lookup Bind Error" "update validated"
+out=$(mc idp openid ls root 2>&1) || fail "idp openid ls: $out"
 stop
 NO_LDAP_ENV=1 start
+out=$(mc --json idp ldap ls root 2>&1) || fail "idp ldap ls: $out"
+has "$out" "\"enabled\":true" "ldap enabled after restart"
 mc idp ldap policy attach root readwrite --user alice >/dev/null 2>&1 || fail "attach after config"
 as_creds "$(sts alice alice123)"
 c=$(code -X PUT "$EP/docs2"); [[ $c == 200 ]] || fail "config-driven LDAP: $c"
+out=$(mc idp ldap rm root 2>&1) || fail "idp ldap rm: $out"
+out=$(mc idp ldap info root 2>&1) || fail "info after rm: $out"
+if grep server_addr >/dev/null <<<"$out"; then fail "rm left the config: $out"; fi
 echo "PASS"
