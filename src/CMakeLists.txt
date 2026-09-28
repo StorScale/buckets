@@ -8,10 +8,13 @@ add_library(buckets STATIC
   core/query.c
   core/uuid.c
   core/loop.c
+  core/msgpack.c
   crypto/sha256.c
   crypto/md5.c
   crypto/hex.c
   crypto/base64.c
+  crypto/highwayhash.c
+  crypto/xxhash.c
   net/http.c
   s3/errors.c
   s3/errors_gen.c
