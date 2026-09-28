@@ -2147,7 +2147,12 @@ buckets_obj_err buckets_ep_mpu_new(buckets_epool *L, const char *bucket, const c
   new_uuid_bytes(dd, dd_s);
   buckets_xl_object o;
   init_version(&o, dd, 0, data, s->parity, dist, s->n);
-  for (size_t i = 0; i < nmeta; i++) buckets_xl_kv_set(&o.meta_user, &o.nmeta_user, meta[i].key, meta[i].value, meta[i].value_len);
+  for (size_t i = 0; i < nmeta; i++) {
+    /* xlMetaV2 keeps x-minio-internal-* keys in MetaSys */
+    bool internal = strncasecmp(meta[i].key, BUCKETS_XL_RESERVED_PREFIX, strlen(BUCKETS_XL_RESERVED_PREFIX)) == 0;
+    if (internal) buckets_xl_kv_set(&o.meta_sys, &o.nmeta_sys, meta[i].key, meta[i].value, meta[i].value_len);
+    else buckets_xl_kv_set(&o.meta_user, &o.nmeta_user, meta[i].key, meta[i].value, meta[i].value_len);
+  }
   char uuid[BUCKETS_UUID_STR_LEN + 1], upload_uuid[80], plain[160];
   buckets_uuid_v4(uuid);
   snprintf(upload_uuid, sizeof(upload_uuid), "%sx%lld", uuid, (long long)o.mod_time);
@@ -2287,6 +2292,7 @@ static buckets_obj_err mpu_put_part(buckets_epool *L, const char *bucket, const 
   if (!err) {
     buckets_part_info pi = {.number = part_number, .size = size, .actual_size = size, .mod_time_ns = now_ns(), .cksum = cks};
     buckets_hex_encode(md5, 16, pi.etag);
+    if (opts && opts->part_commit) opts->part_commit(opts->part_commit_ud, &pi);
     buckets_buf pm = BUCKETS_BUF_INIT, dst = BUCKETS_BUF_INIT, dstmeta = BUCKETS_BUF_INIT;
     encode_part_meta(&pm, &pi);
     buckets_buf_appendf(&dst, "%s/%s/part.%d", dir, u.data_dir, part_number);
@@ -2418,7 +2424,7 @@ static void canonical_etag(const char *in, char *out, size_t cap) {
 
 static buckets_obj_err mpu_complete(buckets_epool *L, const char *bucket, const char *object,
                                     const char *upload_id, const buckets_complete_part *req, size_t nreq,
-                                    const buckets_checksum *want, bool versioned, buckets_object_info *out) {
+                                    const buckets_checksum *want, const buckets_complete_opts *co, buckets_object_info *out) {
   buckets_obj_err err = buckets_ep_stat_bucket(L, bucket);
   if (err) return err;
   if ((err = buckets_obj_check_name(object)) != BUCKETS_OBJ_OK) return err;
@@ -2447,13 +2453,13 @@ static buckets_obj_err mpu_complete(buckets_epool *L, const char *bucket, const 
 
   buckets_xl_object o;
   init_version(&o, u.up.data_dir, 0, u.up.ec_m, u.up.ec_n, u.dist, u.set->n);
-  if (versioned) {
+  if ((co && co->versioned)) {
     char vs[37];
     new_uuid_bytes(o.version_id, vs);
   }
   buckets_md5_ctx etag_md5;
   buckets_md5_init(&etag_md5);
-  int64_t total = 0;
+  int64_t total = 0, actual_total = 0;
   if (nreq == 0) err = BUCKETS_OBJ_ERR_INVALID_PART;
   for (size_t i = 0; i < nreq && !err; i++) {
     if (i > 0 && req[i].number <= req[i - 1].number) {
@@ -2464,9 +2470,13 @@ static buckets_obj_err mpu_complete(buckets_epool *L, const char *bucket, const 
     for (size_t j = 0; j < nhave; j++) {
       if (have[j].number == req[i].number) p = &have[j];
     }
-    char want_etag[80];
+    char want_etag[128], have_etag[128] = "";
     canonical_etag(req[i].etag ? req[i].etag : "", want_etag, sizeof(want_etag));
-    if (!p || strcmp(p->etag, want_etag) != 0) {
+    if (p) {
+      if (co && co->client_etag) co->client_etag(co->ud, p->etag, have_etag);
+      else snprintf(have_etag, sizeof(have_etag), "%s", p->etag);
+    }
+    if (!p || strcmp(have_etag, want_etag) != 0) {
       err = BUCKETS_OBJ_ERR_INVALID_PART;
       break;
     }
@@ -2485,15 +2495,17 @@ static buckets_obj_err mpu_complete(buckets_epool *L, const char *bucket, const 
       err = BUCKETS_OBJ_ERR_PART_TOO_SMALL;
       break;
     }
+    /* etag.Multipart: over the ETags clients know */
     uint8_t raw[16];
     for (int k = 0; k < 16; k++) {
       unsigned v;
-      sscanf(p->etag + 2 * k, "%2x", &v);
+      sscanf(have_etag + 2 * k, "%2x", &v);
       raw[k] = (uint8_t)v;
     }
     buckets_md5_update(&etag_md5, raw, 16);
     buckets_xl_part_add(&o, p->number, p->size, p->actual_size, NULL);
     total += p->size;
+    actual_total += p->actual_size;
   }
   if (!err) {
     o.size = total;
@@ -2502,6 +2514,8 @@ static buckets_obj_err mpu_complete(buckets_epool *L, const char *bucket, const 
       if (strcmp(k, BUCKETS_MPU_CKSUM_META) == 0 || strcmp(k, BUCKETS_MPU_CKSUM_TYPE_META) == 0) continue;
       buckets_xl_kv_set(&o.meta_user, &o.nmeta_user, k, u.up.meta_user[i].value, u.up.meta_user[i].value_len);
     }
+    for (size_t i = 0; i < u.up.nmeta_sys; i++) /* encryption keys and the like carry over */
+      buckets_xl_kv_set(&o.meta_sys, &o.nmeta_sys, u.up.meta_sys[i].key, u.up.meta_sys[i].value, u.up.meta_sys[i].value_len);
     if (ctype) {
       buckets_checksum fin = {.type = ctype | BUCKETS_CKSUM_MULTIPART | BUCKETS_CKSUM_INCLUDES_MULTIPART,
                               .raw_len = clen, .want_parts = (int)nreq};
@@ -2532,8 +2546,11 @@ static buckets_obj_err mpu_complete(buckets_epool *L, const char *bucket, const 
     snprintf(etag + 32, sizeof(etag) - 32, "-%zu", nreq);
     buckets_xl_kv_set(&o.meta_user, &o.nmeta_user, "etag", etag, strlen(etag));
     char actual[32];
-    int al = snprintf(actual, sizeof(actual), "%lld", (long long)total);
+    int al = snprintf(actual, sizeof(actual), "%lld", (long long)actual_total);
     buckets_xl_kv_set(&o.meta_sys, &o.nmeta_sys, ACTUAL_SIZE_KEY, actual, (size_t)al);
+    if (co && co->pre_commit) err = co->pre_commit(co->ud, &o);
+  }
+  if (!err) {
     /* Drop part.N.meta files and parts left out, then install on every drive. */
     for (size_t i = 0; i < u.set->n; i++) {
       if (!u.has[i] || !u.set->drives[i]) continue;
@@ -2610,12 +2627,28 @@ buckets_obj_err buckets_ep_mpu_abort(buckets_epool *L, const char *bucket, const
 
 buckets_obj_err buckets_ep_mpu_complete(buckets_epool *L, const char *bucket, const char *object,
                                          const char *upload_id, const buckets_complete_part *req, size_t nreq,
-                                         const buckets_checksum *want, bool versioned, buckets_object_info *out) {
+                                         const buckets_checksum *want, const buckets_complete_opts *co,
+                                         buckets_object_info *out) {
   buckets_obj_err err;
   buckets_nslock_entry *lk = lock_upload(L, bucket, object, upload_id, true, &err);
-  if (!err) err = mpu_complete(L, bucket, object, upload_id, req, nreq, want, versioned, out);
+  if (!err) err = mpu_complete(L, bucket, object, upload_id, req, nreq, want, co, out);
   buckets_nslock_unlock(lk);
   return err;
+}
+
+buckets_obj_err buckets_ep_mpu_stat(buckets_epool *L, const char *bucket, const char *object, const char *upload_id,
+                                    buckets_object_info *out) {
+  buckets_obj_err err = buckets_ep_stat_bucket(L, bucket);
+  if (err) return err;
+  char *dir = upload_dir(bucket, object, upload_id);
+  if (!dir) return BUCKETS_OBJ_ERR_NO_SUCH_UPLOAD;
+  upload u;
+  err = load_upload(L, bucket, object, dir, &u);
+  free(dir);
+  if (err) return err;
+  fill_info(out, object, &u.up);
+  buckets_xl_object_free(&u.up);
+  return BUCKETS_OBJ_OK;
 }
 
 buckets_obj_err buckets_ep_mpu_list_uploads(buckets_epool *L, const char *bucket, const char *object,

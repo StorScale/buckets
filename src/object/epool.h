@@ -61,7 +61,10 @@ buckets_obj_err buckets_ep_mpu_list_parts(buckets_epool *P, const char *bucket, 
 buckets_obj_err buckets_ep_mpu_abort(buckets_epool *P, const char *bucket, const char *object, const char *upload_id);
 buckets_obj_err buckets_ep_mpu_complete(buckets_epool *P, const char *bucket, const char *object,
                                         const char *upload_id, const buckets_complete_part *parts, size_t nparts,
-                                        const buckets_checksum *want, bool versioned, buckets_object_info *out);
+                                        const buckets_checksum *want, const buckets_complete_opts *co,
+                                        buckets_object_info *out);
+buckets_obj_err buckets_ep_mpu_stat(buckets_epool *P, const char *bucket, const char *object, const char *upload_id,
+                                    buckets_object_info *out);
 buckets_obj_err buckets_ep_mpu_list_uploads(buckets_epool *P, const char *bucket, const char *object,
                                             buckets_upload_info **uploads, size_t *n);
 

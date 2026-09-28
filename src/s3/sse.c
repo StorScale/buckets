@@ -423,11 +423,16 @@ void buckets_s3_sse_headers(s3_ctx *c, const buckets_object_info *oi) {
 
 void buckets_sse_writer_init(buckets_sse_writer *w, const uint8_t key[32], buckets_read_fn rd, void *rd_ud, int64_t size,
                              uint32_t cks_type) {
+  buckets_sse_writer_init_nonce(w, key, NULL, rd, rd_ud, size, cks_type);
+}
+
+void buckets_sse_writer_init_nonce(buckets_sse_writer *w, const uint8_t key[32], const uint8_t *nonce, buckets_read_fn rd,
+                                   void *rd_ud, int64_t size, uint32_t cks_type) {
   memset(w, 0, sizeof(*w));
   w->rd = rd;
   w->rd_ud = rd_ud;
   w->remaining = size;
-  buckets_dare_enc_init(&w->enc, key, NULL, 0);
+  buckets_dare_enc_init(&w->enc, key, nonce, 0);
   buckets_md5_init(&w->md5);
   buckets_sha256_init(&w->sha);
   w->cks_type = cks_type;

@@ -111,7 +111,9 @@ for i, st in enumerate(steps):
     for k, v in hdrs_in.items():
         cmd += ["-H", "%s: %s" % (k, v)]
     if "body" in st or st["method"] in ("PUT", "POST"):
-        cmd += ["--data-binary", body.decode()]
+        with open("/tmp/.s3diff.req", "wb") as f:  # large bodies do not fit on a command line
+            f.write(body)
+        cmd += ["--data-binary", "@/tmp/.s3diff.req"]
     cmd.append(url)
     out = subprocess.run(cmd, capture_output=True, text=True).stdout
     lines = out.replace("\r", "").split("\n")

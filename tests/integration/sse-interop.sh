@@ -41,8 +41,22 @@ put() { # name file sse-headers...
   curl -sf "${S3[@]}" -X PUT --data-binary @"$file" "$@" "$EP/ssex/$name" >/dev/null || fail "put $name"
 }
 # every object: name, etag, size, sha256 of the content, and a range
+# an SSE-S3 multipart object: two parts, each sealed with its part key
+put_multipart() {
+  local up e1 e2
+  up=$(curl -sf "${S3[@]}" -X POST -H "X-Amz-Server-Side-Encryption: AES256" "$EP/ssex/s3-mp?uploads" |
+    sed -n 's:.*<UploadId>\(.*\)</UploadId>.*:\1:p')
+  [[ -n "$up" ]] || fail "create upload"
+  e1=$(curl -sf -D - -o /dev/null "${S3[@]}" -X PUT --data-binary @"$WORK/part1" "$EP/ssex/s3-mp?partNumber=1&uploadId=$up" |
+    tr -d '\r' | sed -n 's/^[Ee][Tt]ag: //p')
+  e2=$(curl -sf -D - -o /dev/null "${S3[@]}" -X PUT --data-binary @"$WORK/small" "$EP/ssex/s3-mp?partNumber=2&uploadId=$up" |
+    tr -d '\r' | sed -n 's/^[Ee][Tt]ag: //p')
+  curl -sf "${S3[@]}" -X POST --data-binary \
+    "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>$e1</ETag></Part><Part><PartNumber>2</PartNumber><ETag>$e2</ETag></Part></CompleteMultipartUpload>" \
+    "$EP/ssex/s3-mp?uploadId=$up" >/dev/null || fail "complete upload"
+}
 snapshot() {
-  for o in s3-small s3-big kms-small kms-ctx; do
+  for o in s3-small s3-big kms-small kms-ctx s3-mp; do
     h=$(curl -s -I "${S3[@]}" "$EP/ssex/$o" | tr -d '\r' | grep -iE '^(etag|content-length|x-amz-server-side-encryption[a-z-]*):' | sort | tr '\n' ' ')
     sum=$(curl -s "${S3[@]}" "$EP/ssex/$o" | shasum -a 256 | cut -c1-16)
     rng=$(curl -s "${S3[@]}" -H 'Range: bytes=500-900' "$EP/ssex/$o" | shasum -a 256 | cut -c1-16)
@@ -52,6 +66,7 @@ snapshot() {
 mkdir -p "$D"/d{1..4}
 head -c 1000 /dev/urandom >"$WORK/small"
 head -c 200000 /dev/urandom >"$WORK/big"
+head -c 5242880 /dev/urandom >"$WORK/part1"
 
 for writer in buckets minio; do
   reader=$([[ $writer == buckets ]] && echo minio || echo buckets)
@@ -65,6 +80,7 @@ for writer in buckets minio; do
   # (curl's --aws-sigv4 misorders headers whose names prefix each other, so
   # the key-ID and context headers are exercised by s3diff instead)
   put kms-ctx "$WORK/big" -H "X-Amz-Server-Side-Encryption: aws:kms"
+  put_multipart
   snapshot >"$WORK/$writer.w"
   stop
   start "$reader"

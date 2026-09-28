@@ -361,10 +361,10 @@ typedef struct {
   cks_ctx *cx;
   buckets_sse_writer *w;
   const body_src *b;
-  uint8_t key[32];
+  uint8_t key[32]; /* the object key (parts are sealed with it too) */
   buckets_xl_kv *sys;
   size_t nsys;
-  bool multipart_part; /* a part: no object metadata */
+  uint8_t md5[16]; /* of the plaintext, once read */
 } sse_put;
 
 /* metadataEncrypter(key)("object-checksum", ...) over the stored checksum. */
@@ -383,7 +383,7 @@ static void seal_checksum_meta(const uint8_t key[32], buckets_xl_object *o) {
 static buckets_obj_err sse_pre_commit(void *ud, const buckets_checksum *computed, buckets_xl_object *o) {
   (void)computed;
   sse_put *p = ud;
-  uint8_t md5[16], sha[32];
+  uint8_t *md5 = p->md5, sha[32];
   buckets_md5_final(&p->w->md5, md5);
   buckets_sha256_final(&p->w->sha, sha);
   if (p->b->has_md5 && memcmp(md5, p->b->md5, 16) != 0) return BUCKETS_OBJ_ERR_BAD_DIGEST;
@@ -406,6 +406,45 @@ static buckets_obj_err sse_pre_commit(void *ud, const buckets_checksum *computed
     buckets_xl_kv_set(&o->meta_sys, &o->nmeta_sys, p->sys[i].key, p->sys[i].value, p->sys[i].value_len);
   if (o->nparts) o->parts[0].actual_size = p->w->plain_size;
   return BUCKETS_OBJ_OK;
+}
+
+/* An encrypted part records its sealed plaintext MD5, plaintext size and
+ * plaintext checksum (the object layer saw only DARE packages). */
+static void sse_part_commit(void *ud, buckets_part_info *pi) {
+  sse_put *p = ud;
+  buckets_buf sealed = BUCKETS_BUF_INIT;
+  buckets_objkey_seal_etag(p->key, p->md5, 16, &sealed);
+  buckets_hex_encode((uint8_t *)sealed.data, sealed.len, pi->etag);
+  buckets_buf_free(&sealed);
+  pi->actual_size = p->w->plain_size;
+  if (p->cx && p->cx->result.type) pi->cksum = p->cx->result;
+  else memset(&pi->cksum, 0, sizeof(pi->cksum));
+}
+
+/* tryDecryptETag: a stored (sealed) part ETag as clients were given it. */
+static void sse_part_etag(const uint8_t *key, bool sse_s3, const char *stored, char out[128]) {
+  size_t n = strlen(stored);
+  snprintf(out, 128, "%s", stored);
+  if (n <= 32) return;
+  if (!sse_s3 || !key) {
+    snprintf(out, 128, "%s", stored + n - 32);
+    return;
+  }
+  uint8_t raw[64];
+  buckets_buf plain = BUCKETS_BUF_INIT;
+  if (n % 2 == 0 && n / 2 <= sizeof(raw) && buckets_hex_decode(stored, n, raw) &&
+      buckets_objkey_unseal_etag(key, raw, n / 2, &plain) && plain.len <= 32)
+    buckets_hex_encode((uint8_t *)plain.data, plain.len, out);
+  buckets_buf_free(&plain);
+}
+
+/* The DARE nonce of a part: SHA-256(uploadID || partNumber)[:12], as MinIO derives it. */
+static void part_nonce(const char *upload_id, int part, uint8_t nonce[12]) {
+  char buf[256];
+  int n = snprintf(buf, sizeof(buf), "%s%d", upload_id, part);
+  uint8_t sum[32];
+  buckets_sha256(buf, (size_t)n, sum);
+  memcpy(nonce, sum, 12);
 }
 
 /* The response of an encrypted write: its SSE headers and the ETag clients see. */
@@ -1164,9 +1203,26 @@ static void copy_object(s3_ctx *c) {
 /* ---- multipart uploads ---------------------------------------------------- */
 
 static void mpu_create(s3_ctx *c) {
+  /* the upload's encryption: its key is sealed into the upload's metadata */
+  buckets_sse_req sse;
+  buckets_s3_error serr = buckets_s3_sse_parse(c, &sse);
+  uint8_t key[32];
+  buckets_xl_kv *sys = NULL;
+  size_t nsys = 0;
+  if (!serr && sse.kind) serr = buckets_s3_sse_new_key(c, &sse, c->bucket, c->object, key, &sys, &nsys);
+  buckets_sse_req_free(&sse);
+  OPENSSL_cleanse(key, sizeof(key));
+  if (serr) {
+    free_kvs(sys, nsys);
+    buckets_s3_sse_write_error(c, serr);
+    return;
+  }
+  if (nsys) buckets_xl_kv_set(&sys, &nsys, BUCKETS_SSE_META_MULTIPART, "", 0);
   buckets_xl_kv *meta = NULL;
   size_t nmeta = 0;
-  buckets_s3_error serr = extract_metadata(c, &meta, &nmeta);
+  serr = extract_metadata(c, &meta, &nmeta);
+  for (size_t i = 0; i < nsys; i++) buckets_xl_kv_set(&meta, &nmeta, sys[i].key, sys[i].value, sys[i].value_len);
+  free_kvs(sys, nsys);
   if (!serr && !buckets_s3_check_tagging_header(c)) {
     free_kvs(meta, nmeta);
     return;
@@ -1320,7 +1376,40 @@ static void mpu_put_part(s3_ctx *c, const char *upload_id) {
       return;
     }
     buckets_part_info pi;
-    err = buckets_obj_mpu_put_part(c->s->layer, c->bucket, c->object, upload_id, part, src_read, &ss, len, NULL, &pi);
+    buckets_object_info ui;
+    bool upload_known = buckets_obj_mpu_stat(c->s->layer, c->bucket, c->object, upload_id, &ui) == BUCKETS_OBJ_OK;
+    if (upload_known && buckets_s3_sse_encrypted(&ui)) {
+      body_src nob = {0};
+      cks_ctx cx = {0};
+      sse_put sp = {.cx = &cx, .b = &nob};
+      buckets_s3_error ke = buckets_s3_sse_object_key(c, &ui, c->bucket, c->object, false, sp.key);
+      if (ke) {
+        buckets_object_info_free(&ui);
+        src_close(&ss);
+        buckets_s3_sse_write_error(c, ke);
+        return;
+      }
+      uint8_t pk[32], nonce[12];
+      buckets_objkey_part_key(sp.key, (uint32_t)part, pk);
+      part_nonce(upload_id, part, nonce);
+      buckets_sse_writer w;
+      buckets_sse_writer_init_nonce(&w, pk, nonce, src_read, &ss, len, 0);
+      OPENSSL_cleanse(pk, sizeof(pk));
+      sp.w = &w;
+      buckets_put_opts po = {.pre_commit = sse_pre_commit, .pre_commit_ud = &sp, .part_commit = sse_part_commit, .part_commit_ud = &sp};
+      err = buckets_obj_mpu_put_part(c->s->layer, c->bucket, c->object, upload_id, part, buckets_sse_writer_read, &w,
+                                     (int64_t)buckets_dare_encrypted_size((uint64_t)len), &po, &pi);
+      buckets_sse_writer_free(&w);
+      if (!err) {
+        char shown[128];
+        sse_part_etag(sp.key, buckets_s3_sse_kind_of(&ui) == BUCKETS_SSE_S3, pi.etag, shown);
+        snprintf(pi.etag, sizeof(pi.etag), "%s", shown);
+      }
+      OPENSSL_cleanse(sp.key, sizeof(sp.key));
+    } else {
+      err = buckets_obj_mpu_put_part(c->s->layer, c->bucket, c->object, upload_id, part, src_read, &ss, len, NULL, &pi);
+    }
+    if (upload_known) buckets_object_info_free(&ui);
     src_close(&ss);
     if (err) {
       buckets_s3_write_error(c, buckets_s3_obj_error(err));
@@ -1360,9 +1449,55 @@ static void mpu_put_part(s3_ctx *c, const char *upload_id) {
     return;
   }
   opts.pre_commit_ud = &cx;
+  /* an encrypted upload: the part is sealed with its part key */
+  buckets_object_info ui;
+  bool upload_known = buckets_obj_mpu_stat(c->s->layer, c->bucket, c->object, upload_id, &ui) == BUCKETS_OBJ_OK;
+  bool part_enc = upload_known && buckets_s3_sse_encrypted(&ui);
+  sse_put sp = {.cx = &cx, .b = &bsrc};
+  buckets_sse_writer w;
+  buckets_read_fn rd = bsrc.rd;
+  void *rd_ud = bsrc.rd_ud;
+  int64_t size = bsrc.size;
+  if (part_enc) {
+    buckets_sse_kind kind = buckets_s3_sse_kind_of(&ui);
+    bool ssec = buckets_http_header_get(c->req, "X-Amz-Server-Side-Encryption-Customer-Algorithm").p != NULL;
+    if ((kind == BUCKETS_SSE_C && !ssec) || (kind == BUCKETS_SSE_S3 && ssec)) serr = BUCKETS_ERR_SSE_MULTIPART_ENCRYPTED;
+    if (!serr) serr = buckets_s3_sse_object_key(c, &ui, c->bucket, c->object, false, sp.key);
+    if (serr) {
+      buckets_object_info_free(&ui);
+      body_close(&bsrc);
+      buckets_s3_sse_write_error(c, serr);
+      return;
+    }
+    uint8_t pk[32], nonce[12];
+    buckets_objkey_part_key(sp.key, (uint32_t)part, pk);
+    part_nonce(upload_id, part, nonce);
+    buckets_sse_writer_init_nonce(&w, pk, nonce, bsrc.rd, bsrc.rd_ud, bsrc.size, cx.want.type & BUCKETS_CKSUM_BASE_MASK);
+    OPENSSL_cleanse(pk, sizeof(pk));
+    sp.w = &w;
+    rd = buckets_sse_writer_read, rd_ud = &w;
+    size = (int64_t)buckets_dare_encrypted_size((uint64_t)bsrc.size);
+    opts.want_md5 = opts.want_sha256 = NULL;
+    opts.checksum_type = 0;
+    opts.pre_commit = sse_pre_commit;
+    opts.pre_commit_ud = &sp;
+    opts.part_commit = sse_part_commit;
+    opts.part_commit_ud = &sp;
+  }
   buckets_part_info pi;
-  buckets_obj_err err = buckets_obj_mpu_put_part(c->s->layer, c->bucket, c->object, upload_id, part, bsrc.rd,
-                                                 bsrc.rd_ud, bsrc.size, &opts, &pi);
+  buckets_obj_err err = buckets_obj_mpu_put_part(c->s->layer, c->bucket, c->object, upload_id, part, rd, rd_ud, size,
+                                                 &opts, &pi);
+  if (part_enc) {
+    buckets_sse_writer_free(&w);
+    if (!err) {
+      char shown[128];
+      sse_part_etag(sp.key, buckets_s3_sse_kind_of(&ui) == BUCKETS_SSE_S3, pi.etag, shown);
+      snprintf(pi.etag, sizeof(pi.etag), "%s", shown);
+      buckets_s3_sse_headers(c, &ui);
+    }
+    OPENSSL_cleanse(sp.key, sizeof(sp.key));
+  }
+  if (upload_known) buckets_object_info_free(&ui);
   if (err) {
     buckets_s3_write_error(c, body_error(&bsrc, err));
   } else {
@@ -1380,7 +1515,7 @@ static void mpu_put_part(s3_ctx *c, const char *upload_id) {
 static void mpu_list_parts(s3_ctx *c, const char *upload_id) {
   const char *ms = buckets_query_get(&c->q, "max-parts");
   const char *pm = buckets_query_get(&c->q, "part-number-marker");
-  long max = 1000, marker = 0;
+  long max = 10000, marker = 0; /* maxPartsList */
   char *end;
   if (ms) {
     max = strtol(ms, &end, 10);
@@ -1388,7 +1523,7 @@ static void mpu_list_parts(s3_ctx *c, const char *upload_id) {
       buckets_s3_write_error(c, BUCKETS_ERR_INVALID_MAX_PARTS);
       return;
     }
-    if (max > 1000) max = 1000;
+    if (max > 10000) max = 10000;
   }
   if (pm) {
     marker = strtol(pm, &end, 10);
@@ -1406,6 +1541,29 @@ static void mpu_list_parts(s3_ctx *c, const char *upload_id) {
     buckets_s3_write_error(c, buckets_s3_obj_error(err));
     return;
   }
+  /* an encrypted upload: SSE-S3 parts are unsealed with the object key */
+  uint8_t key[32];
+  bool upload_enc = false, have_key = false, sse_s3 = false;
+  buckets_object_info ui;
+  char ck_alg[32] = "", ck_type[32] = "";
+  if (buckets_obj_mpu_stat(c->s->layer, c->bucket, c->object, upload_id, &ui) == BUCKETS_OBJ_OK) {
+    const char *a = buckets_object_meta(&ui, BUCKETS_MPU_CKSUM_META), *t = buckets_object_meta(&ui, BUCKETS_MPU_CKSUM_TYPE_META);
+    snprintf(ck_alg, sizeof(ck_alg), "%s", a ? a : "");
+    snprintf(ck_type, sizeof(ck_type), "%s", t ? t : "");
+    upload_enc = buckets_s3_sse_encrypted(&ui);
+    sse_s3 = buckets_s3_sse_kind_of(&ui) == BUCKETS_SSE_S3;
+    if (upload_enc && sse_s3) {
+      buckets_s3_error ke = buckets_s3_sse_object_key(c, &ui, c->bucket, c->object, false, key);
+      if (ke) {
+        buckets_object_info_free(&ui);
+        free(parts);
+        buckets_s3_sse_write_error(c, ke);
+        return;
+      }
+      have_key = true;
+    }
+    buckets_object_info_free(&ui);
+  }
   buckets_buf *b = &c->resp->body;
   buckets_xml_header(b);
   buckets_xml_open_ns(b, "ListPartsResult", BUCKETS_S3_XMLNS);
@@ -1415,20 +1573,28 @@ static void mpu_list_parts(s3_ctx *c, const char *upload_id) {
   for (int who = 0; who < 2; who++) {
     buckets_xml_open(b, who ? "Owner" : "Initiator");
     buckets_xml_elem(b, "ID", BUCKETS_S3_OWNER_ID);
-    buckets_xml_elem(b, "DisplayName", BUCKETS_S3_OWNER_NAME);
+    buckets_xml_elem(b, "DisplayName", BUCKETS_S3_OWNER_ID); /* MinIO shows the ID here */
     buckets_xml_close(b, who ? "Owner" : "Initiator");
   }
   buckets_xml_elem(b, "StorageClass", "STANDARD");
   buckets_buf_appendf(b, "<PartNumberMarker>%ld</PartNumberMarker>", marker);
-  buckets_buf_appendf(b, "<NextPartNumberMarker>%d</NextPartNumberMarker>", n ? parts[n - 1].number : 0);
+  buckets_buf_appendf(b, "<NextPartNumberMarker>%d</NextPartNumberMarker>", truncated && n ? parts[n - 1].number : 0);
   buckets_buf_appendf(b, "<MaxParts>%ld</MaxParts>", max);
   buckets_xml_elem(b, "IsTruncated", truncated ? "true" : "false");
+  buckets_xml_elem(b, "ChecksumAlgorithm", ck_alg);
+  buckets_xml_elem(b, "ChecksumType", ck_type);
   for (size_t i = 0; i < n; i++) {
     char lm[BUCKETS_TIME_ISO8601_LEN + 1];
     buckets_time_iso8601_ns(parts[i].mod_time_ns, lm);
     buckets_xml_open(b, "Part");
     buckets_buf_appendf(b, "<PartNumber>%d</PartNumber>", parts[i].number);
     buckets_xml_elem(b, "LastModified", lm);
+    if (upload_enc) { /* SSE-S3 parts show their plaintext MD5, others the tail of the sealed one */
+      char shown[128];
+      sse_part_etag(have_key ? key : NULL, sse_s3, parts[i].etag, shown);
+      snprintf(parts[i].etag, sizeof(parts[i].etag), "%s", shown);
+      parts[i].size = parts[i].actual_size;
+    }
     buckets_buf_appendf(b, "<ETag>&#34;%s&#34;</ETag>", parts[i].etag);
     buckets_buf_appendf(b, "<Size>%lld</Size>", (long long)parts[i].size);
     if (parts[i].cksum.type) {
@@ -1440,6 +1606,7 @@ static void mpu_list_parts(s3_ctx *c, const char *upload_id) {
     buckets_xml_close(b, "Part");
   }
   buckets_xml_close(b, "ListPartsResult");
+  if (have_key) OPENSSL_cleanse(key, sizeof(key));
   free(parts);
   buckets_s3_write_xml(c, 200);
 }
@@ -1451,6 +1618,35 @@ static void mpu_abort(s3_ctx *c, const char *upload_id) {
     return;
   }
   c->resp->status = 204;
+}
+
+/* CompleteMultipartUpload of an encrypted upload: client ETags are matched
+ * against the unsealed (SSE-S3) or truncated part ETags, and the final
+ * checksum is sealed with the object key. */
+typedef struct {
+  uint8_t key[32];
+  bool have_key, sse_s3;
+} mpu_sse;
+
+static buckets_s3_error mpu_sse_open(s3_ctx *c, const buckets_object_info *ui, bool checksum, mpu_sse *cs) {
+  buckets_sse_kind kind = buckets_s3_sse_kind_of(ui);
+  cs->sse_s3 = kind == BUCKETS_SSE_S3;
+  bool ssec_given = buckets_http_header_get(c->req, "X-Amz-Server-Side-Encryption-Customer-Algorithm").p != NULL;
+  if (kind == BUCKETS_SSE_C && !ssec_given) return checksum ? BUCKETS_ERR_MISSING_SSE_CUSTOMER_KEY : BUCKETS_ERR_NONE;
+  buckets_s3_error e = buckets_s3_sse_object_key(c, ui, c->bucket, c->object, false, cs->key);
+  cs->have_key = !e;
+  return e;
+}
+
+static void mpu_client_etag(void *ud, const char *stored, char out[128]) {
+  mpu_sse *cs = ud;
+  sse_part_etag(cs->have_key ? cs->key : NULL, cs->sse_s3, stored, out);
+}
+
+static buckets_obj_err mpu_seal_checksum(void *ud, buckets_xl_object *o) {
+  mpu_sse *cs = ud;
+  if (cs->have_key) seal_checksum_meta(cs->key, o);
+  return BUCKETS_OBJ_OK;
 }
 
 static void mpu_complete(s3_ctx *c, const char *upload_id) {
@@ -1524,8 +1720,31 @@ static void mpu_complete(s3_ctx *c, const char *upload_id) {
   buckets_object_info oi;
   bool versioned, suspended;
   buckets_s3_versioning(c, c->object, &versioned, &suspended);
+  mpu_sse cs = {0};
+  buckets_complete_opts co = {.versioned = versioned};
+  buckets_object_info ui;
+  if (buckets_obj_mpu_stat(c->s->layer, c->bucket, c->object, upload_id, &ui) == BUCKETS_OBJ_OK) {
+    if (buckets_s3_sse_encrypted(&ui)) {
+      buckets_s3_error ke = mpu_sse_open(c, &ui, want.type != 0, &cs);
+      if (ke) {
+        buckets_object_info_free(&ui);
+        for (size_t i = 0; i < n; i++) {
+          free(etags[i]);
+          free(cksums[i]);
+        }
+        free(etags), free(cksums), free(parts);
+        buckets_s3_sse_write_error(c, ke);
+        return;
+      }
+      co.client_etag = mpu_client_etag;
+      co.pre_commit = mpu_seal_checksum;
+      co.ud = &cs;
+    }
+    buckets_object_info_free(&ui);
+  }
   buckets_obj_err err = buckets_obj_mpu_complete(c->s->layer, c->bucket, c->object, upload_id, parts, n,
-                                                 want.type ? &want : NULL, versioned, &oi);
+                                                 want.type ? &want : NULL, &co, &oi);
+  OPENSSL_cleanse(&cs, sizeof(cs));
   for (size_t i = 0; i < n; i++) {
     free(etags[i]);
     free(cksums[i]);
@@ -1890,31 +2109,16 @@ void buckets_s3_put_acl(s3_ctx *c) {
 /* Server-side encryption arrives in Phase 5. Until then no request may leave
  * data unencrypted that the client asked to encrypt: SSE headers get MinIO's
  * answers for a server without a KMS, and SSE-C keys never travel in clear. */
-/* SSE requests this server cannot serve yet (copy and multipart), and SSE-C
- * without TLS, which MinIO's request validator refuses for every request. */
 static bool refuse_sse(s3_ctx *c) {
+  /* MinIO's request validator: SSE-C needs TLS, on every request */
   bool ssec = buckets_http_header_get(c->req, "X-Amz-Server-Side-Encryption-Customer-Algorithm").p ||
               buckets_http_header_get(c->req, "X-Amz-Server-Side-Encryption-Customer-Key").p ||
-              buckets_http_header_get(c->req, "X-Amz-Server-Side-Encryption-Customer-Key-Md5").p;
-  bool ssec_src = buckets_http_header_get(c->req, "X-Amz-Copy-Source-Server-Side-Encryption-Customer-Algorithm").p ||
-                  buckets_http_header_get(c->req, "X-Amz-Copy-Source-Server-Side-Encryption-Customer-Key").p ||
-                  buckets_http_header_get(c->req, "X-Amz-Copy-Source-Server-Side-Encryption-Customer-Key-Md5").p;
-  bool sse = buckets_http_header_get(c->req, "X-Amz-Server-Side-Encryption").p ||
-             buckets_http_header_get(c->req, "X-Amz-Server-Side-Encryption-Aws-Kms-Key-Id").p ||
-             buckets_http_header_get(c->req, "X-Amz-Server-Side-Encryption-Context").p;
-  if ((ssec || ssec_src) && !c->req->secure) {
+              buckets_http_header_get(c->req, "X-Amz-Server-Side-Encryption-Customer-Key-Md5").p ||
+              buckets_http_header_get(c->req, "X-Amz-Copy-Source-Server-Side-Encryption-Customer-Algorithm").p ||
+              buckets_http_header_get(c->req, "X-Amz-Copy-Source-Server-Side-Encryption-Customer-Key").p ||
+              buckets_http_header_get(c->req, "X-Amz-Copy-Source-Server-Side-Encryption-Customer-Key-Md5").p;
+  if (ssec && !c->req->secure) {
     buckets_s3_write_error(c, BUCKETS_ERR_INSECURE_SSE_CUSTOMER_REQUEST);
-    return true;
-  }
-  if (!ssec && !ssec_src && !sse) return false;
-  buckets_str m = c->req->method;
-  bool copy = buckets_http_header_get(c->req, "X-Amz-Copy-Source").p != NULL;
-  bool mpu = buckets_query_has(&c->q, "uploads") || buckets_query_get(&c->q, "uploadId");
-  if (buckets_str_eq_c(m, "PUT") && !mpu) return false; /* PutObject and CopyObject */
-  if (buckets_str_eq_c(m, "PUT") && mpu && copy && !sse && !ssec) return false; /* UploadPartCopy from an encrypted source */
-  if (buckets_str_eq_c(m, "GET") || buckets_str_eq_c(m, "HEAD")) return false;
-  if (buckets_str_eq_c(m, "PUT") || buckets_str_eq_c(m, "POST")) {
-    buckets_s3_write_error(c, BUCKETS_ERR_NOT_IMPLEMENTED); /* encrypted copies and uploads come next */
     return true;
   }
   return false;

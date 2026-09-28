@@ -520,8 +520,14 @@ buckets_obj_err buckets_obj_mpu_abort(buckets_objlayer *L, const char *bucket, c
 
 buckets_obj_err buckets_obj_mpu_complete(buckets_objlayer *L, const char *bucket, const char *object,
                                          const char *upload_id, const buckets_complete_part *parts, size_t nparts,
-                                         const buckets_checksum *want, bool versioned, buckets_object_info *out) {
-  IN_UPLOAD_POOL(buckets_ep_mpu_complete(P, bucket, object, upload_id, parts, nparts, want, versioned, out));
+                                         const buckets_checksum *want, const buckets_complete_opts *co,
+                                         buckets_object_info *out) {
+  IN_UPLOAD_POOL(buckets_ep_mpu_complete(P, bucket, object, upload_id, parts, nparts, want, co, out));
+}
+
+buckets_obj_err buckets_obj_mpu_stat(buckets_objlayer *L, const char *bucket, const char *object, const char *upload_id,
+                                     buckets_object_info *out) {
+  IN_UPLOAD_POOL(buckets_ep_mpu_stat(P, bucket, object, upload_id, out));
 }
 
 static int upload_cmp(const void *a, const void *b) {

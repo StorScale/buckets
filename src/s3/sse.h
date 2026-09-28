@@ -102,6 +102,9 @@ typedef struct {
  * the plaintext (0 none). */
 void buckets_sse_writer_init(buckets_sse_writer *w, const uint8_t key[32], buckets_read_fn rd, void *rd_ud, int64_t size,
                              uint32_t cks_type);
+/* The same with a given DARE nonce (multipart parts use a derived one). */
+void buckets_sse_writer_init_nonce(buckets_sse_writer *w, const uint8_t key[32], const uint8_t *nonce, buckets_read_fn rd,
+                                   void *rd_ud, int64_t size, uint32_t cks_type);
 void buckets_sse_writer_free(buckets_sse_writer *w);
 long buckets_sse_writer_read(void *ud, void *buf, size_t n);
 

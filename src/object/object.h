@@ -156,6 +156,8 @@ const char *buckets_object_meta(const buckets_object_info *oi, const char *key);
 /* A system-metadata entry (case-insensitive key), or NULL. */
 const buckets_xl_kv *buckets_object_sys(const buckets_object_info *oi, const char *key);
 
+struct buckets_part_info_s;
+
 typedef struct {
   const buckets_xl_kv *meta; /* user-defined metadata to store */
   size_t nmeta;
@@ -167,6 +169,10 @@ typedef struct {
    * committed (NULL for multipart parts). Returning an error aborts. */
   buckets_obj_err (*pre_commit)(void *ud, const buckets_checksum *computed, buckets_xl_object *o);
   void *pre_commit_ud;
+  /* Multipart parts: may adjust the part's recorded ETag, actual size and
+   * checksum (encrypted parts record plaintext values) before it is stored. */
+  void (*part_commit)(void *ud, struct buckets_part_info_s *pi);
+  void *part_commit_ud;
   /* Versioning: a new version ID (bucket versioning enabled), or the given
    * one (replication, imports); otherwise the "null" version is replaced. */
   bool versioned;
@@ -289,7 +295,7 @@ size_t buckets_obj_heal_bucket(buckets_objlayer *L, const char *bucket);
 #define BUCKETS_MAX_PARTS 10000
 #define BUCKETS_UPLOAD_ID_MAX 160
 
-typedef struct {
+typedef struct buckets_part_info_s {
   int number;
   char etag[128];
   int64_t size;
@@ -323,10 +329,24 @@ buckets_obj_err buckets_obj_mpu_list_parts(buckets_objlayer *L, const char *buck
                                            const char *upload_id, int marker, int max, buckets_part_info **parts,
                                            size_t *n, bool *truncated);
 buckets_obj_err buckets_obj_mpu_abort(buckets_objlayer *L, const char *bucket, const char *object, const char *upload_id);
+typedef struct {
+  bool versioned;
+  /* The form of a stored part ETag clients were given (encrypted uploads
+   * keep sealed part ETags); NULL: as stored. */
+  void (*client_etag)(void *ud, const char *stored, char out[128]);
+  /* Runs on the final version before it is installed. */
+  buckets_obj_err (*pre_commit)(void *ud, buckets_xl_object *o);
+  void *ud;
+} buckets_complete_opts;
+
 /* want: the final checksum from the request's x-amz-checksum-* header, or NULL. */
 buckets_obj_err buckets_obj_mpu_complete(buckets_objlayer *L, const char *bucket, const char *object,
                                          const char *upload_id, const buckets_complete_part *parts, size_t nparts,
-                                         const buckets_checksum *want, bool versioned, buckets_object_info *out);
+                                         const buckets_checksum *want, const buckets_complete_opts *co,
+                                         buckets_object_info *out);
+/* An upload's metadata (user and system), as object info. */
+buckets_obj_err buckets_obj_mpu_stat(buckets_objlayer *L, const char *bucket, const char *object, const char *upload_id,
+                                     buckets_object_info *out);
 /* Pending uploads for exactly this object (MinIO lists per object). */
 buckets_obj_err buckets_obj_mpu_list_uploads(buckets_objlayer *L, const char *bucket, const char *object,
                                              buckets_upload_info **uploads, size_t *n);
