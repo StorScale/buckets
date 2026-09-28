@@ -25,6 +25,8 @@
 #include "iam/plugins.h"
 #include "bucket/metadata.h"
 #include "bucket/metasys.h"
+#include "scanner/scanner.h"
+#include "scanner/usage.h"
 #include "dist/peer.h"
 #include "s3/bucketname.h"
 #include "s3/errors.h"
@@ -394,11 +396,45 @@ static void *iam_start_main(void *arg) {
   return NULL;
 }
 
+static uint64_t usage_of(void *ud, const char *bucket) {
+  return buckets_usage_cache_bucket_size(ud, bucket);
+}
+
+/* `scanner speed` (MINIO_SCANNER_SPEED): the cycle of scanner.LookupConfig. */
+static int scanner_cycle_seconds(void *ud) {
+  buckets_s3_server *s = ud;
+  char *speed = s->config ? buckets_config_sys_value(s->config, "scanner", "", "speed") : NULL;
+  int secs = 60;
+  if (speed && strcmp(speed, "fastest") == 0) secs = 1;
+  else if (speed && strcmp(speed, "slowest") == 0) secs = 30 * 60;
+  free(speed);
+  return secs;
+}
+
+static bool scanner_versioned(void *ud, const char *bucket, const char *object) {
+  bool enabled, suspended;
+  s3_ctx c = {.s = ud, .bucket = (char *)bucket};
+  buckets_s3_versioning(&c, object, &enabled, &suspended);
+  return enabled || suspended;
+}
+
+void buckets_s3_scanner_hooks(buckets_s3_server *s, void *hooks) {
+  buckets_scanner_hooks *h = hooks;
+  memset(h, 0, sizeof(*h));
+  h->cycle_seconds = scanner_cycle_seconds;
+  h->versioned = scanner_versioned;
+  h->ud = s;
+}
+
 void buckets_s3_server_set_layer(buckets_s3_server *s, buckets_objlayer *layer) {
   uint8_t h[32];
   buckets_sha256(layer->deployment_id_str, strlen(layer->deployment_id_str), h);
   buckets_hex_encode(h, 32, s->host_id);
   s->meta = buckets_metasys_new(layer, s->meta_ttl_ms);
+  s->usage = buckets_xmalloc(sizeof(*s->usage));
+  buckets_usage_cache_init(s->usage, layer, 10000); /* bucketStorageCache: 10s */
+  s->bucket_usage = usage_of;
+  s->bucket_usage_ud = s->usage;
   buckets_metasys_set_notify(s->meta, notify_bucket, s);
   s->layer = layer; /* atomic store, after host_id and meta */
   s->iam_thread_started = pthread_create(&s->iam_thread, NULL, iam_start_main, s) == 0;

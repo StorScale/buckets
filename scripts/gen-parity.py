@@ -140,7 +140,8 @@ STATUS = {
     "GetBucketLoggingHandler": (DONE, "dummy, as MinIO"),
     "GetBucketPolicyStatusHandler": (DONE, ""),
     "GetBucketQuotaConfigHandler": (DONE, ""),
-    "PutBucketQuotaConfigHandler": (PARTIAL, "enforced on object size alone until the scanner reports bucket usage"),
+    "PutBucketQuotaConfigHandler": (DONE, ""),
+    "DataUsageInfoHandler": (DONE, ""),
 }
 
 SOURCES = [

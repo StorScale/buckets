@@ -2118,6 +2118,7 @@ static const route k_routes[] = {
     {"GET", "/idp/builtin/policy-entities", h_policy_entities},
     {"GET", "/get-bucket-quota", buckets_admin_get_bucket_quota},
     {"PUT", "/set-bucket-quota", buckets_admin_set_bucket_quota},
+    {"GET", "/datausageinfo", buckets_admin_data_usage_info},
 };
 
 bool buckets_admin_is_admin_path(buckets_str path) { return buckets_str_has_prefix(path, ADMIN_PREFIX "/"); }

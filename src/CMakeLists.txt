@@ -59,6 +59,8 @@ add_library(buckets STATIC
   erasure/rs.c
   erasure/layout.c
   heal/healer.c
+  scanner/scanner.c
+  scanner/usage.c
   iam/policy.c
   iam/iam.c
   iam/openid.c

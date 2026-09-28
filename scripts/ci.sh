@@ -26,7 +26,7 @@ run tests/integration/tls.sh build-ci/src/bucketsd
 run tests/integration/cluster.sh build-ci/src/bucketsd
 # IAM, identity providers, configuration and service control (these skip
 # without MC_BIN; iam-interop also needs MINIO_BIN).
-for t in iam iam-interop config openid plugins ldap certsts service; do
+for t in iam iam-interop config openid plugins ldap certsts service usage; do
   run tests/integration/$t.sh build-ci/src/bucketsd
 done
 run tests/e2e-k8s/envtest.sh build-ci/operator/buckets-operator
@@ -39,7 +39,7 @@ run tests/integration/heal.sh build-ci-asan/src/bucketsd
 run tests/integration/pools.sh build-ci-asan/src/bucketsd
 run tests/integration/tls.sh build-ci-asan/src/bucketsd
 run tests/integration/cluster.sh build-ci-asan/src/bucketsd
-for t in iam config openid plugins ldap certsts service; do
+for t in iam config openid plugins ldap certsts service usage; do
   run tests/integration/$t.sh build-ci-asan/src/bucketsd
 done
 run tests/integration/s3diff.sh build-ci-asan/src/bucketsd

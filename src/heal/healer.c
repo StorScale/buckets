@@ -31,10 +31,6 @@ struct buckets_healer {
   mrf *head, *tail;
   size_t qlen;
   bool stop, busy, drives_pending;
-  pthread_t scanner;
-  pthread_cond_t scan_cv; /* the scanner's naps; stop wakes it */
-  bool scanner_started;
-  int scan_interval_s;
   buckets_healer_stats st;
 };
 
@@ -234,76 +230,6 @@ static void heal_drives(buckets_healer *h) {
   }
 }
 
-/* ---- scanner ---------------------------------------------------------------------- */
-
-/* Sleeps up to seconds, waking early on stop. Returns false when stopping. */
-static bool nap(buckets_healer *h, int seconds) {
-  struct timespec ts;
-  clock_gettime(CLOCK_REALTIME, &ts);
-  ts.tv_sec += seconds;
-  pthread_mutex_lock(&h->mu);
-  while (!h->stop && pthread_cond_timedwait(&h->scan_cv, &h->mu, &ts) == 0) {
-  }
-  bool go = !h->stop;
-  pthread_mutex_unlock(&h->mu);
-  return go;
-}
-
-static bool leads(buckets_objlayer *L, const char *object) {
-  for (size_t p = 0; p < L->npools; p++) {
-    if (buckets_objlayer_set_is_led_here(L, p, buckets_objlayer_object_set(L, p, object))) return true;
-  }
-  return false;
-}
-
-static void scan_object(buckets_healer *h, const char *bucket, const char *object) {
-  buckets_heal_opts opts = {.remove_dangling = true};
-  buckets_heal_result r;
-  if (buckets_obj_heal(h->L, bucket, object, NULL, &opts, &r) == BUCKETS_OBJ_OK && r.healed) {
-    buckets_log_info("scanner healed %s/%s on %zu drive%s", bucket, object, r.healed, r.healed == 1 ? "" : "s");
-  }
-  pthread_mutex_lock(&h->mu);
-  h->st.scanned++;
-  pthread_mutex_unlock(&h->mu);
-}
-
-static void scan_cycle(buckets_healer *h) {
-  buckets_objlayer *L = h->L;
-  buckets_bucket_info *bk = NULL;
-  size_t nb = 0;
-  if (buckets_obj_list_buckets(L, &bk, &nb) != BUCKETS_OBJ_OK) return;
-  for (size_t b = 0; b < nb && !stopping(h); b++) {
-    buckets_obj_heal_bucket(L, bk[b].name);
-    buckets_buf meta = BUCKETS_BUF_INIT;
-    buckets_buf_appendf(&meta, "buckets/%s/.metadata.bin", bk[b].name);
-    if (leads(L, meta.data)) scan_object(h, BUCKETS_META_BUCKET, meta.data);
-    buckets_buf_free(&meta);
-    char *marker = NULL;
-    for (;;) {
-      buckets_obj_listing l;
-      if (stopping(h) || buckets_obj_list(L, bk[b].name, "", marker, NULL, 1000, &l) != BUCKETS_OBJ_OK) break;
-      for (size_t i = 0; i < l.nobjects && !stopping(h); i++) {
-        if (leads(L, l.objects[i].name)) scan_object(h, bk[b].name, l.objects[i].name);
-      }
-      free(marker);
-      marker = l.truncated && l.next_marker ? buckets_xstrdup(l.next_marker) : NULL;
-      buckets_obj_list_free(&l);
-      if (!marker) break;
-    }
-    free(marker);
-  }
-  buckets_bucket_info_free(bk, nb);
-  pthread_mutex_lock(&h->mu);
-  h->st.scan_cycles++;
-  pthread_mutex_unlock(&h->mu);
-}
-
-static void *scanner(void *arg) {
-  buckets_healer *h = arg;
-  while (nap(h, h->scan_interval_s)) scan_cycle(h);
-  return NULL;
-}
-
 /* ---- the thread ------------------------------------------------------------------ */
 
 static void *run(void *arg) {
@@ -365,7 +291,6 @@ buckets_healer *buckets_healer_start(buckets_objlayer *L) {
   pthread_mutex_init(&h->mu, NULL);
   pthread_cond_init(&h->cv, NULL);
   pthread_cond_init(&h->idle_cv, NULL);
-  pthread_cond_init(&h->scan_cv, NULL);
   /* A drive formatted into an existing pool starts empty: track it. (A whole
    * pool formatted at once is new, not replaced.) */
   for (size_t i = 0; i < L->nall; i++) {
@@ -384,9 +309,6 @@ buckets_healer *buckets_healer_start(buckets_objlayer *L) {
   h->drives_pending = true;
   buckets_objlayer_set_degraded_hook(L, on_degraded, h);
   if (pthread_create(&h->thread, NULL, run, h) != 0) buckets_fatal("start healer thread");
-  const char *iv = getenv("BUCKETS_SCANNER_INTERVAL");
-  h->scan_interval_s = iv ? atoi(iv) : 60;
-  if (h->scan_interval_s > 0) h->scanner_started = pthread_create(&h->scanner, NULL, scanner, h) == 0;
   return h;
 }
 
@@ -396,16 +318,13 @@ void buckets_healer_stop(buckets_healer *h) {
   pthread_mutex_lock(&h->mu);
   h->stop = true;
   pthread_cond_broadcast(&h->cv);
-  pthread_cond_broadcast(&h->scan_cv);
   pthread_mutex_unlock(&h->mu);
   pthread_join(h->thread, NULL);
-  if (h->scanner_started) pthread_join(h->scanner, NULL);
   for (mrf *e = h->head, *next; e; e = next) {
     next = e->next;
     mrf_free(e);
   }
   pthread_cond_destroy(&h->idle_cv);
-  pthread_cond_destroy(&h->scan_cv);
   pthread_cond_destroy(&h->cv);
   pthread_mutex_destroy(&h->mu);
   free(h);

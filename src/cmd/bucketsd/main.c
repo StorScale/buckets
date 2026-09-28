@@ -29,6 +29,7 @@
 #include "s3/server.h"
 #include "erasure/layout.h"
 #include "heal/healer.h"
+#include "scanner/scanner.h"
 #include "object/object.h"
 #include "storage/drive.h"
 #include "storage/format.h"
@@ -341,6 +342,7 @@ typedef struct {
   buckets_s3_server *s3;
   buckets_objlayer *layer;
   buckets_healer *healer;
+  buckets_scanner *scanner;
   atomic_bool stop;
 } boot_state;
 
@@ -410,6 +412,9 @@ static bool bootstrap(boot_state *b) {
   b->layer = layer;
   b->healer = buckets_healer_start(layer);
   buckets_s3_server_set_layer(b->s3, layer);
+  buckets_scanner_hooks hooks;
+  buckets_s3_scanner_hooks(b->s3, &hooks);
+  b->scanner = buckets_scanner_start(layer, &hooks);
   if (t->distributed) buckets_log_info("storage initialized; serving S3");
   return true;
 }
@@ -715,6 +720,7 @@ int main(int argc, char **argv) {
   buckets_s3_server_stop(&s3); /* its background threads use the object layer */
   buckets_http_server_free(app.http);
   buckets_tls_free(tls);
+  buckets_scanner_stop(boot.scanner);
   buckets_healer_stop(boot.healer);
   buckets_loop_free(g_loop);
   if (boot.layer) buckets_objlayer_set_locker(boot.layer, NULL, NULL, NULL);

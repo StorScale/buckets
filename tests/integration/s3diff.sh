@@ -23,6 +23,7 @@ cleanup() {
 }
 trap cleanup EXIT
 export MINIO_ROOT_USER=rootadmin MINIO_ROOT_PASSWORD=rootsecret123
+export MINIO_SCANNER_SPEED=fastest # usage scenarios wait for a scanner cycle
 start() { # minio|buckets drives-dir
   mkdir -p "$2"/d{1..4}
   if [[ $1 == minio ]]; then

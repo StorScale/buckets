@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
-/* Bucket admin APIs (MinIO's admin-bucket-handlers.go): quotas. */
+/* Bucket admin APIs (MinIO's admin-bucket-handlers.go): quotas; and the
+ * scanner's data usage (DataUsageInfoHandler). */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -7,6 +8,8 @@
 #include "admin/admin.h"
 #include "bucket/metasys.h"
 #include "bucket/quota.h"
+#include "object/sysconfig.h"
+#include "scanner/usage.h"
 
 /* vars["bucket"] after pathClean, and GetBucketInfo on it. */
 static const char *admin_bucket(s3_ctx *c) {
@@ -64,6 +67,28 @@ void buckets_admin_get_bucket_quota(s3_ctx *c) {
   buckets_quota none = {0};
   buckets_quota_json(st->has_quota ? &st->quota : &none, &c->resp->body); /* an empty quota when unset */
   buckets_bucket_state_release(st);
+  buckets_http_resp_header(c->resp, "Content-Type", "application/json");
+  c->resp->status = 200;
+}
+
+void buckets_admin_data_usage_info(s3_ctx *c) {
+  if (!buckets_admin_authorize(c, "admin:DataUsageInfo")) return;
+  /* loadDataUsageFromBackend, then the backup */
+  buckets_buf b = BUCKETS_BUF_INIT;
+  buckets_obj_err err = buckets_sysconfig_read(c->s->layer, BUCKETS_USAGE_PATH, &b, NULL);
+  if (err) err = buckets_sysconfig_read(c->s->layer, BUCKETS_USAGE_PATH ".bkp", &b, NULL);
+  buckets_data_usage u;
+  if (!err && buckets_data_usage_parse(b.data, b.len, &u)) {
+    buckets_data_usage_json(&u, &c->resp->body);
+    buckets_data_usage_free(&u);
+  } else {
+    /* DataUsageInfo{}: nothing scanned yet */
+    buckets_buf_append_c(&c->resp->body,
+                         "{\"lastUpdate\":\"0001-01-01T00:00:00Z\",\"objectsCount\":0,\"versionsCount\":0,"
+                         "\"deleteMarkersCount\":0,\"objectsTotalSize\":0,\"objectsReplicationInfo\":null,"
+                         "\"bucketsCount\":0,\"bucketsUsageInfo\":null,\"bucketsSizes\":null}");
+  }
+  buckets_buf_free(&b);
   buckets_http_resp_header(c->resp, "Content-Type", "application/json");
   c->resp->status = 200;
 }

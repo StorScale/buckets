@@ -5,7 +5,7 @@ registers is listed; statuses live in the script's `STATUS` table.
 
 ✅ done · 🟡 partial · ⬜ not started
 
-**Overall:** 111 done, 9 partial, 102 not started (222 handlers).
+**Overall:** 113 done, 8 partial, 101 not started (222 handlers).
 
 ## S3 API (49/76)
 
@@ -90,7 +90,7 @@ Source: `cmd/api-router.go`
 | ⬜ | `SelectObjectContentHandler` |  |
 | ⬜ | `ValidateBucketReplicationCredsHandler` |  |
 
-## Admin API (madmin / mc admin) (51/123)
+## Admin API (madmin / mc admin) (53/123)
 
 Source: `cmd/admin-router.go`
 
@@ -113,7 +113,7 @@ Source: `cmd/admin-router.go`
 | ⬜ | `ClientDevNull` |  |
 | ⬜ | `ClientDevNullExtraTime` |  |
 | ⬜ | `ConsoleLogHandler` |  |
-| ⬜ | `DataUsageInfoHandler` |  |
+| ✅ | `DataUsageInfoHandler` |  |
 | ✅ | `DelConfigKVHandler` |  |
 | ✅ | `DeleteIdentityProviderCfg` |  |
 | ✅ | `DeleteServiceAccount` |  |
@@ -165,7 +165,7 @@ Source: `cmd/admin-router.go`
 | ⬜ | `NetperfHandler` |  |
 | ⬜ | `ObjectSpeedTestHandler` |  |
 | ⬜ | `ProfileHandler` |  |
-| 🟡 | `PutBucketQuotaConfigHandler` | enforced on object size alone until the scanner reports bucket usage |
+| ✅ | `PutBucketQuotaConfigHandler` |  |
 | ⬜ | `RebalanceStart` |  |
 | ⬜ | `RebalanceStatus` |  |
 | ⬜ | `RebalanceStop` |  |

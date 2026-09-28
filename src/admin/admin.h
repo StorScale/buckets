@@ -35,6 +35,8 @@ void buckets_admin_import_iam_v2(s3_ctx *c);
 /* mc quota set|info|clear (bucket.c). */
 void buckets_admin_set_bucket_quota(s3_ctx *c);
 void buckets_admin_get_bucket_quota(s3_ctx *c);
+/* mc admin info's usage: the scanner's stored data usage (bucket.c). */
+void buckets_admin_data_usage_info(s3_ctx *c);
 
 /* Shared helpers (admin.c): validateAdminReq for one action (answers the
  * request itself when it fails), custom-coded errors, IAM store errors. */

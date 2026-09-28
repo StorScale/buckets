@@ -37,6 +37,7 @@ typedef struct buckets_s3_server {
    * for hard quotas; NULL until the scanner provides one. */
   uint64_t (*bucket_usage)(void *ud, const char *bucket);
   void *bucket_usage_ud;
+  struct buckets_usage_cache_s *usage; /* the stored data usage (scanner/usage.h), once the layer is up */
   /* Background threads (IAM start and refresh, LDAP sync), stopped and
    * joined by buckets_s3_server_stop before the object layer is freed. */
   pthread_mutex_t bg_mu;
@@ -57,6 +58,9 @@ void buckets_s3_handle(const buckets_http_request *req, buckets_http_response *r
 /* Stops the background threads; call once requests have drained and
  * before freeing the object layer. */
 void buckets_s3_server_stop(buckets_s3_server *s);
+/* The data scanner's hooks: cycle length from `scanner speed`, bucket
+ * versioning from the metadata cache. */
+void buckets_s3_scanner_hooks(buckets_s3_server *s, void *hooks /* buckets_scanner_hooks */);
 /* Applies peers' notifications (the ud of buckets_peer_server_handle). */
 void buckets_s3_peer_iam(void *server, const char *kind, const char *name);
 void buckets_s3_peer_bucket(void *server, const char *bucket);

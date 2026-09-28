@@ -81,6 +81,7 @@ def norm_body(b):
     b = re.sub(r"<RetainUntilDate>20[0-8][0-9]-[^<]*</RetainUntilDate>", "<RetainUntilDate>(now+)</RetainUntilDate>", b)
     b = re.sub(r"<Owner>.*?</Owner>", "<Owner/>", b)
     b = re.sub(r'"(RequestId|HostId|Resource)":"[^"]*"', r'"\1":""', b)  # admin JSON errors
+    b = re.sub(r'"lastUpdate":"[0-9]{4}-[^"]*"', '"lastUpdate":"(time)"', b)
     b = re.sub(r"<\?xml[^>]*\?>", "", b)
     b = re.sub(r"\[minio_cache:[^\]]*\]", "", b)  # MinIO's metacache hint in markers
     b = re.sub(r">\s+<", "><", b.strip())
@@ -88,6 +89,10 @@ def norm_body(b):
 
 
 for i, st in enumerate(steps):
+    if "sleep" in st:  # {"sleep": seconds}: let background work (the scanner) run
+        import time
+        time.sleep(st["sleep"])
+        continue
     q = sub(st.get("query", ""))
     url = ep + sub(st["path"]) + ("?" + q if q else "")
     open("/tmp/.s3diff.body", "w").close()
