@@ -45,8 +45,28 @@ static void notify_bucket(void *ud, const char *bucket) {
   if (s->peers) buckets_peer_notify_bucket(s->peers, bucket);
 }
 
+void buckets_s3_service(buckets_s3_server *s, const char *action, bool local) {
+  if (local && s->peers) buckets_peer_notify_iam(s->peers, "service", action);
+  if (strcmp(action, "freeze") == 0 || strcmp(action, "unfreeze") == 0) {
+    pthread_mutex_lock(&s->freeze_mu);
+    if (strcmp(action, "freeze") == 0) {
+      s->freeze_cnt++;
+    } else if (s->freeze_cnt > 0 && --s->freeze_cnt == 0) {
+      pthread_cond_broadcast(&s->freeze_cv);
+    }
+    pthread_mutex_unlock(&s->freeze_mu);
+    buckets_log_info("service: S3 API %s", strcmp(action, "freeze") == 0 ? "frozen" : "unfrozen");
+  } else if (s->service) {
+    s->service(s->service_ud, action);
+  }
+}
+
 void buckets_s3_peer_iam(void *server, const char *kind, const char *name) {
   buckets_s3_server *s = server;
+  if (strcmp(kind, "service") == 0) {
+    buckets_s3_service(s, name, false);
+    return;
+  }
   if (strcmp(kind, "config") == 0) {
     if (s->config) buckets_config_sys_reload(s->config);
     return;
@@ -222,6 +242,8 @@ void buckets_s3_server_init(buckets_s3_server *s, buckets_objlayer *layer, const
   s->config = buckets_config_sys_new(root_user, root_password);
   buckets_config_sys_set_hook(s->config, config_changed, s);
   pthread_mutex_init(&s->oidc_mu, NULL);
+  pthread_mutex_init(&s->freeze_mu, NULL);
+  pthread_cond_init(&s->freeze_cv, NULL);
   g_region = s->region;
   buckets_config_register_validator("identity_openid", validate_openid);
   buckets_config_register_validator("identity_ldap", validate_ldap);
@@ -867,6 +889,12 @@ void buckets_s3_handle(const buckets_http_request *req, buckets_http_response *r
     goto fail;
   }
   if ((err = parse_path(&c)) != BUCKETS_ERR_NONE) goto fail;
+  if (!buckets_admin_is_admin_path(req->path) && s->freeze_cnt > 0) {
+    /* frozen (mc admin service freeze): S3 calls wait for the unfreeze */
+    pthread_mutex_lock(&s->freeze_mu);
+    while (s->freeze_cnt > 0) pthread_cond_wait(&s->freeze_cv, &s->freeze_mu);
+    pthread_mutex_unlock(&s->freeze_mu);
+  }
   if (buckets_admin_is_admin_path(req->path)) {
     if ((err = authenticate(&c)) != BUCKETS_ERR_NONE) buckets_admin_error(&c, err);
     else buckets_admin_handle(&c);

@@ -27,6 +27,12 @@ typedef struct buckets_s3_server {
   struct buckets_plugins *plugins; /* policy/identity plugins (guarded by oidc_mu) */
   struct buckets_ldapidp *ldap;    /* identity_ldap, fixed once IAM starts (guarded by oidc_mu) */
   const char *ca_path;             /* extra trusted CAs (certs/CAs), or NULL */
+  pthread_mutex_t freeze_mu; /* mc admin service freeze: S3 requests wait while freeze_cnt > 0 */
+  pthread_cond_t freeze_cv;
+  int freeze_cnt;
+  /* restart / stop the process (set by main), after the response is sent */
+  void (*service)(void *ud, const char *action);
+  void *service_ud;
   char host_id[65];   /* x-amz-id-2 */
   _Atomic uint64_t request_seq;
 } buckets_s3_server;
@@ -45,6 +51,10 @@ char *buckets_s3_peer_server_info(void *server);
 struct buckets_openid *buckets_s3_openid(buckets_s3_server *s);
 /* The current plugins (a reference to release), or NULL. */
 struct buckets_plugins *buckets_s3_plugins(buckets_s3_server *s);
+/* A service action (restart, stop, freeze, unfreeze) on this server; with
+ * local, peers are told as well. */
+void buckets_s3_service(buckets_s3_server *s, const char *action, bool local);
+
 /* The LDAP identity provider (a reference to release), or NULL. */
 struct buckets_ldapidp *buckets_s3_ldap(buckets_s3_server *s);
 

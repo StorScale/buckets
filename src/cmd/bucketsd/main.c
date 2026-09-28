@@ -10,6 +10,9 @@
 #include <strings.h>
 #include <time.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 
 #include "core/log.h"
 #include "dist/dsync.h"
@@ -42,6 +45,17 @@
 
 static buckets_loop *g_loop;
 static volatile sig_atomic_t g_signal;
+static atomic_bool g_restart; /* mc admin service restart: exec ourselves after draining */
+
+/* mc admin service restart|stop: drain as on SIGTERM (the admin response
+ * goes out first), then exit or re-exec. */
+static void on_service(void *ud, const char *action) {
+  (void)ud;
+  if (strcmp(action, "restart") == 0) atomic_store(&g_restart, true);
+  else if (strcmp(action, "stop") != 0) return;
+  g_signal = SIGTERM;
+  if (g_loop) buckets_loop_wake(g_loop);
+}
 
 typedef struct {
   buckets_http_server *http;
@@ -404,7 +418,24 @@ static void *bootstrap_thread(void *arg) {
   return NULL;
 }
 
+/* This executable's path, for re-exec on restart. */
+static void exe_path(const char *argv0, char *out, size_t cap) {
+#ifdef __APPLE__
+  uint32_t n = (uint32_t)cap;
+  if (_NSGetExecutablePath(out, &n) == 0) return;
+#else
+  ssize_t n = readlink("/proc/self/exe", out, cap - 1);
+  if (n > 0) {
+    out[n] = '\0';
+    return;
+  }
+#endif
+  snprintf(out, cap, "%s", argv0);
+}
+
 int main(int argc, char **argv) {
+  static char self_exe[4096];
+  exe_path(argv[0], self_exe, sizeof(self_exe));
   const char *level_s = getenv("BUCKETS_LOG_LEVEL");
   buckets_log_level level;
   if (level_s && buckets_log_parse_level(level_s, &level)) buckets_log_set_level(level);
@@ -566,6 +597,16 @@ int main(int argc, char **argv) {
   long napi = apit ? strtol(apit, NULL, 10) : BUCKETS_MAX(8L, 2 * ncpu);
   buckets_pool *api_pool = napi > 0 ? buckets_pool_new((int)BUCKETS_MIN(napi, 4096L)) : NULL;
   hcfg.workers = api_pool;
+  /* The admin API and health probes get their own workers: a frozen S3 API
+   * (mc admin service freeze) parks its requests, which must not block the
+   * unfreeze or the kubelet's probes. */
+  buckets_pool *control_pool = api_pool ? buckets_pool_new(4) : NULL;
+  if (control_pool) {
+    static const char *const control[] = {"/minio/admin/", "/minio/health/", "/buckets/health/"};
+    for (size_t i = 0; i < BUCKETS_ARRAY_LEN(control); i++)
+      hcfg.routes[hcfg.nroutes++] = (buckets_http_route){control[i], buckets_s3_handle, &s3, control_pool};
+  }
+  s3.service = on_service;
 
   /* Internode RPC gets its own workers, so peers never wait behind clients
    * (two nodes filling each other's pools with S3 requests would deadlock). */
@@ -659,7 +700,13 @@ int main(int argc, char **argv) {
 
   atomic_store(&boot.stop, true);
   if (boot_started) pthread_join(boot_thread, NULL);
+  /* A frozen API would hold its workers forever. */
+  pthread_mutex_lock(&s3.freeze_mu);
+  s3.freeze_cnt = 0;
+  pthread_cond_broadcast(&s3.freeze_cv);
+  pthread_mutex_unlock(&s3.freeze_mu);
   buckets_pool_free(api_pool); /* finishes in-flight handlers before their connections go */
+  buckets_pool_free(control_pool);
   buckets_pool_free(internode_pool);
   buckets_http_server_free(app.http);
   buckets_tls_free(tls);
@@ -676,6 +723,12 @@ int main(int argc, char **argv) {
   buckets_io_pool_set(NULL);
   buckets_pool_free(io_pool);
   free(host);
+  if (atomic_load(&g_restart)) {
+    buckets_log_info("bucketsd restarting");
+    execv(self_exe, argv);
+    buckets_log_error("restart: exec %s: %s", self_exe, strerror(errno));
+    return 1;
+  }
   buckets_log_info("bucketsd stopped");
   return rc == 0 ? 0 : 1;
 }

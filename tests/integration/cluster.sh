@@ -125,6 +125,13 @@ if [[ -n "${MC_BIN:-}" ]]; then
   info=$(mcc admin info n2 --json)
   expect "admin info: servers online" "$(grep -o '"state":"online"' <<<"$info" | wc -l | tr -d ' ')" 4
   expect "admin info: drives online" "$(sed -n 's/.*"onlineDisks":\([0-9]*\).*/\1/p' <<<"$info")" 8
+  mcc admin service freeze n1 >/dev/null
+  sleep 1
+  expect "frozen via node 1, node 3 holds S3 calls" "$(status --max-time 2 "$(ep 3)/clusterbucket/small.bin")" 000
+  expect "frozen: health still answers" "$(anon "$(ep 3)/minio/health/live")" 200
+  mcc admin service unfreeze n2 >/dev/null
+  sleep 1
+  expect "unfrozen via node 2, node 3 serves" "$(status "$(ep 3)/clusterbucket/small.bin")" 200
 else
   echo "  (set MC_BIN for the admin API checks)"
 fi

@@ -88,7 +88,7 @@ typedef struct {
   buckets_pool *workers; /* NULL: inline on the loop thread */
 } buckets_http_route;
 
-#define BUCKETS_HTTP_MAX_ROUTES 4
+#define BUCKETS_HTTP_MAX_ROUTES 16
 
 typedef struct {
   const char *host; /* NULL or "" binds all interfaces */

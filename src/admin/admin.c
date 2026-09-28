@@ -3,6 +3,7 @@
  * canned policies, policy mappings and service accounts.
  * Replaces MinIO's cmd/admin-handlers-users.go. */
 #include "admin/admin.h"
+#include "admin/info.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -1945,6 +1946,43 @@ out:
   buckets_openid_release(o);
 }
 
+/* ServiceV2Handler (and the older ServiceHandler): restart, stop, freeze, unfreeze. */
+static void h_service(s3_ctx *c) {
+  const char *action = qget(c, "action");
+  const char *perm;
+  if (strcmp(action, "restart") == 0) perm = "admin:ServiceRestart";
+  else if (strcmp(action, "stop") == 0) perm = "admin:ServiceStop";
+  else if (strcmp(action, "freeze") == 0 || strcmp(action, "unfreeze") == 0) perm = "admin:ServiceFreeze";
+  else {
+    buckets_admin_error(c, BUCKETS_ERR_MALFORMED_POST_REQUEST);
+    return;
+  }
+  if (!admin_req1(c, perm)) return;
+  bool dry = strcmp(qget(c, "dry-run"), "true") == 0;
+  bool process = strcmp(action, "restart") == 0 || strcmp(action, "stop") == 0;
+  if (strcmp(qget(c, "type"), "2") == 0) {
+    yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *root = yyjson_mut_obj(d);
+    yyjson_mut_doc_set_root(d, root);
+    yyjson_mut_obj_add_strcpy(d, root, "action", action);
+    yyjson_mut_obj_add_bool(d, root, "dryRun", dry);
+    if (process) {
+      yyjson_mut_val *res = yyjson_mut_obj_add_arr(d, root, "results");
+      const buckets_cluster_info *ci = c->s->cluster;
+      for (size_t i = 0; ci && i < ci->nnodes; i++) {
+        yyjson_mut_val *e = yyjson_mut_arr_add_obj(d, res);
+        yyjson_mut_obj_add_strcpy(d, e, "host", ci->nodes[i]);
+      }
+      if (!ci || !ci->nnodes) yyjson_mut_obj_add_str(d, yyjson_mut_arr_add_obj(d, res), "host", "127.0.0.1");
+    }
+    write_json(c, d, false);
+    yyjson_mut_doc_free(d);
+  } else {
+    c->resp->status = 200;
+  }
+  if (!dry || !process) buckets_s3_service(c->s, action, true);
+}
+
 /* RevokeTokens: /revoke-tokens/{userProvider} */
 static void h_revoke_tokens(s3_ctx *c) {
   if (!admin_signed(c)) return;
@@ -2060,6 +2098,7 @@ static const route k_routes[] = {
     {"DELETE", "/delete-service-account", h_delete_svc},
     {"GET", "/list-access-keys-bulk", h_list_access_keys_bulk},
     {"POST", "/revoke-tokens/*", h_revoke_tokens},
+    {"POST", "/service", h_service},
     {"GET", "/export-iam", buckets_admin_export_iam},
     {"PUT", "/import-iam", buckets_admin_import_iam},
     {"PUT", "/import-iam-v2", buckets_admin_import_iam_v2},

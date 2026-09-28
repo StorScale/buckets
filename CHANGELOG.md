@@ -73,6 +73,7 @@ All notable changes to this project are documented here. The format follows
     - `tests/integration/ldap.sh` runs `mc idp ldap` against a mock directory (`ldapmock.py`), over plain LDAP, LDAPS and StartTLS
   - `mc admin accesskey sts-revoke` (`revoke-tokens`, by token type or all), `mc idp openid accesskey ls` (`idp/openid/list-access-keys-bulk`), and the provider details (`userProvider`, LDAP user, OpenID config and claims) in `info-access-key`
   - `mc admin cluster iam export|import` (`export-iam`, `import-iam`, `import-iam-v2`): the zip of policies, users, groups, service accounts and mappings, with MinIO's import semantics (LDAP DN normalization included); archives move between MinIO and bucketsd in both directions (`iam-interop.sh`). `src/core/zip.c` reads and writes the archives on libdeflate, now a dependency.
+  - `mc admin service restart|stop|freeze|unfreeze` (`service`, v1 and v2 responses), applied across the cluster: freeze holds S3 calls until unfreeze, restart drains and re-executes the server in place, stop drains and exits. The admin API and health probes now run on their own small worker pool, so a frozen API never blocks them (`tests/integration/service.sh`, and three new `cluster.sh` checks).
   - admin `accountinfo`: the effective policy (consoleAdmin for root or with an authorization plugin, role or claim policies, else the mapped ones), the backend layout, and the buckets the account can read or write. Usage figures and bucket feature details stay zero until the scanner and bucket metadata land.
   - `mc idp openid|ldap add|update|info|ls|rm` (the `idp-config` admin API): configuration shown without defaults or secrets, with its environment overrides, role ARNs and live state, and LDAP validation errors in MinIO's format
   - The server configuration (`src/config`), a port of MinIO's `internal/config`:
@@ -86,6 +87,7 @@ All notable changes to this project are documented here. The format follows
   - S3 requests authenticate against IAM, covering users, service accounts and STS with session-token checks. Each route is authorized with MinIO's policy action, using MinIO's condition values (`getConditionValues`), including copy sources, DeleteObjects keys and POST policy uploads. Keys that are disabled or unknown before IAM loads get MinIO's error codes.
 
 ### Fixed
+- The HTTP server allows 16 prefix routes (was 4, too few once internode and control routes are both present).
 - The inherited policy reported for a service account now includes its parent's group policies.
 - RFC 3339 parsing no longer relies on `timegm()`, which fails on macOS for Go's zero time (year 1).
 - ctest now registers tests outside `tests/unit` (`enable_testing()` moved before the subdirectories).
