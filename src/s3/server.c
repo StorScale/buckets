@@ -27,6 +27,7 @@
 #include "bucket/metasys.h"
 #include "kms/kms.h"
 #include "bucket/objectlock.h"
+#include "s3/sse.h"
 #include "scanner/scanner.h"
 #include "scanner/usage.h"
 #include "dist/peer.h"
@@ -554,6 +555,15 @@ static void common_headers(s3_ctx *c) {
 }
 
 void buckets_s3_write_error_msg(s3_ctx *c, buckets_s3_error e, const char *message) {
+  /* KMS failures carry MinIO's kms.Error codes, outside the table */
+  if (e == BUCKETS_SSE_ERR_KMS_KEY_NOT_FOUND) {
+    buckets_s3_write_custom_error(c, 404, "kms:KeyNotFound", "key with given key ID does not exist");
+    return;
+  }
+  if (e == BUCKETS_SSE_ERR_KMS_DECRYPT) {
+    buckets_s3_write_custom_error(c, 400, "kms:InvalidCiphertextException", "failed to decrypt ciphertext");
+    return;
+  }
   const buckets_s3_error_info *info = buckets_s3_error_get(e);
   c->resp->status = info->status;
   buckets_http_resp_header(c->resp, "Content-Type", "application/xml");
@@ -577,8 +587,8 @@ void buckets_s3_write_rejected(s3_ctx *c) {
 /* Real MinIO sub-resources not implemented yet: NotImplemented rather than
  * falling through to the catch-all bucket routes. */
 static bool pending_subresource(const s3_ctx *c, bool put) {
-  static const char *const put_pending[] = {"encryption", "notification", "replication", "replication-reset"};
-  static const char *const del_pending[] = {"encryption", "replication"};
+  static const char *const put_pending[] = {"notification", "replication", "replication-reset"};
+  static const char *const del_pending[] = {"replication"};
   const char *const *list = put ? put_pending : del_pending;
   size_t n = put ? BUCKETS_ARRAY_LEN(put_pending) : BUCKETS_ARRAY_LEN(del_pending);
   for (size_t i = 0; i < n; i++)
@@ -1066,6 +1076,61 @@ static void delete_bucket_policy(s3_ctx *c) {
   c->resp->status = 204;
 }
 
+/* PutBucketEncryptionHandler / GetBucketEncryptionHandler */
+static void put_bucket_encryption(s3_ctx *c) {
+  buckets_s3_error derr = buckets_s3_read_doc(c);
+  if (derr) {
+    buckets_s3_write_error(c, derr);
+    return;
+  }
+  buckets_sse_config cfg;
+  char err[256];
+  if (!buckets_sse_config_parse(c->doc.data ? c->doc.data : "", c->doc.len, &cfg, err, sizeof(err))) {
+    char msg[400];
+    snprintf(msg, sizeof(msg), "%s (%s)", buckets_s3_error_get(BUCKETS_ERR_MALFORMED_XML)->message, err);
+    buckets_s3_write_error_msg(c, BUCKETS_ERR_MALFORMED_XML, msg);
+    return;
+  }
+  if (!c->s->kms) {
+    buckets_s3_write_error(c, BUCKETS_ERR_KMS_NOT_CONFIGURED);
+    return;
+  }
+  const char *key = buckets_sse_config_key(&cfg);
+  if (*key) { /* a test key operation, as MinIO does */
+    uint8_t plain[32];
+    char id[256];
+    buckets_buf ct = BUCKETS_BUF_INIT;
+    buckets_kms_err ke = buckets_kms_generate(c->s->kms, key, "{\"MinIO admin API\":\"ServerInfoHandler\"}", plain, &ct, id, sizeof(id));
+    buckets_buf_free(&ct);
+    if (ke == BUCKETS_KMS_ERR_KEY_NOT_FOUND) {
+      buckets_s3_write_custom_error(c, 404, "kms:KeyNotFound", "key with given key ID does not exist");
+      return;
+    }
+    if (ke) {
+      buckets_s3_write_error(c, BUCKETS_ERR_INTERNAL_ERROR);
+      return;
+    }
+  }
+  buckets_buf x = BUCKETS_BUF_INIT;
+  buckets_sse_config_xml(&cfg, &x);
+  bool ok = buckets_metasys_update(c->s->meta, c->bucket, BUCKETS_BCFG_ENCRYPTION, x.data, x.len);
+  buckets_buf_free(&x);
+  if (!ok) buckets_s3_write_error(c, BUCKETS_ERR_INTERNAL_ERROR);
+  else c->resp->status = 200;
+}
+
+static void get_bucket_encryption(s3_ctx *c) {
+  buckets_bucket_state *st = buckets_metasys_get(c->s->meta, c->bucket);
+  if (!st->has_sse) {
+    buckets_bucket_state_release(st);
+    buckets_s3_write_error(c, BUCKETS_ERR_NO_SUCH_BUCKET_SSE_CONFIG);
+    return;
+  }
+  buckets_sse_config_xml(&st->sse, &c->resp->body);
+  buckets_bucket_state_release(st);
+  buckets_s3_write_xml(c, 200);
+}
+
 /* Query keys that select a bucket sub-resource (as opposed to list parameters). */
 static bool has_unhandled_subresource(const buckets_query *q) {
   static const char *const list_params[] = {"prefix",     "delimiter",          "marker",      "max-keys",
@@ -1098,6 +1163,7 @@ static bool authorize_bucket_request(s3_ctx *c) {
     else if (buckets_query_has(&c->q, "object-lock")) action = "s3:PutBucketObjectLockConfiguration";
     else if (buckets_query_has(&c->q, "tagging")) action = "s3:PutBucketTagging";
     else if (buckets_query_has(&c->q, "lifecycle")) action = "s3:PutLifecycleConfiguration";
+    else if (buckets_query_has(&c->q, "encryption")) action = "s3:PutEncryptionConfiguration";
     else if (!pending_subresource(c, true)) action = "s3:CreateBucket"; /* the catch-all PUT route */
   } else if (buckets_str_eq_c(m, "HEAD")) {
     if (buckets_s3_authorize(c, "s3:HeadBucket", c->bucket, NULL, NULL) == BUCKETS_ERR_NONE) return true;
@@ -1106,6 +1172,7 @@ static bool authorize_bucket_request(s3_ctx *c) {
     buckets_str force = buckets_http_header_get(c->req, "X-Minio-Force-Delete");
     if (buckets_query_has(&c->q, "tagging")) action = "s3:PutBucketTagging"; /* as MinIO */
     else if (buckets_query_has(&c->q, "lifecycle")) action = "s3:PutLifecycleConfiguration"; /* as MinIO */
+    else if (buckets_query_has(&c->q, "encryption")) action = "s3:PutEncryptionConfiguration"; /* as MinIO */
     else if (!pending_subresource(c, false))
       action = force.p && buckets_str_ieq_c(force, "true") ? "s3:ForceDeleteBucket" : "s3:DeleteBucket";
   } else if (buckets_str_eq_c(m, "GET")) {
@@ -1115,6 +1182,7 @@ static bool authorize_bucket_request(s3_ctx *c) {
     else if (buckets_query_has(&c->q, "object-lock")) action = "s3:GetBucketObjectLockConfiguration";
     else if (buckets_query_has(&c->q, "tagging")) action = "s3:GetBucketTagging";
     else if (buckets_query_has(&c->q, "lifecycle")) action = "s3:GetLifecycleConfiguration";
+    else if (buckets_query_has(&c->q, "encryption")) action = "s3:GetEncryptionConfiguration";
     else if (buckets_query_has(&c->q, "uploads")) action = "s3:ListBucketMultipartUploads";
     else if (!has_unhandled_subresource(&c->q)) action = "s3:ListBucket";
   }
@@ -1255,6 +1323,11 @@ static void route_bucket(s3_ctx *c) {
       else buckets_s3_put_bucket_lifecycle(c);
       return;
     }
+    if (buckets_query_has(&c->q, "encryption")) {
+      if (!bucket_exists(c)) buckets_s3_write_error(c, BUCKETS_ERR_NO_SUCH_BUCKET);
+      else put_bucket_encryption(c);
+      return;
+    }
     if (pending_subresource(c, true)) {
       buckets_s3_write_error(c, BUCKETS_ERR_NOT_IMPLEMENTED);
       return;
@@ -1289,6 +1362,11 @@ static void route_bucket(s3_ctx *c) {
       buckets_s3_delete_bucket_lifecycle(c);
       return;
     }
+    if (buckets_query_has(&c->q, "encryption")) {
+      if (!buckets_metasys_update(c->s->meta, c->bucket, BUCKETS_BCFG_ENCRYPTION, NULL, 0)) buckets_s3_write_error(c, BUCKETS_ERR_INTERNAL_ERROR);
+      else c->resp->status = 204;
+      return;
+    }
     if (pending_subresource(c, false)) {
       buckets_s3_write_error(c, BUCKETS_ERR_NOT_IMPLEMENTED);
       return;
@@ -1309,6 +1387,8 @@ static void route_bucket(s3_ctx *c) {
       buckets_s3_get_bucket_tagging(c);
     } else if (buckets_query_has(&c->q, "lifecycle")) {
       buckets_s3_get_bucket_lifecycle(c);
+    } else if (buckets_query_has(&c->q, "encryption")) {
+      get_bucket_encryption(c);
     } else if (buckets_query_has(&c->q, "uploads")) {
       buckets_s3_list_uploads(c);
     } else if (has_unhandled_subresource(&c->q)) {

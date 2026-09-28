@@ -534,5 +534,149 @@
   "path": "/ssebkt",
   "query": "list-type=2&prefix=mpenc",
   "label": "list multipart encrypted"
+ },
+ {
+  "method": "PUT",
+  "path": "/ssedef"
+ },
+ {
+  "method": "GET",
+  "path": "/ssedef",
+  "query": "encryption",
+  "label": "no bucket encryption"
+ },
+ {
+  "method": "PUT",
+  "path": "/ssedef",
+  "query": "encryption",
+  "label": "bad algorithm",
+  "body": "<ServerSideEncryptionConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Rule><ApplyServerSideEncryptionByDefault><SSEAlgorithm>DES</SSEAlgorithm></ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>"
+ },
+ {
+  "method": "PUT",
+  "path": "/ssedef",
+  "query": "encryption",
+  "label": "aes with key",
+  "body": "<ServerSideEncryptionConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Rule><ApplyServerSideEncryptionByDefault><SSEAlgorithm>AES256</SSEAlgorithm><KMSMasterKeyID>k</KMSMasterKeyID></ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>"
+ },
+ {
+  "method": "PUT",
+  "path": "/ssedef",
+  "query": "encryption",
+  "label": "kms without key",
+  "body": "<ServerSideEncryptionConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Rule><ApplyServerSideEncryptionByDefault><SSEAlgorithm>aws:kms</SSEAlgorithm></ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>"
+ },
+ {
+  "method": "PUT",
+  "path": "/ssedef",
+  "query": "encryption",
+  "label": "kms unknown key",
+  "body": "<ServerSideEncryptionConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Rule><ApplyServerSideEncryptionByDefault><SSEAlgorithm>aws:kms</SSEAlgorithm><KMSMasterKeyID>nope</KMSMasterKeyID></ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>"
+ },
+ {
+  "method": "PUT",
+  "path": "/ssedef",
+  "query": "encryption",
+  "label": "two rules",
+  "body": "<ServerSideEncryptionConfiguration><Rule/><Rule/></ServerSideEncryptionConfiguration>"
+ },
+ {
+  "method": "PUT",
+  "path": "/ssedef",
+  "query": "encryption",
+  "label": "wrong root",
+  "body": "<Encryption/>"
+ },
+ {
+  "method": "PUT",
+  "path": "/ssedef",
+  "query": "encryption",
+  "label": "default sse-s3",
+  "body": "<ServerSideEncryptionConfiguration><Rule><ApplyServerSideEncryptionByDefault><SSEAlgorithm>AES256</SSEAlgorithm></ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>"
+ },
+ {
+  "method": "GET",
+  "path": "/ssedef",
+  "query": "encryption",
+  "label": "get default sse-s3"
+ },
+ {
+  "method": "PUT",
+  "path": "/ssedef/auto.txt",
+  "body": "auto encrypted",
+  "label": "put picks the default",
+  "show": [
+   "x-amz-server-side-encryption",
+   "etag"
+  ]
+ },
+ {
+  "method": "HEAD",
+  "path": "/ssedef/auto.txt",
+  "label": "head defaulted object",
+  "show": [
+   "x-amz-server-side-encryption",
+   "content-length"
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/ssedef",
+  "query": "encryption",
+  "label": "default sse-kms",
+  "body": "<ServerSideEncryptionConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Rule><ApplyServerSideEncryptionByDefault><SSEAlgorithm>aws:kms</SSEAlgorithm><KMSMasterKeyID>arn:aws:kms:s3diff-key</KMSMasterKeyID></ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>"
+ },
+ {
+  "method": "GET",
+  "path": "/ssedef",
+  "query": "encryption",
+  "label": "get default sse-kms"
+ },
+ {
+  "method": "PUT",
+  "path": "/ssedef/auto2.txt",
+  "body": "kms by default",
+  "label": "put picks the kms default",
+  "show": [
+   "x-amz-server-side-encryption",
+   "x-amz-server-side-encryption-aws-kms-key-id"
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/ssedef/copy.txt",
+  "headers": {
+   "X-Amz-Copy-Source": "/ssebkt/plain-src.txt"
+  },
+  "label": "copy into a bucket with a default"
+ },
+ {
+  "method": "HEAD",
+  "path": "/ssedef/copy.txt",
+  "label": "copy got the default",
+  "show": [
+   "x-amz-server-side-encryption"
+  ]
+ },
+ {
+  "method": "DELETE",
+  "path": "/ssedef",
+  "query": "encryption",
+  "label": "delete bucket encryption"
+ },
+ {
+  "method": "GET",
+  "path": "/ssedef",
+  "query": "encryption",
+  "label": "after delete"
+ },
+ {
+  "method": "PUT",
+  "path": "/ssedef/plain.txt",
+  "body": "not encrypted",
+  "label": "put after default removed",
+  "show": [
+   "x-amz-server-side-encryption"
+  ]
  }
 ]

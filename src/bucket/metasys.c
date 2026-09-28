@@ -81,6 +81,12 @@ static buckets_bucket_state *build(const char *bucket, buckets_bucket_meta *meta
     st->has_lifecycle = buckets_lifecycle_parse(lcx->data, lcx->len, false, &st->lifecycle, &lerr);
     if (!st->has_lifecycle) buckets_log_warn("bucket %s: stored lifecycle configuration does not parse: %s", bucket, lerr.msg);
   }
+  const buckets_buf *ssex = &st->meta.config[BUCKETS_BCFG_ENCRYPTION];
+  if (ssex->len) {
+    char err[256];
+    st->has_sse = buckets_sse_config_parse(ssex->data, ssex->len, &st->sse, err, sizeof(err));
+    if (!st->has_sse) buckets_log_warn("bucket %s: stored encryption configuration does not parse: %s", bucket, err);
+  }
   const buckets_buf *qt = &st->meta.config[BUCKETS_BCFG_QUOTA];
   if (qt->len) {
     char err[256];

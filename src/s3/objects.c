@@ -447,6 +447,30 @@ static void part_nonce(const char *upload_id, int part, uint8_t nonce[12]) {
   memcpy(nonce, sum, 12);
 }
 
+buckets_s3_error buckets_s3_sse_put(s3_ctx *c, const buckets_sse_req *r, const char *object, buckets_read_fn rd, void *ud,
+                                    int64_t size, const buckets_xl_kv *meta, size_t nmeta, const buckets_checksum *want,
+                                    buckets_object_info *out, char etag_out[80]) {
+  cks_ctx cx = {0};
+  if (want && want->type) cx.want = *want;
+  body_src nob = {0};
+  sse_put sp = {.cx = &cx, .b = &nob};
+  buckets_s3_error e = buckets_s3_sse_new_key(c, r, c->bucket, object, sp.key, &sp.sys, &sp.nsys);
+  if (e) return e;
+  buckets_sse_writer w;
+  buckets_sse_writer_init(&w, sp.key, rd, ud, size, cx.want.type & BUCKETS_CKSUM_BASE_MASK);
+  sp.w = &w;
+  buckets_put_opts opts = {.meta = meta, .nmeta = nmeta, .pre_commit = sse_pre_commit, .pre_commit_ud = &sp};
+  bool suspended;
+  buckets_s3_versioning(c, object, &opts.versioned, &suspended);
+  buckets_obj_err err = buckets_obj_put(c->s->layer, c->bucket, object, buckets_sse_writer_read, &w,
+                                        (int64_t)buckets_dare_encrypted_size((uint64_t)size), &opts, out);
+  buckets_sse_writer_free(&w);
+  free_kvs(sp.sys, sp.nsys);
+  if (!err) buckets_s3_sse_client_etag(c, out, sp.key, etag_out);
+  OPENSSL_cleanse(sp.key, sizeof(sp.key));
+  return err ? buckets_s3_obj_error(err) : BUCKETS_ERR_NONE;
+}
+
 /* The response of an encrypted write: its SSE headers and the ETag clients see. */
 static void sse_put_response(s3_ctx *c, const buckets_object_info *oi, const uint8_t key[32]) {
   char etag[80];

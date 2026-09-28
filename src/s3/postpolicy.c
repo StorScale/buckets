@@ -19,6 +19,7 @@
 #include "bucket/tags.h"
 #include "s3/internal.h"
 #include "s3/sigv2.h"
+#include "s3/sse.h"
 #include "s3/xml.h"
 
 #define MAX_FIELD 20 * 1024 * 1024 /* MinIO: 2 x 10 MiB form memory */
@@ -713,13 +714,21 @@ void buckets_s3_post_policy(s3_ctx *c) {
     } else if (have_policy && policy.range_valid && size > policy.range_max) {
       err = BUCKETS_ERR_ENTITY_TOO_LARGE;
     }
-    /* SSE form fields: refused until server-side encryption lands (see objects.c). */
-    for (size_t i = 0; i < fs.n && !err; i++) {
-      if (strncasecmp(fs.items[i].name, "X-Amz-Server-Side-Encryption", 28) != 0) continue;
-      bool ssec = strncasecmp(fs.items[i].name, "X-Amz-Server-Side-Encryption-Customer", 37) == 0;
-      err = ssec && !c->req->secure ? BUCKETS_ERR_INSECURE_SSE_CUSTOMER_REQUEST
-            : ssec                  ? BUCKETS_ERR_NOT_IMPLEMENTED
-                                    : BUCKETS_ERR_KMS_NOT_CONFIGURED;
+    /* SSE form fields (and the bucket's default): parsed like request
+     * headers, from a request carrying the form fields as headers */
+    buckets_http_request form_req = *c->req;
+    form_req.nheaders = 0;
+    for (size_t i = 0; i < fs.n && form_req.nheaders < BUCKETS_HTTP_MAX_HEADERS; i++) {
+      form_req.headers[form_req.nheaders++] = (buckets_http_header){buckets_str_c(fs.items[i].name), buckets_str_c(fs.items[i].value)};
+    }
+    buckets_sse_req sse = {0};
+    if (!err) {
+      const buckets_http_request *saved = c->req;
+      c->req = &form_req;
+      bool ssec = buckets_http_header_get(c->req, "X-Amz-Server-Side-Encryption-Customer-Algorithm").p != NULL;
+      if (ssec && !saved->secure) err = BUCKETS_ERR_INSECURE_SSE_CUSTOMER_REQUEST;
+      else err = buckets_s3_sse_parse(c, &sse);
+      c->req = saved;
     }
     /* x-amz-checksum-* can arrive as form fields (minio-go PostPolicy.SetChecksum). */
     buckets_checksum want = {0};
@@ -733,16 +742,27 @@ void buckets_s3_post_policy(s3_ctx *c) {
       else if (want.type & BUCKETS_CKSUM_TRAILING) want.type = 0;
     }
     buckets_object_info oi;
+    char enc_etag[80];
     if (!err) {
       buckets_http_request staged_req = {.body_fd = fd, .body_len = size};
       buckets_http_body_cursor sc = {&staged_req, 0};
       post_cks_ctx pc = {.want = want};
       buckets_put_opts opts = {.meta = meta, .nmeta = nmeta, .checksum_type = want.type & BUCKETS_CKSUM_BASE_MASK,
                                .pre_commit = post_cks_check, .pre_commit_ud = &pc};
-      buckets_obj_err oe = buckets_obj_put(c->s->layer, c->bucket, object, (buckets_read_fn)buckets_http_body_read, &sc,
-                                           size, &opts, &oi);
-      if (oe) err = buckets_s3_obj_error(oe);
+      if (sse.kind) {
+        const buckets_http_request *saved = c->req;
+        c->req = &form_req; /* SSE-C keys come from the form */
+        err = buckets_s3_sse_put(c, &sse, object, (buckets_read_fn)buckets_http_body_read, &sc, size, meta, nmeta, &want, &oi,
+                                 enc_etag);
+        c->req = saved;
+        if (!err) snprintf(oi.etag, sizeof(oi.etag), "%s", enc_etag);
+      } else {
+        buckets_obj_err oe = buckets_obj_put(c->s->layer, c->bucket, object, (buckets_read_fn)buckets_http_body_read, &sc,
+                                             size, &opts, &oi);
+        if (oe) err = buckets_s3_obj_error(oe);
+      }
     }
+    buckets_sse_req_free(&sse);
     if (fd >= 0) close(fd);
     free(tmpf);
     for (size_t i = 0; i < nmeta; i++) {
@@ -796,7 +816,8 @@ void buckets_s3_post_policy(s3_ctx *c) {
       buckets_object_info_free(&oi);
     }
   }
-  if (err) buckets_s3_write_error_msg(c, err, errmsg.len ? errmsg.data : NULL);
+  if (err == BUCKETS_SSE_ERR_KMS_KEY_NOT_FOUND || err == BUCKETS_SSE_ERR_KMS_DECRYPT) buckets_s3_sse_write_error(c, err);
+  else if (err) buckets_s3_write_error_msg(c, err, errmsg.len ? errmsg.data : NULL);
   buckets_buf_free(&errmsg);
   if (have_policy) policy_free(&policy);
   fields_free(&fs);

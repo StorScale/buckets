@@ -5,9 +5,9 @@ registers is listed; statuses live in the script's `STATUS` table.
 
 ✅ done · 🟡 partial · ⬜ not started
 
-**Overall:** 116 done, 8 partial, 98 not started (222 handlers).
+**Overall:** 121 done, 6 partial, 95 not started (222 handlers).
 
-## S3 API (52/76)
+## S3 API (57/76)
 
 Source: `cmd/api-router.go`
 
@@ -15,10 +15,10 @@ Source: `cmd/api-router.go`
 |---|---|---|
 | ✅ | `AbortMultipartUploadHandler` |  |
 | ✅ | `CompleteMultipartUploadHandler` |  |
-| 🟡 | `CopyObjectHandler` | no SSE yet |
+| ✅ | `CopyObjectHandler` |  |
 | ✅ | `CopyObjectPartHandler` |  |
 | ✅ | `DeleteBucketCorsHandler` | dummy, as MinIO |
-| ⬜ | `DeleteBucketEncryptionHandler` |  |
+| ✅ | `DeleteBucketEncryptionHandler` |  |
 | 🟡 | `DeleteBucketHandler` | no x-minio-force-delete |
 | ✅ | `DeleteBucketLifecycleHandler` |  |
 | ✅ | `DeleteBucketPolicyHandler` |  |
@@ -31,7 +31,7 @@ Source: `cmd/api-router.go`
 | ✅ | `GetBucketACLHandler` | canned private, as MinIO |
 | ✅ | `GetBucketAccelerateHandler` | dummy, as MinIO |
 | ✅ | `GetBucketCorsHandler` | dummy, as MinIO; CORS is the global api cors_allow_origin |
-| ⬜ | `GetBucketEncryptionHandler` |  |
+| ✅ | `GetBucketEncryptionHandler` |  |
 | ✅ | `GetBucketLifecycleHandler` |  |
 | ✅ | `GetBucketLocationHandler` |  |
 | ✅ | `GetBucketLoggingHandler` | dummy, as MinIO |
@@ -48,13 +48,13 @@ Source: `cmd/api-router.go`
 | ✅ | `GetBucketWebsiteHandler` | dummy, as MinIO |
 | ✅ | `GetObjectACLHandler` | canned private, as MinIO |
 | ✅ | `GetObjectAttributesHandler` |  |
-| 🟡 | `GetObjectHandler` | no SSE/compression/zip-extract yet |
+| 🟡 | `GetObjectHandler` | no compression/zip-extract yet |
 | ⬜ | `GetObjectLambdaHandler` |  |
 | ✅ | `GetObjectLegalHoldHandler` |  |
 | ✅ | `GetObjectRetentionHandler` |  |
 | ✅ | `GetObjectTaggingHandler` |  |
 | ✅ | `HeadBucketHandler` |  |
-| 🟡 | `HeadObjectHandler` | no SSE/compression yet |
+| 🟡 | `HeadObjectHandler` | no compression yet |
 | ✅ | `ListBucketsHandler` |  |
 | ✅ | `ListMultipartUploadsHandler` | per-object listing, like MinIO |
 | ✅ | `ListObjectPartsHandler` |  |
@@ -65,11 +65,11 @@ Source: `cmd/api-router.go`
 | ✅ | `ListObjectsV2MHandler` | metadata=true extension |
 | ⬜ | `ListenNotificationHandler` |  |
 | ✅ | `NewMultipartUploadHandler` |  |
-| 🟡 | `PostPolicyBucketHandler` | no SSE form fields yet |
+| ✅ | `PostPolicyBucketHandler` |  |
 | ⬜ | `PostRestoreObjectHandler` |  |
 | ✅ | `PutBucketACLHandler` | canned private, as MinIO |
 | ✅ | `PutBucketCorsHandler` | dummy, as MinIO |
-| ⬜ | `PutBucketEncryptionHandler` |  |
+| ✅ | `PutBucketEncryptionHandler` |  |
 | ✅ | `PutBucketHandler` |  |
 | ✅ | `PutBucketLifecycleHandler` | expiry; transitions with tiering |
 | ⬜ | `PutBucketNotificationHandler` |  |
@@ -80,7 +80,7 @@ Source: `cmd/api-router.go`
 | ✅ | `PutBucketVersioningHandler` |  |
 | ✅ | `PutObjectACLHandler` | canned private, as MinIO |
 | ⬜ | `PutObjectExtractHandler` |  |
-| 🟡 | `PutObjectHandler` | no SSE/compression yet |
+| 🟡 | `PutObjectHandler` | no compression yet |
 | ✅ | `PutObjectLegalHoldHandler` |  |
 | ✅ | `PutObjectPartHandler` |  |
 | ✅ | `PutObjectRetentionHandler` |  |

@@ -87,6 +87,12 @@ void buckets_s3_sse_headers(s3_ctx *c, const buckets_object_info *oi);
 /* The KMS key ID as AWS shows it ("arn:aws:kms:" + id), or "". */
 void buckets_s3_sse_kms_key_arn(const buckets_object_info *oi, char *out, size_t cap);
 
+/* PutObject of size plaintext bytes from rd, encrypted as r asks (objects.c;
+ * POST policy uploads). etag_out gets the ETag clients see. */
+buckets_s3_error buckets_s3_sse_put(s3_ctx *c, const buckets_sse_req *r, const char *object, buckets_read_fn rd, void *ud,
+                                    int64_t size, const buckets_xl_kv *meta, size_t nmeta, const buckets_checksum *want,
+                                    buckets_object_info *out, char etag_out[80]);
+
 /* ---- writing: plaintext in, DARE out ---- */
 typedef struct {
   buckets_read_fn rd;

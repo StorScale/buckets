@@ -60,6 +60,7 @@ add_library(buckets STATIC
   bucket/tags.c
   bucket/quota.c
   bucket/lifecycle.c
+  bucket/sseconfig.c
   bucket/objectlock.c
   erasure/rs.c
   erasure/layout.c

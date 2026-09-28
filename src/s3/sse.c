@@ -11,6 +11,8 @@
 #include "crypto/base64.h"
 #include "crypto/hex.h"
 #include "crypto/objkey.h"
+#include "bucket/metasys.h"
+#include "config/config.h"
 #include "kms/kms.h"
 
 #define H_SSE "X-Amz-Server-Side-Encryption"
@@ -152,10 +154,32 @@ buckets_s3_error buckets_s3_sse_get_opts(s3_ctx *c) {
   return e;
 }
 
+/* BucketSSEConfig.Apply: a write asking for no encryption gets the bucket's
+ * default (or, with MINIO_KMS_AUTO_ENCRYPTION, SSE-KMS with the default key). */
+static void apply_default(s3_ctx *c, buckets_sse_req *r) {
+  if (!c->s->meta || !c->bucket) return;
+  buckets_bucket_state *st = buckets_metasys_get(c->s->meta, c->bucket);
+  if (st->has_sse) {
+    if (strcmp(st->sse.algorithm, "AES256") == 0) {
+      r->kind = BUCKETS_SSE_S3;
+    } else if (strcmp(st->sse.algorithm, "aws:kms") == 0) {
+      r->kind = BUCKETS_SSE_KMS;
+      snprintf(r->key_id, sizeof(r->key_id), "%s", buckets_sse_config_key(&st->sse));
+    }
+  } else {
+    const char *auto_enc = buckets_config_getenv("MINIO_KMS_AUTO_ENCRYPTION");
+    if (auto_enc && buckets_config_parse_bool(auto_enc) == 1) r->kind = BUCKETS_SSE_KMS;
+  }
+  buckets_bucket_state_release(st);
+}
+
 static buckets_s3_error parse(s3_ctx *c, buckets_sse_req *r, bool copy) {
   memset(r, 0, sizeof(*r));
   bool s3 = s3_requested(c), kms = kms_requested(c), ssec = ssec_requested(c);
-  if (!s3 && !kms && !ssec) return BUCKETS_ERR_NONE;
+  if (!s3 && !kms && !ssec) {
+    apply_default(c, r);
+    return BUCKETS_ERR_NONE;
+  }
   if (!copy && ssec_copy_requested(c)) return BUCKETS_ERR_INVALID_ENCRYPTION_PARAMETERS;
   if (ssec && (s3 || kms)) return BUCKETS_ERR_INCOMPATIBLE_ENCRYPTION_METHOD;
   if (s3) {
