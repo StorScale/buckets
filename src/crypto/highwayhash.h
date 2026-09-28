@@ -29,4 +29,7 @@ void buckets_hh256(const uint8_t key[BUCKETS_HH_KEY_LEN], const void *data, size
 /* MinIO's magicHighwayHash256Key (cmd/bitrot.go). */
 extern const uint8_t buckets_bitrot_key[BUCKETS_HH_KEY_LEN];
 
+/* Tests: force the portable (false) or SIMD (true) update loop. */
+void buckets_hh_set_simd(bool on);
+
 #endif

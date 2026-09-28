@@ -18,9 +18,12 @@ typedef struct {
 /* A fully received request. All slices point into connection-owned memory and
  * are valid only for the duration of the handler call.
  *
- * Small bodies (<= mem_body_limit) are in memory in `body`. Larger or chunked
- * bodies are spooled to an unlinked temp file in spool_dir: then body_fd >= 0
- * and `body` is empty. Use buckets_http_body_read() to consume either kind. */
+ * Small bodies (<= mem_body_limit) are in memory in `body`. Larger bodies
+ * with a Content-Length are streamed: the handler starts once the headers are
+ * in and reads the body as it arrives (`pipe`, with backpressure on the
+ * socket). Without worker threads, or with chunked transfer encoding, large
+ * bodies are spooled to an unlinked temp file (body_fd >= 0). Use
+ * buckets_http_body_read() to consume any kind, sequentially. */
 typedef struct {
   buckets_str method;
   buckets_str target; /* raw request-target, e.g. "/bucket/key?uploads" */
@@ -33,6 +36,9 @@ typedef struct {
   int64_t body_len;  /* total body bytes in either representation */
   bool keep_alive;
   bool secure; /* arrived over TLS */
+  /* Set for large bodies streamed to the handler while they arrive (it runs
+   * before the body is complete); read it with buckets_http_body_read. */
+  struct buckets_body_pipe *pipe;
   const char *remote_addr;
 } buckets_http_request;
 
@@ -45,7 +51,8 @@ typedef struct {
   int64_t off;
 } buckets_http_body_cursor;
 
-/* Returns bytes read, 0 at end of body, -1 on I/O error. */
+/* Returns bytes read, 0 at end of body, -1 on I/O error or when the client
+ * went away mid-body. May block while a streamed body is still arriving. */
 long buckets_http_body_read(buckets_http_body_cursor *c, void *buf, size_t n);
 
 /* Streaming response body: called whenever the socket can take more data.

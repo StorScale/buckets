@@ -9,6 +9,7 @@
 
 #include "crypto/base64.h"
 #include "crypto/hex.h"
+#include "crypto/highwayhash.h"
 #include "crypto/md5.h"
 #include "crypto/sha256.h"
 
@@ -102,8 +103,25 @@ static void test_ct_equal(void **state) {
   assert_false(buckets_ct_equal("abcd", "abce", 4));
 }
 
+static void test_hh_simd_matches_scalar(void **state) {
+  (void)state;
+  uint8_t *buf = malloc(70000);
+  for (size_t i = 0; i < 70000; i++) buf[i] = (uint8_t)(i * 2654435761u >> 13);
+  static const size_t lens[] = {0, 1, 31, 32, 33, 63, 64, 65, 100, 1000, 4096, 65536, 69999};
+  for (size_t k = 0; k < sizeof(lens) / sizeof(lens[0]); k++) {
+    uint8_t a[32], b[32];
+    buckets_hh_set_simd(false);
+    buckets_hh256(buckets_bitrot_key, buf + (k & 7), lens[k], a);
+    buckets_hh_set_simd(true);
+    buckets_hh256(buckets_bitrot_key, buf + (k & 7), lens[k], b);
+    assert_memory_equal(a, b, 32);
+  }
+  free(buf);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
+      cmocka_unit_test(test_hh_simd_matches_scalar),
       cmocka_unit_test(test_sha256_vectors), cmocka_unit_test(test_sha256_streaming_million_a),
       cmocka_unit_test(test_hmac_sha256),    cmocka_unit_test(test_md5),
       cmocka_unit_test(test_base64),         cmocka_unit_test(test_ct_equal),

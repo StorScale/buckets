@@ -8,6 +8,7 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -58,8 +59,18 @@ typedef struct conn {
   /* A handler or stream pull runs on a worker: the loop leaves the connection
    * alone (unwatched, never closed) until the worker posts back. */
   bool busy;
+  /* Response streams are double-buffered: a worker fills `pre` with the next
+   * chunk while the loop sends `out`. */
+  buckets_buf pre;
   long fill_got;
+  bool fill_inflight, pre_ready, waiting_fill, close_pending;
   buckets_tls_conn *tls;
+  /* A streamed request body: the handler already runs and reads it from pipe. */
+  struct buckets_body_pipe *pipe;
+  bool read_paused;  /* pipe full: parsing and reading stop until it drains */
+  bool backpressure; /* on_body asked to pause (vs. message complete) */
+  bool discarding;   /* the handler finished early: drop the rest of the body */
+  bool dead;         /* failed while a handler ran: close once it returns */
   bool write_wants_read; /* TLS: a send is blocked until the socket is readable */
   bool read_wants_write; /* TLS: a receive is blocked until it is writable */
   time_t last_active;
@@ -147,9 +158,101 @@ const char *buckets_http_status_text(int status) {
   }
 }
 
+/* ---- streamed bodies ----------------------------------------------------- */
+
+#define PIPE_HIGH (8u * 1024 * 1024) /* pause reading the socket above this */
+#define PIPE_LOW (2u * 1024 * 1024)  /* and resume below this */
+#define DISCARD_LIMIT (4LL * 1024 * 1024)
+
+typedef struct buckets_body_pipe {
+  pthread_mutex_t mu;
+  pthread_cond_t cv;
+  buckets_buf buf;
+  size_t off; /* read position in buf */
+  bool done, failed, reader_gone;
+  bool producer_paused, resume_posted;
+  buckets_loop *loop;
+  struct conn *c;
+} body_pipe;
+
+static void pipe_resume_cb(buckets_loop *loop, void *ud);
+
+static body_pipe *pipe_new(buckets_loop *loop, struct conn *c) {
+  body_pipe *p = buckets_xcalloc(1, sizeof(*p));
+  pthread_mutex_init(&p->mu, NULL);
+  pthread_cond_init(&p->cv, NULL);
+  p->loop = loop;
+  p->c = c;
+  return p;
+}
+
+static void pipe_free(body_pipe *p) {
+  if (!p) return;
+  pthread_cond_destroy(&p->cv);
+  pthread_mutex_destroy(&p->mu);
+  buckets_buf_free(&p->buf);
+  free(p);
+}
+
+/* Producer (loop thread). Returns true when the reader wants no more input
+ * for now (pause), false to keep going. */
+static bool pipe_put(body_pipe *p, const char *data, size_t n) {
+  pthread_mutex_lock(&p->mu);
+  bool pause = false;
+  if (!p->reader_gone) {
+    buckets_buf_append(&p->buf, data, n);
+    pthread_cond_signal(&p->cv);
+    if (p->buf.len - p->off > PIPE_HIGH) pause = p->producer_paused = true;
+  }
+  pthread_mutex_unlock(&p->mu);
+  return pause;
+}
+
+static void pipe_end(body_pipe *p, bool failed) {
+  pthread_mutex_lock(&p->mu);
+  p->done = true;
+  p->failed |= failed;
+  pthread_cond_broadcast(&p->cv);
+  pthread_mutex_unlock(&p->mu);
+}
+
+/* Consumer (handler thread). */
+static long pipe_read(body_pipe *p, void *out, size_t n) {
+  pthread_mutex_lock(&p->mu);
+  while (p->buf.len == p->off && !p->done) pthread_cond_wait(&p->cv, &p->mu);
+  size_t avail = p->buf.len - p->off;
+  long got = -1;
+  if (avail) {
+    got = (long)BUCKETS_MIN(n, avail);
+    memcpy(out, p->buf.data + p->off, (size_t)got);
+    p->off += (size_t)got;
+    if (p->off == p->buf.len) {
+      buckets_buf_reset(&p->buf);
+      p->off = 0;
+    } else if (p->off > PIPE_HIGH / 2) {
+      buckets_buf_consume(&p->buf, p->off);
+      p->off = 0;
+    }
+    if (p->producer_paused && !p->resume_posted && p->buf.len - p->off < PIPE_LOW) {
+      p->resume_posted = true;
+      buckets_loop_post(p->loop, pipe_resume_cb, p->c);
+    }
+  } else if (!p->failed) {
+    got = 0;
+  }
+  pthread_mutex_unlock(&p->mu);
+  return got;
+}
+
 long buckets_http_body_read(buckets_http_body_cursor *c, void *buf, size_t n) {
   const buckets_http_request *req = c->req;
   if (c->off >= req->body_len) return 0;
+  if (req->pipe) {
+    long r = pipe_read(req->pipe, buf, (size_t)BUCKETS_MIN((int64_t)n, req->body_len - c->off));
+    if (r == 0) return -1; /* the body ended short of Content-Length */
+    if (r > 0) c->off += r;
+    return r;
+  }
   size_t want = (size_t)BUCKETS_MIN((int64_t)n, req->body_len - c->off);
   if (req->body_fd < 0) {
     memcpy(buf, req->body.p + c->off, want);
@@ -197,6 +300,11 @@ static void stream_end(conn *c) {
 
 static void conn_close(conn *c) {
   buckets_http_server *srv = c->srv;
+  if (c->fill_inflight) { /* a worker is still reading the stream: close when it is back */
+    c->close_pending = true;
+    buckets_loop_unwatch(srv->loop, c->fd);
+    return;
+  }
   stream_end(c);
   if (c->body_fd >= 0) close(c->body_fd);
   buckets_loop_unwatch(srv->loop, c->fd);
@@ -208,11 +316,26 @@ static void conn_close(conn *c) {
   srv->nconns--;
   buckets_buf_free(&c->in);
   buckets_buf_free(&c->out);
+  buckets_buf_free(&c->pre);
   buckets_buf_free(&c->method);
   buckets_buf_free(&c->url);
   buckets_buf_free(&c->hdr);
   buckets_buf_free(&c->body);
   free(c);
+}
+
+static void set_busy(conn *c);
+
+/* Like conn_close, but a connection whose handler is still reading its body
+ * cannot be freed yet: fail the body and close once the handler returns. */
+static void conn_abort(conn *c) {
+  if (!c->pipe) {
+    conn_close(c);
+    return;
+  }
+  pipe_end(c->pipe, true);
+  c->dead = true;
+  set_busy(c);
 }
 
 /* Writes as much of c->out as the socket takes. Returns false if the
@@ -244,7 +367,20 @@ static bool conn_flush(conn *c) {
       c->out_off = 0;
       buckets_buf_reserve(&c->out, 256 * 1024);
       if (c->srv->cfg.workers) {
-        start_fill(c);
+        if (c->pre_ready) { /* the next chunk is already here: send it, fetch the one after */
+          buckets_buf tmp = c->out;
+          c->out = c->pre;
+          c->pre = tmp;
+          c->pre_ready = false;
+          int r = take_chunk(c, c->fill_got);
+          if (r < 0) return false;
+          if (r == 0) break;
+          start_fill(c);
+          continue;
+        }
+        if (!c->fill_inflight) start_fill(c);
+        c->waiting_fill = true;
+        buckets_loop_watch(c->srv->loop, c->fd, 0, conn_io, c);
         return true;
       }
       int r = take_chunk(c, c->stream(c->stream_ud, c->out.data, c->out.cap - 1));
@@ -352,20 +488,30 @@ static void resume(conn *c) {
 static void fill_done(buckets_loop *loop, void *ud) {
   conn *c = ud;
   (void)loop;
-  c->busy = false;
-  if (take_chunk(c, c->fill_got) < 0) return;
-  resume(c);
+  c->fill_inflight = false;
+  if (c->close_pending) {
+    conn_close(c);
+    return;
+  }
+  c->pre_ready = true;
+  if (!c->waiting_fill) return; /* the loop is still sending the previous chunk */
+  c->waiting_fill = false;
+  if (conn_flush(c) && conn_process(c)) drain_pending(c);
 }
 
 static void fill_task(void *ud, size_t i) {
   conn *c = ud;
   (void)i;
-  c->fill_got = c->stream(c->stream_ud, c->out.data, c->out.cap - 1);
+  c->fill_got = c->stream(c->stream_ud, c->pre.data, c->pre.cap - 1);
   buckets_loop_post(c->srv->loop, fill_done, c);
 }
 
+/* Starts filling `pre` with the next chunk on a worker. */
 static void start_fill(conn *c) {
-  set_busy(c);
+  if (!c->stream || c->fill_inflight || c->pre_ready) return;
+  buckets_buf_reset(&c->pre);
+  buckets_buf_reserve(&c->pre, 256 * 1024);
+  c->fill_inflight = true;
   buckets_pool_submit(c->srv->cfg.workers, fill_task, c);
 }
 
@@ -392,6 +538,35 @@ static void job_done(buckets_loop *loop, void *ud) {
   job *j = ud;
   conn *c = j->c;
   (void)loop;
+  body_pipe *p = j->req.pipe;
+  if (p) {
+    c->pipe = NULL;
+    if (c->dead) { /* the client went away mid-body */
+      buckets_buf_free(&j->resp.headers);
+      buckets_buf_free(&j->resp.body);
+      if (j->resp.stream_free) j->resp.stream_free(j->resp.stream_ud);
+      free(j);
+      pipe_free(p);
+      c->busy = false;
+      conn_close(c);
+      return;
+    }
+    pthread_mutex_lock(&p->mu);
+    bool done = p->done;
+    p->reader_gone = true;
+    pthread_mutex_unlock(&p->mu);
+    if (!done) {
+      /* Answered before the body was in (an error, typically): skip the rest
+       * of it to keep the connection, unless that is too much to read. */
+      if ((int64_t)c->parser.content_length > DISCARD_LIMIT) j->req.keep_alive = false; /* bytes still to come */
+      else c->discarding = true;
+      if (c->read_paused) {
+        c->read_paused = false;
+        llhttp_resume(&c->parser);
+      }
+    }
+    pipe_free(p);
+  }
   finish_request(c, &j->req, &j->resp);
   free(j);
   resume(c);
@@ -405,7 +580,8 @@ static void job_task(void *ud, size_t i) {
   buckets_loop_post(srv->loop, job_done, j);
 }
 
-static void dispatch_request(conn *c) {
+/* streamed: the body is still arriving (c->pipe); the loop keeps reading. */
+static void dispatch_request_mode(conn *c, bool streamed) {
   buckets_http_server *srv = c->srv;
   job *j = buckets_xcalloc(1, sizeof(*j));
   j->c = c;
@@ -425,6 +601,11 @@ static void dispatch_request(conn *c) {
   rq->keep_alive = llhttp_should_keep_alive(&c->parser) && !srv->shutting_down;
   rq->remote_addr = c->remote;
   rq->secure = c->tls != NULL;
+  if (streamed) {
+    rq->pipe = c->pipe;
+    rq->body_fd = -1;
+    rq->body_len = (int64_t)c->parser.content_length;
+  }
   j->resp = (buckets_http_response){.status = 200, .content_length = -1};
   j->resp.head_only = buckets_str_eq_c(rq->method, "HEAD");
   j->handler = srv->handler;
@@ -440,6 +621,10 @@ static void dispatch_request(conn *c) {
       break;
     }
   }
+  if (streamed) {
+    buckets_pool_submit(workers ? workers : srv->cfg.workers, job_task, j);
+    return;
+  }
   if (workers) {
     set_busy(c);
     buckets_pool_submit(workers, job_task, j);
@@ -450,10 +635,29 @@ static void dispatch_request(conn *c) {
   free(j);
 }
 
+static void dispatch_request(conn *c) { dispatch_request_mode(c, false); }
+
+/* Backpressure released: the handler drained the pipe below the low mark. */
+static void pipe_resume_cb(buckets_loop *loop, void *ud) {
+  conn *c = ud;
+  (void)loop;
+  if (c->pipe) {
+    pthread_mutex_lock(&c->pipe->mu);
+    c->pipe->producer_paused = false;
+    c->pipe->resume_posted = false;
+    pthread_mutex_unlock(&c->pipe->mu);
+  }
+  if (!c->read_paused || c->busy) return;
+  c->read_paused = false;
+  llhttp_resume(&c->parser);
+  buckets_loop_watch(c->srv->loop, c->fd, BUCKETS_EV_READ, conn_io, c);
+  if (conn_process(c)) drain_pending(c);
+}
+
 /* Feeds buffered input to the parser, dispatching complete requests one at a
  * time. Stops while a response is still being written (pipelining backpressure). */
 static bool conn_process(conn *c) {
-  if (c->busy) return true;
+  if (c->busy || c->read_paused) return true;
   while (c->in.len > 0 && !conn_writing(c) && !c->closing) {
     llhttp_errno_t err = llhttp_execute(&c->parser, c->in.data, c->in.len);
     if (err == HPE_OK) {
@@ -463,6 +667,24 @@ static bool conn_process(conn *c) {
     if (err == HPE_PAUSED) {
       const char *pos = llhttp_get_error_pos(&c->parser);
       buckets_buf_consume(&c->in, (size_t)(pos - c->in.data));
+      if (c->backpressure) { /* the pipe is full: stop until the handler drains it */
+        c->backpressure = false;
+        c->read_paused = true;
+        buckets_loop_watch(c->srv->loop, c->fd, 0, conn_io, c);
+        return true;
+      }
+      if (c->pipe) { /* a streamed body is complete; its handler is running */
+        pipe_end(c->pipe, false);
+        llhttp_resume(&c->parser);
+        set_busy(c); /* job_done takes over */
+        return true;
+      }
+      if (c->discarding) { /* the unwanted rest of an answered request */
+        c->discarding = false;
+        request_reset(c);
+        llhttp_resume(&c->parser);
+        continue;
+      }
       dispatch_request(c);
       llhttp_resume(&c->parser);
       if (c->busy) return true; /* job_done resumes */
@@ -473,6 +695,10 @@ static bool conn_process(conn *c) {
     return false;
   }
   if (c->peer_eof) {
+    if (c->pipe) { /* EOF in the middle of a streamed body */
+      conn_abort(c);
+      return false;
+    }
     if (!conn_writing(c)) {
       conn_close(c);
       return false;
@@ -495,7 +721,7 @@ static void conn_read(conn *c) {
       c->in.data[c->in.len] = '\0';
       if (c->in.len > 1024 * 1024) {
         if (!conn_process(c)) return;
-        if (c->busy || conn_writing(c) || c->closing) return; /* resumes from the write or the worker */
+        if (c->busy || c->read_paused || conn_writing(c) || c->closing) return; /* resumed later */
       }
       continue;
     }
@@ -506,7 +732,7 @@ static void conn_read(conn *c) {
       break;
     }
     if (n < 0) { /* reset or error: nobody is listening for responses */
-      conn_close(c);
+      conn_abort(c);
       return;
     }
     /* Orderly EOF: requests may already be buffered, so answer them first. */
@@ -523,6 +749,10 @@ static void conn_io(buckets_loop *loop, int fd, unsigned events, void *ud) {
   (void)fd;
   c->last_active = time(NULL);
   if (c->busy) return;
+  if (c->read_paused) { /* waiting for the handler to drain the body pipe */
+    if (events & BUCKETS_EV_ERROR) conn_abort(c);
+    return;
+  }
   bool retry_read = c->read_wants_write && (events & BUCKETS_EV_WRITE);
   if (retry_read) c->read_wants_write = false;
   if (((events & BUCKETS_EV_WRITE) && !retry_read) || (c->write_wants_read && (events & BUCKETS_EV_READ))) {
@@ -592,7 +822,9 @@ static int on_headers_complete(llhttp_t *p) {
     c->too_large = true;
     return -1;
   }
-  if ((p->flags & F_CHUNKED) || (has_len && p->content_length > cfg->mem_body_limit)) {
+  bool big = has_len && p->content_length > cfg->mem_body_limit;
+  bool stream = big && !(p->flags & F_CHUNKED) && cfg->workers;
+  if (!stream && ((p->flags & F_CHUNKED) || big)) {
     c->body_fd = open_spool(cfg->spool_dir);
     if (c->body_fd < 0) {
       buckets_log_error("spool request body in %s: %s", cfg->spool_dir, strerror(errno));
@@ -607,11 +839,23 @@ static int on_headers_complete(llhttp_t *p) {
       conn_send_some(c);
     }
   }
+  if (stream) { /* the handler starts now and reads the body as it arrives */
+    c->pipe = pipe_new(c->srv->loop, c);
+    dispatch_request_mode(c, true);
+  }
   return 0;
 }
 
 static int on_body(llhttp_t *p, const char *at, size_t n) {
   conn *c = p->data;
+  if (c->discarding) return 0;
+  if (c->pipe) {
+    if (pipe_put(c->pipe, at, n)) {
+      c->backpressure = true;
+      return HPE_PAUSED;
+    }
+    return 0;
+  }
   int64_t have = c->body_fd >= 0 ? c->body_len : (int64_t)c->body.len;
   if (have + (int64_t)n > c->srv->cfg.max_body) {
     c->too_large = true;
@@ -735,7 +979,7 @@ static void on_tick(buckets_http_server *srv) {
   if (srv->cfg.tls && ++srv->ticks % 5 == 0) buckets_tls_reload(srv->cfg.tls);
   for (conn *c = srv->conns, *next; c; c = next) {
     next = c->next;
-    bool idle = !c->busy && c->in.len == 0 && !conn_writing(c);
+    bool idle = !c->busy && !c->pipe && !c->read_paused && c->in.len == 0 && !conn_writing(c);
     if (idle && (srv->shutting_down || now - c->last_active > srv->cfg.idle_timeout_sec)) conn_close(c);
   }
 }

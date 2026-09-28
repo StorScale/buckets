@@ -1,6 +1,7 @@
 /* Erasure-coded object layer over sets of drives (MinIO cmd/erasure-object.go,
  * erasure-multipart.go, erasure-sets.go, erasure-server-pool.go subset).
  * SPDX-License-Identifier: AGPL-3.0-or-later */
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -412,11 +413,15 @@ static size_t source_read(source *s, uint8_t *buf, size_t n) {
     }
     got += (size_t)r;
   }
-  buckets_md5_update(&s->md5, buf, got);
-  if (s->want_sha) buckets_sha256_update(&s->sha, buf, got);
-  if (s->want_cks) buckets_cksum_hasher_update(&s->cks, buf, got);
   s->remaining -= (int64_t)got;
-  return got;
+  return got; /* hashed by source_hash, in parallel with the block's writes */
+}
+
+/* Payload hash i (0 MD5, 1 SHA-256, 2 additional checksum) over one block. */
+static void source_hash(source *s, int i, const uint8_t *buf, size_t n) {
+  if (i == 0) buckets_md5_update(&s->md5, buf, n);
+  else if (i == 1 && s->want_sha) buckets_sha256_update(&s->sha, buf, n);
+  else if (i == 2 && s->want_cks) buckets_cksum_hasher_update(&s->cks, buf, n);
 }
 
 /* ---- erasure encoding -------------------------------------------------------- */
@@ -443,6 +448,7 @@ typedef struct {
   uint8_t **shards;
   size_t sl;
   bool abort_writes;
+  buckets_rs *rs;
 } encoder;
 
 static void enc_open(void *ctx, size_t i) {
@@ -476,6 +482,60 @@ static void enc_write(void *ctx, size_t i) {
   }
 }
 
+#define RS_CHUNKS 4
+
+/* ---- payload hashing, one block behind --------------------------------------
+ * MD5 (the ETag), and SHA-256 / a checksum when asked for, are serial per
+ * object and the slowest step of a PUT. They run as one background task per
+ * block, overlapping the next block's read, parity and writes; the encoder
+ * alternates two block buffers and waits for the task before reusing one. */
+
+typedef struct {
+  source *src;
+  const uint8_t *block;
+  size_t len;
+  pthread_mutex_t mu;
+  pthread_cond_t cv;
+  bool busy;
+} hasher;
+
+static void hash_task(void *ctx, size_t i) {
+  hasher *h = ctx;
+  (void)i;
+  for (int k = 0; k < 3; k++) source_hash(h->src, k, h->block, h->len);
+  pthread_mutex_lock(&h->mu);
+  h->busy = false;
+  pthread_cond_signal(&h->cv);
+  pthread_mutex_unlock(&h->mu);
+}
+
+static void hasher_wait(hasher *h) {
+  pthread_mutex_lock(&h->mu);
+  while (h->busy) pthread_cond_wait(&h->cv, &h->mu);
+  pthread_mutex_unlock(&h->mu);
+}
+
+static void hasher_start(hasher *h, const uint8_t *block, size_t len) {
+  hasher_wait(h);
+  h->block = block;
+  h->len = len;
+  h->busy = true;
+  buckets_pool_submit(buckets_io_pool(), hash_task, h); /* inline without a pool */
+}
+
+/* Parity for one byte range (parity bytes depend only on the data bytes at
+ * the same offset, so ranges encode in parallel). */
+static void enc_parity(void *ctx, size_t k) {
+  encoder *e = ctx;
+  size_t per = ((size_t)ceil_div((int64_t)e->sl, RS_CHUNKS) + 63) & ~(size_t)63;
+  size_t off = k * per;
+  if (off >= e->sl) return;
+  size_t len = BUCKETS_MIN(per, e->sl - off);
+  uint8_t *part[MAX_SET];
+  for (int j = 0; j < e->data + e->parity; j++) part[j] = e->shards[j] + off;
+  buckets_rs_encode(e->rs, part, len);
+}
+
 /* Flushes (fsync) and closes drive i's file, or aborts it. */
 static void enc_close(void *ctx, size_t i) {
   encoder *e = ctx;
@@ -495,13 +555,17 @@ static buckets_obj_err encode_stream(encoder *e, source *src, int64_t size, cons
   buckets_io_parallel(s->n, enc_open, e);
   buckets_rs *rs = buckets_rs_new(e->data, e->parity);
   size_t shard_cap = (size_t)ceil_div(BUCKETS_BLOCK_SIZE, e->data);
-  uint8_t *block = buckets_xmalloc(BUCKETS_BLOCK_SIZE);
+  uint8_t *bufs[2] = {buckets_xmalloc(BUCKETS_BLOCK_SIZE), buckets_xmalloc(BUCKETS_BLOCK_SIZE)};
   uint8_t *shards[MAX_SET];
   for (int k = 0; k < total; k++) shards[k] = buckets_xmalloc(shard_cap);
   e->shards = shards;
+  hasher h = {.src = src};
+  pthread_mutex_init(&h.mu, NULL);
+  pthread_cond_init(&h.cv, NULL);
   buckets_obj_err err = BUCKETS_OBJ_OK;
   int wq = write_quorum(e->data, e->parity);
-  while (src->remaining > 0 && !err) {
+  for (unsigned b = 0; src->remaining > 0 && !err; b++) {
+    uint8_t *block = bufs[b & 1]; /* the other buffer may still be hashing */
     size_t n = source_read(src, block, BUCKETS_BLOCK_SIZE);
     if (src->err) {
       err = src->err;
@@ -514,15 +578,20 @@ static buckets_obj_err encode_stream(encoder *e, source *src, int64_t size, cons
       if (take) memcpy(shards[k], block + off, take);
       memset(shards[k] + take, 0, sl - take);
     }
-    if (e->parity) buckets_rs_encode(rs, shards, sl);
+    hasher_start(&h, block, n);
     e->sl = sl;
+    e->rs = rs;
+    if (e->parity) buckets_io_parallel(RS_CHUNKS, enc_parity, e);
     buckets_io_parallel(s->n, enc_write, e);
     int ok = 0;
     for (size_t i = 0; i < s->n; i++) ok += e->alive[i];
     if (ok < wq) err = BUCKETS_OBJ_ERR_WRITE_QUORUM;
   }
+  hasher_wait(&h);
+  pthread_cond_destroy(&h.cv);
+  pthread_mutex_destroy(&h.mu);
   if (!err) {
-    long extra = src->rd(src->ud, block, 1); /* must be at EOF; lets chunked decoders read trailers */
+    long extra = src->rd(src->ud, bufs[0], 1); /* must be at EOF; lets chunked decoders read trailers */
     if (extra > 0) err = BUCKETS_OBJ_ERR_INCOMPLETE_BODY;
     else if (extra < 0) err = BUCKETS_OBJ_ERR_READER;
   }
@@ -532,7 +601,8 @@ static buckets_obj_err encode_stream(encoder *e, source *src, int64_t size, cons
   for (size_t i = 0; i < s->n; i++) ok += e->alive[i];
   if (!err && ok < wq) err = BUCKETS_OBJ_ERR_WRITE_QUORUM;
   for (int k = 0; k < total; k++) free(shards[k]);
-  free(block);
+  free(bufs[0]);
+  free(bufs[1]);
   buckets_rs_free(rs);
   return err;
 }
@@ -814,11 +884,14 @@ struct buckets_obj_reader {
   int64_t block_index;
   size_t block_len;
   buckets_nslock_entry *lk; /* read lock, held until EOF or free */
+  buckets_drive_file *fh[MAX_SET]; /* open part file per drive */
+  int fh_part[MAX_SET];            /* the part number fh[i] has open */
 };
 
 void buckets_obj_reader_free(buckets_obj_reader *r) {
   if (!r) return;
   buckets_nslock_unlock(r->lk);
+  for (int i = 0; i < MAX_SET; i++) buckets_drive_file_close(r->fh[i]);
   for (int i = 0; i < MAX_SET; i++) r->degraded |= r->bad[i];
   if (r->degraded && !r->quiet) report_degraded(r->L, r->bucket, r->object, r->version_id, r->bitrot);
   for (int i = 0; i < MAX_SET; i++) {
@@ -958,11 +1031,19 @@ static bool read_shard(buckets_obj_reader *r, int k, int64_t bi, size_t sl) {
     }
     memcpy(frame, r->inl[i] + foff, flen);
   } else {
-    buckets_buf path = BUCKETS_BUF_INIT;
-    buckets_buf_appendf(&path, "%s/%s/part.%d", r->op, r->data_dir, r->parts[r->part].number);
+    int pn = r->parts[r->part].number;
+    buckets_drive_err e = BUCKETS_DRIVE_OK;
+    if (!r->fh[i] || r->fh_part[i] != pn) {
+      buckets_drive_file_close(r->fh[i]);
+      r->fh[i] = NULL;
+      buckets_buf path = BUCKETS_BUF_INIT;
+      buckets_buf_appendf(&path, "%s/%s/part.%d", r->op, r->data_dir, pn);
+      e = buckets_drive_open_file(r->set->drives[i], r->bucket, path.data, &r->fh[i]);
+      buckets_buf_free(&path);
+      r->fh_part[i] = pn;
+    }
     size_t got = 0;
-    buckets_drive_err e = buckets_drive_read_at(r->set->drives[i], r->bucket, path.data, foff, frame, flen, &got);
-    buckets_buf_free(&path);
+    if (!e) e = buckets_drive_file_read_at(r->fh[i], foff, frame, flen, &got);
     if (e || got != flen) {
       r->bad[i] = true;
       return false;

@@ -173,7 +173,7 @@ static buckets_s3_error canonical_headers(const buckets_http_request *req, const
       } else if (strcmp(name, "expect") == 0) {
         buckets_buf_append_c(out, "100-continue");
       } else if (strcmp(name, "content-length") == 0) {
-        buckets_buf_appendf(out, "%zu", req->body.n);
+        buckets_buf_appendf(out, "%lld", (long long)req->body_len);
       } else if (strcmp(name, "transfer-encoding") == 0) {
         /* Go exposes TransferEncoding separately; an absent header joins to "". */
       } else {

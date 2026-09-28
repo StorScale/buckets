@@ -2,6 +2,9 @@
  * Port of highwayhash_generic.go / highwayhash.go from github.com/minio/highwayhash. */
 #include "crypto/highwayhash.h"
 
+#include <stdatomic.h>
+#include <stdbool.h>
+#include <stdlib.h>
 #include <string.h>
 
 enum { V0 = 0, V1 = 4, MUL0 = 8, MUL1 = 12 };
@@ -56,7 +59,7 @@ static void zipper_merge(uint64_t v0, uint64_t v1, uint64_t *d0, uint64_t *d1) {
   *d1 += res2;
 }
 
-static void update(uint64_t s[16], const uint8_t *msg, size_t n) {
+static void update_scalar(uint64_t s[16], const uint8_t *msg, size_t n) {
   for (; n >= 32; msg += 32, n -= 32) {
     for (int i = 0; i < 4; i++) {
       s[V1 + i] += le64(msg + 8 * i) + s[MUL0 + i];
@@ -69,6 +72,92 @@ static void update(uint64_t s[16], const uint8_t *msg, size_t n) {
     zipper_merge(s[V0 + 0], s[V0 + 1], &s[V1 + 0], &s[V1 + 1]);
     zipper_merge(s[V0 + 2], s[V0 + 3], &s[V1 + 2], &s[V1 + 3]);
   }
+}
+
+/* The bulk update in 128-bit SIMD: each state row of four 64-bit lanes is
+ * two vectors, 32x32->64 multiplies are native, and ZipperMerge is one byte
+ * shuffle per 128-bit half (the permutation of Google's SSE4.1 reference).
+ * Bit-identical to update_scalar; verified by the golden vectors. */
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#define HAVE_SIMD 1
+static void update_simd(uint64_t s[16], const uint8_t *msg, size_t n) {
+  static const uint8_t zm[16] = {3, 12, 2, 5, 14, 1, 15, 0, 11, 4, 10, 13, 9, 6, 8, 7};
+  const uint8x16_t mask = vld1q_u8(zm);
+  uint64x2_t v0a = vld1q_u64(s + V0), v0b = vld1q_u64(s + V0 + 2);
+  uint64x2_t v1a = vld1q_u64(s + V1), v1b = vld1q_u64(s + V1 + 2);
+  uint64x2_t m0a = vld1q_u64(s + MUL0), m0b = vld1q_u64(s + MUL0 + 2);
+  uint64x2_t m1a = vld1q_u64(s + MUL1), m1b = vld1q_u64(s + MUL1 + 2);
+  for (; n >= 32; msg += 32, n -= 32) {
+    uint64x2_t pa = vreinterpretq_u64_u8(vld1q_u8(msg)), pb = vreinterpretq_u64_u8(vld1q_u8(msg + 16));
+    v1a = vaddq_u64(v1a, vaddq_u64(pa, m0a));
+    v1b = vaddq_u64(v1b, vaddq_u64(pb, m0b));
+    m0a = veorq_u64(m0a, vmull_u32(vmovn_u64(v1a), vshrn_n_u64(v0a, 32)));
+    m0b = veorq_u64(m0b, vmull_u32(vmovn_u64(v1b), vshrn_n_u64(v0b, 32)));
+    v0a = vaddq_u64(v0a, m1a);
+    v0b = vaddq_u64(v0b, m1b);
+    m1a = veorq_u64(m1a, vmull_u32(vmovn_u64(v0a), vshrn_n_u64(v1a, 32)));
+    m1b = veorq_u64(m1b, vmull_u32(vmovn_u64(v0b), vshrn_n_u64(v1b, 32)));
+    v0a = vaddq_u64(v0a, vreinterpretq_u64_u8(vqtbl1q_u8(vreinterpretq_u8_u64(v1a), mask)));
+    v0b = vaddq_u64(v0b, vreinterpretq_u64_u8(vqtbl1q_u8(vreinterpretq_u8_u64(v1b), mask)));
+    v1a = vaddq_u64(v1a, vreinterpretq_u64_u8(vqtbl1q_u8(vreinterpretq_u8_u64(v0a), mask)));
+    v1b = vaddq_u64(v1b, vreinterpretq_u64_u8(vqtbl1q_u8(vreinterpretq_u8_u64(v0b), mask)));
+  }
+  vst1q_u64(s + V0, v0a), vst1q_u64(s + V0 + 2, v0b);
+  vst1q_u64(s + V1, v1a), vst1q_u64(s + V1 + 2, v1b);
+  vst1q_u64(s + MUL0, m0a), vst1q_u64(s + MUL0 + 2, m0b);
+  vst1q_u64(s + MUL1, m1a), vst1q_u64(s + MUL1 + 2, m1b);
+}
+static bool simd_ok(void) { return true; }
+#elif defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+#include <immintrin.h>
+#define HAVE_SIMD 1
+__attribute__((target("ssse3"))) static void update_simd(uint64_t s[16], const uint8_t *msg, size_t n) {
+  const __m128i mask = _mm_set_epi64x(0x070806090D0A040Bll, 0x000F010E05020C03ll);
+  __m128i v0a = _mm_loadu_si128((const __m128i *)(s + V0)), v0b = _mm_loadu_si128((const __m128i *)(s + V0 + 2));
+  __m128i v1a = _mm_loadu_si128((const __m128i *)(s + V1)), v1b = _mm_loadu_si128((const __m128i *)(s + V1 + 2));
+  __m128i m0a = _mm_loadu_si128((const __m128i *)(s + MUL0)), m0b = _mm_loadu_si128((const __m128i *)(s + MUL0 + 2));
+  __m128i m1a = _mm_loadu_si128((const __m128i *)(s + MUL1)), m1b = _mm_loadu_si128((const __m128i *)(s + MUL1 + 2));
+  for (; n >= 32; msg += 32, n -= 32) {
+    __m128i pa = _mm_loadu_si128((const __m128i *)msg), pb = _mm_loadu_si128((const __m128i *)(msg + 16));
+    v1a = _mm_add_epi64(v1a, _mm_add_epi64(pa, m0a));
+    v1b = _mm_add_epi64(v1b, _mm_add_epi64(pb, m0b));
+    m0a = _mm_xor_si128(m0a, _mm_mul_epu32(v1a, _mm_srli_epi64(v0a, 32)));
+    m0b = _mm_xor_si128(m0b, _mm_mul_epu32(v1b, _mm_srli_epi64(v0b, 32)));
+    v0a = _mm_add_epi64(v0a, m1a);
+    v0b = _mm_add_epi64(v0b, m1b);
+    m1a = _mm_xor_si128(m1a, _mm_mul_epu32(v0a, _mm_srli_epi64(v1a, 32)));
+    m1b = _mm_xor_si128(m1b, _mm_mul_epu32(v0b, _mm_srli_epi64(v1b, 32)));
+    v0a = _mm_add_epi64(v0a, _mm_shuffle_epi8(v1a, mask));
+    v0b = _mm_add_epi64(v0b, _mm_shuffle_epi8(v1b, mask));
+    v1a = _mm_add_epi64(v1a, _mm_shuffle_epi8(v0a, mask));
+    v1b = _mm_add_epi64(v1b, _mm_shuffle_epi8(v0b, mask));
+  }
+  _mm_storeu_si128((__m128i *)(s + V0), v0a), _mm_storeu_si128((__m128i *)(s + V0 + 2), v0b);
+  _mm_storeu_si128((__m128i *)(s + V1), v1a), _mm_storeu_si128((__m128i *)(s + V1 + 2), v1b);
+  _mm_storeu_si128((__m128i *)(s + MUL0), m0a), _mm_storeu_si128((__m128i *)(s + MUL0 + 2), m0b);
+  _mm_storeu_si128((__m128i *)(s + MUL1), m1a), _mm_storeu_si128((__m128i *)(s + MUL1 + 2), m1b);
+}
+static bool simd_ok(void) { return __builtin_cpu_supports("ssse3"); }
+#endif
+
+static _Atomic int g_simd = -1; /* -1: decide on first use (threads may race; they agree) */
+
+void buckets_hh_set_simd(bool on) { g_simd = on; }
+
+static void update(uint64_t s[16], const uint8_t *msg, size_t n) {
+#ifdef HAVE_SIMD
+  int simd = atomic_load_explicit(&g_simd, memory_order_relaxed);
+  if (simd < 0) {
+    simd = simd_ok() && !getenv("BUCKETS_NO_SIMD");
+    atomic_store_explicit(&g_simd, simd, memory_order_relaxed);
+  }
+  if (n >= 32 && simd) {
+    update_simd(s, msg, n & ~(size_t)31);
+    return;
+  }
+#endif
+  update_scalar(s, msg, n);
 }
 
 static void hash_buffer(uint64_t s[16], const uint8_t buffer[32], size_t offset) {

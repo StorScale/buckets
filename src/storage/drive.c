@@ -69,6 +69,16 @@ static int mkdir_p(const char *path) {
   return rc;
 }
 
+/* Data durability for file contents: fdatasync where the platform has it
+ * (skips metadata-only flushes, as MinIO's Fdatasync), fsync elsewhere. */
+static int data_sync(int fd) {
+#if defined(__linux__)
+  return fdatasync(fd);
+#else
+  return fsync(fd);
+#endif
+}
+
 static int fsync_dir(const char *dir) {
   int fd = open(dir, O_RDONLY);
   if (fd < 0) return -1;
@@ -102,7 +112,7 @@ static buckets_drive_err write_atomic(buckets_drive *d, const char *dir, const c
     }
     off += (size_t)w;
   }
-  if (err == BUCKETS_DRIVE_OK && fsync(fd) != 0) err = BUCKETS_DRIVE_ERR_IO;
+  if (err == BUCKETS_DRIVE_OK && data_sync(fd) != 0) err = BUCKETS_DRIVE_ERR_IO;
   close(fd);
   if (err == BUCKETS_DRIVE_OK && rename(tmp, dst) != 0) err = from_errno(errno);
   if (err == BUCKETS_DRIVE_OK) fsync_dir(dir);
@@ -423,7 +433,7 @@ buckets_drive_err buckets_drive_writer_close(buckets_drive_writer *w) {
     free(w);
     return e;
   }
-  buckets_drive_err err = fsync(w->fd) == 0 ? BUCKETS_DRIVE_OK : BUCKETS_DRIVE_ERR_IO;
+  buckets_drive_err err = data_sync(w->fd) == 0 ? BUCKETS_DRIVE_OK : BUCKETS_DRIVE_ERR_IO;
   close(w->fd);
   free(w->path);
   free(w);
@@ -478,9 +488,54 @@ buckets_drive_err buckets_drive_fsync_file(buckets_drive *d, const char *vol, co
   int fd = open(p, O_RDONLY | O_CLOEXEC);
   free(p);
   if (fd < 0) return from_errno(errno);
-  buckets_drive_err err = fsync(fd) == 0 ? BUCKETS_DRIVE_OK : BUCKETS_DRIVE_ERR_IO;
+  buckets_drive_err err = data_sync(fd) == 0 ? BUCKETS_DRIVE_OK : BUCKETS_DRIVE_ERR_IO;
   close(fd);
   return err;
+}
+
+struct buckets_drive_file {
+  buckets_drive *d;
+  int fd;           /* local */
+  char *vol, *path; /* remote */
+};
+
+buckets_drive_err buckets_drive_open_file(buckets_drive *d, const char *vol, const char *path, buckets_drive_file **f) {
+  int fd = -1;
+  if (!d->remote) {
+    char *p = vpath(d, vol, path);
+    fd = open(p, O_RDONLY | O_CLOEXEC);
+    free(p);
+    if (fd < 0) return from_errno(errno == ENOTDIR ? ENOENT : errno);
+  }
+  *f = buckets_xcalloc(1, sizeof(**f));
+  (*f)->d = d;
+  (*f)->fd = fd;
+  if (d->remote) {
+    (*f)->vol = buckets_xstrdup(vol);
+    (*f)->path = buckets_xstrdup(path);
+  }
+  return BUCKETS_DRIVE_OK;
+}
+
+buckets_drive_err buckets_drive_file_read_at(buckets_drive_file *f, int64_t off, void *buf, size_t n, size_t *got) {
+  if (f->d->remote) return buckets_rdrive_read_at(f->d, f->vol, f->path, off, buf, n, got);
+  *got = 0;
+  while (*got < n) {
+    ssize_t r = pread(f->fd, (char *)buf + *got, n - *got, (off_t)(off + (int64_t)*got));
+    if (r < 0 && errno == EINTR) continue;
+    if (r < 0) return BUCKETS_DRIVE_ERR_IO;
+    if (r == 0) break;
+    *got += (size_t)r;
+  }
+  return BUCKETS_DRIVE_OK;
+}
+
+void buckets_drive_file_close(buckets_drive_file *f) {
+  if (!f) return;
+  if (f->fd >= 0) close(f->fd);
+  free(f->vol);
+  free(f->path);
+  free(f);
 }
 
 buckets_drive_err buckets_drive_read_at(buckets_drive *d, const char *vol, const char *path, int64_t off, void *buf,

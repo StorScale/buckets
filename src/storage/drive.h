@@ -80,6 +80,14 @@ buckets_drive_err buckets_drive_writer_write(buckets_drive_writer *w, const void
 buckets_drive_err buckets_drive_writer_close(buckets_drive_writer *w);
 void buckets_drive_writer_abort(buckets_drive_writer *w);
 
+/* A file held open for repeated positional reads (object readers keep one
+ * per drive and part instead of reopening for every shard block). Remote
+ * drives keep just the path. */
+typedef struct buckets_drive_file buckets_drive_file;
+buckets_drive_err buckets_drive_open_file(buckets_drive *d, const char *vol, const char *path, buckets_drive_file **f);
+buckets_drive_err buckets_drive_file_read_at(buckets_drive_file *f, int64_t off, void *buf, size_t n, size_t *got);
+void buckets_drive_file_close(buckets_drive_file *f);
+
 /* Writes data at off of an existing file whose size must equal off (so a
  * retried append can never duplicate or skip bytes). Remote writers use this. */
 buckets_drive_err buckets_drive_append(buckets_drive *d, const char *vol, const char *path, int64_t off,

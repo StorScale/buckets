@@ -92,7 +92,7 @@ static void usage(FILE *f) {
           "  BUCKETS_REGION / MINIO_REGION                server region (default: accept any)\n"
           "  BUCKETS_LOG_LEVEL                            debug|info|warn|error\n"
           "  BUCKETS_API_THREADS                          request handler threads (default: 2 x CPUs, min 8)\n"
-          "  BUCKETS_IO_THREADS                           drive I/O threads (default: set size - 1)\n");
+          "  BUCKETS_IO_THREADS                           drive I/O threads (default: set size + 2)\n");
 }
 
 static bool parse_address(const char *addr, char **host, int *port) {
@@ -447,7 +447,8 @@ int main(int argc, char **argv) {
   size_t max_set = 0;
   for (size_t p = 0; p < topo.npools; p++) max_set = BUCKETS_MAX(max_set, topo.layouts[p].set_size);
   const char *iot = getenv("BUCKETS_IO_THREADS");
-  long nio = iot ? strtol(iot, NULL, 10) : (long)max_set - 1 + (topo.distributed ? 8 : 0);
+  /* +3: the payload hashes (MD5, SHA-256, checksum) run beside the writes. */
+  long nio = iot ? strtol(iot, NULL, 10) : (long)max_set - 1 + 3 + (topo.distributed ? 8 : 0);
   buckets_pool *io_pool = NULL;
   if (nio > 0) {
     io_pool = buckets_pool_new((int)BUCKETS_MIN(nio, 1024L));

@@ -6,6 +6,24 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- PUT and GET throughput. PUT went from 2.6–3.3× MinIO's time to parity; GET matches or beats MinIO. Details and numbers are in `docs/performance.md`.
+  - MD5 and SHA-256 use OpenSSL's optimized block functions, with value-type contexts and no allocation.
+  - Payload hashes run one block behind in the background, overlapping reads, parity and writes.
+  - Reed-Solomon parity is computed in parallel byte ranges.
+  - Large request bodies (with Content-Length) stream to the handler through a bounded pipe with socket backpressure, instead of being spooled to disk first.
+  - HighwayHash has NEON and SSSE3 update loops, bit-identical to the portable one.
+  - Object readers keep part files open.
+  - Response streams are double-buffered.
+  - On Linux, shard data syncs with `fdatasync`.
+- The default drive I/O pool is the set size + 2 threads (it now also runs the payload hashes).
+
+### Fixed
+- SigV4 canonicalization of an unsigned `content-length` header used the in-memory body length, which is 0 for spooled or streamed bodies.
+
+### Added
+- `tests/bench/putget.sh`: single-stream PUT/GET timings, side by side with MinIO when `MINIO_BIN` is set.
+
 ## [0.3.0] - 2026-09-28
 
 Phase 2: erasure coding, pools, distributed mode.

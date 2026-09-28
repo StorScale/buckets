@@ -8,10 +8,7 @@
 
 /* MD5 is only used for S3 ETags and Content-MD5; it is not a security primitive here. */
 typedef struct {
-  uint32_t state[4];
-  uint64_t bytes;
-  uint8_t block[64];
-  size_t used;
+  uint64_t opaque[16]; /* OpenSSL's MD5_CTX; a plain value, nothing to free */
 } buckets_md5_ctx;
 
 void buckets_md5_init(buckets_md5_ctx *ctx);

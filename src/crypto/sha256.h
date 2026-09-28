@@ -7,13 +7,10 @@
 #define BUCKETS_SHA256_LEN 32
 #define BUCKETS_SHA256_BLOCK 64
 
-/* Portable SHA-256. Hot paths (object payload hashing) will move to a
- * multi-buffer SIMD implementation; this one is the reference. */
+/* SHA-256 (OpenSSL underneath: hardware SHA instructions where available).
+ * The context is a plain value: no allocation, nothing to free. */
 typedef struct {
-  uint32_t state[8];
-  uint64_t bytes;
-  uint8_t block[BUCKETS_SHA256_BLOCK];
-  size_t used;
+  uint64_t opaque[16];
 } buckets_sha256_ctx;
 
 void buckets_sha256_init(buckets_sha256_ctx *ctx);
