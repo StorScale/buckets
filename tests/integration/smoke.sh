@@ -14,7 +14,7 @@ EP="http://127.0.0.1:$PORT"
 
 cleanup() {
   [[ -n "${PID:-}" ]] && kill "$PID" 2>/dev/null && wait "$PID" 2>/dev/null || true
-  rm -rf "$DIR" "$LOG"
+  rm -rf "$DIR" "$LOG" "$DIR.small" "$DIR.big"
 }
 trap cleanup EXIT
 
@@ -66,8 +66,35 @@ check "get bucket location"        200 "<LocationConstraint"       -- "${S3[@]}"
 check "get bucket versioning"      200 "<VersioningConfiguration"  -- "${S3[@]}" "$EP/photos?versioning"
 check "list objects v2 (empty)"    200 "<KeyCount>0</KeyCount>"    -- "${S3[@]}" "$EP/photos?list-type=2&prefix=a%2Fb"
 check "list objects bad max-keys"  400 "InvalidArgument"           -- "${S3[@]}" "$EP/photos?max-keys=-1"
-check "object op not implemented"  501 "NotImplemented"            -- "${S3[@]}" "$EP/photos/cat.jpg"
+check "get missing object"         404 "<Code>NoSuchKey</Code>"    -- "${S3[@]}" "$EP/photos/cat.jpg"
 check "path traversal refused"     400 "XMinioInvalidResourceName" -- "${S3[@]}" --path-as-is "$EP/photos/../../etc"
+
+# objects: small (inline) and multi-block (part file)
+printf 'meow\n' > "$DIR.small"
+head -c 3000000 /dev/urandom > "$DIR.big"
+BIG_MD5=$( (md5sum "$DIR.big" 2>/dev/null || md5 -r "$DIR.big") | cut -d' ' -f1)
+check "put small object"           200 ""                          -- "${S3[@]}" -T "$DIR.small" -H 'X-Amz-Meta-Pet: cat' "$EP/photos/cat.txt"
+check "put object with bad md5"    400 "BadDigest"                 -- "${S3[@]}" -T "$DIR.small" -H 'Content-MD5: 1B2M2Y8AsgTpgAmY7PhCfg==' "$EP/photos/x.txt"
+check "put large object"           200 ""                          -- "${S3[@]}" -T "$DIR.big" "$EP/photos/2026/big.bin"
+check "get small object"           200 "meow"                      -- "${S3[@]}" "$EP/photos/cat.txt"
+check "head object meta"           200 ""                          -- "${S3[@]}" -I "$EP/photos/cat.txt"
+got=$(curl -s "${S3[@]}" "$EP/photos/2026/big.bin" | (md5sum 2>/dev/null || md5 -r) | cut -d' ' -f1)
+if [[ "$got" == "$BIG_MD5" ]]; then pass=$((pass + 1)); echo "  ok    large object round trip"; else fail=$((fail + 1)); echo "  FAIL  large object round trip"; fi
+check "range read"                 206 ""                          -- "${S3[@]}" -H 'Range: bytes=1048570-1048580' "$EP/photos/2026/big.bin"
+check "unsatisfiable range"        416 "InvalidRange"              -- "${S3[@]}" -H 'Range: bytes=9999999-' "$EP/photos/cat.txt"
+check "if-none-match"              304 ""                          -- "${S3[@]}" -H 'If-None-Match: *' "$EP/photos/cat.txt"
+check "if-match mismatch"          412 "PreconditionFailed"        -- "${S3[@]}" -H 'If-Match: "nope"' "$EP/photos/cat.txt"
+check "copy object"                200 "<CopyObjectResult"         -- "${S3[@]}" -X PUT -H 'X-Amz-Copy-Source: /photos/cat.txt' "$EP/photos/cat-copy.txt"
+check "copy onto itself refused"   400 "InvalidRequest"            -- "${S3[@]}" -X PUT -H 'X-Amz-Copy-Source: /photos/cat.txt' "$EP/photos/cat.txt"
+check "list with delimiter"        200 "<Prefix>2026/</Prefix>"    -- "${S3[@]}" "$EP/photos?delimiter=/"
+check "list v2 paged"              200 "<NextContinuationToken>"   -- "${S3[@]}" "$EP/photos?list-type=2&max-keys=1"
+check "parent is an object"        400 "XMinioObjectExistsAsDirectory" -- "${S3[@]}" -T "$DIR.small" "$EP/photos/cat.txt/inner"
+check "delete non-empty bucket"    409 "BucketNotEmpty"            -- "${S3[@]}" -X DELETE "$EP/photos"
+check "delete objects (batch)"     200 "<Deleted><Key>cat-copy.txt</Key>" -- "${S3[@]}" -X POST "$EP/photos?delete" \
+  --data '<Delete><Object><Key>cat-copy.txt</Key></Object><Object><Key>2026/big.bin</Key></Object></Delete>'
+check "delete object"              204 ""                          -- "${S3[@]}" -X DELETE "$EP/photos/cat.txt"
+check "delete missing object"      204 ""                          -- "${S3[@]}" -X DELETE "$EP/photos/cat.txt"
+check "list after deletes"         200 "<KeyCount>0</KeyCount>"    -- "${S3[@]}" "$EP/photos?list-type=2"
 check "delete bucket"              204 ""                          -- "${S3[@]}" -X DELETE "$EP/photos"
 check "delete missing bucket"      404 "NoSuchBucket"              -- "${S3[@]}" -X DELETE "$EP/photos"
 
