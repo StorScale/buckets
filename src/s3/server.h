@@ -18,6 +18,7 @@ typedef struct {
   buckets_iam *iam;   /* credentials and policies (root-only until started) */
   struct buckets_metasys *meta; /* bucket metadata cache, once the layer is up */
   int meta_ttl_ms;              /* its snapshot lifetime (0: until invalidated) */
+  struct buckets_peer_sys *peers; /* other servers, told about IAM and bucket changes */
   char host_id[65];   /* x-amz-id-2 */
   _Atomic uint64_t request_seq;
 } buckets_s3_server;
@@ -28,5 +29,8 @@ void buckets_s3_server_init(buckets_s3_server *s, buckets_objlayer *layer, const
  * get 503 XMinioServerNotInitialized and readiness probes fail. */
 void buckets_s3_server_set_layer(buckets_s3_server *s, buckets_objlayer *layer);
 void buckets_s3_handle(const buckets_http_request *req, buckets_http_response *resp, void *ud);
+/* Applies peers' notifications (the ud of buckets_peer_server_handle). */
+void buckets_s3_peer_iam(void *server, const char *kind, const char *name);
+void buckets_s3_peer_bucket(void *server, const char *bucket);
 
 #endif

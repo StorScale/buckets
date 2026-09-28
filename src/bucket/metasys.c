@@ -15,6 +15,8 @@ struct buckets_metasys {
   pthread_mutex_t mu;       /* guards cache */
   pthread_mutex_t write_mu; /* serializes read-modify-write updates */
   buckets_strmap cache;     /* bucket -> buckets_bucket_state */
+  void (*notify)(void *ud, const char *bucket);
+  void *notify_ud;
 };
 
 static long long now_ns(void) {
@@ -110,6 +112,7 @@ bool buckets_metasys_update(buckets_metasys *m, const char *bucket, buckets_buck
     buckets_bucket_state *st = build(bucket, &meta, true);
     publish(m, bucket, st);
     buckets_bucket_state_release(st);
+    if (m->notify) m->notify(m->notify_ud, bucket);
   } else {
     buckets_bucket_meta_free(&meta);
   }
@@ -121,4 +124,14 @@ void buckets_metasys_invalidate(buckets_metasys *m, const char *bucket) {
   pthread_mutex_lock(&m->mu);
   buckets_bucket_state_release(buckets_strmap_del(&m->cache, bucket));
   pthread_mutex_unlock(&m->mu);
+}
+
+void buckets_metasys_set_notify(buckets_metasys *m, void (*fn)(void *ud, const char *bucket), void *ud) {
+  m->notify = fn;
+  m->notify_ud = ud;
+}
+
+void buckets_metasys_changed(buckets_metasys *m, const char *bucket) {
+  buckets_metasys_invalidate(m, bucket);
+  if (m->notify) m->notify(m->notify_ud, bucket);
 }

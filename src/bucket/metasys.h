@@ -35,5 +35,10 @@ void buckets_bucket_state_release(buckets_bucket_state *st);
 bool buckets_metasys_update(buckets_metasys *m, const char *bucket, buckets_bucket_cfg cfg, const void *data,
                             size_t len);
 void buckets_metasys_invalidate(buckets_metasys *m, const char *bucket);
+/* Called after a local change to a bucket's metadata (or the bucket being
+ * created or deleted), to tell other servers. */
+void buckets_metasys_set_notify(buckets_metasys *m, void (*fn)(void *ud, const char *bucket), void *ud);
+/* Invalidates and notifies: for changes made outside buckets_metasys_update. */
+void buckets_metasys_changed(buckets_metasys *m, const char *bucket);
 
 #endif

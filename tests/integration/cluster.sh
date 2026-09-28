@@ -93,6 +93,39 @@ b=$(curl -s "${S3[@]}" "$(ep 3)/clusterbucket/hot" | md5of)
 expect "nodes agree on the winner" "$a" "$b"
 expect "the winner is one of the uploads" "$(grep -c "^$a\$" "$WORK/versions")" 1
 
+echo "== IAM and bucket metadata across nodes"
+# Node 2 caches "no policy" first, so a pass proves the peer notification.
+anon() { curl -s -o /dev/null -w '%{http_code}' ${CURLTLS[@]+"${CURLTLS[@]}"} "$@"; }
+expect "anonymous read before policy (node 2)" "$(anon "$(ep 2)/clusterbucket/small.bin")" 403
+echo '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::clusterbucket/*"}]}' >"$WORK/bp.json"
+expect "put bucket policy (node 1)" "$(status -X PUT -T "$WORK/bp.json" "$(ep 1)/clusterbucket?policy")" 204
+sleep 1 # well inside the 5 s metadata TTL: only the notification can explain a change
+expect "anonymous read after policy (node 2)" "$(anon "$(ep 2)/clusterbucket/small.bin")" 200
+expect "delete bucket policy (node 3)" "$(status -X DELETE "$(ep 3)/clusterbucket?policy")" 204
+sleep 1
+expect "anonymous read after delete (node 2)" "$(anon "$(ep 2)/clusterbucket/small.bin")" 403
+r=$(curl -s --aws-sigv4 "aws:amz:us-east-1:sts" --user "$AK:$SK" ${CURLTLS[@]+"${CURLTLS[@]}"} -X POST \
+  -H "Content-Type: application/x-www-form-urlencoded" --data "Action=AssumeRole&Version=2011-06-15" "$(ep 1)/")
+tak=$(sed -n 's:.*<AccessKeyId>\(.*\)</AccessKeyId>.*:\1:p' <<<"$r")
+tsk=$(sed -n 's:.*<SecretAccessKey>\(.*\)</SecretAccessKey>.*:\1:p' <<<"$r")
+ttok=$(sed -n 's:.*<SessionToken>\(.*\)</SessionToken>.*:\1:p' <<<"$r")
+expect "STS credentials from node 1 work on node 3" "$(anon --aws-sigv4 "aws:amz:us-east-1:s3" --user "$tak:$tsk" \
+  -H "X-Amz-Security-Token: $ttok" "$(ep 3)/clusterbucket/small.bin")" 200
+if [[ -n "${MC_BIN:-}" ]]; then
+  mcc() { "$MC_BIN" --config-dir "$WORK/mc" ${TLS:+--insecure} "$@"; }
+  for n in 1 2 3 4; do mcc alias set "n$n" "$(ep "$n")" "$AK" "$SK" >/dev/null; done
+  mcc admin user add n1 dora dorasecret123 >/dev/null
+  mcc admin policy attach n2 readonly --user dora >/dev/null
+  dora() { anon --aws-sigv4 "aws:amz:us-east-1:s3" --user dora:dorasecret123 "$@"; }
+  expect "user from node 1, policy from node 2, read on node 4" "$(dora "$(ep 4)/clusterbucket/small.bin")" 200
+  mcc admin user disable n3 dora >/dev/null
+  until_true '[[ $(dora "$(ep 4)/clusterbucket/small.bin") == 403 ]]' || true
+  expect "disabled on node 3, refused on node 4" "$(dora "$(ep 4)/clusterbucket/small.bin")" 403
+  mcc admin user rm n2 dora >/dev/null
+else
+  echo "  (set MC_BIN for the admin API checks)"
+fi
+
 echo "== a node goes down"
 stop 4
 expect "read with node 4 down" "$(curl -s "${S3[@]}" "$(ep 1)/clusterbucket/big.bin" | md5of)" "$BIG"

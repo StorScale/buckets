@@ -15,6 +15,7 @@
 #include "dist/dsync.h"
 #include "dist/endpoint.h"
 #include "dist/internode.h"
+#include "dist/peer.h"
 #include "dist/storage_server.h"
 #include "storage/remote.h"
 #include "core/pool.h"
@@ -526,6 +527,8 @@ int main(int argc, char **argv) {
    * (two nodes filling each other's pools with S3 requests would deadlock). */
   buckets_pool *internode_pool = NULL;
   buckets_storage_server *storage_srv = NULL;
+  static buckets_peer_handlers peer_handlers;
+  peer_handlers = (buckets_peer_handlers){buckets_s3_peer_iam, buckets_s3_peer_bucket, &s3};
   if (topo.distributed) {
     internode_pool = buckets_pool_new((int)BUCKETS_MAX(16L, 2 * ncpu));
     storage_srv = buckets_storage_server_new(topo.local_drives, topo.nlocal);
@@ -533,6 +536,8 @@ int main(int argc, char **argv) {
                                                         storage_srv, internode_pool};
     hcfg.routes[hcfg.nroutes++] = (buckets_http_route){BUCKETS_INTERNODE_PREFIX "lock/", buckets_lock_server_handle,
                                                         topo.lock_server, internode_pool};
+    hcfg.routes[hcfg.nroutes++] = (buckets_http_route){BUCKETS_INTERNODE_PREFIX "peer/", buckets_peer_server_handle,
+                                                        &peer_handlers, internode_pool};
   }
 
   /* HTTPS when the certs directory holds a key pair, as in MinIO. */
@@ -570,7 +575,13 @@ int main(int argc, char **argv) {
       return 1;
     }
   }
-  if (topo.distributed) topology_connect(&topo);
+  if (topo.distributed) {
+    topology_connect(&topo);
+    buckets_http_client **pc = buckets_xcalloc(topo.npeers ? topo.npeers : 1, sizeof(*pc));
+    for (size_t i = 0; i < topo.npeers; i++) pc[i] = topo.peers[i].client;
+    s3.peers = buckets_peer_sys_new(pc, topo.npeers);
+    free(pc);
+  }
 
   app_state app = {0};
   app.http = buckets_http_server_start(g_loop, &hcfg, buckets_s3_handle, &s3);
@@ -606,6 +617,7 @@ int main(int argc, char **argv) {
   buckets_healer_stop(boot.healer);
   buckets_loop_free(g_loop);
   if (boot.layer) buckets_objlayer_set_locker(boot.layer, NULL, NULL, NULL);
+  buckets_peer_sys_free(s3.peers);
   buckets_dsync_free(topo.dsync);
   buckets_objlayer_free(boot.layer);
   buckets_storage_server_free(storage_srv);

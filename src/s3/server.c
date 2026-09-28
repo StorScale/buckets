@@ -19,6 +19,7 @@
 #include "admin/admin.h"
 #include "bucket/metadata.h"
 #include "bucket/metasys.h"
+#include "dist/peer.h"
 #include "s3/bucketname.h"
 #include "s3/errors.h"
 #include "s3/sigv4.h"
@@ -29,6 +30,26 @@
 #define DEFAULT_REGION "us-east-1"
 
 
+static void notify_iam(void *ud, const char *kind, const char *name) {
+  buckets_s3_server *s = ud;
+  if (s->peers) buckets_peer_notify_iam(s->peers, kind, name);
+}
+
+static void notify_bucket(void *ud, const char *bucket) {
+  buckets_s3_server *s = ud;
+  if (s->peers) buckets_peer_notify_bucket(s->peers, bucket);
+}
+
+void buckets_s3_peer_iam(void *server, const char *kind, const char *name) {
+  buckets_s3_server *s = server;
+  buckets_iam_on_notify(s->iam, kind, name);
+}
+
+void buckets_s3_peer_bucket(void *server, const char *bucket) {
+  buckets_s3_server *s = server;
+  if (s->meta) buckets_metasys_invalidate(s->meta, bucket);
+}
+
 void buckets_s3_server_init(buckets_s3_server *s, buckets_objlayer *layer, const char *root_user,
                             const char *root_password, const char *region) {
   memset(s, 0, sizeof(*s));
@@ -36,6 +57,7 @@ void buckets_s3_server_init(buckets_s3_server *s, buckets_objlayer *layer, const
   s->root_password = root_password;
   s->region = region ? region : "";
   s->iam = buckets_iam_new(root_user, root_password);
+  buckets_iam_set_notify(s->iam, notify_iam, s);
   if (layer) buckets_s3_server_set_layer(s, layer);
 }
 
@@ -62,6 +84,7 @@ void buckets_s3_server_set_layer(buckets_s3_server *s, buckets_objlayer *layer) 
   buckets_sha256(layer->deployment_id_str, strlen(layer->deployment_id_str), h);
   buckets_hex_encode(h, 32, s->host_id);
   s->meta = buckets_metasys_new(layer, s->meta_ttl_ms);
+  buckets_metasys_set_notify(s->meta, notify_bucket, s);
   s->layer = layer; /* atomic store, after host_id and meta */
   pthread_t t;
   if (pthread_create(&t, NULL, iam_start_main, s) == 0) pthread_detach(t);
@@ -370,7 +393,7 @@ static void create_bucket(s3_ctx *c) {
       buckets_bucket_meta_init(&bm, c->bucket, (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec);
       if (!buckets_bucket_meta_save(c->s->layer, &bm)) buckets_log_warn("could not save metadata for bucket %s", c->bucket);
       buckets_bucket_meta_free(&bm);
-      buckets_metasys_invalidate(c->s->meta, c->bucket);
+      buckets_metasys_changed(c->s->meta, c->bucket);
       buckets_http_resp_headerf(c->resp, "Location", "/%s", c->bucket);
       c->resp->status = 200;
       return;
@@ -391,7 +414,7 @@ static void delete_bucket(s3_ctx *c) {
     return;
   }
   buckets_bucket_meta_delete(c->s->layer, c->bucket);
-  buckets_metasys_invalidate(c->s->meta, c->bucket);
+  buckets_metasys_changed(c->s->meta, c->bucket);
   c->resp->status = 204;
 }
 
