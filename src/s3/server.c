@@ -364,6 +364,8 @@ static void route_bucket(s3_ctx *c) {
       get_bucket_location(c);
     } else if (buckets_query_has(&c->q, "versioning")) {
       get_bucket_versioning(c);
+    } else if (buckets_query_has(&c->q, "uploads")) {
+      buckets_s3_list_uploads(c);
     } else if (has_unhandled_subresource(&c->q)) {
       buckets_s3_write_error(c, BUCKETS_ERR_NOT_IMPLEMENTED);
     } else {

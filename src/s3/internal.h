@@ -44,5 +44,6 @@ buckets_s3_error buckets_s3_read_doc(s3_ctx *c);
 void buckets_s3_route_object(s3_ctx *c);
 void buckets_s3_list_objects(s3_ctx *c, bool v2);
 void buckets_s3_delete_objects(s3_ctx *c);
+void buckets_s3_list_uploads(s3_ctx *c);
 
 #endif

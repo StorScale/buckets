@@ -34,6 +34,10 @@ buckets_s3_error buckets_s3_obj_error(buckets_obj_err e) {
     case BUCKETS_OBJ_ERR_READER: return BUCKETS_ERR_INCOMPLETE_BODY;
     case BUCKETS_OBJ_ERR_CORRUPT: return BUCKETS_ERR_INTERNAL_ERROR;
     case BUCKETS_OBJ_ERR_IO: return BUCKETS_ERR_INTERNAL_ERROR;
+    case BUCKETS_OBJ_ERR_NO_SUCH_UPLOAD: return BUCKETS_ERR_NO_SUCH_UPLOAD;
+    case BUCKETS_OBJ_ERR_INVALID_PART: return BUCKETS_ERR_INVALID_PART;
+    case BUCKETS_OBJ_ERR_INVALID_PART_ORDER: return BUCKETS_ERR_INVALID_PART_ORDER;
+    case BUCKETS_OBJ_ERR_PART_TOO_SMALL: return BUCKETS_ERR_ENTITY_TOO_SMALL;
   }
   return BUCKETS_ERR_INTERNAL_ERROR;
 }
@@ -196,87 +200,87 @@ static long reader_source(void *ud, void *buf, size_t n) { return buckets_obj_re
 
 static void copy_object(s3_ctx *c);
 
+/* The request body as a decoded data source: plain, or aws-chunked. */
+typedef struct {
+  buckets_read_fn rd;
+  void *rd_ud;
+  buckets_http_body_cursor cur;
+  buckets_chunked *ch;
+  int64_t size;
+  uint8_t md5[16], sha[32];
+  bool has_md5, want_sha;
+} body_src;
+
+static buckets_s3_error body_open(s3_ctx *c, body_src *b) {
+  memset(b, 0, sizeof(*b));
+  buckets_s3_error serr = BUCKETS_ERR_NONE;
+  if (!parse_content_md5(c, b->md5, &b->has_md5, &serr)) return serr;
+  b->size = c->req->body_len;
+  b->cur = (buckets_http_body_cursor){c->req, 0};
+  b->rd = body_source;
+  b->rd_ud = &b->cur;
+  buckets_str mode = buckets_http_header_get(c->req, "X-Amz-Content-Sha256");
+  if (mode.p && buckets_str_has_prefix(mode, "STREAMING-")) {
+    b->ch = buckets_chunked_new(c->req, mode, c->auth == BUCKETS_AUTH_SIGV4_STREAMING ? &c->sig : NULL);
+    if (!b->ch) return BUCKETS_ERR_CONTENT_SHA256_MISMATCH;
+    buckets_str dl = buckets_http_header_get(c->req, "X-Amz-Decoded-Content-Length");
+    char *s = dl.p ? buckets_str_dup(dl) : NULL;
+    char *end = NULL;
+    b->size = s ? strtoll(s, &end, 10) : -1;
+    if (!s || !*s || *end) b->size = -1;
+    free(s);
+    if (b->size < 0) return BUCKETS_ERR_MISSING_CONTENT_LENGTH;
+    b->rd = buckets_chunked_read;
+    b->rd_ud = b->ch;
+  } else if (c->sig.payload_hash[0] && strcmp(c->sig.payload_hash, BUCKETS_UNSIGNED_PAYLOAD) != 0) {
+    if (!hex_decode32(c->sig.payload_hash, b->sha)) return BUCKETS_ERR_CONTENT_SHA256_MISMATCH;
+    b->want_sha = true;
+  }
+  return BUCKETS_ERR_NONE;
+}
+
+static void body_close(body_src *b) { buckets_chunked_free(b->ch); }
+
+/* Maps an object-layer failure, preferring the chunk decoder's diagnosis. */
+static buckets_s3_error body_error(const body_src *b, buckets_obj_err err) {
+  if (err == BUCKETS_OBJ_ERR_READER && b->ch && buckets_chunked_error(b->ch)) return buckets_chunked_error(b->ch);
+  return buckets_s3_obj_error(err);
+}
+
 static void put_object(s3_ctx *c) {
   if (buckets_http_header_get(c->req, "X-Amz-Copy-Source").p) {
     copy_object(c);
     return;
   }
-  buckets_s3_error serr = BUCKETS_ERR_NONE;
-  uint8_t md5[16];
-  bool has_md5;
-  if (!parse_content_md5(c, md5, &has_md5, &serr)) {
-    buckets_s3_write_error(c, serr);
-    return;
-  }
-
-  int64_t size = c->req->body_len;
-  buckets_chunked *ch = NULL;
-  buckets_read_fn rd = body_source;
-  buckets_http_body_cursor cur = {c->req, 0};
-  void *rd_ud = &cur;
-  uint8_t sha[32];
-  bool want_sha = false;
-
-  buckets_str mode = buckets_http_header_get(c->req, "X-Amz-Content-Sha256");
-  if (mode.p && buckets_str_has_prefix(mode, "STREAMING-")) {
-    ch = buckets_chunked_new(c->req, mode, c->auth == BUCKETS_AUTH_SIGV4_STREAMING ? &c->sig : NULL);
-    if (!ch) {
-      buckets_s3_write_error(c, BUCKETS_ERR_CONTENT_SHA256_MISMATCH);
-      return;
-    }
-    buckets_str dl = buckets_http_header_get(c->req, "X-Amz-Decoded-Content-Length");
-    char *s = dl.p ? buckets_str_dup(dl) : NULL;
-    char *end = NULL;
-    size = s ? strtoll(s, &end, 10) : -1;
-    if (!s || !*s || *end || size < 0) size = -1;
-    free(s);
-    if (size < 0) {
-      buckets_chunked_free(ch);
-      buckets_s3_write_error(c, BUCKETS_ERR_MISSING_CONTENT_LENGTH);
-      return;
-    }
-    rd = buckets_chunked_read;
-    rd_ud = ch;
-  } else if (c->sig.payload_hash[0] && strcmp(c->sig.payload_hash, BUCKETS_UNSIGNED_PAYLOAD) != 0) {
-    if (!hex_decode32(c->sig.payload_hash, sha)) {
-      buckets_s3_write_error(c, BUCKETS_ERR_CONTENT_SHA256_MISMATCH);
-      return;
-    }
-    want_sha = true;
-  }
-  if (size > BUCKETS_S3_MAX_OBJECT_SIZE) {
-    buckets_chunked_free(ch);
-    buckets_s3_write_error(c, BUCKETS_ERR_ENTITY_TOO_LARGE);
-    return;
-  }
-
+  body_src b;
+  buckets_s3_error serr = body_open(c, &b);
+  if (!serr && b.size > BUCKETS_S3_MAX_OBJECT_SIZE) serr = BUCKETS_ERR_ENTITY_TOO_LARGE;
   buckets_xl_kv *meta = NULL;
   size_t nmeta = 0;
-  if ((serr = extract_metadata(c, &meta, &nmeta)) != BUCKETS_ERR_NONE) {
+  if (!serr) serr = extract_metadata(c, &meta, &nmeta);
+  if (serr) {
     free_kvs(meta, nmeta);
-    buckets_chunked_free(ch);
+    body_close(&b);
     buckets_s3_write_error(c, serr);
     return;
   }
   buckets_put_opts opts = {
       .meta = meta,
       .nmeta = nmeta,
-      .want_md5 = has_md5 ? md5 : NULL,
-      .want_sha256 = want_sha ? sha : NULL,
+      .want_md5 = b.has_md5 ? b.md5 : NULL,
+      .want_sha256 = b.want_sha ? b.sha : NULL,
   };
   buckets_object_info oi;
-  buckets_obj_err err = buckets_obj_put(c->s->drive, c->bucket, c->object, rd, rd_ud, size, &opts, &oi);
+  buckets_obj_err err = buckets_obj_put(c->s->drive, c->bucket, c->object, b.rd, b.rd_ud, b.size, &opts, &oi);
   free_kvs(meta, nmeta);
-  if (err == BUCKETS_OBJ_ERR_READER && ch && buckets_chunked_error(ch)) {
-    buckets_s3_write_error(c, buckets_chunked_error(ch));
-  } else if (err) {
-    buckets_s3_write_error(c, buckets_s3_obj_error(err));
+  if (err) {
+    buckets_s3_write_error(c, body_error(&b, err));
   } else {
     etag_header(c->resp, oi.etag);
     c->resp->status = 200;
     buckets_object_info_free(&oi);
   }
-  buckets_chunked_free(ch);
+  body_close(&b);
 }
 
 /* ---- GetObject / HeadObject ----------------------------------------------- */
@@ -621,12 +625,376 @@ static void copy_object(s3_ctx *c) {
   buckets_object_info_free(&oi);
 }
 
+/* ---- multipart uploads ---------------------------------------------------- */
+
+static void mpu_create(s3_ctx *c) {
+  buckets_xl_kv *meta = NULL;
+  size_t nmeta = 0;
+  buckets_s3_error serr = extract_metadata(c, &meta, &nmeta);
+  if (serr) {
+    free_kvs(meta, nmeta);
+    buckets_s3_write_error(c, serr);
+    return;
+  }
+  char upload_id[BUCKETS_UPLOAD_ID_MAX];
+  buckets_obj_err err = buckets_obj_mpu_new(c->s->drive, c->bucket, c->object, meta, nmeta, upload_id);
+  free_kvs(meta, nmeta);
+  if (err) {
+    buckets_s3_write_error(c, buckets_s3_obj_error(err));
+    return;
+  }
+  buckets_buf *b = &c->resp->body;
+  buckets_xml_header(b);
+  buckets_xml_open_ns(b, "InitiateMultipartUploadResult", BUCKETS_S3_XMLNS);
+  buckets_xml_elem(b, "Bucket", c->bucket);
+  buckets_xml_elem(b, "Key", c->object);
+  buckets_xml_elem(b, "UploadId", upload_id);
+  buckets_xml_close(b, "InitiateMultipartUploadResult");
+  buckets_s3_write_xml(c, 200);
+}
+
+static bool parse_part_number(s3_ctx *c, int *out) {
+  const char *s = buckets_query_get(&c->q, "partNumber");
+  char *end = NULL;
+  long v = s ? strtol(s, &end, 10) : 0;
+  if (!s || !*s || *end || v < 1) {
+    buckets_s3_write_error(c, BUCKETS_ERR_INVALID_PART);
+    return false;
+  }
+  if (v > BUCKETS_MAX_PARTS) {
+    buckets_s3_write_error(c, BUCKETS_ERR_INVALID_MAX_PARTS);
+    return false;
+  }
+  *out = (int)v;
+  return true;
+}
+
+/* x-amz-copy-source: "/bucket/key[?versionId=...]" (URL-encoded). */
+static bool parse_copy_source(buckets_str h, char **decoded, const char **bucket, const char **object,
+                              const char **version) {
+  *decoded = buckets_xmalloc(h.n + 1);
+  long dn = buckets_url_decode(h, *decoded, false);
+  if (dn < 0) return false;
+  (*decoded)[dn] = '\0';
+  char *path = *decoded;
+  *version = NULL;
+  char *q = strchr(path, '?');
+  if (q) {
+    *q = '\0';
+    if (strncmp(q + 1, "versionId=", 10) == 0) *version = q + 11;
+  }
+  while (*path == '/') path++;
+  char *slash = strchr(path, '/');
+  if (!slash || !slash[1]) return false;
+  *slash = '\0';
+  *bucket = path;
+  *object = slash + 1;
+  return true;
+}
+
+static void mpu_put_part(s3_ctx *c, const char *upload_id) {
+  int part;
+  if (!parse_part_number(c, &part)) return;
+
+  buckets_str copy_src = buckets_http_header_get(c->req, "X-Amz-Copy-Source");
+  if (copy_src.p) {
+    /* UploadPartCopy */
+    char *decoded;
+    const char *sb, *so, *sv;
+    if (!parse_copy_source(copy_src, &decoded, &sb, &so, &sv)) {
+      free(decoded);
+      buckets_s3_write_error(c, BUCKETS_ERR_INVALID_COPY_SOURCE);
+      return;
+    }
+    buckets_object_info src;
+    buckets_obj_err err = buckets_obj_stat(c->s->drive, sb, so, sv, &src);
+    if (err) {
+      free(decoded);
+      buckets_s3_write_error(c, buckets_s3_obj_error(err));
+      return;
+    }
+    int64_t off = 0, len = src.size;
+    buckets_str rh = buckets_http_header_get(c->req, "X-Amz-Copy-Source-Range");
+    if (rh.p) {
+      range_spec rs;
+      if (!parse_range(rh, &rs) || !rs.present || rs.suffix || rs.end < 0 || !resolve_range(&rs, src.size, &off, &len)) {
+        buckets_object_info_free(&src);
+        free(decoded);
+        buckets_s3_write_error(c, BUCKETS_ERR_INVALID_RANGE);
+        return;
+      }
+    }
+    buckets_obj_reader *r;
+    buckets_object_info tmp;
+    err = buckets_obj_open(c->s->drive, sb, so, sv, off, len, &r, &tmp);
+    buckets_object_info_free(&src);
+    free(decoded);
+    if (err) {
+      buckets_s3_write_error(c, buckets_s3_obj_error(err));
+      return;
+    }
+    buckets_object_info_free(&tmp);
+    buckets_part_info pi;
+    err = buckets_obj_mpu_put_part(c->s->drive, c->bucket, c->object, upload_id, part, reader_source, r, len, NULL, &pi);
+    buckets_obj_reader_free(r);
+    if (err) {
+      buckets_s3_write_error(c, buckets_s3_obj_error(err));
+      return;
+    }
+    char lm[BUCKETS_TIME_ISO8601_LEN + 1];
+    buckets_time_iso8601((time_t)(pi.mod_time_ns / 1000000000LL), lm);
+    buckets_buf *b = &c->resp->body;
+    buckets_xml_header(b);
+    buckets_xml_open_ns(b, "CopyPartResult", BUCKETS_S3_XMLNS);
+    buckets_xml_elem(b, "LastModified", lm);
+    buckets_buf_appendf(b, "<ETag>&quot;%s&quot;</ETag>", pi.etag);
+    buckets_xml_close(b, "CopyPartResult");
+    buckets_s3_write_xml(c, 200);
+    return;
+  }
+
+  body_src bsrc;
+  buckets_s3_error serr = body_open(c, &bsrc);
+  if (!serr && bsrc.size > BUCKETS_MAX_PART_SIZE) serr = BUCKETS_ERR_ENTITY_TOO_LARGE;
+  if (serr) {
+    body_close(&bsrc);
+    buckets_s3_write_error(c, serr);
+    return;
+  }
+  buckets_put_opts opts = {.want_md5 = bsrc.has_md5 ? bsrc.md5 : NULL, .want_sha256 = bsrc.want_sha ? bsrc.sha : NULL};
+  buckets_part_info pi;
+  buckets_obj_err err = buckets_obj_mpu_put_part(c->s->drive, c->bucket, c->object, upload_id, part, bsrc.rd,
+                                                 bsrc.rd_ud, bsrc.size, &opts, &pi);
+  if (err) {
+    buckets_s3_write_error(c, body_error(&bsrc, err));
+  } else {
+    etag_header(c->resp, pi.etag);
+    c->resp->status = 200;
+  }
+  body_close(&bsrc);
+}
+
+static void mpu_list_parts(s3_ctx *c, const char *upload_id) {
+  const char *ms = buckets_query_get(&c->q, "max-parts");
+  const char *pm = buckets_query_get(&c->q, "part-number-marker");
+  long max = 1000, marker = 0;
+  char *end;
+  if (ms) {
+    max = strtol(ms, &end, 10);
+    if (!*ms || *end || max < 0) {
+      buckets_s3_write_error(c, BUCKETS_ERR_INVALID_MAX_PARTS);
+      return;
+    }
+    if (max > 1000) max = 1000;
+  }
+  if (pm) {
+    marker = strtol(pm, &end, 10);
+    if (!*pm || *end || marker < 0) {
+      buckets_s3_write_error(c, BUCKETS_ERR_INVALID_PART_NUMBER_MARKER);
+      return;
+    }
+  }
+  buckets_part_info *parts;
+  size_t n;
+  bool truncated;
+  buckets_obj_err err = buckets_obj_mpu_list_parts(c->s->drive, c->bucket, c->object, upload_id, (int)marker,
+                                                   (int)max, &parts, &n, &truncated);
+  if (err) {
+    buckets_s3_write_error(c, buckets_s3_obj_error(err));
+    return;
+  }
+  buckets_buf *b = &c->resp->body;
+  buckets_xml_header(b);
+  buckets_xml_open_ns(b, "ListPartsResult", BUCKETS_S3_XMLNS);
+  buckets_xml_elem(b, "Bucket", c->bucket);
+  buckets_xml_elem(b, "Key", c->object);
+  buckets_xml_elem(b, "UploadId", upload_id);
+  for (int who = 0; who < 2; who++) {
+    buckets_xml_open(b, who ? "Owner" : "Initiator");
+    buckets_xml_elem(b, "ID", BUCKETS_S3_OWNER_ID);
+    buckets_xml_elem(b, "DisplayName", BUCKETS_S3_OWNER_NAME);
+    buckets_xml_close(b, who ? "Owner" : "Initiator");
+  }
+  buckets_xml_elem(b, "StorageClass", "STANDARD");
+  buckets_buf_appendf(b, "<PartNumberMarker>%ld</PartNumberMarker>", marker);
+  buckets_buf_appendf(b, "<NextPartNumberMarker>%d</NextPartNumberMarker>", n ? parts[n - 1].number : 0);
+  buckets_buf_appendf(b, "<MaxParts>%ld</MaxParts>", max);
+  buckets_xml_elem(b, "IsTruncated", truncated ? "true" : "false");
+  for (size_t i = 0; i < n; i++) {
+    char lm[BUCKETS_TIME_ISO8601_LEN + 1];
+    buckets_time_iso8601((time_t)(parts[i].mod_time_ns / 1000000000LL), lm);
+    buckets_xml_open(b, "Part");
+    buckets_buf_appendf(b, "<PartNumber>%d</PartNumber>", parts[i].number);
+    buckets_xml_elem(b, "LastModified", lm);
+    buckets_buf_appendf(b, "<ETag>&quot;%s&quot;</ETag>", parts[i].etag);
+    buckets_buf_appendf(b, "<Size>%lld</Size>", (long long)parts[i].size);
+    buckets_xml_close(b, "Part");
+  }
+  buckets_xml_close(b, "ListPartsResult");
+  free(parts);
+  buckets_s3_write_xml(c, 200);
+}
+
+static void mpu_abort(s3_ctx *c, const char *upload_id) {
+  buckets_obj_err err = buckets_obj_mpu_abort(c->s->drive, c->bucket, c->object, upload_id);
+  if (err) {
+    buckets_s3_write_error(c, buckets_s3_obj_error(err));
+    return;
+  }
+  c->resp->status = 204;
+}
+
+static void mpu_complete(s3_ctx *c, const char *upload_id) {
+  buckets_s3_error serr = buckets_s3_read_doc(c);
+  if (serr) {
+    buckets_s3_write_error(c, serr);
+    return;
+  }
+  buckets_xml_doc doc;
+  if (!buckets_xml_parse(buckets_buf_str(&c->doc), &doc) ||
+      !buckets_str_eq_c(doc.nodes[0].name, "CompleteMultipartUpload")) {
+    if (doc.nodes) buckets_xml_doc_free(&doc);
+    buckets_s3_write_error(c, BUCKETS_ERR_MALFORMED_XML);
+    return;
+  }
+  size_t cap = 0, n = 0;
+  buckets_complete_part *parts = NULL;
+  char **etags = NULL;
+  bool bad = false;
+  for (size_t i = doc.nodes[0].first_child; i && !bad; i = doc.nodes[i].next_sibling) {
+    if (!buckets_str_eq_c(doc.nodes[i].name, "Part")) continue;
+    size_t pn = buckets_xml_child(&doc, i, "PartNumber"), en = buckets_xml_child(&doc, i, "ETag");
+    if (!pn || !en || n >= BUCKETS_MAX_PARTS) {
+      bad = true;
+      break;
+    }
+    char *num = buckets_str_dup(buckets_str_trim(doc.nodes[pn].text));
+    char *end;
+    long v = strtol(num, &end, 10);
+    bad = !*num || *end || v < 1 || v > BUCKETS_MAX_PARTS;
+    free(num);
+    buckets_buf etag = BUCKETS_BUF_INIT;
+    if (!bad && !buckets_xml_unescape(doc.nodes[en].text, &etag)) bad = true;
+    if (!bad) {
+      if (n == cap) {
+        cap = cap ? cap * 2 : 16;
+        parts = buckets_xrealloc(parts, cap * sizeof(*parts));
+        etags = buckets_xrealloc(etags, cap * sizeof(*etags));
+      }
+      etags[n] = etag.data ? etag.data : buckets_xstrdup("");
+      parts[n] = (buckets_complete_part){(int)v, etags[n]};
+      n++;
+    } else {
+      buckets_buf_free(&etag);
+    }
+  }
+  buckets_xml_doc_free(&doc);
+  if (bad || n == 0) {
+    for (size_t i = 0; i < n; i++) free(etags[i]);
+    free(etags);
+    free(parts);
+    buckets_s3_write_error(c, BUCKETS_ERR_MALFORMED_XML);
+    return;
+  }
+  buckets_object_info oi;
+  buckets_obj_err err = buckets_obj_mpu_complete(c->s->drive, c->bucket, c->object, upload_id, parts, n, &oi);
+  for (size_t i = 0; i < n; i++) free(etags[i]);
+  free(etags);
+  free(parts);
+  if (err) {
+    buckets_s3_write_error(c, err == BUCKETS_OBJ_ERR_PART_TOO_SMALL      ? BUCKETS_ERR_ENTITY_TOO_SMALL
+                              : err == BUCKETS_OBJ_ERR_INVALID_PART       ? BUCKETS_ERR_INVALID_PART
+                              : err == BUCKETS_OBJ_ERR_INVALID_PART_ORDER ? BUCKETS_ERR_INVALID_PART_ORDER
+                                                                          : buckets_s3_obj_error(err));
+    return;
+  }
+  buckets_buf *b = &c->resp->body;
+  buckets_xml_header(b);
+  buckets_xml_open_ns(b, "CompleteMultipartUploadResult", BUCKETS_S3_XMLNS);
+  buckets_buf loc = BUCKETS_BUF_INIT;
+  buckets_str host = buckets_http_header_get(c->req, "Host");
+  buckets_buf_appendf(&loc, "http://" BUCKETS_STR_FMT "/%s/%s", BUCKETS_STR_ARG(host), c->bucket, c->object);
+  buckets_xml_elem(b, "Location", loc.data);
+  buckets_buf_free(&loc);
+  buckets_xml_elem(b, "Bucket", c->bucket);
+  buckets_xml_elem(b, "Key", c->object);
+  buckets_buf_appendf(b, "<ETag>&quot;%s&quot;</ETag>", oi.etag);
+  buckets_xml_close(b, "CompleteMultipartUploadResult");
+  buckets_s3_write_xml(c, 200);
+  buckets_object_info_free(&oi);
+}
+
+void buckets_s3_list_uploads(s3_ctx *c) {
+  const char *prefix = buckets_query_get(&c->q, "prefix");
+  const char *mu = buckets_query_get(&c->q, "max-uploads");
+  long max = 1000;
+  if (mu) {
+    char *end;
+    max = strtol(mu, &end, 10);
+    if (!*mu || *end || max < 0 || max > 2147483647L) {
+      buckets_s3_write_error(c, BUCKETS_ERR_INVALID_MAX_UPLOADS);
+      return;
+    }
+  }
+  buckets_upload_info *ups;
+  size_t n;
+  buckets_obj_err err = buckets_obj_mpu_list_uploads(c->s->drive, c->bucket, prefix, &ups, &n);
+  if (err) {
+    buckets_s3_write_error(c, buckets_s3_obj_error(err));
+    return;
+  }
+  buckets_buf *b = &c->resp->body;
+  buckets_xml_header(b);
+  buckets_xml_open_ns(b, "ListMultipartUploadsResult", BUCKETS_S3_XMLNS);
+  buckets_xml_elem(b, "Bucket", c->bucket);
+  buckets_xml_elem(b, "KeyMarker", buckets_query_get(&c->q, "key-marker"));
+  buckets_xml_elem(b, "UploadIdMarker", buckets_query_get(&c->q, "upload-id-marker"));
+  buckets_xml_elem(b, "NextKeyMarker", "");
+  buckets_xml_elem(b, "NextUploadIdMarker", "");
+  buckets_xml_elem(b, "Delimiter", buckets_query_get(&c->q, "delimiter"));
+  buckets_xml_elem(b, "Prefix", prefix);
+  buckets_buf_appendf(b, "<MaxUploads>%ld</MaxUploads>", max);
+  buckets_xml_elem(b, "IsTruncated", "false");
+  for (size_t i = 0; i < n && (long)i < max; i++) {
+    char ts[BUCKETS_TIME_ISO8601_LEN + 1];
+    buckets_time_iso8601((time_t)(ups[i].initiated_ns / 1000000000LL), ts);
+    buckets_xml_open(b, "Upload");
+    buckets_xml_elem(b, "Key", ups[i].object);
+    buckets_xml_elem(b, "UploadId", ups[i].upload_id);
+    for (int who = 0; who < 2; who++) {
+      buckets_xml_open(b, who ? "Owner" : "Initiator");
+      buckets_xml_elem(b, "ID", BUCKETS_S3_OWNER_ID);
+      buckets_xml_elem(b, "DisplayName", BUCKETS_S3_OWNER_NAME);
+      buckets_xml_close(b, who ? "Owner" : "Initiator");
+    }
+    buckets_xml_elem(b, "StorageClass", "STANDARD");
+    buckets_xml_elem(b, "Initiated", ts);
+    buckets_xml_close(b, "Upload");
+  }
+  buckets_xml_close(b, "ListMultipartUploadsResult");
+  buckets_upload_info_free(ups, n);
+  buckets_s3_write_xml(c, 200);
+}
+
 /* ---- routing -------------------------------------------------------------- */
 
 void buckets_s3_route_object(s3_ctx *c) {
   buckets_str m = c->req->method;
-  static const char *const unsupported[] = {"uploads", "uploadId", "tagging", "retention", "legal-hold", "acl",
-                                            "attributes", "select", "restore", "torrent", "partNumber"};
+  const char *upload_id = buckets_query_get(&c->q, "uploadId");
+  if (buckets_str_eq_c(m, "POST") && buckets_query_has(&c->q, "uploads")) {
+    mpu_create(c);
+    return;
+  }
+  if (upload_id) {
+    if (buckets_str_eq_c(m, "PUT")) mpu_put_part(c, upload_id);
+    else if (buckets_str_eq_c(m, "GET")) mpu_list_parts(c, upload_id);
+    else if (buckets_str_eq_c(m, "DELETE")) mpu_abort(c, upload_id);
+    else if (buckets_str_eq_c(m, "POST")) mpu_complete(c, upload_id);
+    else buckets_s3_write_error(c, BUCKETS_ERR_METHOD_NOT_ALLOWED);
+    return;
+  }
+  static const char *const unsupported[] = {"tagging", "retention", "legal-hold", "acl", "attributes",
+                                            "select",  "restore",   "torrent",    "partNumber"};
   for (size_t i = 0; i < BUCKETS_ARRAY_LEN(unsupported); i++) {
     if (buckets_query_has(&c->q, unsupported[i])) {
       buckets_s3_write_error(c, BUCKETS_ERR_NOT_IMPLEMENTED);

@@ -9,3 +9,4 @@ crash-*
 leak-*
 timeout-*
 .DS_Store
+/.oracles/

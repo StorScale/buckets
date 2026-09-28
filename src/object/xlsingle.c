@@ -17,6 +17,7 @@
 #include "crypto/highwayhash.h"
 #include "crypto/md5.h"
 #include "crypto/sha256.h"
+#include "object/internal.h"
 #include "object/object.h"
 
 #define XL_META "xl.meta"
@@ -39,13 +40,17 @@ const char *buckets_obj_strerror(buckets_obj_err e) {
     case BUCKETS_OBJ_ERR_READER: return "data source failed";
     case BUCKETS_OBJ_ERR_CORRUPT: return "corrupt data";
     case BUCKETS_OBJ_ERR_IO: return "I/O error";
+    case BUCKETS_OBJ_ERR_NO_SUCH_UPLOAD: return "no such upload";
+    case BUCKETS_OBJ_ERR_INVALID_PART: return "invalid part";
+    case BUCKETS_OBJ_ERR_INVALID_PART_ORDER: return "parts out of order";
+    case BUCKETS_OBJ_ERR_PART_TOO_SMALL: return "part too small";
   }
   return "unknown";
 }
 
 /* ---- small utilities ------------------------------------------------------ */
 
-static int64_t now_ns(void) {
+int64_t buckets_objx_now_ns(void) {
   struct timespec ts;
   clock_gettime(CLOCK_REALTIME, &ts);
   return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
@@ -93,7 +98,7 @@ buckets_obj_err buckets_obj_check_name(const char *object) {
 }
 
 /* <root>/<bucket>/<object>, with trailing-slash keys encoded as name__XLDIR__. */
-static char *object_dir(buckets_drive *d, const char *bucket, const char *object) {
+char *buckets_objx_object_dir(buckets_drive *d, const char *bucket, const char *object) {
   buckets_buf p = BUCKETS_BUF_INIT;
   size_t n = strlen(object);
   if (n && object[n - 1] == '/') {
@@ -104,12 +109,12 @@ static char *object_dir(buckets_drive *d, const char *bucket, const char *object
   return p.data;
 }
 
-static bool is_file(const char *path) {
+bool buckets_objx_is_file(const char *path) {
   struct stat st;
   return stat(path, &st) == 0 && S_ISREG(st.st_mode);
 }
 
-static bool bucket_exists(buckets_drive *d, const char *bucket) {
+bool buckets_objx_bucket_exists(buckets_drive *d, const char *bucket) {
   return buckets_drive_stat_vol(d, bucket, NULL) == BUCKETS_DRIVE_OK;
 }
 
@@ -117,9 +122,9 @@ static int rm_entry(const char *path, const struct stat *st, int flag, struct FT
   return remove(path) == 0 || errno == ENOENT ? 0 : -1;
 }
 
-static void rm_rf(const char *path) { nftw(path, rm_entry, 16, FTW_DEPTH | FTW_PHYS); }
+void buckets_objx_rm_rf(const char *path) { nftw(path, rm_entry, 16, FTW_DEPTH | FTW_PHYS); }
 
-static int mkdir_all(const char *path) {
+int buckets_objx_mkdir_all(const char *path) {
   char *tmp = buckets_xstrdup(path);
   for (char *s = tmp + 1; *s; s++) {
     if (*s != '/') continue;
@@ -135,7 +140,7 @@ static int mkdir_all(const char *path) {
   return rc;
 }
 
-static void fsync_path(const char *path) {
+void buckets_objx_fsync_path(const char *path) {
   int fd = open(path, O_RDONLY);
   if (fd >= 0) {
     fsync(fd);
@@ -143,7 +148,7 @@ static void fsync_path(const char *path) {
   }
 }
 
-static bool write_full(int fd, const void *p, size_t n) {
+bool buckets_objx_write_full(int fd, const void *p, size_t n) {
   const char *c = p;
   while (n) {
     ssize_t w = write(fd, c, n);
@@ -173,7 +178,7 @@ static bool read_file(const char *path, buckets_buf *out) {
   return true;
 }
 
-static char *tmp_path(buckets_drive *d) {
+char *buckets_objx_tmp_path(buckets_drive *d) {
   char id[BUCKETS_UUID_STR_LEN + 1];
   buckets_uuid_v4(id);
   buckets_buf p = BUCKETS_BUF_INIT;
@@ -182,20 +187,20 @@ static char *tmp_path(buckets_drive *d) {
 }
 
 /* Writes xl.meta via temp file + rename so readers never see a partial file. */
-static buckets_obj_err write_xlmeta(buckets_drive *d, const char *dir, const buckets_xlmeta *x) {
+buckets_obj_err buckets_objx_write_xlmeta(buckets_drive *d, const char *dir, const buckets_xlmeta *x) {
   buckets_buf bytes = BUCKETS_BUF_INIT;
   buckets_xlmeta_serialize(x, &bytes);
-  char *tmp = tmp_path(d);
+  char *tmp = buckets_objx_tmp_path(d);
   buckets_obj_err err = BUCKETS_OBJ_OK;
   int fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
-  if (fd < 0 || !write_full(fd, bytes.data, bytes.len) || fsync(fd) != 0) err = BUCKETS_OBJ_ERR_IO;
+  if (fd < 0 || !buckets_objx_write_full(fd, bytes.data, bytes.len) || fsync(fd) != 0) err = BUCKETS_OBJ_ERR_IO;
   if (fd >= 0) close(fd);
   if (err == BUCKETS_OBJ_OK) {
     buckets_buf dst = BUCKETS_BUF_INIT;
     buckets_buf_appendf(&dst, "%s/" XL_META, dir);
     if (rename(tmp, dst.data) != 0) err = BUCKETS_OBJ_ERR_IO;
     buckets_buf_free(&dst);
-    fsync_path(dir);
+    buckets_objx_fsync_path(dir);
   }
   if (err != BUCKETS_OBJ_OK) unlink(tmp);
   free(tmp);
@@ -203,16 +208,14 @@ static buckets_obj_err write_xlmeta(buckets_drive *d, const char *dir, const buc
   return err;
 }
 
-typedef enum { LOAD_OK, LOAD_MISSING, LOAD_ERR } load_result;
-
-static load_result load_xlmeta(const char *dir, buckets_xlmeta *x) {
+buckets_objx_load_result buckets_objx_load_xlmeta(const char *dir, buckets_xlmeta *x) {
   buckets_buf path = BUCKETS_BUF_INIT, raw = BUCKETS_BUF_INIT;
   buckets_buf_appendf(&path, "%s/" XL_META, dir);
-  load_result res = LOAD_OK;
+  buckets_objx_load_result res = BUCKETS_OBJX_LOAD_OK;
   if (!read_file(path.data, &raw)) {
-    res = errno == ENOENT || errno == ENOTDIR ? LOAD_MISSING : LOAD_ERR;
+    res = errno == ENOENT || errno == ENOTDIR ? BUCKETS_OBJX_LOAD_MISSING : BUCKETS_OBJX_LOAD_ERR;
   } else if (buckets_xlmeta_parse(raw.data, raw.len, x) != BUCKETS_XL_OK) {
-    res = LOAD_ERR;
+    res = BUCKETS_OBJX_LOAD_ERR;
   }
   buckets_buf_free(&path);
   buckets_buf_free(&raw);
@@ -236,7 +239,7 @@ const char *buckets_object_meta(const buckets_object_info *oi, const char *key) 
   return kv ? (const char *)kv->value : NULL;
 }
 
-static void fill_info(buckets_object_info *oi, const char *name, const buckets_xl_object *o) {
+void buckets_objx_fill_info(buckets_object_info *oi, const char *name, const buckets_xl_object *o) {
   memset(oi, 0, sizeof(*oi));
   oi->name = buckets_xstrdup(name);
   buckets_xl_version_id_string(o->version_id, oi->version_id);
@@ -254,7 +257,7 @@ static void fill_info(buckets_object_info *oi, const char *name, const buckets_x
 }
 
 /* Picks the requested version (or the latest), decoding it into *o. */
-static buckets_obj_err pick_version(const buckets_xlmeta *x, const char *version_id, buckets_xl_object *o) {
+buckets_obj_err buckets_objx_pick_version(const buckets_xlmeta *x, const char *version_id, buckets_xl_object *o) {
   long idx = 0;
   if (version_id && *version_id) {
     uint8_t id[16];
@@ -310,7 +313,7 @@ static void frame_block(buckets_buf *out, const uint8_t *block, size_t n) {
 }
 
 /* Rejects keys whose parent path is an object, or that shadow a non-empty prefix. */
-static buckets_obj_err check_namespace(buckets_drive *d, const char *bucket, const char *object) {
+buckets_obj_err buckets_objx_check_namespace(buckets_drive *d, const char *bucket, const char *object) {
   buckets_buf p = BUCKETS_BUF_INIT;
   buckets_buf_appendf(&p, "%s/%s", d->root, bucket);
   size_t base = p.len;
@@ -318,17 +321,17 @@ static buckets_obj_err check_namespace(buckets_drive *d, const char *bucket, con
   for (const char *s = object; (s = strchr(s, '/')) != NULL && s[1]; s++) {
     p.len = base;
     buckets_buf_appendf(&p, "/%.*s/" XL_META, (int)(s - object), object);
-    if (is_file(p.data)) {
+    if (buckets_objx_is_file(p.data)) {
       err = BUCKETS_OBJ_ERR_EXISTS_AS_DIRECTORY;
       break;
     }
   }
   if (err == BUCKETS_OBJ_OK) {
-    char *dir = object_dir(d, bucket, object);
+    char *dir = buckets_objx_object_dir(d, bucket, object);
     buckets_buf meta = BUCKETS_BUF_INIT;
     buckets_buf_appendf(&meta, "%s/" XL_META, dir);
     struct stat st;
-    if (stat(dir, &st) == 0 && !is_file(meta.data)) {
+    if (stat(dir, &st) == 0 && !buckets_objx_is_file(meta.data)) {
       if (!S_ISDIR(st.st_mode)) {
         err = BUCKETS_OBJ_ERR_EXISTS_AS_DIRECTORY;
       } else {
@@ -350,42 +353,26 @@ static buckets_obj_err check_namespace(buckets_drive *d, const char *bucket, con
   return err;
 }
 
-buckets_obj_err buckets_obj_put(buckets_drive *d, const char *bucket, const char *object, buckets_read_fn rd,
-                                void *rd_ud, int64_t size, const buckets_put_opts *opts, buckets_object_info *out) {
-  if (!bucket_exists(d, bucket)) return BUCKETS_OBJ_ERR_NO_SUCH_BUCKET;
-  buckets_obj_err err = buckets_obj_check_name(object);
-  if (err) return err;
-  if ((err = check_namespace(d, bucket, object)) != BUCKETS_OBJ_OK) return err;
-  if (size < 0) return BUCKETS_OBJ_ERR_INCOMPLETE_BODY;
-
+buckets_obj_err buckets_objx_write_data(buckets_drive *d, buckets_read_fn rd, void *rd_ud, int64_t size,
+                                       const buckets_put_opts *opts, bool allow_inline, const char *tmp_dir,
+                                       const char *data_dir, int part_number, buckets_buf *inline_shard,
+                                       uint8_t md5_out[16]) {
   source src = {.rd = rd, .ud = rd_ud, .remaining = size, .want_sha = opts && opts->want_sha256};
   buckets_md5_init(&src.md5);
   buckets_sha256_init(&src.sha);
-
-  uint8_t data_dir[16];
-  buckets_random_bytes(data_dir, 16);
-  data_dir[6] = (uint8_t)((data_dir[6] & 0x0f) | 0x40);
-  data_dir[8] = (uint8_t)((data_dir[8] & 0x3f) | 0x80);
-  char data_dir_s[37];
-  buckets_xl_version_id_string(data_dir, data_dir_s);
-
-  bool inline_data = size <= BUCKETS_INLINE_THRESHOLD;
-  buckets_buf framed = BUCKETS_BUF_INIT; /* inline shard */
-  char *tmp_dir = NULL;
   uint8_t *block = buckets_xmalloc(BUCKETS_BLOCK_SIZE);
 
-  if (inline_data) {
+  if (allow_inline && size <= BUCKETS_INLINE_THRESHOLD) {
     size_t n = source_read(&src, block, (size_t)size);
-    if (!src.err && n > 0) frame_block(&framed, block, n);
+    if (!src.err && n > 0) frame_block(inline_shard, block, n);
   } else {
-    /* <tmp>/<uuid>/<data-dir>/part.1, renamed into place on commit. */
-    tmp_dir = tmp_path(d);
+    /* <tmp_dir>/<data-dir>/part.N, renamed into place by the caller. */
     buckets_buf part = BUCKETS_BUF_INIT;
-    buckets_buf_appendf(&part, "%s/%s", tmp_dir, data_dir_s);
+    buckets_buf_appendf(&part, "%s/%s", tmp_dir, data_dir);
     int fd = -1;
-    if (mkdir_all(part.data) == 0) {
-      buckets_buf_append_c(&part, "/part.1");
-      fd = open(part.data, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+    if (buckets_objx_mkdir_all(part.data) == 0) {
+      buckets_buf_appendf(&part, "/part.%d", part_number);
+      fd = open(part.data, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
     }
     if (fd < 0) src.err = BUCKETS_OBJ_ERR_IO;
     buckets_buf chunk = BUCKETS_BUF_INIT;
@@ -394,65 +381,63 @@ buckets_obj_err buckets_obj_put(buckets_drive *d, const char *bucket, const char
       if (src.err) break;
       buckets_buf_reset(&chunk);
       frame_block(&chunk, block, n);
-      if (!write_full(fd, chunk.data, chunk.len)) src.err = BUCKETS_OBJ_ERR_IO;
+      if (!buckets_objx_write_full(fd, chunk.data, chunk.len)) src.err = BUCKETS_OBJ_ERR_IO;
     }
-    if (!src.err && fsync(fd) != 0) src.err = BUCKETS_OBJ_ERR_IO;
+    if (!src.err && fd >= 0 && fsync(fd) != 0) src.err = BUCKETS_OBJ_ERR_IO;
     if (fd >= 0) close(fd);
     buckets_buf_free(&chunk);
     buckets_buf_free(&part);
   }
   free(block);
 
-  uint8_t md5[16], sha[32];
-  buckets_md5_final(&src.md5, md5);
+  uint8_t sha[32];
+  buckets_md5_final(&src.md5, md5_out);
   buckets_sha256_final(&src.sha, sha);
-  err = src.err;
-  if (!err && opts && opts->want_md5 && memcmp(md5, opts->want_md5, 16) != 0) err = BUCKETS_OBJ_ERR_BAD_DIGEST;
-  if (!err && opts && opts->want_sha256 && memcmp(sha, opts->want_sha256, 32) != 0) {
-    err = BUCKETS_OBJ_ERR_SHA256_MISMATCH;
-  }
-  if (err) goto cleanup;
+  if (src.err) return src.err;
+  if (opts && opts->want_md5 && memcmp(md5_out, opts->want_md5, 16) != 0) return BUCKETS_OBJ_ERR_BAD_DIGEST;
+  if (opts && opts->want_sha256 && memcmp(sha, opts->want_sha256, 32) != 0) return BUCKETS_OBJ_ERR_SHA256_MISMATCH;
+  return BUCKETS_OBJ_OK;
+}
 
-  /* Build the version exactly as MinIO's putObject would for a 1-drive set. */
-  buckets_xl_object o;
-  memset(&o, 0, sizeof(o));
-  o.type = BUCKETS_XL_TYPE_OBJECT;
-  memcpy(o.data_dir, data_dir, 16);
-  o.mod_time = now_ns();
-  o.size = size;
-  o.ec_m = 1;
-  o.ec_n = 0;
-  o.ec_block_size = BUCKETS_BLOCK_SIZE;
-  o.ec_index = 1;
-  o.ec_dist[0] = 1;
-  o.ec_dist_n = 1;
-  buckets_xl_part_add(&o, 1, size, size, NULL);
-  for (size_t i = 0; opts && i < opts->nmeta; i++) {
-    buckets_xl_kv_set(&o.meta_user, &o.nmeta_user, opts->meta[i].key, opts->meta[i].value, opts->meta[i].value_len);
-  }
-  char etag[33];
-  buckets_hex_encode(md5, 16, etag);
-  buckets_xl_kv_set(&o.meta_user, &o.nmeta_user, "etag", etag, 32);
-  if (inline_data) buckets_xl_kv_set(&o.meta_sys, &o.nmeta_sys, BUCKETS_XL_META_INLINE, "true", 4);
+void buckets_objx_init_version(buckets_xl_object *o, const uint8_t data_dir[16], int64_t size) {
+  memset(o, 0, sizeof(*o));
+  o->type = BUCKETS_XL_TYPE_OBJECT;
+  memcpy(o->data_dir, data_dir, 16);
+  o->mod_time = buckets_objx_now_ns();
+  o->size = size;
+  o->ec_m = 1;
+  o->ec_n = 0;
+  o->ec_block_size = BUCKETS_BLOCK_SIZE;
+  o->ec_index = 1;
+  o->ec_dist[0] = 1;
+  o->ec_dist_n = 1;
+}
 
-  char *dir = object_dir(d, bucket, object);
+void buckets_objx_new_data_dir(uint8_t id[16], char str[37]) {
+  buckets_random_bytes(id, 16);
+  id[6] = (uint8_t)((id[6] & 0x0f) | 0x40);
+  id[8] = (uint8_t)((id[8] & 0x3f) | 0x80);
+  buckets_xl_version_id_string(id, str);
+}
+
+buckets_obj_err buckets_objx_commit(buckets_drive *d, const char *bucket, const char *object, const buckets_xl_object *o,
+                                    const buckets_buf *inline_shard, const char *src_data_dir,
+                                    buckets_object_info *out) {
+  char *dir = buckets_objx_object_dir(d, bucket, object);
   buckets_xlmeta x;
-  load_result lr = load_xlmeta(dir, &x);
-  if (lr == LOAD_MISSING) memset(&x, 0, sizeof(x));
-  if (lr == LOAD_ERR) {
-    /* Unreadable metadata is replaced (MinIO would heal it); keep going. */
-    buckets_log_warn("replacing unreadable xl.meta for %s/%s", bucket, object);
+  buckets_objx_load_result lr = buckets_objx_load_xlmeta(dir, &x);
+  if (lr != BUCKETS_OBJX_LOAD_OK) {
+    if (lr == BUCKETS_OBJX_LOAD_ERR) buckets_log_warn("replacing unreadable xl.meta for %s/%s", bucket, object);
     memset(&x, 0, sizeof(x));
   }
 
   /* Unversioned bucket: the new object replaces the "null" version. */
   char old_data_dir[37] = "";
-  static const uint8_t null_id[16];
-  long old = buckets_xlmeta_find(&x, null_id);
+  long old = buckets_xlmeta_find(&x, o->version_id);
   if (old >= 0) {
     buckets_xl_object prev;
     if (buckets_xl_object_decode(&x.versions[old], &prev) == BUCKETS_XL_OK) {
-      if (!buckets_xl_kv_get(prev.meta_sys, prev.nmeta_sys, BUCKETS_XL_META_INLINE)) {
+      if (prev.type == BUCKETS_XL_TYPE_OBJECT && !buckets_xl_kv_get(prev.meta_sys, prev.nmeta_sys, BUCKETS_XL_META_INLINE)) {
         buckets_xl_version_id_string(prev.data_dir, old_data_dir);
       }
       buckets_xl_object_free(&prev);
@@ -461,40 +446,77 @@ buckets_obj_err buckets_obj_put(buckets_drive *d, const char *bucket, const char
 
   buckets_buf meta = BUCKETS_BUF_INIT;
   buckets_xl_header hdr;
-  buckets_xl_object_encode(&o, &meta, &hdr);
+  buckets_xl_object_encode(o, &meta, &hdr);
   buckets_xlmeta_put_version(&x, &hdr, (uint8_t *)meta.data, meta.len);
-  if (inline_data) {
-    buckets_xlmeta_inline_put(&x, "null", framed.data ? framed.data : "", framed.len);
+  char key[37];
+  buckets_xl_version_id_string(o->version_id, key);
+  if (inline_shard) {
+    buckets_xlmeta_inline_put(&x, key, inline_shard->data ? inline_shard->data : "", inline_shard->len);
   } else {
-    buckets_xlmeta_inline_remove(&x, "null");
+    buckets_xlmeta_inline_remove(&x, key);
   }
 
-  if (mkdir_all(dir) != 0) {
+  char data_dir[37];
+  buckets_xl_version_id_string(o->data_dir, data_dir);
+  buckets_obj_err err = BUCKETS_OBJ_OK;
+  if (buckets_objx_mkdir_all(dir) != 0) {
     err = BUCKETS_OBJ_ERR_IO;
-  } else if (!inline_data) {
-    buckets_buf from = BUCKETS_BUF_INIT, to = BUCKETS_BUF_INIT;
-    buckets_buf_appendf(&from, "%s/%s", tmp_dir, data_dir_s);
-    buckets_buf_appendf(&to, "%s/%s", dir, data_dir_s);
-    if (rename(from.data, to.data) != 0) err = BUCKETS_OBJ_ERR_IO;
-    buckets_buf_free(&from);
+  } else if (src_data_dir) {
+    buckets_buf to = BUCKETS_BUF_INIT;
+    buckets_buf_appendf(&to, "%s/%s", dir, data_dir);
+    if (rename(src_data_dir, to.data) != 0) err = BUCKETS_OBJ_ERR_IO;
     buckets_buf_free(&to);
   }
-  if (!err) err = write_xlmeta(d, dir, &x);
-  if (!err && old_data_dir[0] && strcmp(old_data_dir, data_dir_s) != 0) {
+  if (!err) err = buckets_objx_write_xlmeta(d, dir, &x);
+  if (!err && old_data_dir[0] && strcmp(old_data_dir, data_dir) != 0) {
     buckets_buf stale = BUCKETS_BUF_INIT;
     buckets_buf_appendf(&stale, "%s/%s", dir, old_data_dir);
-    rm_rf(stale.data);
+    buckets_objx_rm_rf(stale.data);
     buckets_buf_free(&stale);
   }
-  if (!err && out) fill_info(out, object, &o);
-
+  if (!err && out) buckets_objx_fill_info(out, object, o);
   buckets_xlmeta_free(&x);
-  buckets_xl_object_free(&o);
   free(dir);
+  return err;
+}
 
-cleanup:
+buckets_obj_err buckets_obj_put(buckets_drive *d, const char *bucket, const char *object, buckets_read_fn rd,
+                                void *rd_ud, int64_t size, const buckets_put_opts *opts, buckets_object_info *out) {
+  if (!buckets_objx_bucket_exists(d, bucket)) return BUCKETS_OBJ_ERR_NO_SUCH_BUCKET;
+  buckets_obj_err err = buckets_obj_check_name(object);
+  if (err) return err;
+  if ((err = buckets_objx_check_namespace(d, bucket, object)) != BUCKETS_OBJ_OK) return err;
+  if (size < 0) return BUCKETS_OBJ_ERR_INCOMPLETE_BODY;
+
+  uint8_t data_dir[16];
+  char data_dir_s[37];
+  buckets_objx_new_data_dir(data_dir, data_dir_s);
+  bool inline_data = size <= BUCKETS_INLINE_THRESHOLD;
+  char *tmp_dir = inline_data ? NULL : buckets_objx_tmp_path(d);
+  buckets_buf framed = BUCKETS_BUF_INIT;
+  uint8_t md5[16];
+  err = buckets_objx_write_data(d, rd, rd_ud, size, opts, true, tmp_dir, data_dir_s, 1, &framed, md5);
+  if (!err) {
+    /* Built exactly as MinIO's putObject would for a 1-drive set. */
+    buckets_xl_object o;
+    buckets_objx_init_version(&o, data_dir, size);
+    buckets_xl_part_add(&o, 1, size, size, NULL);
+    for (size_t i = 0; opts && i < opts->nmeta; i++) {
+      buckets_xl_kv_set(&o.meta_user, &o.nmeta_user, opts->meta[i].key, opts->meta[i].value, opts->meta[i].value_len);
+    }
+    char etag[33];
+    buckets_hex_encode(md5, 16, etag);
+    buckets_xl_kv_set(&o.meta_user, &o.nmeta_user, "etag", etag, 32);
+    if (inline_data) buckets_xl_kv_set(&o.meta_sys, &o.nmeta_sys, BUCKETS_XL_META_INLINE, "true", 4);
+
+    buckets_buf src = BUCKETS_BUF_INIT;
+    if (!inline_data) buckets_buf_appendf(&src, "%s/%s", tmp_dir, data_dir_s);
+    err = buckets_objx_commit(d, bucket, object, &o, inline_data ? &framed : NULL, inline_data ? NULL : src.data, out);
+    buckets_buf_free(&src);
+    buckets_xl_object_free(&o);
+  }
   if (tmp_dir) {
-    rm_rf(tmp_dir);
+    buckets_objx_rm_rf(tmp_dir);
     free(tmp_dir);
   }
   buckets_buf_free(&framed);
@@ -505,19 +527,19 @@ cleanup:
 
 buckets_obj_err buckets_obj_stat(buckets_drive *d, const char *bucket, const char *object, const char *version_id,
                                  buckets_object_info *out) {
-  if (!bucket_exists(d, bucket)) return BUCKETS_OBJ_ERR_NO_SUCH_BUCKET;
+  if (!buckets_objx_bucket_exists(d, bucket)) return BUCKETS_OBJ_ERR_NO_SUCH_BUCKET;
   buckets_obj_err err = buckets_obj_check_name(object);
   if (err) return err;
-  char *dir = object_dir(d, bucket, object);
+  char *dir = buckets_objx_object_dir(d, bucket, object);
   buckets_xlmeta x;
-  load_result lr = load_xlmeta(dir, &x);
+  buckets_objx_load_result lr = buckets_objx_load_xlmeta(dir, &x);
   free(dir);
-  if (lr == LOAD_MISSING) return version_id && *version_id ? BUCKETS_OBJ_ERR_NO_SUCH_VERSION : BUCKETS_OBJ_ERR_NO_SUCH_KEY;
-  if (lr == LOAD_ERR) return BUCKETS_OBJ_ERR_CORRUPT;
+  if (lr == BUCKETS_OBJX_LOAD_MISSING) return version_id && *version_id ? BUCKETS_OBJ_ERR_NO_SUCH_VERSION : BUCKETS_OBJ_ERR_NO_SUCH_KEY;
+  if (lr == BUCKETS_OBJX_LOAD_ERR) return BUCKETS_OBJ_ERR_CORRUPT;
   buckets_xl_object o;
-  err = pick_version(&x, version_id, &o);
+  err = buckets_objx_pick_version(&x, version_id, &o);
   if (!err) {
-    fill_info(out, object, &o);
+    buckets_objx_fill_info(out, object, &o);
     buckets_xl_object_free(&o);
   }
   buckets_xlmeta_free(&x);
@@ -554,19 +576,19 @@ void buckets_obj_reader_free(buckets_obj_reader *r) {
 buckets_obj_err buckets_obj_open(buckets_drive *d, const char *bucket, const char *object, const char *version_id,
                                  int64_t offset, int64_t length, buckets_obj_reader **out,
                                  buckets_object_info *info) {
-  if (!bucket_exists(d, bucket)) return BUCKETS_OBJ_ERR_NO_SUCH_BUCKET;
+  if (!buckets_objx_bucket_exists(d, bucket)) return BUCKETS_OBJ_ERR_NO_SUCH_BUCKET;
   buckets_obj_err err = buckets_obj_check_name(object);
   if (err) return err;
-  char *dir = object_dir(d, bucket, object);
+  char *dir = buckets_objx_object_dir(d, bucket, object);
   buckets_xlmeta x;
-  load_result lr = load_xlmeta(dir, &x);
-  if (lr != LOAD_OK) {
+  buckets_objx_load_result lr = buckets_objx_load_xlmeta(dir, &x);
+  if (lr != BUCKETS_OBJX_LOAD_OK) {
     free(dir);
-    if (lr == LOAD_ERR) return BUCKETS_OBJ_ERR_CORRUPT;
+    if (lr == BUCKETS_OBJX_LOAD_ERR) return BUCKETS_OBJ_ERR_CORRUPT;
     return version_id && *version_id ? BUCKETS_OBJ_ERR_NO_SUCH_VERSION : BUCKETS_OBJ_ERR_NO_SUCH_KEY;
   }
   buckets_xl_object o;
-  if ((err = pick_version(&x, version_id, &o)) != BUCKETS_OBJ_OK) {
+  if ((err = buckets_objx_pick_version(&x, version_id, &o)) != BUCKETS_OBJ_OK) {
     buckets_xlmeta_free(&x);
     free(dir);
     return err;
@@ -599,7 +621,7 @@ buckets_obj_err buckets_obj_open(buckets_drive *d, const char *bucket, const cha
       err = BUCKETS_OBJ_ERR_CORRUPT;
     }
   }
-  if (info) fill_info(info, object, &o);
+  if (info) buckets_objx_fill_info(info, object, &o);
   buckets_xl_object_free(&o);
   buckets_xlmeta_free(&x);
   if (err) {
@@ -703,17 +725,17 @@ static void prune_parents(buckets_drive *d, const char *bucket, const char *dir)
 }
 
 buckets_obj_err buckets_obj_delete(buckets_drive *d, const char *bucket, const char *object, const char *version_id) {
-  if (!bucket_exists(d, bucket)) return BUCKETS_OBJ_ERR_NO_SUCH_BUCKET;
+  if (!buckets_objx_bucket_exists(d, bucket)) return BUCKETS_OBJ_ERR_NO_SUCH_BUCKET;
   buckets_obj_err err = buckets_obj_check_name(object);
   if (err) return err;
-  char *dir = object_dir(d, bucket, object);
+  char *dir = buckets_objx_object_dir(d, bucket, object);
   buckets_xlmeta x;
-  load_result lr = load_xlmeta(dir, &x);
-  if (lr == LOAD_MISSING) {
+  buckets_objx_load_result lr = buckets_objx_load_xlmeta(dir, &x);
+  if (lr == BUCKETS_OBJX_LOAD_MISSING) {
     free(dir);
     return version_id && *version_id ? BUCKETS_OBJ_ERR_NO_SUCH_VERSION : BUCKETS_OBJ_ERR_NO_SUCH_KEY;
   }
-  if (lr == LOAD_ERR) {
+  if (lr == BUCKETS_OBJX_LOAD_ERR) {
     free(dir);
     return BUCKETS_OBJ_ERR_CORRUPT;
   }
@@ -744,20 +766,20 @@ buckets_obj_err buckets_obj_delete(buckets_drive *d, const char *bucket, const c
 
   if (x.n == 0) {
     /* Last version: move the whole object directory aside, then delete it. */
-    char *trash = tmp_path(d);
+    char *trash = buckets_objx_tmp_path(d);
     if (rename(dir, trash) == 0) {
-      rm_rf(trash);
+      buckets_objx_rm_rf(trash);
       prune_parents(d, bucket, dir);
     } else {
       err = BUCKETS_OBJ_ERR_IO;
     }
     free(trash);
   } else {
-    err = write_xlmeta(d, dir, &x);
+    err = buckets_objx_write_xlmeta(d, dir, &x);
     if (!err && data_dir[0]) {
       buckets_buf p = BUCKETS_BUF_INIT;
       buckets_buf_appendf(&p, "%s/%s", dir, data_dir);
-      rm_rf(p.data);
+      buckets_objx_rm_rf(p.data);
       buckets_buf_free(&p);
     }
   }
@@ -824,13 +846,13 @@ static void emit_object(list_ctx *lc, const char *key, const char *dir) {
     return;
   }
   buckets_xlmeta x;
-  if (load_xlmeta(dir, &x) != LOAD_OK) return;
+  if (buckets_objx_load_xlmeta(dir, &x) != BUCKETS_OBJX_LOAD_OK) return;
   buckets_xl_object o;
-  if (pick_version(&x, NULL, &o) == BUCKETS_OBJ_OK) {
+  if (buckets_objx_pick_version(&x, NULL, &o) == BUCKETS_OBJ_OK) {
     if (o.type == BUCKETS_XL_TYPE_OBJECT) {
       buckets_obj_listing *out = lc->out;
       out->objects = buckets_xrealloc(out->objects, (out->nobjects + 1) * sizeof(buckets_object_info));
-      fill_info(&out->objects[out->nobjects++], key, &o);
+      buckets_objx_fill_info(&out->objects[out->nobjects++], key, &o);
       lc->count++;
     }
     buckets_xl_object_free(&o);
@@ -865,7 +887,7 @@ static void walk(list_ctx *lc, const char *rel, const char *name_filter) {
       continue;
     }
     buckets_buf_append_c(&child, "/" XL_META);
-    bool obj = is_file(child.data);
+    bool obj = buckets_objx_is_file(child.data);
     buckets_buf_free(&child);
     if (n == cap) {
       cap = cap ? cap * 2 : 32;
@@ -925,7 +947,7 @@ static void walk(list_ctx *lc, const char *rel, const char *name_filter) {
 buckets_obj_err buckets_obj_list(buckets_drive *d, const char *bucket, const char *prefix, const char *marker,
                                  const char *delimiter, int max_keys, buckets_obj_listing *out) {
   memset(out, 0, sizeof(*out));
-  if (!bucket_exists(d, bucket)) return BUCKETS_OBJ_ERR_NO_SUCH_BUCKET;
+  if (!buckets_objx_bucket_exists(d, bucket)) return BUCKETS_OBJ_ERR_NO_SUCH_BUCKET;
   if (max_keys <= 0) return BUCKETS_OBJ_OK;
   if (max_keys > BUCKETS_MAX_LIST_KEYS) max_keys = BUCKETS_MAX_LIST_KEYS;
   list_ctx lc = {.d = d,
@@ -954,7 +976,7 @@ buckets_obj_err buckets_obj_list(buckets_drive *d, const char *bucket, const cha
       buckets_buf fo = BUCKETS_BUF_INIT, meta = BUCKETS_BUF_INIT;
       buckets_buf_appendf(&fo, "%s/%s/%.*s" DIR_SUFFIX, d->root, bucket, (int)strlen(base) - 1, base);
       buckets_buf_appendf(&meta, "%s/" XL_META, fo.data);
-      if (is_file(meta.data)) emit_object(&lc, base, fo.data);
+      if (buckets_objx_is_file(meta.data)) emit_object(&lc, base, fo.data);
       buckets_buf_free(&fo);
       buckets_buf_free(&meta);
     }

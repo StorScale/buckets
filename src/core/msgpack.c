@@ -103,6 +103,18 @@ void buckets_mp_map(buckets_buf *b, uint32_t n) {
   }
 }
 
+void buckets_mp_time(buckets_buf *b, int64_t unix_ns) {
+  int64_t sec = unix_ns / 1000000000LL, nsec = unix_ns % 1000000000LL;
+  if (nsec < 0) {
+    sec--;
+    nsec += 1000000000LL;
+  }
+  uint8_t t[15] = {0xc7, 12, 5};
+  for (int i = 0; i < 8; i++) t[3 + i] = (uint8_t)((uint64_t)sec >> (8 * (7 - i)));
+  for (int i = 0; i < 4; i++) t[11 + i] = (uint8_t)((uint32_t)nsec >> (8 * (3 - i)));
+  buckets_buf_append(b, t, sizeof(t));
+}
+
 /* ---- reader -------------------------------------------------------------- */
 
 static bool need(buckets_mp_reader *r, size_t n) {
@@ -287,6 +299,18 @@ static bool read_container(buckets_mp_reader *r, uint32_t *n, uint8_t fixmask, u
 bool buckets_mp_read_array(buckets_mp_reader *r, uint32_t *n) { return read_container(r, n, 0x90, 0xdc, 0xdd); }
 
 bool buckets_mp_read_map(buckets_mp_reader *r, uint32_t *n) { return read_container(r, n, 0x80, 0xde, 0xdf); }
+
+bool buckets_mp_read_time(buckets_mp_reader *r, int64_t *unix_ns) {
+  if (!need(r, 15) || r->p[0] != 0xc7 || r->p[1] != 12 || r->p[2] != 5) {
+    r->err = true;
+    return false;
+  }
+  int64_t sec = (int64_t)get_be(r->p + 3, 8);
+  int64_t nsec = (int64_t)get_be(r->p + 11, 4);
+  r->p += 15;
+  *unix_ns = sec * 1000000000LL + nsec;
+  return true;
+}
 
 static bool skip_depth(buckets_mp_reader *r, int depth) {
   if (depth > 64) {

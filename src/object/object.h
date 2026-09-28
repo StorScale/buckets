@@ -36,6 +36,10 @@ typedef enum {
   BUCKETS_OBJ_ERR_READER,  /* the data source failed (e.g. bad chunk signature) */
   BUCKETS_OBJ_ERR_CORRUPT, /* bitrot or unreadable metadata */
   BUCKETS_OBJ_ERR_IO,
+  BUCKETS_OBJ_ERR_NO_SUCH_UPLOAD,
+  BUCKETS_OBJ_ERR_INVALID_PART,       /* missing part or ETag mismatch */
+  BUCKETS_OBJ_ERR_INVALID_PART_ORDER, /* parts not in ascending order */
+  BUCKETS_OBJ_ERR_PART_TOO_SMALL,     /* a non-final part below 5 MiB */
 } buckets_obj_err;
 
 const char *buckets_obj_strerror(buckets_obj_err e);
@@ -100,5 +104,52 @@ buckets_obj_err buckets_obj_list(buckets_drive *d, const char *bucket, const cha
 void buckets_obj_list_free(buckets_obj_listing *l);
 /* True if the bucket has no objects (used by DeleteBucket). */
 bool buckets_obj_bucket_empty(buckets_drive *d, const char *bucket);
+
+/* ---- multipart uploads ----
+ * .minio.sys/multipart/<sha256(bucket/object)>/<upload-uuid>/xl.meta
+ *                                               /<data-dir>/part.N{,.meta}
+ * Upload IDs are base64url("<deployment-id>.<upload-uuid>") as in MinIO. */
+
+#define BUCKETS_MIN_PART_SIZE (5LL * 1024 * 1024)
+#define BUCKETS_MAX_PART_SIZE (5LL * 1024 * 1024 * 1024)
+#define BUCKETS_MAX_PARTS 10000
+#define BUCKETS_UPLOAD_ID_MAX 160
+
+typedef struct {
+  int number;
+  char etag[80];
+  int64_t size;
+  int64_t actual_size;
+  int64_t mod_time_ns;
+} buckets_part_info;
+
+typedef struct {
+  int number;
+  const char *etag; /* as sent by the client; quotes are ignored */
+} buckets_complete_part;
+
+typedef struct {
+  char *object;
+  char upload_id[BUCKETS_UPLOAD_ID_MAX];
+  int64_t initiated_ns;
+} buckets_upload_info;
+
+buckets_obj_err buckets_obj_mpu_new(buckets_drive *d, const char *bucket, const char *object, const buckets_xl_kv *meta,
+                                    size_t nmeta, char upload_id[BUCKETS_UPLOAD_ID_MAX]);
+buckets_obj_err buckets_obj_mpu_put_part(buckets_drive *d, const char *bucket, const char *object, const char *upload_id,
+                                         int part_number, buckets_read_fn rd, void *rd_ud, int64_t size,
+                                         const buckets_put_opts *opts, buckets_part_info *out);
+/* Parts numbered > marker, ascending, at most max. */
+buckets_obj_err buckets_obj_mpu_list_parts(buckets_drive *d, const char *bucket, const char *object,
+                                           const char *upload_id, int marker, int max, buckets_part_info **parts,
+                                           size_t *n, bool *truncated);
+buckets_obj_err buckets_obj_mpu_abort(buckets_drive *d, const char *bucket, const char *object, const char *upload_id);
+buckets_obj_err buckets_obj_mpu_complete(buckets_drive *d, const char *bucket, const char *object,
+                                         const char *upload_id, const buckets_complete_part *parts, size_t nparts,
+                                         buckets_object_info *out);
+/* Pending uploads for exactly this object (MinIO lists per object). */
+buckets_obj_err buckets_obj_mpu_list_uploads(buckets_drive *d, const char *bucket, const char *object,
+                                             buckets_upload_info **uploads, size_t *n);
+void buckets_upload_info_free(buckets_upload_info *u, size_t n);
 
 #endif

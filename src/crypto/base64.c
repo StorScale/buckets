@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 #include "crypto/base64.h"
 
+#include <stdlib.h>
+
 static const char k_alpha[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 void buckets_base64_encode(const uint8_t *in, size_t n, char *out) {
@@ -47,4 +49,34 @@ long buckets_base64_decode(const char *in, size_t n, uint8_t *out) {
     if (d >= 0) out[o++] = (uint8_t)v;
   }
   return (long)o;
+}
+
+/* ---- RawURLEncoding (no padding, '-' and '_') ----------------------------- */
+
+void buckets_base64url_raw_encode(const uint8_t *in, size_t n, char *out) {
+  buckets_base64_encode(in, n, out);
+  size_t len = 0;
+  for (char *p = out; *p; p++, len++) {
+    if (*p == '+') *p = '-';
+    else if (*p == '/') *p = '_';
+  }
+  while (len && out[len - 1] == '=') out[--len] = '\0';
+}
+
+long buckets_base64url_raw_decode(const char *in, size_t n, uint8_t *out) {
+  if (n % 4 == 1) return -1;
+  char *tmp = buckets_xmalloc(n + 4);
+  for (size_t i = 0; i < n; i++) {
+    char c = in[i];
+    if (c == '+' || c == '/' || c == '=') {
+      free(tmp);
+      return -1;
+    }
+    tmp[i] = c == '-' ? '+' : c == '_' ? '/' : c;
+  }
+  size_t len = n;
+  while (len % 4) tmp[len++] = '=';
+  long r = buckets_base64_decode(tmp, len, out);
+  free(tmp);
+  return r;
 }
