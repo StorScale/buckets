@@ -10,6 +10,7 @@
 #include <yyjson.h>
 
 #include "core/timefmt.h"
+#include "iam/ldapidp.h"
 #include "iam/openid.h"
 #include "iam/plugins.h"
 #include "crypto/hex.h"
@@ -143,10 +144,14 @@ static void write_credentials(s3_ctx *c, const char *action, const buckets_iam_i
   buckets_xml_header(b);
   buckets_xml_open_ns(b, resp, STS_XMLNS);
   buckets_xml_open(b, result);
-  buckets_xml_open(b, "AssumedRoleUser");
-  buckets_xml_elem(b, "Arn", "");
-  buckets_xml_elem(b, "AssumeRoleId", "");
-  buckets_xml_close(b, "AssumedRoleUser");
+  /* LDAPIdentityResult, and the custom token and certificate results, carry no AssumedRoleUser. */
+  if (strcmp(action, "AssumeRoleWithLDAPIdentity") != 0 && strcmp(action, "AssumeRoleWithCustomToken") != 0 &&
+      strcmp(action, "AssumeRoleWithCertificate") != 0) {
+    buckets_xml_open(b, "AssumedRoleUser");
+    buckets_xml_elem(b, "Arn", "");
+    buckets_xml_elem(b, "AssumeRoleId", "");
+    buckets_xml_close(b, "AssumedRoleUser");
+  }
   buckets_xml_open(b, "Credentials");
   buckets_xml_elem(b, "AccessKeyId", cred->access_key);
   buckets_xml_elem(b, "SecretAccessKey", cred->secret_key);
@@ -163,7 +168,8 @@ static void write_credentials(s3_ctx *c, const char *action, const buckets_iam_i
 }
 
 /* Issues temporary credentials for claims (their "exp" is the expiry). */
-static buckets_iam_ident *issue(s3_ctx *c, const char *parent, yyjson_mut_doc *claims, const char *policy) {
+static buckets_iam_ident *issue(s3_ctx *c, const char *parent, char *const *groups, size_t ngroups,
+                                 yyjson_mut_doc *claims, const char *policy) {
   yyjson_mut_val *exp = yyjson_mut_obj_get(yyjson_mut_doc_get_root(claims), "exp");
   long long e = exp && yyjson_mut_is_num(exp) ? (long long)yyjson_mut_get_num(exp) : 0;
   if (exp && yyjson_mut_is_str(exp)) e = atoll(yyjson_mut_get_str(exp));
@@ -171,7 +177,8 @@ static buckets_iam_ident *issue(s3_ctx *c, const char *parent, yyjson_mut_doc *c
   char ak[21], sk[41];
   buckets_iam_generate_credentials(ak, sk);
   buckets_iam_ident *cred = NULL;
-  buckets_iam_err err = buckets_iam_set_temp_user(c->s->iam, ak, sk, parent, NULL, 0, (buckets_iam_time){e, 0},
+  buckets_iam_err err = buckets_iam_set_temp_user(c->s->iam, ak, sk, parent, (const char *const *)groups, ngroups,
+                                                  (buckets_iam_time){e, 0},
                                                   claims_json, policy, &cred);
   free(claims_json);
   if (err) {
@@ -206,7 +213,7 @@ static void assume_role(s3_ctx *c, const buckets_query *form, const buckets_quer
   yyjson_mut_obj_add_strcpy(claims, root, "parent", c->ident->access_key);
   const char *revoke = form_get(form, url, "TokenRevokeType");
   if (revoke && *revoke) yyjson_mut_obj_add_strcpy(claims, root, "tokenRevokeType", revoke);
-  buckets_iam_ident *cred = issue(c, c->ident->access_key, claims, NULL);
+  buckets_iam_ident *cred = issue(c, c->ident->access_key, NULL, 0, claims, NULL);
   yyjson_mut_doc_free(claims);
   if (!cred) return;
   write_credentials(c, "AssumeRole", cred, NULL, NULL);
@@ -321,7 +328,7 @@ static void assume_role_sso(s3_ctx *c, const buckets_query *form, const buckets_
     goto out;
   }
   char *sub_copy = buckets_xstrdup(sub);
-  cred = issue(c, parent, claims, policy_name);
+  cred = issue(c, parent, NULL, 0, claims, policy_name);
   if (cred) {
     write_credentials(c, action, cred, grants ? "SubjectFromToken" : "SubjectFromWebIdentityToken", sub_copy);
   }
@@ -419,13 +426,86 @@ static void assume_role_custom(s3_ctx *c, const buckets_query *form, const bucke
       }
     }
   }
-  cred = issue(c, parent, claims, NULL);
+  cred = issue(c, parent, NULL, 0, claims, NULL);
   if (cred) write_credentials(c, "AssumeRoleWithCustomToken", cred, "AssumedUser", parent);
 out:
   buckets_iam_ident_release(cred);
   yyjson_mut_doc_free(claims);
   buckets_idp_result_free(&res);
   buckets_plugins_release(pl);
+}
+
+/* ---- AssumeRoleWithLDAPIdentity ---- */
+
+static void assume_role_ldap(s3_ctx *c, const buckets_query *form, const buckets_query *url) {
+  const char *user = form_get(form, url, "LDAPUsername"), *pass = form_get(form, url, "LDAPPassword");
+  if (!user || !*user || !pass || !*pass) {
+    sts_error(c, STS_MISSING_PARAMETER, "LDAPUsername and LDAPPassword cannot be empty");
+    return;
+  }
+  yyjson_mut_doc *claims = yyjson_mut_doc_new(NULL);
+  yyjson_mut_val *root = yyjson_mut_obj(claims);
+  yyjson_mut_doc_set_root(claims, root);
+  buckets_ldapidp *ldap = NULL;
+  buckets_ldap_dnres dn = {0};
+  char **groups = NULL;
+  size_t ngroups = 0;
+  char *policies = NULL;
+  buckets_iam_ident *cred = NULL;
+  char err[1024], msg[1400];
+  if (!session_policy(c, form_get(form, url, "Policy"), claims)) goto out;
+  if (!buckets_iam_ready(c->s->iam)) {
+    sts_error(c, STS_NOT_INITIALIZED, "IAM sub-system not initialized");
+    goto out;
+  }
+  ldap = buckets_s3_ldap(c->s);
+  if (!buckets_ldapidp_bind(ldap, user, pass, &dn, &groups, &ngroups, err, sizeof(err))) {
+    snprintf(msg, sizeof(msg), "LDAP server error: %s", err);
+    sts_error(c, STS_INVALID_PARAMETER_VALUE, msg);
+    goto out;
+  }
+  policies = buckets_iam_policy_db_get(c->s->iam, dn.norm_dn, groups, ngroups);
+  buckets_plugins *pl = buckets_s3_plugins(c->s);
+  bool authz = buckets_authz_plugin_enabled(pl);
+  buckets_plugins_release(pl);
+  if (!*policies && !authz) {
+    buckets_buf g = BUCKETS_BUF_INIT;
+    buckets_buf_append_c(&g, "");
+    for (size_t i = 0; i < ngroups; i++) buckets_buf_appendf(&g, "%s%s", i ? "`,`" : "", groups[i]);
+    snprintf(msg, sizeof(msg),
+             "expecting a policy to be set for user `%s` or one of their groups: `%s` - rejecting this request",
+             dn.actual_dn, g.data);
+    buckets_buf_free(&g);
+    sts_error(c, STS_INVALID_PARAMETER_VALUE, msg);
+    goto out;
+  }
+  long long dur = buckets_ldapidp_expiry(ldap, form_get(form, url, "DurationSeconds"));
+  if (dur < 0) {
+    sts_error(c, STS_INVALID_PARAMETER_VALUE, "invalid token expiry");
+    goto out;
+  }
+  yyjson_mut_obj_add_int(claims, root, "exp", (long long)time(NULL) + dur);
+  yyjson_mut_obj_add_strcpy(claims, root, "ldapUser", dn.norm_dn);
+  yyjson_mut_obj_add_strcpy(claims, root, "ldapActualUser", dn.actual_dn);
+  yyjson_mut_obj_add_strcpy(claims, root, "ldapUsername", user);
+  for (size_t a = 0; a < dn.nattrs; a++) {
+    char key[256];
+    snprintf(key, sizeof(key), "ldapAttrib_%s", dn.attrs[a].name);
+    yyjson_mut_val *arr = yyjson_mut_arr(claims);
+    for (size_t v = 0; v < dn.attrs[a].nvalues; v++) yyjson_mut_arr_add_strcpy(claims, arr, dn.attrs[a].values[v]);
+    yyjson_mut_obj_add(root, yyjson_mut_strcpy(claims, key), arr);
+  }
+  const char *revoke = form_get(form, url, "TokenRevokeType");
+  if (revoke && *revoke) yyjson_mut_obj_add_strcpy(claims, root, "tokenRevokeType", revoke);
+  cred = issue(c, dn.norm_dn, groups, ngroups, claims, NULL);
+  if (cred) write_credentials(c, "AssumeRoleWithLDAPIdentity", cred, NULL, NULL);
+out:
+  buckets_iam_ident_release(cred);
+  free(policies);
+  buckets_ldap_strv_free(groups, ngroups);
+  buckets_ldap_dnres_free(&dn);
+  buckets_ldapidp_release(ldap);
+  yyjson_mut_doc_free(claims);
 }
 
 void buckets_sts_handle(s3_ctx *c) {
@@ -487,6 +567,8 @@ void buckets_sts_handle(s3_ctx *c) {
     assume_role_sso(c, &form, &c->q, action);
   } else if (action && strcmp(action, "AssumeRoleWithCustomToken") == 0) {
     assume_role_custom(c, &form, &c->q);
+  } else if (action && strcmp(action, "AssumeRoleWithLDAPIdentity") == 0) {
+    assume_role_ldap(c, &form, &c->q);
   } else {
     snprintf(msg, sizeof(msg), "Unsupported action %s", action ? action : "");
     sts_error(c, STS_INVALID_PARAMETER_VALUE, msg);

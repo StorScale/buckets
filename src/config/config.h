@@ -60,6 +60,9 @@ typedef bool (*buckets_config_validator)(const buckets_config *c, char *err, siz
 void buckets_config_register_validator(const char *subsys, buckets_config_validator fn);
 bool buckets_config_validate(const buckets_config *c, const char *subsys, char *err, size_t errlen);
 
+/* config.ParseBool: 1, 0, or -1 when s is not a boolean. */
+int buckets_config_parse_bool(const char *s);
+
 /* getenv, preferring BUCKETS_<rest> over MINIO_<rest> for MINIO_ names. */
 const char *buckets_config_getenv(const char *minio_name);
 

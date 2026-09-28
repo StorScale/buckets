@@ -915,3 +915,13 @@ bool buckets_config_validate(const buckets_config *c, const char *subsys, char *
   }
   return true;
 }
+
+int buckets_config_parse_bool(const char *s) {
+  static const char *const on[] = {"1", "t", "T", "TRUE", "true", "True", "on", "ON", "On", "enabled"};
+  static const char *const off[] = {"0", "f", "F", "FALSE", "false", "False", "off", "OFF", "Off", "disabled"};
+  for (size_t i = 0; s && i < BUCKETS_ARRAY_LEN(on); i++) {
+    if (strcmp(s, on[i]) == 0) return 1;
+    if (strcmp(s, off[i]) == 0) return 0;
+  }
+  return -1;
+}

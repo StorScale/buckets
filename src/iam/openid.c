@@ -73,17 +73,6 @@ const char *buckets_openid_role_policy(const buckets_openid *o, const char *arn)
   return NULL;
 }
 
-/* config.ParseBool */
-static int parse_bool(const char *s) {
-  static const char *const on[] = {"1", "t", "T", "TRUE", "true", "True", "on", "ON", "On", "enabled"};
-  static const char *const off[] = {"0", "f", "F", "FALSE", "false", "False", "off", "OFF", "Off", "disabled"};
-  for (size_t i = 0; i < BUCKETS_ARRAY_LEN(on); i++) {
-    if (strcmp(s, on[i]) == 0) return 1;
-    if (strcmp(s, off[i]) == 0) return 0;
-  }
-  return -1;
-}
-
 static bool get_json(const char *url, const char *bearer, const char *method, yyjson_doc **out, char *err, size_t errlen) {
   buckets_http_result r;
   char auth[4200];
@@ -142,7 +131,7 @@ buckets_openid *buckets_openid_build(const buckets_config *cfg, const char *regi
 #define GET(key) buckets_config_get(cfg, "identity_openid", name, key)
     char *enable = GET("enable");
     bool explicit = enable && *enable;
-    int en = explicit ? parse_bool(enable) : 1;
+    int en = explicit ? buckets_config_parse_bool(enable) : 1;
     free(enable);
     if (en < 0) {
       snprintf(err, errlen, "identity_openid: invalid value for enable");

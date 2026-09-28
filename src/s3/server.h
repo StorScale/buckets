@@ -25,6 +25,8 @@ typedef struct buckets_s3_server {
   pthread_mutex_t oidc_mu;
   struct buckets_openid *openid; /* identity_openid providers (guarded by oidc_mu) */
   struct buckets_plugins *plugins; /* policy/identity plugins (guarded by oidc_mu) */
+  struct buckets_ldapidp *ldap;    /* identity_ldap, fixed once IAM starts (guarded by oidc_mu) */
+  const char *ca_path;             /* extra trusted CAs (certs/CAs), or NULL */
   char host_id[65];   /* x-amz-id-2 */
   _Atomic uint64_t request_seq;
 } buckets_s3_server;
@@ -43,5 +45,7 @@ char *buckets_s3_peer_server_info(void *server);
 struct buckets_openid *buckets_s3_openid(buckets_s3_server *s);
 /* The current plugins (a reference to release), or NULL. */
 struct buckets_plugins *buckets_s3_plugins(buckets_s3_server *s);
+/* The LDAP identity provider (a reference to release), or NULL. */
+struct buckets_ldapidp *buckets_s3_ldap(buckets_s3_server *s);
 
 #endif

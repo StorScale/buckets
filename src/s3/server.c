@@ -20,6 +20,7 @@
 #include "admin/info.h"
 #include "config/sys.h"
 #include "iam/openid.h"
+#include "iam/ldapidp.h"
 #include "iam/plugins.h"
 #include "bucket/metadata.h"
 #include "bucket/metasys.h"
@@ -69,6 +70,46 @@ buckets_plugins *buckets_s3_plugins(buckets_s3_server *s) {
   buckets_plugins *p = buckets_plugins_ref(s->plugins);
   pthread_mutex_unlock(&s->oidc_mu);
   return p;
+}
+
+buckets_ldapidp *buckets_s3_ldap(buckets_s3_server *s) {
+  pthread_mutex_lock(&s->oidc_mu);
+  buckets_ldapidp *p = buckets_ldapidp_ref(s->ldap);
+  pthread_mutex_unlock(&s->oidc_mu);
+  return p;
+}
+
+static const char *g_ca_path;
+
+/* mc admin config set identity_ldap: the directory must be usable. */
+static bool validate_ldap(const buckets_config *cfg, char *err, size_t errlen) {
+  buckets_ldapidp *p = buckets_ldapidp_build(cfg, g_ca_path, err, errlen);
+  buckets_ldapidp_release(p);
+  return p != NULL;
+}
+
+/* identity_ldap is read once, before IAM starts (it decides how users are
+ * stored); like MinIO, keep trying until the directory can be used. */
+static void init_ldap(buckets_s3_server *s) {
+  int delay_ms = 250;
+  for (;;) {
+    buckets_config *cfg = buckets_config_sys_snapshot(s->config);
+    char err[1024];
+    buckets_ldapidp *p = buckets_ldapidp_build(cfg, s->ca_path, err, sizeof(err));
+    buckets_config_free(cfg);
+    if (p) {
+      pthread_mutex_lock(&s->oidc_mu);
+      s->ldap = p;
+      pthread_mutex_unlock(&s->oidc_mu);
+      if (buckets_ldapidp_enabled(p)) buckets_log_info("identity_ldap: LDAP configured; users are LDAP DNs");
+      buckets_iam_set_ldap_mode(s->iam, buckets_ldapidp_enabled(p));
+      return;
+    }
+    buckets_log_warn("identity_ldap: unable to load the LDAP configuration: %s; retrying", err);
+    struct timespec ts = {delay_ms / 1000, (delay_ms % 1000) * 1000000L};
+    nanosleep(&ts, NULL);
+    if (delay_ms < 3000) delay_ms *= 2;
+  }
 }
 
 static void rebuild_plugins(buckets_s3_server *s) {
@@ -183,6 +224,7 @@ void buckets_s3_server_init(buckets_s3_server *s, buckets_objlayer *layer, const
   pthread_mutex_init(&s->oidc_mu, NULL);
   g_region = s->region;
   buckets_config_register_validator("identity_openid", validate_openid);
+  buckets_config_register_validator("identity_ldap", validate_ldap);
   buckets_config_register_validator("policy_plugin", validate_plugins);
   buckets_config_register_validator("identity_plugin", validate_plugins);
   buckets_iam_set_authz(s->iam, authz_hook, s);
@@ -206,6 +248,8 @@ static void *iam_start_main(void *arg) {
   }
   rebuild_openid(s);
   rebuild_plugins(s);
+  g_ca_path = s->ca_path;
+  init_ldap(s);
   delay_ms = 250;
   while (!buckets_iam_start(s->iam, s->layer)) {
     buckets_log_warn("iam: unable to load IAM data yet, retrying");

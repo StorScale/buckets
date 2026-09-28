@@ -25,6 +25,7 @@ add_library(buckets STATIC
   net/tls.c
   net/client.c
   net/fetch.c
+  net/ldap.c
   s3/errors.c
   s3/errors_gen.c
   s3/xml.c
@@ -56,6 +57,7 @@ add_library(buckets STATIC
   iam/policy.c
   iam/iam.c
   iam/openid.c
+  iam/ldapidp.c
   iam/plugins.c
   crypto/jwt.c
   crypto/jwk.c
@@ -74,6 +76,10 @@ target_include_directories(buckets PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_definitions(buckets PUBLIC _GNU_SOURCE _DARWIN_C_SOURCE
   BUCKETS_VERSION="${PROJECT_VERSION}")
 find_package(Threads REQUIRED)
+find_library(RESOLV_LIB resolv)
+if(RESOLV_LIB)
+  target_link_libraries(buckets PUBLIC ${RESOLV_LIB})
+endif()
 target_link_libraries(buckets PUBLIC llhttp::llhttp yyjson OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
 buckets_warnings(buckets)
 

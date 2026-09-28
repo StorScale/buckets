@@ -12,6 +12,7 @@
 #include "core/log.h"
 #include "core/timefmt.h"
 #include "crypto/madmin.h"
+#include "iam/ldapidp.h"
 
 #define ADMIN_PREFIX "/minio/admin/v3"
 #define MAX_ECONFIG_JSON (262272) /* maxEConfigJSONSize */
@@ -559,6 +560,7 @@ static void h_set_user_or_group_policy(s3_ctx *c) {
   const char *policy = qget(c, "policyName"), *entity = qget(c, "userOrGroup");
   bool is_group = strcmp(qget(c, "isGroup"), "true") == 0;
   buckets_iam *iam = c->s->iam;
+  bool ldap = buckets_iam_ldap_mode(iam);
   if (!is_group) {
     buckets_iam_ident *cur = buckets_iam_get_ident(iam, entity);
     bool temp = cur && buckets_iam_ident_is_temp(cur);
@@ -568,7 +570,7 @@ static void h_set_user_or_group_policy(s3_ctx *c) {
       iam_error(c, BUCKETS_IAM_ERR_NOT_ALLOWED, NULL);
       return;
     }
-    if (!exists) {
+    if (!exists && !ldap) {
       iam_error(c, BUCKETS_IAM_ERR_NO_SUCH_USER, NULL);
       return;
     }
@@ -580,6 +582,31 @@ static void h_set_user_or_group_policy(s3_ctx *c) {
       return;
     }
     buckets_iam_group_desc_free(&gd);
+  }
+  if (ldap) {
+    /* The user or group must be in the directory; map its normalized DN. */
+    buckets_ldapidp *lp = buckets_s3_ldap(c->s);
+    buckets_ldap_dnres res;
+    char err[1024];
+    bool under = true;
+    int r = is_group ? buckets_ldapidp_validated_group(lp, entity, &res, &under, err, sizeof(err))
+                     : buckets_ldapidp_validated_user(lp, entity, &res, err, sizeof(err));
+    buckets_ldapidp_release(lp);
+    if (r < 0) {
+      buckets_log_warn("ldap: %s", err);
+      buckets_admin_error_msg(c, BUCKETS_ERR_INTERNAL_ERROR, err);
+      return;
+    }
+    if (r == 0 || !under) {
+      if (r > 0) buckets_ldap_dnres_free(&res);
+      iam_error(c, is_group ? BUCKETS_IAM_ERR_NO_SUCH_GROUP : BUCKETS_IAM_ERR_NO_SUCH_USER, NULL);
+      return;
+    }
+    buckets_iam_err e = buckets_iam_policy_set(iam, res.norm_dn, is_group, BUCKETS_IAM_STS, policy);
+    buckets_ldap_dnres_free(&res);
+    if (e) iam_error(c, e, NULL);
+    else c->resp->status = 200;
+    return;
   }
   buckets_iam_err e = buckets_iam_policy_set(iam, entity, is_group, BUCKETS_IAM_REG, policy);
   if (e) iam_error(c, e, NULL);
@@ -598,21 +625,35 @@ static void add_csv_array(yyjson_mut_doc *d, yyjson_mut_val *o, const char *key,
   }
 }
 
-static void h_attach_detach(s3_ctx *c, bool attach) {
+/* AttachDetachPolicyBuiltin, and AttachDetachPolicyLDAP (PolicyDBUpdateLDAP). */
+static void attach_detach(s3_ctx *c, bool attach, bool ldap) {
   static const char *const actions[] = {"admin:UpdatePolicyAssociation", "admin:AttachUserOrGroupPolicy"};
-  if (!admin_req(c, actions, 2)) return;
+  if (!admin_req(c, actions, ldap ? 1 : 2)) return;
+  buckets_ldapidp *lp = NULL;
+  if (ldap) {
+    lp = buckets_s3_ldap(c->s);
+    bool on = buckets_ldapidp_enabled(lp);
+    if (!on) {
+      buckets_ldapidp_release(lp);
+      buckets_admin_error(c, BUCKETS_ERR_ADMIN_LDAP_NOT_ENABLED);
+      return;
+    }
+  }
+  yyjson_doc *req = NULL;
+  const char **policies = NULL;
+  char *changed = NULL, *dn = NULL;
+  buckets_ldap_dnres res = {0};
   if (c->req->body_len > MAX_ECONFIG_JSON) {
     custom_error(c, 400, "XMinioAdminConfigTooLarge",
                  "Configuration data provided exceeds the allowed maximum of 262272 bytes");
-    return;
+    goto out;
   }
   buckets_str ct = buckets_http_header_get(c->req, "Content-Type");
   if (!ct.p || !buckets_str_eq_c(ct, "application/octet-stream")) {
     buckets_admin_error(c, BUCKETS_ERR_BAD_REQUEST);
-    return;
+    goto out;
   }
-  yyjson_doc *req = read_encrypted(c);
-  if (!req) return;
+  if (!(req = read_encrypted(c))) goto out;
   yyjson_val *root = yyjson_doc_get_root(req);
   const char *user = yyjson_get_str(yyjson_obj_get(root, "user"));
   const char *group = yyjson_get_str(yyjson_obj_get(root, "group"));
@@ -625,34 +666,55 @@ static void h_attach_detach(s3_ctx *c, bool attach) {
   if (!np || has_user == has_group) {
     custom_error(c, 400, "XMinioAdminInvalidArgument",
                  !np ? "no policy names were given" : "exactly one of user or group must be specified");
-    yyjson_doc_free(req);
-    return;
+    goto out;
   }
-  const char **policies = buckets_xcalloc(np, sizeof(char *));
+  policies = buckets_xcalloc(np, sizeof(char *));
   size_t k = 0, i, max;
   yyjson_val *v;
   yyjson_arr_foreach(pv, i, max, v) {
     if (yyjson_is_str(v)) policies[k++] = yyjson_get_str(v);
   }
-  if (has_user) {
-    buckets_iam_ident *cur = buckets_iam_get_ident(iam, user);
-    if (cur && buckets_iam_ident_is_temp(cur)) e = BUCKETS_IAM_ERR_NOT_ALLOWED;
-    else if (strcmp(user, buckets_iam_root_access_key(iam)) == 0) e = BUCKETS_IAM_ERR_NOT_ALLOWED;
-    else if (!cur || !buckets_iam_ident_is_valid(cur)) e = BUCKETS_IAM_ERR_NO_SUCH_USER;
-    buckets_iam_ident_release(cur);
+  if (ldap) {
+    /* The entity must be in the directory (a detach may name a DN that is gone). */
+    const char *raw = has_user ? user : group;
+    char err[1024];
+    bool under = true;
+    int r = has_user ? buckets_ldapidp_validated_user(lp, user, &res, err, sizeof(err))
+                     : buckets_ldapidp_validated_group(lp, group, &res, &under, err, sizeof(err));
+    if (r < 0) {
+      buckets_log_warn("ldap: %s", err);
+      buckets_admin_error_msg(c, BUCKETS_ERR_INTERNAL_ERROR, err);
+      goto out;
+    }
+    if (r > 0 && under) {
+      dn = buckets_xstrdup(res.norm_dn);
+    } else if (!attach && (has_group || buckets_ldapidp_is_user_dn(lp, user))) {
+      dn = buckets_ldapidp_quick_normalize(raw);
+    } else {
+      iam_error(c, has_user ? BUCKETS_IAM_ERR_NO_SUCH_USER : BUCKETS_IAM_ERR_NO_SUCH_GROUP, NULL);
+      goto out;
+    }
+    /* Backward compatibility: detach from a non-normalized DN too. */
+    if (!attach && strcmp(raw, dn) != 0)
+      buckets_iam_policy_update_sts(iam, raw, has_group, false, policies, k, NULL, NULL);
+    e = buckets_iam_policy_update_sts(iam, dn, has_group, attach, policies, k, &changed, NULL);
   } else {
-    buckets_iam_group_desc gd;
-    e = buckets_iam_group_describe(iam, group, &gd);
-    if (!e) buckets_iam_group_desc_free(&gd);
+    if (has_user) {
+      buckets_iam_ident *cur = buckets_iam_get_ident(iam, user);
+      if (cur && buckets_iam_ident_is_temp(cur)) e = BUCKETS_IAM_ERR_NOT_ALLOWED;
+      else if (strcmp(user, buckets_iam_root_access_key(iam)) == 0) e = BUCKETS_IAM_ERR_NOT_ALLOWED;
+      else if (!cur || !buckets_iam_ident_is_valid(cur)) e = BUCKETS_IAM_ERR_NO_SUCH_USER;
+      buckets_iam_ident_release(cur);
+    } else {
+      buckets_iam_group_desc gd;
+      e = buckets_iam_group_describe(iam, group, &gd);
+      if (!e) buckets_iam_group_desc_free(&gd);
+    }
+    if (!e) e = buckets_iam_policy_update(iam, has_user ? user : group, has_group, attach, policies, k, &changed, NULL);
   }
-  char *changed = NULL;
-  if (!e) e = buckets_iam_policy_update(iam, has_user ? user : group, has_group, attach, policies, k, &changed, NULL);
-  free(policies);
-  yyjson_doc_free(req);
   if (e) {
     iam_error(c, e, NULL);
-    free(changed);
-    return;
+    goto out;
   }
   yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
   yyjson_mut_val *out = yyjson_mut_obj(d);
@@ -663,12 +725,46 @@ static void h_attach_detach(s3_ctx *c, bool attach) {
   add_time(d, out, "updatedAt", (buckets_iam_time){ts.tv_sec, ts.tv_nsec});
   write_json(c, d, true);
   yyjson_mut_doc_free(d);
+out:
   free(changed);
+  free(dn);
+  free(policies);
+  buckets_ldap_dnres_free(&res);
+  buckets_ldapidp_release(lp);
+  yyjson_doc_free(req);
 }
 
 /* ---- service accounts -------------------------------------------------------------------- */
 
-static void h_add_svc(s3_ctx *c) {
+/* claims of the request sender, less "exp", as a JSON object (NULL: none). */
+static char *sender_claims(s3_ctx *c) {
+  if (!c->ident->claims) return NULL;
+  yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
+  yyjson_mut_val *root = yyjson_val_mut_copy(d, yyjson_doc_get_root(c->ident->claims));
+  yyjson_mut_doc_set_root(d, root);
+  if (yyjson_mut_is_obj(root)) yyjson_mut_obj_remove_key(root, "exp");
+  char *json = yyjson_mut_write(d, 0, NULL);
+  yyjson_mut_doc_free(d);
+  return json;
+}
+
+static void add_ldap_attr_claims(yyjson_mut_doc *d, yyjson_mut_val *root, const buckets_ldap_dnres *dn) {
+  for (size_t a = 0; a < dn->nattrs; a++) {
+    char key[256];
+    snprintf(key, sizeof(key), "ldapAttrib_%s", dn->attrs[a].name);
+    yyjson_mut_val *arr = yyjson_mut_arr(d);
+    for (size_t v = 0; v < dn->attrs[a].nvalues; v++) yyjson_mut_arr_add_strcpy(d, arr, dn->attrs[a].values[v]);
+    yyjson_mut_obj_add(root, yyjson_mut_strcpy(d, key), arr);
+  }
+}
+
+static void join_groups(buckets_buf *b, char *const *groups, size_t n) {
+  buckets_buf_append_c(b, "");
+  for (size_t i = 0; i < n; i++) buckets_buf_appendf(b, "%s%s", i ? "`,`" : "", groups[i]);
+}
+
+/* AddServiceAccount (ldap false) and AddServiceAccountLDAP (ldap true). */
+static void add_svc(s3_ctx *c, bool ldap) {
   if (!admin_signed(c)) return;
   yyjson_doc *req = read_encrypted(c);
   if (!req) return;
@@ -688,6 +784,10 @@ static void h_add_svc(s3_ctx *c) {
   char *target_user = NULL;
   const char **groups = NULL;
   size_t ngroups = 0;
+  buckets_ldapidp *lp = ldap ? buckets_s3_ldap(c->s) : NULL;
+  char **ldap_groups = NULL;
+  size_t nldap_groups = 0;
+  buckets_ldap_dnres dn = {0};
 
   if ((ak && has_space_be(ak)) || (ak && *ak && (!sk || !*sk)) || (sk && *sk && (!ak || !*ak)) ||
       (name && strlen(name) > 32) || (desc && strlen(desc) > 256)) {
@@ -697,6 +797,13 @@ static void h_add_svc(s3_ctx *c) {
   target_user = buckets_xstrdup(target && *target ? target : requestor(c));
   bool deny_only = strcmp(target_user, requestor(c)) == 0 ||
                    (c->ident->parent && strcmp(target_user, c->ident->parent) == 0);
+  if (ldap && !deny_only && buckets_ldapidp_enabled(lp)) {
+    char e[512];
+    if (buckets_ldapidp_validated_user(lp, target_user, &dn, e, sizeof(e)) > 0 && c->ident->parent &&
+        strcmp(dn.norm_dn, c->ident->parent) == 0)
+      deny_only = true;
+    buckets_ldap_dnres_free(&dn);
+  }
   if (has_exp) {
     char ts[BUCKETS_TIME_RFC3339_NANO_LEN + 1];
     time_str(exp_t, ts);
@@ -721,7 +828,70 @@ static void h_add_svc(s3_ctx *c) {
     goto out;
   }
   bool derived = buckets_iam_ident_is_svc(c->ident) || buckets_iam_ident_is_temp(c->ident);
-  if (strcmp(target_user, requestor(c)) != 0) {
+  if (ldap) {
+    if (!buckets_ldapidp_enabled(lp)) {
+      buckets_admin_error(c, BUCKETS_ERR_ADMIN_LDAP_NOT_ENABLED);
+      goto out;
+    }
+    char e[1024], msg[1400];
+    if (strcmp(target_user, requestor(c)) == 0 || strcmp(target_user, requestor_parent(c)) == 0) {
+      if (derived) {
+        if (!c->ident->parent || !*c->ident->parent) {
+          buckets_admin_error_msg(c, BUCKETS_ERR_INTERNAL_ERROR,
+                                  "service accounts cannot be generated for temporary credentials without parent");
+          goto out;
+        }
+        free(target_user);
+        target_user = buckets_xstrdup(c->ident->parent);
+      }
+      groups = (const char **)c->ident->groups;
+      ngroups = c->ident->ngroups;
+      int r = buckets_ldapidp_validated_user(lp, target_user, &dn, e, sizeof(e));
+      if (r < 0) {
+        buckets_admin_error_msg(c, BUCKETS_ERR_INTERNAL_ERROR, e);
+        goto out;
+      }
+      if (r == 0) {
+        buckets_admin_error_msg(c, BUCKETS_ERR_ADMIN_NO_SUCH_USER, "Specified user does not exist on LDAP server");
+        goto out;
+      }
+      claims_json = sender_claims(c);
+    } else {
+      bool is_dn = buckets_ldapidp_parses_as_dn(target_user);
+      int r = buckets_ldapidp_lookup_user(lp, target_user, &dn, &ldap_groups, &nldap_groups, e, sizeof(e));
+      if (r <= 0) {
+        if (strstr(e, "User DN not found for:"))
+          buckets_admin_error_msg(c, is_dn ? BUCKETS_ERR_ADMIN_LDAP_EXPECTED_LOGIN_NAME : BUCKETS_ERR_ADMIN_NO_SUCH_USER,
+                                  e);
+        else buckets_admin_error_msg(c, BUCKETS_ERR_INTERNAL_ERROR, e);
+        goto out;
+      }
+      char *pols = buckets_iam_policy_db_get(iam, dn.norm_dn, ldap_groups, nldap_groups);
+      bool none = !*pols;
+      free(pols);
+      if (none) {
+        buckets_buf g = BUCKETS_BUF_INIT;
+        join_groups(&g, ldap_groups, nldap_groups);
+        snprintf(msg, sizeof(msg), "No policy set for user `%s` or any of their groups: `%s`", dn.actual_dn, g.data);
+        buckets_buf_free(&g);
+        buckets_admin_error_msg(c, BUCKETS_ERR_ADMIN_NO_SUCH_USER, msg);
+        goto out;
+      }
+      yyjson_mut_doc *cd = yyjson_mut_doc_new(NULL);
+      yyjson_mut_val *croot = yyjson_mut_obj(cd);
+      yyjson_mut_doc_set_root(cd, croot);
+      yyjson_mut_obj_add_strcpy(cd, croot, "ldapUsername", target_user);
+      yyjson_mut_obj_add_strcpy(cd, croot, "ldapUser", dn.norm_dn);
+      yyjson_mut_obj_add_strcpy(cd, croot, "ldapActualUser", dn.actual_dn);
+      add_ldap_attr_claims(cd, croot, &dn);
+      claims_json = yyjson_mut_write(cd, 0, NULL);
+      yyjson_mut_doc_free(cd);
+      free(target_user);
+      target_user = buckets_xstrdup(dn.norm_dn);
+      groups = (const char **)ldap_groups;
+      ngroups = nldap_groups;
+    }
+  } else if (!buckets_iam_ldap_mode(iam) && strcmp(target_user, requestor(c)) != 0) {
     buckets_iam_ident *tu = buckets_iam_get_ident(iam, target_user);
     bool regular = tu && tu->type == BUCKETS_IAM_REG && !buckets_iam_ident_is_svc(tu);
     buckets_iam_ident_release(tu);
@@ -733,7 +903,7 @@ static void h_add_svc(s3_ctx *c) {
     }
   }
   bool for_self = strcmp(target_user, requestor(c)) == 0 || strcmp(target_user, requestor_parent(c)) == 0;
-  if (for_self) {
+  if (!ldap && for_self) {
     if (derived) {
       free(target_user);
       target_user = buckets_xstrdup(requestor_parent(c));
@@ -787,8 +957,14 @@ out:
   free(target_user);
   free(policy_json);
   free(claims_json);
+  buckets_ldap_strv_free(ldap_groups, nldap_groups);
+  buckets_ldap_dnres_free(&dn);
+  buckets_ldapidp_release(lp);
   yyjson_doc_free(req);
 }
+
+static void h_add_svc(s3_ctx *c) { add_svc(c, false); }
+static void h_add_svc_ldap(s3_ctx *c) { add_svc(c, true); }
 
 static void h_update_svc(s3_ctx *c) {
   if (!admin_signed(c)) return;
@@ -1201,6 +1377,246 @@ static void h_policy_entities(s3_ctx *c) {
   buckets_http_resp_header(c->resp, "Content-Type", "application/json");
 }
 
+/* ---- LDAP (admin-handlers-idp-ldap.go) --------------------------------------------------------- */
+
+static bool ldap_user_pred(void *ud, const char *name) { return buckets_ldapidp_is_user_dn(ud, name); }
+static bool ldap_group_pred(void *ud, const char *name) { return buckets_ldapidp_is_group_dn(ud, name); }
+
+static void write_encrypted_json(s3_ctx *c, const char *json) {
+  buckets_buf_reset(&c->resp->body);
+  if (!buckets_madmin_encrypt(c->ident->secret_key, json, strlen(json), &c->resp->body)) {
+    buckets_admin_error(c, BUCKETS_ERR_INTERNAL_ERROR);
+    return;
+  }
+  c->resp->status = 200;
+  buckets_http_resp_header(c->resp, "Content-Type", "application/json");
+}
+
+/* ListLDAPPolicyMappingEntities (QueryLDAPPolicyEntities). */
+static void h_ldap_policy_entities(s3_ctx *c) {
+  static const char *const actions[] = {"admin:ListGroups", "admin:ListUsers", "admin:ListUserPolicies"};
+  if (!admin_req(c, actions, 3)) return;
+  buckets_ldapidp *lp = buckets_s3_ldap(c->s);
+  if (!buckets_ldapidp_enabled(lp)) {
+    buckets_ldapidp_release(lp);
+    iam_error(c, BUCKETS_IAM_ERR_NOT_ALLOWED, NULL);
+    return;
+  }
+  const char **u, **g, **p;
+  size_t nu = qall(c, "user", &u), ng = qall(c, "group", &g), np = qall(c, "policy", &p);
+  /* createCleanEntitiesQuery: users found in the directory by their DN
+   * (with their groups), and as given; groups as given and by their DN. */
+  buckets_iam_entity_user *eu = buckets_xcalloc(2 * nu + 1, sizeof(*eu));
+  buckets_ldap_dnres *res = buckets_xcalloc(nu + 1, sizeof(*res));
+  char ***ug = buckets_xcalloc(nu + 1, sizeof(char **));
+  size_t *nug = buckets_xcalloc(nu + 1, sizeof(size_t)), neu = 0;
+  char err[1024];
+  for (size_t i = 0; i < nu; i++) {
+    if (buckets_ldapidp_validated_user_groups(lp, u[i], &res[i], &ug[i], &nug[i], err, sizeof(err)) > 0)
+      eu[neu++] = (buckets_iam_entity_user){res[i].norm_dn, ug[i], nug[i]};
+    eu[neu++] = (buckets_iam_entity_user){u[i], NULL, 0};
+  }
+  const char **gs = buckets_xcalloc(2 * ng + 1, sizeof(char *));
+  char **gnorm = buckets_xcalloc(ng + 1, sizeof(char *));
+  size_t ngs = 0;
+  for (size_t i = 0; i < ng; i++) {
+    gs[ngs++] = g[i];
+    buckets_ldap_dnres r;
+    bool under;
+    if (buckets_ldapidp_validated_group(lp, g[i], &r, &under, err, sizeof(err)) > 0 && under) {
+      gnorm[i] = buckets_xstrdup(r.norm_dn);
+      gs[ngs++] = gnorm[i];
+    }
+    buckets_ldap_dnres_free(&r);
+  }
+  char *json = buckets_iam_ldap_policy_entities_json(c->s->iam, eu, neu, gs, ngs, p, np, ldap_user_pred,
+                                                     ldap_group_pred, lp);
+  write_encrypted_json(c, json);
+  free(json);
+  for (size_t i = 0; i < nu; i++) {
+    buckets_ldap_dnres_free(&res[i]);
+    buckets_ldap_strv_free(ug[i], nug[i]);
+  }
+  for (size_t i = 0; i < ng; i++) free(gnorm[i]);
+  free(gnorm);
+  free(gs);
+  free(res);
+  free(ug);
+  free(nug);
+  free(eu);
+  free(u);
+  free(g);
+  free(p);
+  buckets_ldapidp_release(lp);
+}
+
+static void add_ldap_key_infos(yyjson_mut_doc *d, yyjson_mut_val *o, const char *key, buckets_iam_ident **ids,
+                               size_t n) {
+  add_key_infos(d, o, key, ids, n);
+  yyjson_mut_val *a = yyjson_mut_obj_get(o, key);
+  for (size_t i = 0; i < n && yyjson_mut_is_arr(a); i++) {
+    yyjson_mut_val *e = yyjson_mut_arr_get(a, i);
+    if (ids[i]->name && *ids[i]->name) yyjson_mut_obj_add_strcpy(d, e, "name", ids[i]->name);
+    if (ids[i]->description && *ids[i]->description)
+      yyjson_mut_obj_add_strcpy(d, e, "description", ids[i]->description);
+  }
+}
+
+static void release_idents(buckets_iam_ident **ids, size_t n) {
+  for (size_t i = 0; i < n; i++) buckets_iam_ident_release(ids[i]);
+  free(ids);
+}
+
+/* One user's ListAccessKeysLDAPResp into o. */
+static void ldap_keys_for(buckets_iam *iam, yyjson_mut_doc *d, yyjson_mut_val *o, const char *dn, bool sts,
+                          bool svc, size_t *nsts, size_t *nsvc) {
+  buckets_iam_ident **list;
+  size_t n;
+  *nsts = *nsvc = 0;
+  if (svc) {
+    buckets_iam_list_derived(iam, dn, BUCKETS_IAM_SVC, &list, &n);
+    add_ldap_key_infos(d, o, "serviceAccounts", list, n);
+    *nsvc = n;
+    release_idents(list, n);
+  } else {
+    yyjson_mut_obj_add_null(d, o, "serviceAccounts");
+  }
+  if (sts) {
+    buckets_iam_list_derived(iam, dn, BUCKETS_IAM_STS, &list, &n);
+    add_key_infos(d, o, "stsKeys", list, n);
+    *nsts = n;
+    release_idents(list, n);
+  } else {
+    yyjson_mut_obj_add_null(d, o, "stsKeys");
+  }
+}
+
+/* ListAccessKeysLDAP */
+static void h_ldap_list_access_keys(s3_ctx *c) {
+  if (!admin_signed(c)) return;
+  const char *user_dn = qget(c, "userDN");
+  bool other = *user_dn && !(c->ident->parent && strcmp(user_dn, c->ident->parent) == 0);
+  if (!allowed(c, "admin:ListServiceAccounts", !other)) {
+    buckets_admin_error(c, BUCKETS_ERR_ACCESS_DENIED);
+    return;
+  }
+  if (!other) user_dn = requestor_parent(c);
+  buckets_ldapidp *lp = buckets_s3_ldap(c->s);
+  buckets_ldap_dnres res;
+  char err[1024];
+  int r = buckets_ldapidp_validated_user(lp, user_dn, &res, err, sizeof(err));
+  buckets_ldapidp_release(lp);
+  if (r < 0) {
+    buckets_admin_error_msg(c, BUCKETS_ERR_INTERNAL_ERROR, err);
+    return;
+  }
+  if (r == 0) {
+    iam_error(c, BUCKETS_IAM_ERR_NO_SUCH_USER, NULL);
+    return;
+  }
+  const char *lt = qget(c, "listType");
+  bool sts = strcmp(lt, "svcacc-only") != 0, svc = strcmp(lt, "sts-only") != 0;
+  yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
+  yyjson_mut_val *root = yyjson_mut_obj(d);
+  yyjson_mut_doc_set_root(d, root);
+  size_t a, b;
+  ldap_keys_for(c->s->iam, d, root, res.norm_dn, sts, svc, &a, &b);
+  write_json(c, d, true);
+  yyjson_mut_doc_free(d);
+  buckets_ldap_dnres_free(&res);
+}
+
+/* ListAccessKeysLDAPBulk */
+static void h_ldap_list_access_keys_bulk(s3_ctx *c) {
+  if (!admin_signed(c)) return;
+  const char **dns;
+  size_t ndn = qall(c, "userDNs", &dns);
+  bool all = strcmp(qget(c, "all"), "true") == 0;
+  bool self_only = !all && ndn == 0;
+  buckets_iam *iam = c->s->iam;
+  buckets_ldapidp *lp = buckets_s3_ldap(c->s);
+  char **users = NULL;
+  size_t nusers = 0;
+  char err[1024];
+  if (all && ndn) {
+    buckets_admin_error(c, BUCKETS_ERR_INVALID_REQUEST);
+    goto out;
+  }
+  if (all && !allowed(c, "admin:ListUsers", false)) {
+    buckets_admin_error(c, BUCKETS_ERR_ACCESS_DENIED);
+    goto out;
+  }
+  if (ndn == 1) {
+    buckets_ldap_dnres res;
+    const char *parent = c->ident->parent ? c->ident->parent : "";
+    if (buckets_ldapidp_validated_user(lp, dns[0], &res, err, sizeof(err)) > 0 && strcmp(res.norm_dn, parent) == 0)
+      self_only = true;
+    if (strcmp(dns[0], parent) == 0) self_only = true;
+    buckets_ldap_dnres_free(&res);
+  }
+  if (!allowed(c, "admin:ListServiceAccounts", self_only)) {
+    buckets_admin_error(c, BUCKETS_ERR_ACCESS_DENIED);
+    goto out;
+  }
+  if (all) {
+    if (!buckets_iam_ldap_mode(iam)) {
+      iam_error(c, BUCKETS_IAM_ERR_NOT_ALLOWED, NULL);
+      goto out;
+    }
+    char **pols;
+    nusers = buckets_iam_sts_user_mappings(iam, ldap_user_pred, lp, &users, &pols);
+    buckets_ldap_strv_free(pols, nusers);
+  } else {
+    const char *self = requestor_parent(c);
+    size_t n = self_only && !ndn ? 1 : ndn;
+    for (size_t i = 0; i < n; i++) {
+      const char *u = self_only && !ndn ? self : dns[i];
+      buckets_ldap_dnres res;
+      int r = buckets_ldapidp_validated_user(lp, u, &res, err, sizeof(err));
+      if (r < 0) {
+        buckets_admin_error_msg(c, BUCKETS_ERR_INTERNAL_ERROR, err);
+        goto out;
+      }
+      if (r == 0) continue;
+      users = buckets_xrealloc(users, (nusers + 1) * sizeof(char *));
+      users[nusers++] = buckets_xstrdup(res.norm_dn);
+      buckets_ldap_dnres_free(&res);
+    }
+  }
+  const char *lt = qget(c, "listType");
+  bool sts = strcmp(lt, "sts-only") == 0 || strcmp(lt, "all") == 0;
+  bool svc = strcmp(lt, "svcacc-only") == 0 || strcmp(lt, "all") == 0;
+  if (!sts && !svc && strcmp(lt, "users-only") != 0) {
+    buckets_admin_error_msg(c, BUCKETS_ERR_INVALID_REQUEST, "invalid list type");
+    goto out;
+  }
+  yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
+  yyjson_mut_val *root = yyjson_mut_obj(d);
+  yyjson_mut_doc_set_root(d, root);
+  for (size_t i = 0; i < nusers; i++) {
+    char *ext = buckets_ldapidp_decode(users[i]);
+    if (yyjson_mut_obj_get(root, ext)) {
+      free(ext);
+      continue;
+    }
+    yyjson_mut_val *o = yyjson_mut_obj(d);
+    size_t a, b;
+    ldap_keys_for(iam, d, o, users[i], sts, svc, &a, &b);
+    if ((sts && !svc && !a) || (svc && !sts && !b)) {
+      free(ext);
+      continue;
+    }
+    yyjson_mut_obj_add(root, yyjson_mut_strcpy(d, ext), o);
+    free(ext);
+  }
+  write_json(c, d, true);
+  yyjson_mut_doc_free(d);
+out:
+  buckets_ldap_strv_free(users, nusers);
+  buckets_ldapidp_release(lp);
+  free(dns);
+}
+
 /* ---- routing ------------------------------------------------------------------------------- */
 
 typedef struct {
@@ -1213,8 +1629,10 @@ static void h_server_info(s3_ctx *c) {
   if (admin_req1(c, "admin:ServerInfo")) buckets_admin_server_info(c);
 }
 
-static void h_attach(s3_ctx *c) { h_attach_detach(c, true); }
-static void h_detach(s3_ctx *c) { h_attach_detach(c, false); }
+static void h_attach(s3_ctx *c) { attach_detach(c, true, false); }
+static void h_detach(s3_ctx *c) { attach_detach(c, false, false); }
+static void h_ldap_attach(s3_ctx *c) { attach_detach(c, true, true); }
+static void h_ldap_detach(s3_ctx *c) { attach_detach(c, false, true); }
 
 static const route k_routes[] = {
     {"GET", "/info", h_server_info},
@@ -1249,6 +1667,12 @@ static const route k_routes[] = {
     {"GET", "/list-service-accounts", h_list_svc},
     {"DELETE", "/delete-service-account", h_delete_svc},
     {"GET", "/list-access-keys-bulk", h_list_access_keys_bulk},
+    {"GET", "/idp/ldap/policy-entities", h_ldap_policy_entities},
+    {"POST", "/idp/ldap/policy/attach", h_ldap_attach},
+    {"POST", "/idp/ldap/policy/detach", h_ldap_detach},
+    {"PUT", "/idp/ldap/add-service-account", h_add_svc_ldap},
+    {"GET", "/idp/ldap/list-access-keys", h_ldap_list_access_keys},
+    {"GET", "/idp/ldap/list-access-keys-bulk", h_ldap_list_access_keys_bulk},
     {"GET", "/info-access-key", h_info_access_key},
     {"GET", "/temporary-account-info", h_temp_account_info},
     {"GET", "/idp/builtin/policy-entities", h_policy_entities},

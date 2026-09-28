@@ -274,6 +274,8 @@ struct buckets_tls_client {
   SSL_CTX *ctx;
 };
 
+void buckets_tls_client_skip_verify(buckets_tls_client *t) { SSL_CTX_set_verify(t->ctx, SSL_VERIFY_NONE, NULL); }
+
 buckets_tls_client *buckets_tls_client_new(const char *ca_dir, char *err, size_t errlen) {
   SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
   if (!ctx) {

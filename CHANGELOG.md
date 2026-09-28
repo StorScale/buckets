@@ -64,6 +64,13 @@ All notable changes to this project are documented here. The format follows
     - `policy_plugin` (and the older `policy_opa`), to which every authorization decision is delegated
     - `identity_plugin`, for `AssumeRoleWithCustomToken`, with its `idmp-` role ARN
     - Both are probed when set through `mc admin config`; `tests/integration/plugins.sh` covers them.
+  - LDAP / Active Directory:
+    - `src/net/ldap.c`, a compact LDAPv3 client (BER, simple bind, search, StartTLS, LDAPS) with go-ldap's filter compiler, filter escaping and DN normalization, checked against vectors generated from go-ldap (`tools/ldapvec`)
+    - `identity_ldap` (`src/iam/ldapidp.c`, from MinIO's `identity/ldap` and minio/pkg `ldap`): validated against the directory on startup and on `mc admin config set`, lookup bind, user and group search with several base DNs, user attributes, SRV records, and trust in `certs/CAs`
+    - `AssumeRoleWithLDAPIdentity`, with the `ldapUser`/`ldapActualUser`/`ldapUsername`/`ldapAttrib_*` claims, DurationSeconds and session policies
+    - IAM's LDAP mode: policies mapped on user and group DNs (`policydb/sts-users`, `policydb/groups`), and built-in user/group changes refused as in MinIO
+    - admin `idp/ldap/policy/attach|detach`, `policy-entities`, `add-service-account`, `list-access-keys` and `list-access-keys-bulk`, and LDAP handling in `set-user-or-group-policy`
+    - `tests/integration/ldap.sh` runs `mc idp ldap` against a mock directory (`ldapmock.py`), over plain LDAP, LDAPS and StartTLS
   - The server configuration (`src/config`), a port of MinIO's `internal/config`:
     - all 34 sub-systems, with their keys, defaults and help, generated from MinIO's own registry (`tools/configgen`)
     - set/reset validation, `MINIO_*` (and `BUCKETS_*`) environment overrides and env-defined targets, and `config.json` and history in `.minio.sys` (MinIO-compatible in both directions)

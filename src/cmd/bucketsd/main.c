@@ -611,6 +611,10 @@ int main(int argc, char **argv) {
     }
   }
   hcfg.tls = tls;
+  /* Identity providers (LDAP) also trust certs/CAs, as MinIO's globalRootCAs. */
+  static char ca_path[4200];
+  snprintf(ca_path, sizeof(ca_path), "%s/CAs", certs_dir ? certs_dir : ".");
+  if (certs_dir && access(ca_path, R_OK) == 0) s3.ca_path = ca_path;
   if (topo.distributed && topo.secure) {
     char cas[4200], terr[512];
     snprintf(cas, sizeof(cas), "%s/CAs", certs_dir ? certs_dir : ".");

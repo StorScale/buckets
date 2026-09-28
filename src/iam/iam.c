@@ -16,6 +16,7 @@
 #include "crypto/base64.h"
 #include "crypto/jwt.h"
 #include "crypto/madmin.h"
+#include "net/ldap.h"
 #include "object/sysconfig.h"
 
 #define IAM_PREFIX "config/iam/"
@@ -331,6 +332,7 @@ typedef struct {
   buckets_strmap groups;    /* name -> group_info */
   buckets_strmap pol[3];    /* policydb: indexed by buckets_iam_utype (REG, SVC, STS) */
   buckets_strmap group_pol; /* group -> mapped_policy */
+  bool ldap;                /* LDAPUsersSysType: users are LDAP DNs mapped in sts-users */
 } cache;
 
 static void policy_doc_free(policy_doc *d) {
@@ -396,6 +398,19 @@ void buckets_iam_set_authz(buckets_iam *iam, buckets_iam_authz_fn fn, void *ud) 
 }
 
 void buckets_iam_set_openid_hooks(buckets_iam *iam, const buckets_iam_openid_hooks *hooks) { iam->oidc = *hooks; }
+
+void buckets_iam_set_ldap_mode(buckets_iam *iam, bool on) {
+  pthread_rwlock_wrlock(&iam->lock);
+  iam->c.ldap = on;
+  pthread_rwlock_unlock(&iam->lock);
+}
+
+bool buckets_iam_ldap_mode(buckets_iam *iam) {
+  pthread_rwlock_rdlock(&iam->lock);
+  bool on = iam->c.ldap;
+  pthread_rwlock_unlock(&iam->lock);
+  return on;
+}
 
 const char *buckets_iam_root_access_key(const buckets_iam *iam) { return iam->root->access_key; }
 const char *buckets_iam_root_secret_key(const buckets_iam *iam) { return iam->root->secret_key; }
@@ -712,6 +727,7 @@ static bool reload(buckets_iam *iam, bool first) {
   bool apply = first || time_before(iam->changed, started);
   if (apply) {
     cache old = iam->c;
+    fresh.ldap = old.ldap;
     iam->c = fresh;
     fresh = old;
   }
@@ -971,6 +987,12 @@ buckets_iam_token_status buckets_iam_check_token(const buckets_iam *iam, const b
 /* cache.policyDBGet for a user (MinIO users mode). Returns false when a
  * disabled user or group means "no policies". */
 static void policy_db_user(const cache *c, const char *name, strset *out) {
+  if (c->ldap) {
+    /* LDAP: the mapping of the DN is all there is (groups come with the credential). */
+    const mapped_policy *mp = buckets_strmap_get(&c->pol[BUCKETS_IAM_STS], name);
+    if (mp) set_add_csv(out, mp->policies);
+    return;
+  }
   const buckets_iam_ident *u = buckets_strmap_get(&c->users, name);
   if (u && !buckets_iam_ident_is_valid(u)) return;
   strset acc = {0};
@@ -1004,8 +1026,10 @@ static void policy_db_get(const cache *c, const char *name, char *const *groups,
   bool user_present = out->n > 0;
   strset gp = {0};
   for (size_t i = 0; i < ngroups; i++) {
-    const group_info *g = buckets_strmap_get(&c->groups, groups[i]);
-    if (!g || !g->enabled) continue;
+    if (!c->ldap) {
+      const group_info *g = buckets_strmap_get(&c->groups, groups[i]);
+      if (!g || !g->enabled) continue;
+    }
     const mapped_policy *m = buckets_strmap_get(&c->group_pol, groups[i]);
     if (m) set_add_csv(&gp, m->policies);
   }
@@ -1284,6 +1308,7 @@ buckets_iam_err buckets_iam_add_user(buckets_iam *iam, const char *access_key, c
 
 buckets_iam_err buckets_iam_set_user_status(buckets_iam *iam, const char *access_key, bool enabled) {
   if (need_ready(iam)) return BUCKETS_IAM_ERR_NOT_INITIALIZED;
+  if (iam->c.ldap) return BUCKETS_IAM_ERR_NOT_ALLOWED;
   pthread_mutex_lock(&iam->write_mu);
   buckets_iam_ident *cur = buckets_iam_get_ident(iam, access_key);
   buckets_iam_err e;
@@ -1297,6 +1322,7 @@ buckets_iam_err buckets_iam_set_user_status(buckets_iam *iam, const char *access
 
 buckets_iam_err buckets_iam_set_user_secret(buckets_iam *iam, const char *access_key, const char *secret_key) {
   if (need_ready(iam)) return BUCKETS_IAM_ERR_NOT_INITIALIZED;
+  if (iam->c.ldap) return BUCKETS_IAM_ERR_NOT_ALLOWED;
   if (!secret_key || strlen(secret_key) < 8) return BUCKETS_IAM_ERR_INVALID_SECRET_KEY;
   pthread_mutex_lock(&iam->write_mu);
   buckets_iam_ident *cur = buckets_iam_get_ident(iam, access_key);
@@ -1467,6 +1493,7 @@ out:
 buckets_iam_err buckets_iam_group_remove_members(buckets_iam *iam, const char *group, const char *const *members,
                                                  size_t n) {
   if (need_ready(iam)) return BUCKETS_IAM_ERR_NOT_INITIALIZED;
+  if (iam->c.ldap) return BUCKETS_IAM_ERR_NOT_ALLOWED;
   if (!group || !*group) return BUCKETS_IAM_ERR_INVALID_ARGUMENT;
   pthread_mutex_lock(&iam->write_mu);
   buckets_iam_err e = check_members(iam, members, n);
@@ -1499,6 +1526,7 @@ out:
 
 buckets_iam_err buckets_iam_group_set_status(buckets_iam *iam, const char *group, bool enabled) {
   if (need_ready(iam)) return BUCKETS_IAM_ERR_NOT_INITIALIZED;
+  if (iam->c.ldap) return BUCKETS_IAM_ERR_NOT_ALLOWED;
   if (!group || !*group) return BUCKETS_IAM_ERR_INVALID_ARGUMENT;
   pthread_mutex_lock(&iam->write_mu);
   pthread_rwlock_rdlock(&iam->lock);
@@ -1533,6 +1561,19 @@ buckets_iam_err buckets_iam_group_describe(buckets_iam *iam, const char *group, 
   if (need_ready(iam)) return BUCKETS_IAM_ERR_NOT_INITIALIZED;
   memset(out, 0, sizeof(*out));
   pthread_rwlock_rdlock(&iam->lock);
+  if (iam->c.ldap) {
+    /* LDAP groups exist in the directory; only their mapping is here. */
+    const mapped_policy *mp = buckets_strmap_get(&iam->c.group_pol, group);
+    strset s = {0};
+    if (mp) set_add_csv(&s, mp->policies);
+    out->name = buckets_xstrdup(group);
+    out->status = buckets_xstrdup("");
+    out->policy = set_join(&s);
+    set_free(&s);
+    if (mp) out->updated = mp->updated;
+    pthread_rwlock_unlock(&iam->lock);
+    return BUCKETS_IAM_OK;
+  }
   const group_info *g = buckets_strmap_get(&iam->c.groups, group);
   if (g) {
     out->name = buckets_xstrdup(group);
@@ -1555,7 +1596,8 @@ void buckets_iam_list_groups(buckets_iam *iam, char ***out, size_t *n) {
   pthread_rwlock_rdlock(&iam->lock);
   size_t it = 0;
   const char *name;
-  while (buckets_strmap_next(&iam->c.groups, &it, &name, NULL)) set_add(&s, name);
+  if (!iam->c.ldap)
+    while (buckets_strmap_next(&iam->c.groups, &it, &name, NULL)) set_add(&s, name);
   it = 0;
   while (buckets_strmap_next(&iam->c.group_pol, &it, &name, NULL)) set_add(&s, name);
   pthread_rwlock_unlock(&iam->lock);
@@ -1720,8 +1762,9 @@ buckets_iam_err buckets_iam_policy_set(buckets_iam *iam, const char *name, bool 
   return e;
 }
 
-buckets_iam_err buckets_iam_policy_update(buckets_iam *iam, const char *name, bool is_group, bool attach,
-                                          const char *const *policies, size_t n, char **changed, char **effective) {
+static buckets_iam_err policy_update(buckets_iam *iam, const char *name, bool is_group, buckets_iam_utype t,
+                                     bool attach, const char *const *policies, size_t n, char **changed,
+                                     char **effective) {
   if (changed) *changed = NULL;
   if (effective) *effective = NULL;
   if (need_ready(iam)) return BUCKETS_IAM_ERR_NOT_INITIALIZED;
@@ -1730,12 +1773,12 @@ buckets_iam_err buckets_iam_policy_update(buckets_iam *iam, const char *name, bo
   buckets_iam_err e = BUCKETS_IAM_OK;
   strset existing = {0}, update = {0}, result = {0};
   pthread_rwlock_rdlock(&iam->lock);
-  if (is_group) {
+  if (is_group && t == BUCKETS_IAM_REG) {
     const group_info *g = buckets_strmap_get(&iam->c.groups, name);
     if (!g) e = BUCKETS_IAM_ERR_NO_SUCH_GROUP;
     else if (!g->enabled) e = BUCKETS_IAM_ERR_GROUP_DISABLED;
   }
-  const mapped_policy *mp = buckets_strmap_get(is_group ? &iam->c.group_pol : &iam->c.pol[BUCKETS_IAM_REG], name);
+  const mapped_policy *mp = buckets_strmap_get(is_group ? &iam->c.group_pol : &iam->c.pol[t], name);
   if (mp) set_add_csv(&existing, mp->policies);
   for (size_t i = 0; i < n; i++) set_add_csv(&update, policies[i]);
   strset delta = {0};
@@ -1758,8 +1801,8 @@ buckets_iam_err buckets_iam_policy_update(buckets_iam *iam, const char *name, bo
       for (size_t i = 0; i < delta.n; i++) set_add(&result, delta.v[i]);
     }
     char *joined = set_join(&result);
-    if (!result.n) delete_mapping(iam, name, BUCKETS_IAM_REG, is_group);
-    else e = store_mapping(iam, name, BUCKETS_IAM_REG, is_group, joined);
+    if (!result.n) delete_mapping(iam, name, t, is_group);
+    else e = store_mapping(iam, name, t, is_group, joined);
     if (!e && effective) *effective = joined;
     else free(joined);
     if (!e && changed) *changed = set_join(&delta);
@@ -1770,6 +1813,17 @@ buckets_iam_err buckets_iam_policy_update(buckets_iam *iam, const char *name, bo
   set_free(&delta);
   pthread_mutex_unlock(&iam->write_mu);
   return e;
+}
+
+buckets_iam_err buckets_iam_policy_update(buckets_iam *iam, const char *name, bool is_group, bool attach,
+                                          const char *const *policies, size_t n, char **changed, char **effective) {
+  return policy_update(iam, name, is_group, BUCKETS_IAM_REG, attach, policies, n, changed, effective);
+}
+
+buckets_iam_err buckets_iam_policy_update_sts(buckets_iam *iam, const char *name, bool is_group, bool attach,
+                                              const char *const *policies, size_t n, char **changed,
+                                              char **effective) {
+  return policy_update(iam, name, is_group, BUCKETS_IAM_STS, attach, policies, n, changed, effective);
 }
 
 char *buckets_iam_existing_policies(buckets_iam *iam, const char *csv) {
@@ -1801,6 +1855,16 @@ bool buckets_iam_policies_allow(buckets_iam *iam, const char *csv, const buckets
   free(ps);
   set_free(&names);
   return ok;
+}
+
+char *buckets_iam_policy_db_get(buckets_iam *iam, const char *name, char *const *groups, size_t ngroups) {
+  strset s = {0};
+  pthread_rwlock_rdlock(&iam->lock);
+  policy_db_get(&iam->c, name, groups, ngroups, &s);
+  pthread_rwlock_unlock(&iam->lock);
+  char *r = set_join(&s);
+  set_free(&s);
+  return r;
 }
 
 char *buckets_iam_mapped_policies(buckets_iam *iam, const char *name, bool is_group) {
@@ -2315,4 +2379,213 @@ char *buckets_iam_policy_entities_json(buckets_iam *iam, const char *const *user
   char *json = yyjson_mut_write(d, 0, NULL);
   yyjson_mut_doc_free(d);
   return json;
+}
+
+/* ---- LDAP entity queries -------------------------------------------------------------------- */
+
+static char *decode_name(const char *s) {
+  char *d = buckets_ldap_decode_dn(s);
+  return d ? d : buckets_xstrdup(s);
+}
+
+typedef struct {
+  char *key; /* the decoded name, which is what gets sorted */
+  const char *name;
+} named;
+
+static int cmp_named(const void *a, const void *b) { return strcmp(((const named *)a)->key, ((const named *)b)->key); }
+
+/* listGroupPolicyMappings with a predicate and DN decoding. */
+static yyjson_mut_val *ldap_group_mappings(yyjson_mut_doc *d, const cache *c, const strset *only,
+                                           buckets_iam_name_pred pred, void *ud) {
+  named *v = NULL;
+  size_t n = 0;
+  size_t it = 0;
+  const char *g;
+  while (buckets_strmap_next(&c->group_pol, &it, &g, NULL)) {
+    if (pred && !pred(ud, g)) continue;
+    if (only && only->n && !strv_has(only->v, only->n, g)) continue;
+    v = buckets_xrealloc(v, (n + 1) * sizeof(*v));
+    v[n++] = (named){decode_name(g), g};
+  }
+  if (n) qsort(v, n, sizeof(*v), cmp_named);
+  yyjson_mut_val *arr = yyjson_mut_arr(d);
+  for (size_t i = 0; i < n; i++) {
+    const mapped_policy *m = buckets_strmap_get(&c->group_pol, v[i].name);
+    yyjson_mut_val *o = yyjson_mut_arr_add_obj(d, arr);
+    yyjson_mut_obj_add_strcpy(d, o, "group", v[i].key);
+    strset ps = {0};
+    set_add_csv(&ps, m->policies);
+    add_sorted(d, o, "policies", &ps);
+    set_free(&ps);
+    free(v[i].key);
+  }
+  free(v);
+  return arr;
+}
+
+char *buckets_iam_ldap_policy_entities_json(buckets_iam *iam, const buckets_iam_entity_user *users, size_t nu,
+                                            const char *const *groups, size_t ng, const char *const *policies,
+                                            size_t np, buckets_iam_name_pred is_user, buckets_iam_name_pred is_group,
+                                            void *ud) {
+  yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
+  yyjson_mut_val *root = yyjson_mut_obj(d);
+  yyjson_mut_doc_set_root(d, root);
+  char ts[BUCKETS_TIME_RFC3339_NANO_LEN + 1];
+  time_fmt(now_time(), ts);
+  yyjson_mut_obj_add_strcpy(d, root, "timestamp", ts);
+  pthread_rwlock_rdlock(&iam->lock);
+  const cache *c = &iam->c;
+  bool all = !nu && !ng && !np;
+
+  if (nu) {
+    /* listUserPolicyMappings: the queried users' regular or STS mapping,
+     * and the mappings of the groups found for them. */
+    typedef struct {
+      char *key;
+      const char *name;
+      const mapped_policy *m;
+      yyjson_mut_val *mof;
+    } urow;
+    urow *rows = NULL;
+    size_t nr = 0;
+    for (size_t i = 0; i < nu; i++) {
+      bool dup = false;
+      for (size_t k = 0; k < nr && !dup; k++) dup = strcmp(rows[k].name, users[i].user) == 0;
+      if (dup) continue;
+      rows = buckets_xrealloc(rows, (nr + 1) * sizeof(*rows));
+      urow *r = &rows[nr++];
+      r->key = decode_name(users[i].user);
+      r->name = users[i].user;
+      r->mof = NULL;
+      if (users[i].ngroups) {
+        strset gs = {0};
+        for (size_t k = 0; k < users[i].ngroups; k++) set_add(&gs, users[i].groups[k]);
+        yyjson_mut_val *gm = ldap_group_mappings(d, c, &gs, NULL, NULL);
+        if (yyjson_mut_arr_size(gm)) r->mof = gm;
+        set_free(&gs);
+      }
+      r->m = NULL;
+      if (!is_user || is_user(ud, r->name)) {
+        r->m = buckets_strmap_get(&c->pol[BUCKETS_IAM_REG], r->name);
+        const mapped_policy *sm = buckets_strmap_get(&c->pol[BUCKETS_IAM_STS], r->name);
+        if (sm) r->m = sm;
+      }
+    }
+    qsort(rows, nr, sizeof(*rows), cmp_named);
+    yyjson_mut_val *arr = yyjson_mut_arr(d);
+    for (size_t i = 0; i < nr; i++) {
+      if (rows[i].m || rows[i].mof) {
+        yyjson_mut_val *o = yyjson_mut_arr_add_obj(d, arr);
+        yyjson_mut_obj_add_strcpy(d, o, "user", rows[i].key);
+        if (rows[i].m) {
+          strset ps = {0};
+          set_add_csv(&ps, rows[i].m->policies);
+          add_sorted(d, o, "policies", &ps);
+          set_free(&ps);
+        } else {
+          yyjson_mut_obj_add_null(d, o, "policies");
+        }
+        if (rows[i].mof) yyjson_mut_obj_add_val(d, o, "memberOfMappings", rows[i].mof);
+      }
+      free(rows[i].key);
+    }
+    free(rows);
+    if (yyjson_mut_arr_size(arr)) yyjson_mut_obj_add_val(d, root, "userMappings", arr);
+  }
+  if (ng) {
+    strset gs = {0};
+    for (size_t i = 0; i < ng; i++) set_add(&gs, groups[i]);
+    yyjson_mut_val *arr = ldap_group_mappings(d, c, &gs, is_group, ud);
+    if (yyjson_mut_arr_size(arr)) yyjson_mut_obj_add_val(d, root, "groupMappings", arr);
+    set_free(&gs);
+  }
+  if (np || all) {
+    strset q = {0};
+    for (size_t i = 0; i < np; i++) set_add(&q, policies[i]);
+    buckets_strmap by_user = BUCKETS_STRMAP_INIT, by_group = BUCKETS_STRMAP_INIT;
+    const buckets_strmap *umaps[] = {&c->pol[BUCKETS_IAM_REG], &c->pol[BUCKETS_IAM_STS], &c->group_pol};
+    for (int k = 0; k < 3; k++) {
+      buckets_iam_name_pred pred = k == 2 ? is_group : is_user;
+      size_t it = 0;
+      const char *who;
+      void *v;
+      while (buckets_strmap_next(umaps[k], &it, &who, &v)) {
+        if (pred && !pred(ud, who)) continue;
+        char *dec = decode_name(who);
+        strset ps = {0};
+        set_add_csv(&ps, ((mapped_policy *)v)->policies);
+        for (size_t i = 0; i < ps.n; i++) {
+          if (q.n && !strv_has(q.v, q.n, ps.v[i])) continue;
+          buckets_strmap *m = k == 2 ? &by_group : &by_user;
+          strset *set = buckets_strmap_get(m, ps.v[i]);
+          if (!set) {
+            set = buckets_xcalloc(1, sizeof(*set));
+            buckets_strmap_put(m, ps.v[i], set);
+          }
+          set_add(set, dec);
+        }
+        set_free(&ps);
+        free(dec);
+      }
+    }
+    strset names = {0};
+    size_t it = 0;
+    const char *pn;
+    while (buckets_strmap_next(&by_user, &it, &pn, NULL)) set_add(&names, pn);
+    it = 0;
+    while (buckets_strmap_next(&by_group, &it, &pn, NULL)) set_add(&names, pn);
+    if (names.n) qsort(names.v, names.n, sizeof(char *), cmp_str);
+    yyjson_mut_val *arr = yyjson_mut_arr(d);
+    for (size_t i = 0; i < names.n; i++) {
+      yyjson_mut_val *o = yyjson_mut_arr_add_obj(d, arr);
+      yyjson_mut_obj_add_strcpy(d, o, "policy", names.v[i]);
+      strset *us = buckets_strmap_get(&by_user, names.v[i]), *gs = buckets_strmap_get(&by_group, names.v[i]);
+      if (us) add_sorted(d, o, "users", us);
+      else yyjson_mut_obj_add_null(d, o, "users");
+      if (gs) add_sorted(d, o, "groups", gs);
+      else yyjson_mut_obj_add_null(d, o, "groups");
+    }
+    if (yyjson_mut_arr_size(arr)) yyjson_mut_obj_add_val(d, root, "policyMappings", arr);
+    set_free(&names);
+    void *v;
+    it = 0;
+    while (buckets_strmap_next(&by_user, &it, NULL, &v)) {
+      set_free(v);
+      free(v);
+    }
+    it = 0;
+    while (buckets_strmap_next(&by_group, &it, NULL, &v)) {
+      set_free(v);
+      free(v);
+    }
+    buckets_strmap_free(&by_user);
+    buckets_strmap_free(&by_group);
+    set_free(&q);
+  }
+  pthread_rwlock_unlock(&iam->lock);
+  char *json = yyjson_mut_write(d, 0, NULL);
+  yyjson_mut_doc_free(d);
+  return json;
+}
+
+size_t buckets_iam_sts_user_mappings(buckets_iam *iam, buckets_iam_name_pred pred, void *ud, char ***names,
+                                     char ***policies) {
+  *names = NULL;
+  *policies = NULL;
+  size_t n = 0;
+  pthread_rwlock_rdlock(&iam->lock);
+  size_t it = 0;
+  const char *who;
+  void *v;
+  while (buckets_strmap_next(&iam->c.pol[BUCKETS_IAM_STS], &it, &who, &v)) {
+    if (pred && !pred(ud, who)) continue;
+    *names = buckets_xrealloc(*names, (n + 1) * sizeof(char *));
+    *policies = buckets_xrealloc(*policies, (n + 1) * sizeof(char *));
+    (*names)[n] = buckets_xstrdup(who);
+    (*policies)[n] = buckets_xstrdup(((mapped_policy *)v)->policies);
+    n++;
+  }
+  pthread_rwlock_unlock(&iam->lock);
+  return n;
 }

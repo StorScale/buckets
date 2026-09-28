@@ -120,6 +120,12 @@ typedef struct {
 } buckets_iam_openid_hooks;
 void buckets_iam_set_openid_hooks(buckets_iam *iam, const buckets_iam_openid_hooks *hooks);
 
+/* LDAPUsersSysType (set before start when identity_ldap is enabled): users
+ * are LDAP DNs whose policies are mapped in policydb/sts-users, groups are
+ * LDAP group DNs, and built-in user/group changes are not allowed. */
+void buckets_iam_set_ldap_mode(buckets_iam *iam, bool on);
+bool buckets_iam_ldap_mode(buckets_iam *iam);
+
 /* An authorization plugin (policy_plugin): when it returns true, *allowed
  * is the decision and IAM policies are not consulted at all. */
 typedef bool (*buckets_iam_authz_fn)(void *ud, const buckets_iam_ident *id, bool owner,
@@ -232,10 +238,17 @@ buckets_iam_err buckets_iam_policy_set(buckets_iam *iam, const char *name, bool 
  * resulting mapping, *changed the policies actually added/removed. */
 buckets_iam_err buckets_iam_policy_update(buckets_iam *iam, const char *name, bool is_group, bool attach,
                                           const char *const *policies, size_t n, char **changed, char **effective);
+/* The same for the STS mapping of a user (an LDAP DN) or a group, which
+ * need not exist in the store. */
+buckets_iam_err buckets_iam_policy_update_sts(buckets_iam *iam, const char *name, bool is_group, bool attach,
+                                              const char *const *policies, size_t n, char **changed,
+                                              char **effective);
 /* CurrentPolicies: the names in csv that exist, comma-separated ("" if none). */
 char *buckets_iam_existing_policies(buckets_iam *iam, const char *csv);
 /* doesPolicyAllow: the named policies (comma-separated) evaluated together. */
 bool buckets_iam_policies_allow(buckets_iam *iam, const char *csv, const buckets_policy_args *args);
+/* PolicyDBGet(name, groups...): comma-separated ("" if none). */
+char *buckets_iam_policy_db_get(buckets_iam *iam, const char *name, char *const *groups, size_t ngroups);
 /* The mapped policies of a user (with its groups) or a group, comma-separated. */
 char *buckets_iam_mapped_policies(buckets_iam *iam, const char *name, bool is_group);
 
@@ -243,6 +256,25 @@ char *buckets_iam_mapped_policies(buckets_iam *iam, const char *name, bool is_gr
  * lists every policy's users and groups. */
 char *buckets_iam_policy_entities_json(buckets_iam *iam, const char *const *users, size_t nu,
                                        const char *const *groups, size_t ng, const char *const *policies, size_t np);
+
+/* QueryLDAPPolicyEntities: like buckets_iam_policy_entities_json for LDAP,
+ * where each queried user comes with the groups found for it, entities
+ * are filtered by the predicates (IsLDAPUserDN / IsLDAPGroupDN) and names
+ * are reported decoded (DecodeDN). */
+typedef bool (*buckets_iam_name_pred)(void *ud, const char *name);
+typedef struct {
+  const char *user;
+  char *const *groups;
+  size_t ngroups;
+} buckets_iam_entity_user;
+char *buckets_iam_ldap_policy_entities_json(buckets_iam *iam, const buckets_iam_entity_user *users, size_t nu,
+                                            const char *const *groups, size_t ng, const char *const *policies,
+                                            size_t np, buckets_iam_name_pred is_user, buckets_iam_name_pred is_group,
+                                            void *ud);
+/* GetAllSTSUserMappings: the STS-mapped users matching pred and their
+ * policies (both arrays and strings to free). */
+size_t buckets_iam_sts_user_mappings(buckets_iam *iam, buckets_iam_name_pred pred, void *ud, char ***names,
+                                     char ***policies);
 
 /* ---- service accounts ---------------------------------------------------------- */
 

@@ -51,6 +51,8 @@ typedef struct buckets_tls_client buckets_tls_client;
  * Kubernetes service account's ca.crt); ca_dir may be NULL. */
 buckets_tls_client *buckets_tls_client_new(const char *ca_dir, char *err, size_t errlen);
 void buckets_tls_client_free(buckets_tls_client *t);
+/* Accept any server certificate (identity_ldap tls_skip_verify=on). */
+void buckets_tls_client_skip_verify(buckets_tls_client *t);
 /* Handshakes on a connected blocking socket, verifying host; NULL on failure. */
 buckets_tls_conn *buckets_tls_connect(buckets_tls_client *t, int fd, const char *host);
 
