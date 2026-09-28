@@ -105,7 +105,7 @@ static void free_kvs(buckets_xl_kv *kvs, size_t n) {
  * metadata under the canonical header name, from query form then headers. */
 static const char *const k_supported[] = {
     "content-type",        "cache-control", "content-language", "content-encoding", "content-disposition",
-    "x-amz-storage-class", "X-Amz-Storage-Class", "X-Amz-Tagging", "expires",
+    "x-amz-storage-class", "X-Amz-Tagging", "expires",
 };
 
 static void extract_one(buckets_xl_kv **kvs, size_t *n, buckets_str name, buckets_str value) {
@@ -157,13 +157,13 @@ static buckets_s3_error extract_metadata(s3_ctx *c, buckets_xl_kv **kvs, size_t 
     buckets_buf_free(&kept);
   }
 
-  const buckets_xl_kv *sc = buckets_xl_kv_get(*kvs, *n, "X-Amz-Storage-Class");
+  const buckets_xl_kv *sc = buckets_xl_kv_get(*kvs, *n, "x-amz-storage-class");
   if (sc) {
     const char *v = (const char *)sc->value;
     if (strcmp(v, "STANDARD") != 0 && strcmp(v, "REDUCED_REDUNDANCY") != 0) return BUCKETS_ERR_INVALID_STORAGE_CLASS;
     if (strcmp(v, "STANDARD") == 0) {
       for (size_t i = 0; i < *n; i++) {
-        if (strcmp((*kvs)[i].key, "X-Amz-Storage-Class") == 0) {
+        if (strcmp((*kvs)[i].key, "x-amz-storage-class") == 0) {
           free((*kvs)[i].key);
           free((*kvs)[i].value);
           (*kvs)[i] = (*kvs)[--*n];
@@ -1301,6 +1301,8 @@ void buckets_s3_list_objects(s3_ctx *c, bool v2) {
   const char *token = v2 ? buckets_query_get(&c->q, "continuation-token") : NULL;
   bool fetch_owner = v2 && buckets_query_get(&c->q, "fetch-owner") &&
                      strcmp(buckets_query_get(&c->q, "fetch-owner"), "true") == 0;
+  /* MinIO extension (ListObjectsV2M): user metadata inline in the listing. */
+  bool with_meta = v2 && buckets_query_get(&c->q, "metadata") && strcmp(buckets_query_get(&c->q, "metadata"), "true") == 0;
 
   /* v2 continuation tokens are the base64 of the next marker (as MinIO does). */
   char *marker = NULL;
@@ -1373,8 +1375,22 @@ void buckets_s3_list_objects(s3_ctx *c, bool v2) {
       buckets_xml_elem(b, "DisplayName", BUCKETS_S3_OWNER_NAME);
       buckets_xml_close(b, "Owner");
     }
-    const char *sc = buckets_object_meta(o, "X-Amz-Storage-Class");
+    const char *sc = buckets_object_meta(o, "x-amz-storage-class");
     buckets_xml_elem(b, "StorageClass", sc ? sc : "STANDARD");
+    if (with_meta) {
+      bool any = false;
+      for (size_t k = 0; k < o->nmeta; k++) {
+        if (has_prefix_fold(o->meta[k].key, BUCKETS_XL_RESERVED_PREFIX)) continue;
+        if (!any) buckets_xml_open(b, "UserMetadata");
+        any = true;
+        buckets_xml_elem(b, o->meta[k].key, (const char *)o->meta[k].value);
+      }
+      if (any) buckets_xml_close(b, "UserMetadata");
+      buckets_xml_open(b, "Internal");
+      buckets_xml_elem(b, "K", "1");
+      buckets_xml_elem(b, "M", "0");
+      buckets_xml_close(b, "Internal");
+    }
     buckets_xml_close(b, "Contents");
   }
   for (size_t i = 0; i < l.nprefixes; i++) {

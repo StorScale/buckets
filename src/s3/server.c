@@ -311,7 +311,7 @@ static void get_bucket_versioning(s3_ctx *c) {
 static bool has_unhandled_subresource(const buckets_query *q) {
   static const char *const list_params[] = {"prefix",     "delimiter",          "marker",      "max-keys",
                                             "encoding-type", "list-type",       "continuation-token",
-                                            "fetch-owner", "start-after"};
+                                            "fetch-owner", "start-after",   "metadata"};
   for (size_t i = 0; i < q->n; i++) {
     const char *k = q->items[i].key;
     if (strncasecmp(k, "x-amz-", 6) == 0) continue; /* presign parameters */

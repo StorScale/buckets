@@ -7,6 +7,7 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Changed
+- The storage class is stored under MinIO's lowercase `x-amz-storage-class` key, and `STANDARD` is not stored.
 - Object uploads now read the body to EOF after the declared length. Extra bytes are rejected as IncompleteBody, and trailers are always consumed.
 - `ListObjects` now returns real objects instead of the 0.1.0 empty placeholder.
 
@@ -23,6 +24,8 @@ All notable changes to this project are documented here. The format follows
   - returned with `x-amz-checksum-mode: ENABLED`
   - multipart composite (`-N`) and full-object checksums, merged with CRC combination
   - real MinIO reports identical values for objects Buckets wrote
+- `ListObjectsV2` with `metadata=true` (MinIO's ListObjectsV2M extension).
+- `tests/conformance/minio-go.sh` runs minio-go's functional suite (mint's Go suite). Current result: 35 pass, 2 fail (POST policy), 46 not implemented.
 - `tests/integration/interop.sh`: round trips through `mc` and a real MinIO build in both directions. `tools/build-oracles.sh` builds the oracles.
 - aws-chunked uploads: signed chunks (chained chunk signatures), signed trailers, and unsigned trailers.
 - HTTP request bodies over 1 MiB spool to disk (up to 5 TiB), and responses stream from the object reader.
