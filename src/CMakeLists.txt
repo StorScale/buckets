@@ -49,6 +49,7 @@ add_library(buckets STATIC
   erasure/rs.c
   erasure/layout.c
   heal/healer.c
+  iam/policy.c
 )
 target_include_directories(buckets PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 # timegm, gmtime_r, arc4random_buf, strncasecmp live outside strict C17.
