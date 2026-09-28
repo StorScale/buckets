@@ -25,6 +25,7 @@
 #include "iam/plugins.h"
 #include "bucket/metadata.h"
 #include "bucket/metasys.h"
+#include "kms/kms.h"
 #include "bucket/objectlock.h"
 #include "scanner/scanner.h"
 #include "scanner/usage.h"
@@ -346,6 +347,10 @@ void buckets_s3_server_init(buckets_s3_server *s, buckets_objlayer *layer, const
   s->iam = buckets_iam_new(root_user, root_password);
   buckets_iam_set_notify(s->iam, notify_iam, s);
   s->config = buckets_config_sys_new(root_user, root_password);
+  char kerr[256];
+  s->kms = buckets_kms_from_env(kerr, sizeof(kerr));
+  if (!s->kms && *kerr) buckets_fatal("%s", kerr);
+  if (s->kms) buckets_log_info("kms: %s, default key %s", buckets_kms_type(s->kms), buckets_kms_default_key(s->kms));
   buckets_config_sys_set_hook(s->config, config_changed, s);
   pthread_mutex_init(&s->oidc_mu, NULL);
   pthread_mutex_init(&s->freeze_mu, NULL);

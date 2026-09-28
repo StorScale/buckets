@@ -134,9 +134,11 @@ typedef struct {
   char version_id[37];
   int64_t size;
   int64_t mod_time_ns;
-  char etag[80];
+  char etag[128]; /* sealed ETags of encrypted objects are 96 hex digits */
   buckets_xl_kv *meta; /* user-defined metadata (MinIO MetaUser, incl. content-type) */
   size_t nmeta;
+  buckets_xl_kv *meta_sys; /* internal metadata (MinIO MetaSys: encryption keys, ...) */
+  size_t nmeta_sys;
   size_t nparts;
   bool delete_marker;
   bool is_latest; /* the newest version of its key (listings, stat and open) */
@@ -151,6 +153,8 @@ typedef struct {
 void buckets_object_info_free(buckets_object_info *oi);
 /* Value of a user-metadata key, or NULL. */
 const char *buckets_object_meta(const buckets_object_info *oi, const char *key);
+/* A system-metadata entry (case-insensitive key), or NULL. */
+const buckets_xl_kv *buckets_object_sys(const buckets_object_info *oi, const char *key);
 
 typedef struct {
   const buckets_xl_kv *meta; /* user-defined metadata to store */
@@ -287,7 +291,7 @@ size_t buckets_obj_heal_bucket(buckets_objlayer *L, const char *bucket);
 
 typedef struct {
   int number;
-  char etag[80];
+  char etag[128];
   int64_t size;
   int64_t actual_size;
   int64_t mod_time_ns;

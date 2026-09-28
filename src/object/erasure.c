@@ -361,6 +361,11 @@ void buckets_object_info_free(buckets_object_info *oi) {
     free(oi->meta[i].value);
   }
   free(oi->meta);
+  for (size_t i = 0; i < oi->nmeta_sys; i++) {
+    free(oi->meta_sys[i].key);
+    free(oi->meta_sys[i].value);
+  }
+  free(oi->meta_sys);
   free(oi->checksum);
   free(oi->parts);
   memset(oi, 0, sizeof(*oi));
@@ -369,6 +374,10 @@ void buckets_object_info_free(buckets_object_info *oi) {
 const char *buckets_object_meta(const buckets_object_info *oi, const char *key) {
   const buckets_xl_kv *kv = buckets_xl_kv_get(oi->meta, oi->nmeta, key);
   return kv ? (const char *)kv->value : NULL;
+}
+
+const buckets_xl_kv *buckets_object_sys(const buckets_object_info *oi, const char *key) {
+  return buckets_xl_kv_get(oi->meta_sys, oi->nmeta_sys, key);
 }
 
 static void fill_info(buckets_object_info *oi, const char *name, const buckets_xl_object *o) {
@@ -393,6 +402,9 @@ static void fill_info(buckets_object_info *oi, const char *name, const buckets_x
       continue;
     }
     buckets_xl_kv_set(&oi->meta, &oi->nmeta, o->meta_user[i].key, o->meta_user[i].value, o->meta_user[i].value_len);
+  }
+  for (size_t i = 0; i < o->nmeta_sys; i++) {
+    buckets_xl_kv_set(&oi->meta_sys, &oi->nmeta_sys, o->meta_sys[i].key, o->meta_sys[i].value, o->meta_sys[i].value_len);
   }
   const buckets_xl_kv *crc = buckets_xl_kv_get(o->meta_sys, o->nmeta_sys, "x-minio-internal-crc");
   if (crc && crc->value_len) {

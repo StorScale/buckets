@@ -2,6 +2,7 @@
  * Mirrors MinIO cmd/object-handlers.go, bucket-listobjects-handlers.go.
  * SPDX-License-Identifier: AGPL-3.0-or-later */
 #include <ctype.h>
+#include <openssl/crypto.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,12 +14,15 @@
 #include "core/uuid.h"
 #include "crypto/base64.h"
 #include "crypto/hex.h"
+#include "crypto/objkey.h"
+#include "crypto/sha256.h"
 #include "s3/checksum.h"
 #include "s3/chunked.h"
 #include "s3/internal.h"
 #include "bucket/metasys.h"
 #include "bucket/objectlock.h"
 #include "crypto/md5.h"
+#include "s3/sse.h"
 #include "s3/xml.h"
 
 /* ---- error mapping -------------------------------------------------------- */
@@ -350,6 +354,68 @@ static void cks_echo(buckets_http_response *resp, const cks_ctx *x) {
   buckets_http_resp_header(resp, buckets_cksum_header(x->result.type), enc);
 }
 
+/* Encrypted writes: the object layer stores DARE packages, so the digests,
+ * checksum and ETag are computed over the plaintext here and settled just
+ * before the version commits. */
+typedef struct {
+  cks_ctx *cx;
+  buckets_sse_writer *w;
+  const body_src *b;
+  uint8_t key[32];
+  buckets_xl_kv *sys;
+  size_t nsys;
+  bool multipart_part; /* a part: no object metadata */
+} sse_put;
+
+/* metadataEncrypter(key)("object-checksum", ...) over the stored checksum. */
+static void seal_checksum_meta(const uint8_t key[32], buckets_xl_object *o) {
+  const buckets_xl_kv *kv = buckets_xl_kv_get(o->meta_sys, o->nmeta_sys, BUCKETS_CKSUM_META);
+  if (!kv || !kv->value_len) return;
+  uint8_t k[32];
+  buckets_hmac_sha256(key, 32, "object-checksum", 15, k);
+  size_t n = buckets_dare_encrypted_size(kv->value_len);
+  uint8_t *enc = buckets_xmalloc(n);
+  buckets_dare_encrypt_buffer(k, kv->value, kv->value_len, enc);
+  buckets_xl_kv_set(&o->meta_sys, &o->nmeta_sys, BUCKETS_CKSUM_META, enc, n);
+  free(enc);
+}
+
+static buckets_obj_err sse_pre_commit(void *ud, const buckets_checksum *computed, buckets_xl_object *o) {
+  (void)computed;
+  sse_put *p = ud;
+  uint8_t md5[16], sha[32];
+  buckets_md5_final(&p->w->md5, md5);
+  buckets_sha256_final(&p->w->sha, sha);
+  if (p->b->has_md5 && memcmp(md5, p->b->md5, 16) != 0) return BUCKETS_OBJ_ERR_BAD_DIGEST;
+  if (p->b->want_sha && memcmp(sha, p->b->sha, 32) != 0) return BUCKETS_OBJ_ERR_SHA256_MISMATCH;
+  if (p->cx->want.type) {
+    buckets_checksum plain = {.type = p->cx->want.type & BUCKETS_CKSUM_BASE_MASK};
+    plain.raw_len = buckets_cksum_hasher_final(&p->w->cks, plain.raw);
+    buckets_obj_err e = cks_pre_commit(p->cx, &plain, o);
+    if (e) return e;
+  }
+  if (!o) return BUCKETS_OBJ_OK; /* a multipart part */
+  seal_checksum_meta(p->key, o);
+  buckets_buf sealed = BUCKETS_BUF_INIT;
+  buckets_objkey_seal_etag(p->key, md5, 16, &sealed);
+  char hex[200];
+  buckets_hex_encode((uint8_t *)sealed.data, sealed.len, hex);
+  buckets_xl_kv_set(&o->meta_user, &o->nmeta_user, "etag", hex, strlen(hex));
+  buckets_buf_free(&sealed);
+  for (size_t i = 0; i < p->nsys; i++)
+    buckets_xl_kv_set(&o->meta_sys, &o->nmeta_sys, p->sys[i].key, p->sys[i].value, p->sys[i].value_len);
+  if (o->nparts) o->parts[0].actual_size = p->w->plain_size;
+  return BUCKETS_OBJ_OK;
+}
+
+/* The response of an encrypted write: its SSE headers and the ETag clients see. */
+static void sse_put_response(s3_ctx *c, const buckets_object_info *oi, const uint8_t key[32]) {
+  char etag[80];
+  buckets_s3_sse_client_etag(c, oi, key, etag);
+  etag_header(c->resp, etag);
+  buckets_s3_sse_headers(c, oi);
+}
+
 static void put_object(s3_ctx *c) {
   if (buckets_http_header_get(c->req, "X-Amz-Copy-Source").p) {
     copy_object(c);
@@ -395,13 +461,50 @@ static void put_object(s3_ctx *c) {
     return;
   }
   opts.pre_commit_ud = &cx;
+  char why[200];
+  if (!buckets_s3_sse_put_opts(c, why, sizeof(why))) {
+    char msg[400];
+    snprintf(msg, sizeof(msg), "Invalid arguments provided for %s/%s: (%s)", c->bucket, c->object, why);
+    free_kvs(meta, nmeta);
+    body_close(&b);
+    buckets_s3_write_custom_error(c, 400, "InvalidArgument", msg);
+    return;
+  }
+  buckets_sse_req sse;
+  serr = buckets_s3_sse_parse(c, &sse);
+  sse_put sp = {.cx = &cx, .b = &b};
+  buckets_sse_writer w;
+  if (!serr && sse.kind) serr = buckets_s3_sse_new_key(c, &sse, c->bucket, c->object, sp.key, &sp.sys, &sp.nsys);
+  buckets_sse_req_free(&sse);
+  if (serr) {
+    free_kvs(meta, nmeta);
+    free_kvs(sp.sys, sp.nsys);
+    body_close(&b);
+    buckets_s3_sse_write_error(c, serr);
+    return;
+  }
+  buckets_read_fn rd = b.rd;
+  void *rd_ud = b.rd_ud;
+  int64_t size = b.size;
+  if (sp.nsys) {
+    buckets_sse_writer_init(&w, sp.key, b.rd, b.rd_ud, b.size, cx.want.type & BUCKETS_CKSUM_BASE_MASK);
+    sp.w = &w;
+    rd = buckets_sse_writer_read, rd_ud = &w;
+    size = (int64_t)buckets_dare_encrypted_size((uint64_t)b.size);
+    opts.want_md5 = opts.want_sha256 = NULL;
+    opts.checksum_type = 0;
+    opts.pre_commit = sse_pre_commit;
+    opts.pre_commit_ud = &sp;
+  }
   buckets_object_info oi;
-  buckets_obj_err err = buckets_obj_put(c->s->layer, c->bucket, c->object, b.rd, b.rd_ud, b.size, &opts, &oi);
+  buckets_obj_err err = buckets_obj_put(c->s->layer, c->bucket, c->object, rd, rd_ud, size, &opts, &oi);
   free_kvs(meta, nmeta);
+  if (sp.nsys) buckets_sse_writer_free(&w);
   if (err) {
     buckets_s3_write_error(c, body_error(&b, err));
   } else {
-    etag_header(c->resp, oi.etag);
+    if (sp.nsys) sse_put_response(c, &oi, sp.key);
+    else etag_header(c->resp, oi.etag);
     buckets_s3_version_header(c, oi.version_id);
     oi.is_latest = true; /* the version just written */
     buckets_s3_expiration_header(c, &oi);
@@ -409,6 +512,8 @@ static void put_object(s3_ctx *c) {
     c->resp->status = 200;
     buckets_object_info_free(&oi);
   }
+  free_kvs(sp.sys, sp.nsys);
+  OPENSSL_cleanse(sp.key, sizeof(sp.key));
   body_close(&b);
 }
 
@@ -593,6 +698,16 @@ static void response_overrides(s3_ctx *c) {
 static void reader_free(void *ud) { buckets_obj_reader_free(ud); }
 
 static void get_object(s3_ctx *c, bool head) {
+  /* "If SSE-S3 or SSE-KMS present -> AWS fails with undefined error" */
+  if (buckets_s3_sse_s3_or_kms_requested(c)) {
+    buckets_s3_write_error(c, BUCKETS_ERR_BAD_REQUEST);
+    return;
+  }
+  buckets_s3_error oerr = buckets_s3_sse_get_opts(c);
+  if (oerr) {
+    buckets_s3_write_error(c, oerr);
+    return;
+  }
   const char *version = buckets_query_get(&c->q, "versionId");
   const char *pn_s = buckets_query_get(&c->q, "partNumber");
   long part_number = 0;
@@ -622,6 +737,27 @@ static void get_object(s3_ctx *c, bool head) {
     buckets_s3_write_error(c, version && *version ? BUCKETS_ERR_METHOD_NOT_ALLOWED : BUCKETS_ERR_NO_SUCH_KEY);
     buckets_object_info_free(&oi);
     return;
+  }
+  /* DecryptObjectInfo: request checks, the key, and what clients see */
+  buckets_s3_error serr = buckets_s3_sse_check_read(c, &oi, false);
+  bool encrypted = !serr && buckets_s3_sse_encrypted(&oi);
+  uint8_t key[32];
+  bool have_key = false;
+  if (!serr && encrypted && (buckets_s3_sse_kind_of(&oi) == BUCKETS_SSE_C || !head)) {
+    serr = buckets_s3_sse_object_key(c, &oi, c->bucket, c->object, false, key);
+    have_key = !serr;
+  }
+  if (serr) {
+    buckets_object_info_free(&oi);
+    buckets_s3_sse_write_error(c, serr);
+    return;
+  }
+  int64_t stored_size = oi.size;
+  if (encrypted) {
+    char etag[80];
+    buckets_s3_sse_client_etag(c, &oi, have_key ? key : NULL, etag);
+    snprintf(oi.etag, sizeof(oi.etag), "%s", etag);
+    oi.size = buckets_s3_sse_actual_size(&oi);
   }
   if (part_number > 1) {
     bool found = false;
@@ -656,20 +792,39 @@ static void get_object(s3_ctx *c, bool head) {
   }
 
   buckets_obj_reader *r = NULL;
+  buckets_sse_reader *sr = NULL;
   if (!head) {
     buckets_object_info oi2;
-    err = buckets_obj_open(c->s->layer, c->bucket, c->object, version, off, len, &r, &oi2);
+    int64_t roff = off, rlen = len;
+    buckets_sse_range rg;
+    if (encrypted) {
+      int64_t plain = oi.size;
+      oi.size = stored_size;
+      buckets_s3_sse_range(&oi, off, len, &rg);
+      oi.size = plain;
+      roff = rg.enc_off, rlen = rg.enc_len;
+    }
+    err = buckets_obj_open(c->s->layer, c->bucket, c->object, version, roff, rlen, &r, &oi2);
     if (err) {
       buckets_object_info_free(&oi);
       buckets_s3_write_error(c, buckets_s3_obj_error(err));
       return;
     }
     buckets_object_info_free(&oi2);
+    if (encrypted) {
+      int64_t plain = oi.size;
+      oi.size = stored_size;
+      sr = buckets_sse_reader_new(&oi, key, &rg, len, (buckets_read_fn)reader_source, r, reader_free);
+      oi.size = plain;
+      r = NULL;
+    }
   }
+  if (have_key) OPENSSL_cleanse(key, sizeof(key));
   buckets_s3_lock_filter_meta(c, &oi);
   write_object_headers(c, &oi);
   buckets_s3_version_header(c, oi.version_id);
   buckets_s3_expiration_header(c, &oi);
+  if (encrypted) buckets_s3_sse_headers(c, &oi);
   if (rs.present) {
     buckets_http_resp_headerf(c->resp, "Content-Range", "bytes %lld-%lld/%lld", (long long)off,
                               (long long)(off + len - 1), (long long)oi.size);
@@ -686,6 +841,10 @@ static void get_object(s3_ctx *c, bool head) {
     c->resp->stream = (buckets_http_body_fn)reader_source;
     c->resp->stream_ud = r;
     c->resp->stream_free = reader_free;
+  } else if (sr) {
+    c->resp->stream = (buckets_http_body_fn)buckets_sse_reader_read;
+    c->resp->stream_ud = sr;
+    c->resp->stream_free = buckets_sse_reader_free;
   }
   buckets_object_info_free(&oi);
 }
@@ -724,6 +883,80 @@ static void delete_object(s3_ctx *c) {
 }
 
 /* ---- CopyObject ----------------------------------------------------------- */
+
+/* forward: helpers below copy_object use these */
+/* A copy source read as plaintext: raw for plain objects, decrypted (with
+ * the copy-source SSE-C key, or the KMS) for encrypted ones. */
+typedef struct {
+  buckets_obj_reader *r;
+  buckets_sse_reader *sr;
+} src_stream;
+
+static long src_read(void *ud, void *buf, size_t n) {
+  src_stream *s = ud;
+  return s->sr ? buckets_sse_reader_read(s->sr, buf, n) : buckets_obj_read(s->r, buf, n);
+}
+
+static void src_close(src_stream *s) {
+  if (s->sr) buckets_sse_reader_free(s->sr);
+  else if (s->r) buckets_obj_reader_free(s->r);
+  memset(s, 0, sizeof(*s));
+}
+
+/* Stats a copy source and prepares it: SSE request checks, its key, the
+ * ETag clients see and its plaintext size (oi->size; stored_size keeps the
+ * stored one). */
+static buckets_s3_error prepare_source(s3_ctx *c, const char *b, const char *o, const char *v, buckets_object_info *oi,
+                                       uint8_t key[32], bool *encrypted, int64_t *stored_size) {
+  buckets_obj_err err = buckets_obj_stat(c->s->layer, b, o, v, oi);
+  if (!err && oi->delete_marker) {
+    buckets_object_info_free(oi);
+    err = v && *v ? BUCKETS_OBJ_ERR_METHOD_NOT_ALLOWED : BUCKETS_OBJ_ERR_NO_SUCH_KEY;
+  }
+  if (err) return err == BUCKETS_OBJ_ERR_NO_SUCH_BUCKET ? BUCKETS_ERR_NO_SUCH_BUCKET : buckets_s3_obj_error(err);
+  *stored_size = oi->size;
+  buckets_s3_error e = buckets_s3_sse_check_read(c, oi, true);
+  *encrypted = !e && buckets_s3_sse_encrypted(oi);
+  if (!e && *encrypted) e = buckets_s3_sse_object_key(c, oi, b, o, true, key);
+  if (e) {
+    buckets_object_info_free(oi);
+    return e;
+  }
+  if (*encrypted) {
+    char etag[80];
+    buckets_s3_sse_client_etag(c, oi, key, etag);
+    snprintf(oi->etag, sizeof(oi->etag), "%s", etag);
+    oi->size = buckets_s3_sse_actual_size(oi);
+  }
+  return BUCKETS_ERR_NONE;
+}
+
+/* Opens plaintext [off, off+len) of a prepared source. */
+static buckets_s3_error open_source(s3_ctx *c, const char *b, const char *o, const char *v, buckets_object_info *oi,
+                                    const uint8_t *key, bool encrypted, int64_t stored_size, int64_t off, int64_t len,
+                                    src_stream *s) {
+  memset(s, 0, sizeof(*s));
+  int64_t roff = off, rlen = len;
+  buckets_sse_range rg;
+  int64_t plain = oi->size;
+  if (encrypted) {
+    oi->size = stored_size;
+    buckets_s3_sse_range(oi, off, len, &rg);
+    oi->size = plain;
+    roff = rg.enc_off, rlen = rg.enc_len;
+  }
+  buckets_object_info tmp;
+  buckets_obj_err err = buckets_obj_open(c->s->layer, b, o, v, roff, rlen, &s->r, &tmp);
+  if (err) return err == BUCKETS_OBJ_ERR_NO_SUCH_BUCKET ? BUCKETS_ERR_NO_SUCH_BUCKET : buckets_s3_obj_error(err);
+  buckets_object_info_free(&tmp);
+  if (encrypted) {
+    oi->size = stored_size;
+    s->sr = buckets_sse_reader_new(oi, key, &rg, len, (buckets_read_fn)reader_source, s->r, reader_free);
+    oi->size = plain;
+    s->r = NULL;
+  }
+  return BUCKETS_ERR_NONE;
+}
 
 static void copy_object(s3_ctx *c) {
   buckets_str src_h = buckets_http_header_get(c->req, "X-Amz-Copy-Source");
@@ -777,20 +1010,25 @@ static void copy_object(s3_ctx *c) {
     free(decoded);
     return;
   }
-  if (strcmp(src_bucket, c->bucket) == 0 && strcmp(src_object, c->object) == 0 && !replace && !replace_tags &&
-      !(version && *version)) {
+
+  buckets_object_info src;
+  uint8_t src_key[32], dst_key[32];
+  bool src_enc = false;
+  int64_t stored_size = 0;
+  buckets_s3_error perr = prepare_source(c, src_bucket, src_object, version, &src, src_key, &src_enc, &stored_size);
+  if (perr) {
     free(decoded);
-    buckets_s3_write_error(c, BUCKETS_ERR_INVALID_COPY_DEST);
+    buckets_s3_sse_write_error(c, perr);
     return;
   }
-
-  buckets_obj_reader *r = NULL;
-  buckets_object_info src;
-  buckets_obj_err err = buckets_obj_open(c->s->layer, src_bucket, src_object, version, 0, INT64_MAX, &r, &src);
-  if (err) {
+  buckets_obj_err err;
+  /* copying onto itself must change something: metadata, tags or encryption */
+  if (strcmp(src_bucket, c->bucket) == 0 && strcmp(src_object, c->object) == 0 && !replace && !replace_tags &&
+      !(version && *version) && !buckets_s3_sse_s3_or_kms_requested(c) &&
+      !buckets_http_header_get(c->req, "X-Amz-Server-Side-Encryption-Customer-Algorithm").p && !src_enc) {
+    buckets_object_info_free(&src);
     free(decoded);
-    buckets_s3_write_error(c, err == BUCKETS_OBJ_ERR_NO_SUCH_BUCKET ? BUCKETS_ERR_NO_SUCH_BUCKET
-                                                                    : buckets_s3_obj_error(err));
+    buckets_s3_write_error(c, BUCKETS_ERR_INVALID_COPY_DEST);
     return;
   }
 
@@ -809,7 +1047,6 @@ static void copy_object(s3_ctx *c) {
     failed = true;
   }
   if (failed) {
-    buckets_obj_reader_free(r);
     buckets_object_info_free(&src);
     free(decoded);
     buckets_s3_write_error(c, BUCKETS_ERR_PRECONDITION_FAILED);
@@ -817,7 +1054,6 @@ static void copy_object(s3_ctx *c) {
   }
   bool same = strcmp(src_bucket, c->bucket) == 0 && strcmp(src_object, c->object) == 0;
   if (!same && !buckets_s3_enforce_quota(c, c->bucket, src.size)) {
-    buckets_obj_reader_free(r);
     buckets_object_info_free(&src);
     free(decoded);
     return;
@@ -848,24 +1084,67 @@ static void copy_object(s3_ctx *c) {
     free(tags);
   }
   if (!serr) serr = buckets_s3_lock_put_meta(c, c->object, &meta, &nmeta);
+  /* the destination's encryption */
+  char why[200];
+  if (!serr && !buckets_s3_sse_put_opts(c, why, sizeof(why))) {
+    char msg[400];
+    snprintf(msg, sizeof(msg), "Invalid arguments provided for %s/%s: (%s)", c->bucket, c->object, why);
+    free_kvs(meta, nmeta);
+    buckets_object_info_free(&src);
+    free(decoded);
+    buckets_s3_write_custom_error(c, 400, "InvalidArgument", msg);
+    return;
+  }
+  buckets_sse_req sse = {0};
+  if (!serr) serr = buckets_s3_sse_parse_copy_dest(c, &sse);
+  cks_ctx cx = {0};
+  body_src nob = {0};
+  sse_put sp = {.cx = &cx, .b = &nob};
+  if (!serr && sse.kind) serr = buckets_s3_sse_new_key(c, &sse, c->bucket, c->object, dst_key, &sp.sys, &sp.nsys);
+  buckets_sse_req_free(&sse);
+  memcpy(sp.key, dst_key, 32);
+  src_stream ss = {0};
+  if (!serr) serr = open_source(c, src_bucket, src_object, version, &src, src_key, src_enc, stored_size, 0, src.size, &ss);
   buckets_object_info oi;
+  buckets_sse_writer w;
   if (!serr) {
     buckets_put_opts opts = {.meta = meta, .nmeta = nmeta};
     bool suspended;
     buckets_s3_versioning(c, c->object, &opts.versioned, &suspended);
-    err = buckets_obj_put(c->s->layer, c->bucket, c->object, reader_source, r, src.size, &opts, &oi);
+    buckets_read_fn rd = src_read;
+    void *rd_ud = &ss;
+    int64_t size = src.size;
+    if (sp.nsys) {
+      buckets_sse_writer_init(&w, dst_key, src_read, &ss, src.size, 0);
+      sp.w = &w;
+      rd = buckets_sse_writer_read, rd_ud = &w;
+      size = (int64_t)buckets_dare_encrypted_size((uint64_t)src.size);
+      opts.pre_commit = sse_pre_commit;
+      opts.pre_commit_ud = &sp;
+    }
+    err = buckets_obj_put(c->s->layer, c->bucket, c->object, rd, rd_ud, size, &opts, &oi);
+    if (sp.nsys) buckets_sse_writer_free(&w);
     serr = buckets_s3_obj_error(err);
   }
+  src_close(&ss);
+  OPENSSL_cleanse(src_key, sizeof(src_key));
   char src_vid[37];
   snprintf(src_vid, sizeof(src_vid), "%s", src.version_id);
   free_kvs(meta, nmeta);
-  buckets_obj_reader_free(r);
+  free_kvs(sp.sys, sp.nsys);
   buckets_object_info_free(&src);
   free(decoded);
   if (serr) {
-    buckets_s3_write_error(c, serr);
+    OPENSSL_cleanse(dst_key, sizeof(dst_key));
+    buckets_s3_sse_write_error(c, serr);
     return;
   }
+  if (buckets_s3_sse_encrypted(&oi)) { /* the ETag clients see; CopyObject sends no SSE headers */
+    char etag[80];
+    buckets_s3_sse_client_etag(c, &oi, dst_key, etag);
+    snprintf(oi.etag, sizeof(oi.etag), "%s", etag);
+  }
+  OPENSSL_cleanse(dst_key, sizeof(dst_key));
   if (strcmp(src_vid, "null") != 0) buckets_http_resp_header(c->resp, "X-Amz-Copy-Source-Version-Id", src_vid);
   buckets_s3_version_header(c, oi.version_id);
   oi.is_latest = true; /* the version just written */
@@ -995,21 +1274,34 @@ static void mpu_put_part(s3_ctx *c, const char *upload_id) {
       free(decoded);
       return;
     }
+    free(c->err_bucket);
+    free(c->err_object);
+    c->err_bucket = buckets_xstrdup(sb); /* errors name the source from here on, as MinIO's do */
+    c->err_object = buckets_xstrdup(so);
     buckets_object_info src;
-    buckets_obj_err err = buckets_obj_stat(c->s->layer, sb, so, sv, &src);
-    if (err) {
+    uint8_t skey[32];
+    bool senc = false;
+    int64_t stored = 0;
+    buckets_s3_error perr = prepare_source(c, sb, so, sv, &src, skey, &senc, &stored);
+    if (perr) {
       free(decoded);
-      buckets_s3_write_error(c, buckets_s3_obj_error(err));
+      buckets_s3_sse_write_error(c, perr);
       return;
     }
+    buckets_obj_err err;
     int64_t off = 0, len = src.size;
     buckets_str rh = buckets_http_header_get(c->req, "X-Amz-Copy-Source-Range");
     if (rh.p) {
+      /* parseCopyPartRangeSpec + checkCopyPartRangeWithSize */
       range_spec rs;
-      if (!parse_range(rh, &rs) || !rs.present || rs.suffix || rs.end < 0 || !resolve_range(&rs, src.size, &off, &len)) {
+      buckets_s3_error re = BUCKETS_ERR_NONE;
+      if (!parse_range(rh, &rs) || !rs.present || rs.suffix || rs.end < 0) re = BUCKETS_ERR_INVALID_COPY_PART_RANGE;
+      else if (rs.start >= src.size || rs.end >= src.size) re = BUCKETS_ERR_INVALID_COPY_PART_RANGE_SOURCE;
+      else resolve_range(&rs, src.size, &off, &len);
+      if (re) {
         buckets_object_info_free(&src);
         free(decoded);
-        buckets_s3_write_error(c, BUCKETS_ERR_INVALID_RANGE);
+        buckets_s3_write_error(c, re);
         return;
       }
     }
@@ -1018,19 +1310,18 @@ static void mpu_put_part(s3_ctx *c, const char *upload_id) {
       free(decoded);
       return;
     }
-    buckets_obj_reader *r;
-    buckets_object_info tmp;
-    err = buckets_obj_open(c->s->layer, sb, so, sv, off, len, &r, &tmp);
+    src_stream ss;
+    perr = open_source(c, sb, so, sv, &src, skey, senc, stored, off, len, &ss);
+    OPENSSL_cleanse(skey, sizeof(skey));
     buckets_object_info_free(&src);
     free(decoded);
-    if (err) {
-      buckets_s3_write_error(c, buckets_s3_obj_error(err));
+    if (perr) {
+      buckets_s3_sse_write_error(c, perr);
       return;
     }
-    buckets_object_info_free(&tmp);
     buckets_part_info pi;
-    err = buckets_obj_mpu_put_part(c->s->layer, c->bucket, c->object, upload_id, part, reader_source, r, len, NULL, &pi);
-    buckets_obj_reader_free(r);
+    err = buckets_obj_mpu_put_part(c->s->layer, c->bucket, c->object, upload_id, part, src_read, &ss, len, NULL, &pi);
+    src_close(&ss);
     if (err) {
       buckets_s3_write_error(c, buckets_s3_obj_error(err));
       return;
@@ -1599,24 +1890,34 @@ void buckets_s3_put_acl(s3_ctx *c) {
 /* Server-side encryption arrives in Phase 5. Until then no request may leave
  * data unencrypted that the client asked to encrypt: SSE headers get MinIO's
  * answers for a server without a KMS, and SSE-C keys never travel in clear. */
+/* SSE requests this server cannot serve yet (copy and multipart), and SSE-C
+ * without TLS, which MinIO's request validator refuses for every request. */
 static bool refuse_sse(s3_ctx *c) {
   bool ssec = buckets_http_header_get(c->req, "X-Amz-Server-Side-Encryption-Customer-Algorithm").p ||
-              buckets_http_header_get(c->req, "X-Amz-Server-Side-Encryption-Customer-Key").p;
+              buckets_http_header_get(c->req, "X-Amz-Server-Side-Encryption-Customer-Key").p ||
+              buckets_http_header_get(c->req, "X-Amz-Server-Side-Encryption-Customer-Key-Md5").p;
   bool ssec_src = buckets_http_header_get(c->req, "X-Amz-Copy-Source-Server-Side-Encryption-Customer-Algorithm").p ||
-                  buckets_http_header_get(c->req, "X-Amz-Copy-Source-Server-Side-Encryption-Customer-Key").p;
-  bool sse = buckets_http_header_get(c->req, "X-Amz-Server-Side-Encryption").p != NULL;
-  if (!ssec && !ssec_src && !sse) return false;
-  buckets_str m = c->req->method;
+                  buckets_http_header_get(c->req, "X-Amz-Copy-Source-Server-Side-Encryption-Customer-Key").p ||
+                  buckets_http_header_get(c->req, "X-Amz-Copy-Source-Server-Side-Encryption-Customer-Key-Md5").p;
+  bool sse = buckets_http_header_get(c->req, "X-Amz-Server-Side-Encryption").p ||
+             buckets_http_header_get(c->req, "X-Amz-Server-Side-Encryption-Aws-Kms-Key-Id").p ||
+             buckets_http_header_get(c->req, "X-Amz-Server-Side-Encryption-Context").p;
   if ((ssec || ssec_src) && !c->req->secure) {
     buckets_s3_write_error(c, BUCKETS_ERR_INSECURE_SSE_CUSTOMER_REQUEST);
-  } else if (buckets_str_eq_c(m, "GET") || buckets_str_eq_c(m, "HEAD")) {
-    buckets_s3_write_error(c, BUCKETS_ERR_INVALID_ENCRYPTION_PARAMETERS); /* no object is encrypted yet */
-  } else if (sse) {
-    buckets_s3_write_error(c, BUCKETS_ERR_KMS_NOT_CONFIGURED);
-  } else {
-    buckets_s3_write_error(c, BUCKETS_ERR_NOT_IMPLEMENTED);
+    return true;
   }
-  return true;
+  if (!ssec && !ssec_src && !sse) return false;
+  buckets_str m = c->req->method;
+  bool copy = buckets_http_header_get(c->req, "X-Amz-Copy-Source").p != NULL;
+  bool mpu = buckets_query_has(&c->q, "uploads") || buckets_query_get(&c->q, "uploadId");
+  if (buckets_str_eq_c(m, "PUT") && !mpu) return false; /* PutObject and CopyObject */
+  if (buckets_str_eq_c(m, "PUT") && mpu && copy && !sse && !ssec) return false; /* UploadPartCopy from an encrypted source */
+  if (buckets_str_eq_c(m, "GET") || buckets_str_eq_c(m, "HEAD")) return false;
+  if (buckets_str_eq_c(m, "PUT") || buckets_str_eq_c(m, "POST")) {
+    buckets_s3_write_error(c, BUCKETS_ERR_NOT_IMPLEMENTED); /* encrypted copies and uploads come next */
+    return true;
+  }
+  return false;
 }
 
 /* The policy action of an object-level request (MinIO's router + handlers). */
@@ -1903,6 +2204,30 @@ static void xml_key(buckets_buf *b, const char *tag, const char *value, bool url
   buckets_buf_free(&enc);
 }
 
+/* DecryptETags: listed encrypted objects show their plaintext size and the
+ * ETag clients see. */
+static void sse_list_view(s3_ctx *c, buckets_obj_listing *l) {
+  for (size_t i = 0; i < l->nobjects; i++) {
+    buckets_object_info *o = &l->objects[i];
+    if (o->delete_marker || !buckets_s3_sse_encrypted(o)) continue;
+    char etag[80];
+    buckets_s3_sse_client_etag(c, o, NULL, etag);
+    int64_t size = buckets_s3_sse_actual_size(o);
+    snprintf(o->etag, sizeof(o->etag), "%s", etag);
+    if (size >= 0) o->size = size;
+  }
+}
+
+/* The encryption entry MinIO puts first in a metadata listing's UserMetadata. */
+static const char *sse_list_meta(const buckets_object_info *o, const char **value) {
+  switch (buckets_s3_sse_kind_of(o)) {
+  case BUCKETS_SSE_S3: *value = "AES256"; return "X-Amz-Server-Side-Encryption";
+  case BUCKETS_SSE_KMS: *value = "aws:kms"; return "X-Amz-Server-Side-Encryption";
+  case BUCKETS_SSE_C: *value = "AES256"; return "X-Amz-Server-Side-Encryption-Customer-Algorithm";
+  default: return NULL;
+  }
+}
+
 void buckets_s3_list_objects(s3_ctx *c, bool v2) {
   const char *max_keys_s = buckets_query_get(&c->q, "max-keys");
   long long max_keys = BUCKETS_MAX_LIST_KEYS;
@@ -1957,6 +2282,8 @@ void buckets_s3_list_objects(s3_ctx *c, bool v2) {
     buckets_s3_write_error(c, buckets_s3_obj_error(err));
     return;
   }
+  sse_list_view(c, &l);
+
 
   buckets_buf *b = &c->resp->body;
   buckets_xml_header(b);
@@ -2004,6 +2331,12 @@ void buckets_s3_list_objects(s3_ctx *c, bool v2) {
     buckets_xml_elem(b, "StorageClass", sc ? sc : "STANDARD");
     if (with_meta) {
       bool any = false;
+      const char *sv, *sk = sse_list_meta(o, &sv);
+      if (sk) {
+        buckets_xml_open(b, "UserMetadata");
+        any = true;
+        buckets_xml_elem(b, sk, sv);
+      }
       for (size_t k = 0; k < o->nmeta; k++) {
         if (has_prefix_fold(o->meta[k].key, BUCKETS_XL_RESERVED_PREFIX) || strcasecmp(o->meta[k].key, "X-Amz-Tagging") == 0)
           continue;
@@ -2070,6 +2403,8 @@ void buckets_s3_list_object_versions(s3_ctx *c) {
     buckets_s3_write_error(c, buckets_s3_obj_error(err));
     return;
   }
+  sse_list_view(c, &l);
+
   buckets_buf *b = &c->resp->body;
   buckets_xml_header(b);
   buckets_xml_open_ns(b, "ListVersionsResult", BUCKETS_S3_XMLNS);
@@ -2106,6 +2441,12 @@ void buckets_s3_list_object_versions(s3_ctx *c) {
     buckets_xml_elem(b, "StorageClass", sc ? sc : "STANDARD");
     if (with_meta && !o->delete_marker) {
       bool any = false;
+      const char *sv, *sk = sse_list_meta(o, &sv);
+      if (sk) {
+        buckets_xml_open(b, "UserMetadata");
+        any = true;
+        buckets_xml_elem(b, sk, sv);
+      }
       for (size_t k = 0; k < o->nmeta; k++) {
         if (has_prefix_fold(o->meta[k].key, BUCKETS_XL_RESERVED_PREFIX) || strcasecmp(o->meta[k].key, "X-Amz-Tagging") == 0)
           continue;
