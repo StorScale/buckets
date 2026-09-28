@@ -381,8 +381,8 @@ buckets_s3_error buckets_sigv4_verify_header(const buckets_sigv4_config *cfg, co
     goto done;
   }
 
-  const char *secret = cfg->lookup(cfg->lookup_ud, cred.access_key);
-  if (!secret) {
+  char secret[BUCKETS_SECRET_MAX];
+  if (!cfg->lookup(cfg->lookup_ud, cred.access_key, secret)) {
     err = BUCKETS_ERR_INVALID_ACCESS_KEY_ID;
     goto free_sh;
   }
@@ -450,8 +450,8 @@ buckets_s3_error buckets_sigv4_verify_presigned(const buckets_sigv4_config *cfg,
     return err;
   }
 
-  const char *secret = cfg->lookup(cfg->lookup_ud, cred.access_key);
-  if (!secret) {
+  char secret[BUCKETS_SECRET_MAX];
+  if (!cfg->lookup(cfg->lookup_ud, cred.access_key, secret)) {
     err = BUCKETS_ERR_INVALID_ACCESS_KEY_ID;
     goto done;
   }

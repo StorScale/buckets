@@ -1,8 +1,20 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 #include "core/timefmt.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <string.h>
+
+long long buckets_days_from_civil(int y, int m, int d) {
+  /* Howard Hinnant's algorithm: valid for any proleptic Gregorian date,
+   * unlike timegm(), which some libcs reject before 1900. */
+  y -= m <= 2;
+  long long era = (y >= 0 ? y : y - 399) / 400;
+  long long yoe = y - era * 400;
+  long long doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+  long long doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  return era * 146097 + doe - 719468;
+}
 
 static const char *const k_days[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
 static const char *const k_months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -85,4 +97,60 @@ bool buckets_time_parse_http(buckets_str s, time_t *out) {
   if (!tm_in_range(&tm)) return false;
   *out = timegm(&tm);
   return true;
+}
+
+/* time.Parse(time.RFC3339, s), to UTC seconds + nanoseconds. */
+bool buckets_time_parse_rfc3339(const char *s, long long *sec, long *nsec) {
+  int Y, M, D, h, m, sc, n = 0;
+  if (sscanf(s, "%4d-%2d-%2dT%2d:%2d:%2d%n", &Y, &M, &D, &h, &m, &sc, &n) != 6 || n != 19) return false;
+  if (M < 1 || M > 12 || D < 1 || D > 31 || h > 23 || m > 59 || sc > 59) return false;
+  const char *p = s + 19;
+  long frac = 0;
+  if (*p == '.') {
+    p++;
+    int digits = 0;
+    while (isdigit((unsigned char)*p)) {
+      if (digits < 9) frac = frac * 10 + (*p - '0');
+      digits++;
+      p++;
+    }
+    if (!digits) return false;
+    for (; digits < 9; digits++) frac *= 10;
+  }
+  long off = 0;
+  if (*p == 'Z') {
+    p++;
+  } else if (*p == '+' || *p == '-') {
+    int oh, om, k = 0;
+    if (sscanf(p + 1, "%2d:%2d%n", &oh, &om, &k) != 2 || k != 5) return false;
+    off = (oh * 3600L + om * 60L) * (*p == '-' ? -1 : 1);
+    p += 6;
+  } else {
+    return false;
+  }
+  if (*p) return false;
+  static const int mdays[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  bool leap = (Y % 4 == 0 && Y % 100 != 0) || Y % 400 == 0;
+  if (D > mdays[M - 1] + (M == 2 && leap)) return false;
+  *sec = buckets_days_from_civil(Y, M, D) * 86400LL + h * 3600LL + m * 60LL + sc - off;
+  *nsec = frac;
+  return true;
+}
+
+void buckets_time_rfc3339_nano(long long sec, long nsec, char *out) {
+  time_t t = (time_t)sec;
+  struct tm tm;
+  gmtime_r(&t, &tm);
+  int n = snprintf(out, BUCKETS_TIME_RFC3339_NANO_LEN + 1, "%04d-%02d-%02dT%02d:%02d:%02d", tm.tm_year + 1900,
+                   tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
+  if (nsec > 0) {
+    char frac[11];
+    snprintf(frac, sizeof(frac), ".%09ld", nsec);
+    size_t k = strlen(frac);
+    while (frac[k - 1] == '0') frac[--k] = '\0';
+    memcpy(out + n, frac, k);
+    n += (int)k;
+  }
+  out[n++] = 'Z';
+  out[n] = '\0';
 }

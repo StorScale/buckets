@@ -21,4 +21,13 @@ void buckets_time_http(time_t t, char *out);
 bool buckets_time_parse_amz(buckets_str s, time_t *out);
 bool buckets_time_parse_http(buckets_str s, time_t *out);
 
+/* Go's time.RFC3339Nano in UTC ("2006-01-02T15:04:05.999999999Z", trailing
+ * fraction zeros trimmed), as encoding/json writes time.Time. */
+#define BUCKETS_TIME_RFC3339_NANO_LEN 30
+void buckets_time_rfc3339_nano(long long sec, long nsec, char *out);
+/* time.Parse(time.RFC3339, s) (fraction and offset accepted), to UTC. */
+bool buckets_time_parse_rfc3339(const char *s, long long *sec, long *nsec);
+/* Days since 1970-01-01 of a proleptic Gregorian date. */
+long long buckets_days_from_civil(int y, int m, int d);
+
 #endif

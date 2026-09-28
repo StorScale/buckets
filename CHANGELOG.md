@@ -24,8 +24,17 @@ All notable changes to this project are documented here. The format follows
     - `tests/e2e-k8s/envtest.sh`: 34 checks against a real kube-apiserver and etcd, as the operator's own ServiceAccount
     - `tests/e2e-k8s/kind.sh`: the full kind end to end (not yet run: needs docker)
 - HTTP client: chunked responses, and CA bundles given as a file.
+- IAM (Phase 4, in progress):
+  - The IAM policy engine, ported from minio/pkg v3.1.3 and checked against golden vectors from the Go package.
+  - madmin `EncryptData`/`DecryptData` (Argon2id, AES-256-GCM or ChaCha20-Poly1305 over sio).
+  - The IAM store (`src/iam/iam.c`): users, groups, policies, policy mappings, service accounts and STS credentials. They are cached in memory and stored in MinIO's `.minio.sys/config/iam` layout, so MinIO deployments carry their IAM state over. It also:
+    - reloads on a timer
+    - loads keys on a cache miss
+    - takes per-item peer reload notifications
+  - HS256/384/512 JWTs for session tokens, and `.minio.sys` config object helpers.
 
 ### Fixed
+- RFC 3339 parsing no longer relies on `timegm()`, which fails on macOS for Go's zero time (year 1).
 - ctest now registers tests outside `tests/unit` (`enable_testing()` moved before the subdirectories).
 
 ### Changed

@@ -14,6 +14,7 @@
 #include <yyjson.h>
 
 #include "core/buf.h"
+#include "core/timefmt.h"
 #include "crypto/base64.h"
 
 #include "iam/policy_tables.inc"
@@ -389,45 +390,6 @@ static bool go_atoi(const char *s, long long *out) {
   return true;
 }
 
-/* time.Parse(time.RFC3339, s), to UTC seconds + nanoseconds. */
-static bool parse_rfc3339(const char *s, long long *sec, long *nsec) {
-  int Y, M, D, h, m, sc, n = 0;
-  if (sscanf(s, "%4d-%2d-%2dT%2d:%2d:%2d%n", &Y, &M, &D, &h, &m, &sc, &n) != 6 || n != 19) return false;
-  if (M < 1 || M > 12 || D < 1 || D > 31 || h > 23 || m > 59 || sc > 59) return false;
-  const char *p = s + 19;
-  long frac = 0;
-  if (*p == '.') {
-    p++;
-    int digits = 0;
-    while (isdigit((unsigned char)*p)) {
-      if (digits < 9) frac = frac * 10 + (*p - '0');
-      digits++;
-      p++;
-    }
-    if (!digits) return false;
-    for (; digits < 9; digits++) frac *= 10;
-  }
-  long off = 0;
-  if (*p == 'Z') {
-    p++;
-  } else if (*p == '+' || *p == '-') {
-    int oh, om, k = 0;
-    if (sscanf(p + 1, "%2d:%2d%n", &oh, &om, &k) != 2 || k != 5) return false;
-    off = (oh * 3600L + om * 60L) * (*p == '-' ? -1 : 1);
-    p += 6;
-  } else {
-    return false;
-  }
-  if (*p) return false;
-  static const int mdays[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
-  bool leap = (Y % 4 == 0 && Y % 100 != 0) || Y % 400 == 0;
-  if (D > mdays[M - 1] + (M == 2 && leap)) return false;
-  struct tm tm = {.tm_year = Y - 1900, .tm_mon = M - 1, .tm_mday = D, .tm_hour = h, .tm_min = m, .tm_sec = sc};
-  *sec = (long long)timegm(&tm) - off;
-  *nsec = frac;
-  return true;
-}
-
 static bool compare(cmp_op c, int order) {
   switch (c) {
     case C_EQ: return order == 0;
@@ -467,7 +429,7 @@ static bool func_eval(const cond_func *f, const buckets_policy_args *a) {
       if (!rv || !rv->n) return false;
       long long s;
       long ns;
-      if (!parse_rfc3339(rv->values[0], &s, &ns)) return false;
+      if (!buckets_time_parse_rfc3339(rv->values[0], &s, &ns)) return false;
       int order = s != f->date_sec ? (s < f->date_sec ? -1 : 1) : ns != f->date_nsec ? (ns < f->date_nsec ? -1 : 1) : 0;
       return compare(f->cmp, order);
     }
@@ -698,7 +660,7 @@ static bool make_func(const char *qual, const char *nm, yyjson_val *key_json, co
            : strcmp(op, "LessThan") == 0 ? C_LT : strcmp(op, "LessThanEquals") == 0 ? C_LE
            : strcmp(op, "GreaterThan") == 0 ? C_GT : C_GE;
     if (nv != 1) ok = fail(err, errlen, "only one value is allowed for %s condition", nm);
-    else if (vs[0].t != V_STRING || !parse_rfc3339(vs[0].s, &f->date_sec, &f->date_nsec)) ok = fail(err, errlen, "value must be a time.Time string for %s condition", nm);
+    else if (vs[0].t != V_STRING || !buckets_time_parse_rfc3339(vs[0].s, &f->date_sec, &f->date_nsec)) ok = fail(err, errlen, "value must be a time.Time string for %s condition", nm);
   }
   free(vs);
   return ok;
@@ -1289,6 +1251,27 @@ void buckets_policy_free(buckets_policy *p) {
 }
 
 bool buckets_policy_is_empty(const buckets_policy *p) { return !p || p->n == 0; }
+
+const char *buckets_policy_version(const buckets_policy *p) { return p && p->version ? p->version : ""; }
+
+bool buckets_policy_is_blank(const buckets_policy *p) {
+  return !p || ((!p->version || !*p->version) && (!p->id || !*p->id) && p->n == 0);
+}
+
+bool buckets_policies_allowed(const buckets_policy *const *ps, size_t n, const buckets_policy_args *a) {
+  for (size_t k = 0; k < n; k++) {
+    for (size_t i = 0; ps[k] && i < ps[k]->n; i++) {
+      if (ps[k]->st[i].eff == EFFECT_DENY && !statement_allowed(&ps[k]->st[i], a)) return false;
+    }
+  }
+  if (a->deny_only || a->owner) return true;
+  for (size_t k = 0; k < n; k++) {
+    for (size_t i = 0; ps[k] && i < ps[k]->n; i++) {
+      if (ps[k]->st[i].eff == EFFECT_ALLOW && statement_allowed(&ps[k]->st[i], a)) return true;
+    }
+  }
+  return false;
+}
 
 static void statement_copy(statement *dst, const statement *src) {
   memset(dst, 0, sizeof(*dst));

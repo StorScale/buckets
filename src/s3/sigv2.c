@@ -169,8 +169,8 @@ buckets_s3_error buckets_sigv2_verify_header(const buckets_sigv4_config *cfg, co
   buckets_str kv = buckets_str_trim(rest), ak, sig;
   if (!buckets_str_cut(kv, ':', &ak, &sig) || memchr(sig.p, ':', sig.n)) return BUCKETS_ERR_MISSING_FIELDS;
   if (ak.n < 3) return BUCKETS_ERR_INVALID_ACCESS_KEY_ID;
-  const char *secret = cfg->lookup(cfg->lookup_ud, ak);
-  if (!secret) return BUCKETS_ERR_INVALID_ACCESS_KEY_ID;
+  char secret[BUCKETS_SECRET_MAX];
+  if (!cfg->lookup(cfg->lookup_ud, ak, secret)) return BUCKETS_ERR_INVALID_ACCESS_KEY_ID;
   if (!buckets_str_eq_c(scheme, "AWS")) return BUCKETS_ERR_SIGNATURE_DOES_NOT_MATCH;
 
   pieces q;
@@ -212,9 +212,9 @@ buckets_s3_error buckets_sigv2_verify_presigned(const buckets_sigv4_config *cfg,
     }
   }
   if (!err && (!ak || !*ak || !sig || !*sig || !expires || !*expires)) err = BUCKETS_ERR_INVALID_QUERY_PARAMS;
-  const char *secret = NULL;
+  char secret[BUCKETS_SECRET_MAX] = "";
   if (!err) {
-    if (strlen(ak) < 3 || !(secret = cfg->lookup(cfg->lookup_ud, buckets_str_c(ak)))) {
+    if (strlen(ak) < 3 || !cfg->lookup(cfg->lookup_ud, buckets_str_c(ak), secret)) {
       err = BUCKETS_ERR_INVALID_ACCESS_KEY_ID;
     }
   }

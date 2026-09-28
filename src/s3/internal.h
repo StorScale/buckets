@@ -49,5 +49,7 @@ void buckets_s3_list_uploads(s3_ctx *c);
 void buckets_s3_write_private_acl(s3_ctx *c);
 void buckets_s3_put_acl(s3_ctx *c);
 void buckets_s3_post_policy(s3_ctx *c);
+/* Secret for an access key (root, IAM users, service accounts, STS). */
+bool buckets_s3_lookup_secret(void *server, buckets_str access_key, char secret[BUCKETS_SECRET_MAX]);
 
 #endif

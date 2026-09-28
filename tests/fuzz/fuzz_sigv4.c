@@ -3,13 +3,17 @@
  *   remaining lines: "Name: value" headers
  * SPDX-License-Identifier: AGPL-3.0-or-later */
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "core/query.h"
 #include "s3/sigv4.h"
 
-static const char *lookup(void *ud, buckets_str ak) {
-  return buckets_str_eq_c(ak, "AKIAIOSFODNN7EXAMPLE") ? "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" : NULL;
+static bool lookup(void *ud, buckets_str ak, char secret[BUCKETS_SECRET_MAX]) {
+  (void)ud;
+  if (!buckets_str_eq_c(ak, "AKIAIOSFODNN7EXAMPLE")) return false;
+  snprintf(secret, BUCKETS_SECRET_MAX, "%s", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY");
+  return true;
 }
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);

@@ -78,3 +78,9 @@ void buckets_url_encode(buckets_buf *out, const char *s, bool keep_slash) {
     }
   }
 }
+
+char *buckets_buf_detach(buckets_buf *b) {
+  char *d = b->data ? b->data : buckets_xstrdup("");
+  *b = BUCKETS_BUF_INIT;
+  return d;
+}

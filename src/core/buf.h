@@ -23,6 +23,9 @@ void buckets_buf_append_c(buckets_buf *b, const char *s);
 void buckets_buf_append_str(buckets_buf *b, buckets_str s);
 void buckets_buf_append_char(buckets_buf *b, char c);
 void buckets_buf_appendf(buckets_buf *b, const char *fmt, ...) BUCKETS_PRINTF(2, 3);
+/* Returns the NUL-terminated contents (never NULL) and resets b; the
+ * caller frees them. */
+char *buckets_buf_detach(buckets_buf *b);
 /* Removes the first n bytes. */
 void buckets_buf_consume(buckets_buf *b, size_t n);
 static inline buckets_str buckets_buf_str(const buckets_buf *b) {

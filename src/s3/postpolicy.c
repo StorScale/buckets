@@ -453,8 +453,8 @@ static buckets_s3_error verify_signature(s3_ctx *c, const fields *fs) {
   const char *v2sig = fields_get(fs, "Signature");
   if (v2sig) {
     const char *ak = fields_get(fs, "AWSAccessKeyId");
-    if (!ak || strcmp(ak, c->s->root_user) != 0) return BUCKETS_ERR_INVALID_ACCESS_KEY_ID; /* IAM lookup later */
-    const char *secret = c->s->root_password;
+    char secret[BUCKETS_SECRET_MAX];
+    if (!ak || !buckets_s3_lookup_secret(c->s, buckets_str_c(ak), secret)) return BUCKETS_ERR_INVALID_ACCESS_KEY_ID;
     char want[32];
     buckets_sigv2_sign(secret, policy, strlen(policy), want);
     if (strcmp(want, v2sig) != 0) return BUCKETS_ERR_SIGNATURE_DOES_NOT_MATCH;
@@ -483,11 +483,8 @@ static buckets_s3_error verify_signature(s3_ctx *c, const fields *fs) {
   else if (strcmp(parts[4], "aws4_request") != 0) err = BUCKETS_ERR_INVALID_REQUEST_VERSION;
   else if (*region_conf && strcmp(parts[2], region_conf) != 0) err = BUCKETS_ERR_AUTHORIZATION_HEADER_MALFORMED;
   else if (strlen(parts[1]) != 8) err = BUCKETS_ERR_MALFORMED_CREDENTIAL_DATE;
-  const char *secret = NULL;
-  if (!err) {
-    if (strcmp(parts[0], c->s->root_user) == 0) secret = c->s->root_password;
-    else err = BUCKETS_ERR_INVALID_ACCESS_KEY_ID;
-  }
+  char secret[BUCKETS_SECRET_MAX] = "";
+  if (!err && !buckets_s3_lookup_secret(c->s, buckets_str_c(parts[0]), secret)) err = BUCKETS_ERR_INVALID_ACCESS_KEY_ID;
   if (!err) {
     uint8_t key[32], mac[32];
     char hex[65];

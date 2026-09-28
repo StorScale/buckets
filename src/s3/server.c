@@ -111,11 +111,12 @@ static buckets_s3_error parse_path(s3_ctx *c) {
   return BUCKETS_ERR_NONE;
 }
 
-static const char *lookup_secret(void *ud, buckets_str access_key) {
+bool buckets_s3_lookup_secret(void *ud, buckets_str access_key, char secret[BUCKETS_SECRET_MAX]) {
   buckets_s3_server *s = ud;
   /* IAM (users, service accounts, STS) replaces this root-only lookup. */
-  if (buckets_str_eq_c(access_key, s->root_user)) return s->root_password;
-  return NULL;
+  if (!buckets_str_eq_c(access_key, s->root_user)) return false;
+  snprintf(secret, BUCKETS_SECRET_MAX, "%s", s->root_password);
+  return true;
 }
 
 static bool is_hex64(const char *s) {
@@ -165,7 +166,7 @@ static buckets_s3_error authenticate(s3_ctx *c) {
       .region = c->s->region,
       .service = "s3",
       .now = time(NULL),
-      .lookup = lookup_secret,
+      .lookup = buckets_s3_lookup_secret,
       .lookup_ud = c->s,
   };
   buckets_sigv4_result *res = &c->sig;

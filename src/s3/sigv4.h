@@ -33,7 +33,10 @@ typedef enum {
 buckets_auth_type buckets_auth_classify(const buckets_http_request *req, const buckets_query *q);
 
 /* Returns the secret key for an access key, or NULL if unknown. */
-typedef const char *(*buckets_secret_lookup)(void *ud, buckets_str access_key);
+/* Copies the secret key for access_key into secret (NUL-terminated);
+ * false for unknown or disabled keys. Called from request threads. */
+#define BUCKETS_SECRET_MAX 256
+typedef bool (*buckets_secret_lookup)(void *ud, buckets_str access_key, char secret[BUCKETS_SECRET_MAX]);
 
 typedef struct {
   const char *region;  /* configured region; "" accepts any */

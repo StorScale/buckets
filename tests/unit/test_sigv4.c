@@ -20,10 +20,12 @@
 #define SUITE_AK "AKIDEXAMPLE"
 #define SUITE_SK "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"
 
-static const char *lookup(void *ud, buckets_str ak) {
-  if (buckets_str_eq_c(ak, S3_AK)) return S3_SK;
-  if (buckets_str_eq_c(ak, SUITE_AK)) return SUITE_SK;
-  return NULL;
+static bool lookup(void *ud, buckets_str ak, char secret[BUCKETS_SECRET_MAX]) {
+  (void)ud;
+  const char *sk = buckets_str_eq_c(ak, S3_AK) ? S3_SK : buckets_str_eq_c(ak, SUITE_AK) ? SUITE_SK : NULL;
+  if (!sk) return false;
+  snprintf(secret, BUCKETS_SECRET_MAX, "%s", sk);
+  return true;
 }
 
 static void make_request(buckets_http_request *req, const char *method, const char *target,

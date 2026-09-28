@@ -18,6 +18,11 @@ bool buckets_policy_parse(const char *json, size_t len, buckets_policy **out, ch
 void buckets_policy_free(buckets_policy *p);
 /* The policy has no statements (e.g. "{}"). */
 bool buckets_policy_is_empty(const buckets_policy *p);
+/* The Version field ("" when absent). */
+const char *buckets_policy_version(const buckets_policy *p);
+/* No Version, ID or statements: "null", "{}" (service-account policies
+ * treat these as "inherit the parent's policy"). */
+bool buckets_policy_is_blank(const buckets_policy *p);
 
 /* A request's condition values (MinIO's getConditionValues), keyed by the
  * short names MinIO uses: "SourceIp", "username", "prefix", ... */
@@ -38,6 +43,9 @@ typedef struct {
 } buckets_policy_args;
 
 bool buckets_policy_allowed(const buckets_policy *p, const buckets_policy_args *a);
+/* The same as evaluating buckets_policy_merge(ps, n), without building it.
+ * NULL entries are skipped. */
+bool buckets_policies_allowed(const buckets_policy *const *ps, size_t n, const buckets_policy_args *a);
 
 /* Merges several policies into one (MinIO's MergePolicies): the union of
  * their statements. The inputs stay owned by the caller. */
