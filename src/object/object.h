@@ -50,6 +50,7 @@ typedef enum {
   BUCKETS_OBJ_ERR_BUCKET_EXISTS,
   BUCKETS_OBJ_ERR_BUCKET_NOT_EMPTY,
   BUCKETS_OBJ_ERR_TIMEOUT, /* a namespace lock was not granted in time */
+  BUCKETS_OBJ_ERR_METHOD_NOT_ALLOWED, /* a delete marker asked for by its version ID */
 } buckets_obj_err;
 
 const char *buckets_obj_strerror(buckets_obj_err e);
@@ -215,6 +216,16 @@ typedef struct {
 buckets_obj_err buckets_obj_list(buckets_objlayer *L, const char *bucket, const char *prefix, const char *marker,
                                  const char *delimiter, int max_keys, buckets_obj_listing *out);
 void buckets_obj_list_free(buckets_obj_listing *l);
+
+/* PutObjectMetadata: rewrites one version's metadata in place (the data
+ * and modification time stay). fn gets the current version and edits its
+ * user and system metadata; returning an error aborts. A delete marker is
+ * METHOD_NOT_ALLOWED. */
+typedef buckets_obj_err (*buckets_meta_edit_fn)(void *ud, const buckets_object_info *cur, buckets_xl_kv **user,
+                                                size_t *nuser, buckets_xl_kv **sys, size_t *nsys);
+buckets_obj_err buckets_obj_update_meta(buckets_objlayer *L, const char *bucket, const char *object,
+                                        const char *version_id, buckets_meta_edit_fn fn, void *ud,
+                                        buckets_object_info *out);
 
 /* ListObjectVersions: every version (delete markers included, newest first
  * within a key), after key_marker (and, within it, version_marker). When

@@ -1,0 +1,361 @@
+[
+ {
+  "method": "PUT",
+  "path": "/lbkt",
+  "headers": {
+   "X-Amz-Bucket-Object-Lock-Enabled": "true"
+  }
+ },
+ {
+  "method": "PUT",
+  "path": "/plainbkt"
+ },
+ {
+  "method": "PUT",
+  "path": "/badlock",
+  "headers": {
+   "X-Amz-Bucket-Object-Lock-Enabled": "maybe"
+  },
+  "label": "bad lock header"
+ },
+ {
+  "method": "GET",
+  "path": "/lbkt",
+  "query": "versioning",
+  "label": "versioning of lock bucket"
+ },
+ {
+  "method": "GET",
+  "path": "/lbkt",
+  "query": "object-lock",
+  "label": "object-lock config"
+ },
+ {
+  "method": "GET",
+  "path": "/plainbkt",
+  "query": "object-lock",
+  "label": "no object-lock config"
+ },
+ {
+  "method": "PUT",
+  "path": "/plainbkt",
+  "query": "object-lock",
+  "label": "object-lock on plain bucket",
+  "md5": true,
+  "body": "<ObjectLockConfiguration><ObjectLockEnabled>Enabled</ObjectLockEnabled></ObjectLockConfiguration>"
+ },
+ {
+  "method": "PUT",
+  "path": "/lbkt",
+  "query": "object-lock",
+  "label": "bad lock config",
+  "md5": true,
+  "body": "<ObjectLockConfiguration><ObjectLockEnabled>Enabled</ObjectLockEnabled><Rule><DefaultRetention><Mode>GOVERNANCE</Mode></DefaultRetention></Rule></ObjectLockConfiguration>"
+ },
+ {
+  "method": "PUT",
+  "path": "/lbkt",
+  "query": "object-lock",
+  "label": "bad lock mode",
+  "md5": true,
+  "body": "<ObjectLockConfiguration><ObjectLockEnabled>Enabled</ObjectLockEnabled><Rule><DefaultRetention><Mode>FOO</Mode><Days>1</Days></DefaultRetention></Rule></ObjectLockConfiguration>"
+ },
+ {
+  "method": "PUT",
+  "path": "/lbkt",
+  "query": "object-lock",
+  "label": "default governance 1 day",
+  "md5": true,
+  "body": "<ObjectLockConfiguration><ObjectLockEnabled>Enabled</ObjectLockEnabled><Rule><DefaultRetention><Mode>GOVERNANCE</Mode><Days>1</Days></DefaultRetention></Rule></ObjectLockConfiguration>"
+ },
+ {
+  "method": "GET",
+  "path": "/lbkt",
+  "query": "object-lock",
+  "label": "config with rule"
+ },
+ {
+  "method": "PUT",
+  "path": "/lbkt",
+  "query": "versioning",
+  "label": "suspend lock bucket",
+  "body": "<VersioningConfiguration><Status>Suspended</Status></VersioningConfiguration>"
+ },
+ {
+  "method": "PUT",
+  "path": "/lbkt/gov.txt",
+  "body": "governed",
+  "save": {
+   "g1": "x-amz-version-id"
+  }
+ },
+ {
+  "method": "HEAD",
+  "path": "/lbkt/gov.txt",
+  "label": "head inherits retention",
+  "show": [
+   "x-amz-object-lock-mode"
+  ]
+ },
+ {
+  "method": "GET",
+  "path": "/lbkt/gov.txt",
+  "query": "retention",
+  "label": "get retention"
+ },
+ {
+  "method": "GET",
+  "path": "/lbkt/gov.txt",
+  "query": "legal-hold",
+  "label": "no legal hold"
+ },
+ {
+  "method": "DELETE",
+  "path": "/lbkt/gov.txt",
+  "query": "versionId=$g1",
+  "label": "delete governed version"
+ },
+ {
+  "method": "DELETE",
+  "path": "/lbkt/gov.txt",
+  "label": "delete marker is allowed"
+ },
+ {
+  "method": "DELETE",
+  "path": "/lbkt/gov.txt",
+  "query": "versionId=$g1",
+  "label": "delete with bypass",
+  "headers": {
+   "X-Amz-Bypass-Governance-Retention": "true"
+  }
+ },
+ {
+  "method": "PUT",
+  "path": "/lbkt/comp.txt",
+  "body": "complied",
+  "save": {
+   "c1": "x-amz-version-id"
+  },
+  "headers": {
+   "X-Amz-Object-Lock-Mode": "COMPLIANCE",
+   "X-Amz-Object-Lock-Retain-Until-Date": "2099-01-01T00:00:00.000Z"
+  },
+  "label": "put compliance"
+ },
+ {
+  "method": "GET",
+  "path": "/lbkt/comp.txt",
+  "query": "retention",
+  "label": "compliance retention"
+ },
+ {
+  "method": "PUT",
+  "path": "/lbkt/comp.txt",
+  "query": "retention",
+  "label": "shorten compliance",
+  "md5": true,
+  "body": "<Retention><Mode>COMPLIANCE</Mode><RetainUntilDate>2098-01-01T00:00:00.000Z</RetainUntilDate></Retention>"
+ },
+ {
+  "method": "PUT",
+  "path": "/lbkt/comp.txt",
+  "query": "retention",
+  "label": "compliance to governance",
+  "md5": true,
+  "body": "<Retention><Mode>GOVERNANCE</Mode><RetainUntilDate>2100-01-01T00:00:00.000Z</RetainUntilDate></Retention>"
+ },
+ {
+  "method": "PUT",
+  "path": "/lbkt/comp.txt",
+  "query": "retention",
+  "label": "extend compliance",
+  "md5": true,
+  "body": "<Retention><Mode>COMPLIANCE</Mode><RetainUntilDate>2100-01-01T00:00:00.000Z</RetainUntilDate></Retention>"
+ },
+ {
+  "method": "GET",
+  "path": "/lbkt/comp.txt",
+  "query": "retention",
+  "label": "extended retention"
+ },
+ {
+  "method": "DELETE",
+  "path": "/lbkt/comp.txt",
+  "query": "versionId=$c1",
+  "label": "delete compliance version",
+  "headers": {
+   "X-Amz-Bypass-Governance-Retention": "true"
+  }
+ },
+ {
+  "method": "PUT",
+  "path": "/lbkt/comp.txt",
+  "query": "retention",
+  "label": "retention without md5",
+  "body": "<Retention><Mode>COMPLIANCE</Mode><RetainUntilDate>2100-01-01T00:00:00.000Z</RetainUntilDate></Retention>"
+ },
+ {
+  "method": "PUT",
+  "path": "/lbkt/comp.txt",
+  "query": "retention",
+  "label": "retention bad mode",
+  "md5": true,
+  "body": "<Retention><Mode>WHAT</Mode><RetainUntilDate>2100-01-01T00:00:00.000Z</RetainUntilDate></Retention>"
+ },
+ {
+  "method": "PUT",
+  "path": "/lbkt/comp.txt",
+  "query": "retention",
+  "label": "retention past date",
+  "md5": true,
+  "body": "<Retention><Mode>COMPLIANCE</Mode><RetainUntilDate>2001-01-01T00:00:00.000Z</RetainUntilDate></Retention>"
+ },
+ {
+  "method": "PUT",
+  "path": "/lbkt/held.txt",
+  "body": "held",
+  "save": {
+   "h1": "x-amz-version-id"
+  },
+  "headers": {
+   "X-Amz-Object-Lock-Legal-Hold": "ON"
+  },
+  "label": "put with legal hold"
+ },
+ {
+  "method": "HEAD",
+  "path": "/lbkt/held.txt",
+  "label": "head legal hold",
+  "show": [
+   "x-amz-object-lock-legal-hold",
+   "x-amz-object-lock-mode"
+  ]
+ },
+ {
+  "method": "GET",
+  "path": "/lbkt/held.txt",
+  "query": "legal-hold",
+  "label": "get legal hold"
+ },
+ {
+  "method": "DELETE",
+  "path": "/lbkt/held.txt",
+  "query": "versionId=$h1",
+  "label": "delete held version",
+  "headers": {
+   "X-Amz-Bypass-Governance-Retention": "true"
+  }
+ },
+ {
+  "method": "PUT",
+  "path": "/lbkt/held.txt",
+  "query": "legal-hold",
+  "label": "legal hold off",
+  "md5": true,
+  "body": "<LegalHold><Status>OFF</Status></LegalHold>"
+ },
+ {
+  "method": "PUT",
+  "path": "/lbkt/held.txt",
+  "query": "legal-hold",
+  "label": "legal hold bad",
+  "md5": true,
+  "body": "<LegalHold><Status>MAYBE</Status></LegalHold>"
+ },
+ {
+  "method": "GET",
+  "path": "/lbkt/held.txt",
+  "query": "legal-hold",
+  "label": "legal hold now off"
+ },
+ {
+  "method": "DELETE",
+  "path": "/lbkt/held.txt",
+  "query": "versionId=$h1",
+  "label": "delete released version"
+ },
+ {
+  "method": "PUT",
+  "path": "/lbkt/bad1.txt",
+  "body": "x",
+  "headers": {
+   "X-Amz-Object-Lock-Mode": "GOVERNANCE"
+  },
+  "label": "mode without date"
+ },
+ {
+  "method": "PUT",
+  "path": "/lbkt/bad2.txt",
+  "body": "x",
+  "headers": {
+   "X-Amz-Object-Lock-Mode": "NOPE",
+   "X-Amz-Object-Lock-Retain-Until-Date": "2099-01-01T00:00:00Z"
+  },
+  "label": "unknown mode"
+ },
+ {
+  "method": "PUT",
+  "path": "/lbkt/bad3.txt",
+  "body": "x",
+  "headers": {
+   "X-Amz-Object-Lock-Mode": "GOVERNANCE",
+   "X-Amz-Object-Lock-Retain-Until-Date": "2001-01-01T00:00:00Z"
+  },
+  "label": "past date"
+ },
+ {
+  "method": "PUT",
+  "path": "/lbkt/bad4.txt",
+  "body": "x",
+  "headers": {
+   "X-Amz-Object-Lock-Mode": "GOVERNANCE",
+   "X-Amz-Object-Lock-Retain-Until-Date": "tomorrow"
+  },
+  "label": "bad date"
+ },
+ {
+  "method": "PUT",
+  "path": "/lbkt/bad5.txt",
+  "body": "x",
+  "headers": {
+   "X-Amz-Object-Lock-Legal-Hold": "sometimes"
+  },
+  "label": "bad legal hold header"
+ },
+ {
+  "method": "PUT",
+  "path": "/plainbkt/x.txt",
+  "body": "x",
+  "headers": {
+   "X-Amz-Object-Lock-Legal-Hold": "ON"
+  },
+  "label": "lock headers on plain bucket"
+ },
+ {
+  "method": "GET",
+  "path": "/plainbkt/x.txt",
+  "query": "retention",
+  "label": "retention on plain bucket"
+ },
+ {
+  "method": "PUT",
+  "path": "/plainbkt/y.txt",
+  "body": "y"
+ },
+ {
+  "method": "PUT",
+  "path": "/lbkt/copy.txt",
+  "label": "copy into lock bucket",
+  "headers": {
+   "X-Amz-Copy-Source": "/plainbkt/y.txt"
+  }
+ },
+ {
+  "method": "HEAD",
+  "path": "/lbkt/copy.txt",
+  "label": "copy got default retention",
+  "show": [
+   "x-amz-object-lock-mode"
+  ]
+ }
+]

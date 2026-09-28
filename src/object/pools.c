@@ -342,6 +342,15 @@ buckets_obj_err buckets_obj_delete_ex(buckets_objlayer *L, const char *bucket, c
   return result;
 }
 
+buckets_obj_err buckets_obj_update_meta(buckets_objlayer *L, const char *bucket, const char *object,
+                                        const char *version_id, buckets_meta_edit_fn fn, void *ud,
+                                        buckets_object_info *out) {
+  if (L->npools == 1) return buckets_ep_update_meta(L->pools[0], bucket, object, version_id, fn, ud, out);
+  lookup l = find_pool(L, bucket, object, version_id);
+  if (l.pool < 0 || l.err) return l.err;
+  return buckets_ep_update_meta(L->pools[l.pool], bucket, object, version_id, fn, ud, out);
+}
+
 buckets_obj_err buckets_obj_list_versions(buckets_objlayer *L, const char *bucket, const char *prefix,
                                           const char *key_marker, const char *version_marker, const char *delimiter,
                                           int max_keys, buckets_obj_listing *out) {

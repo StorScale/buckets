@@ -5,6 +5,7 @@
 #include <stdatomic.h>
 
 #include "bucket/metadata.h"
+#include "bucket/objectlock.h"
 #include "bucket/versioning.h"
 #include "iam/policy.h"
 
@@ -18,6 +19,8 @@ typedef struct {
   buckets_bucket_meta meta;
   buckets_policy *policy; /* parsed PolicyConfigJSON, or NULL */
   buckets_versioning versioning; /* parsed VersioningConfigXML (status UNSET when none) */
+  buckets_lock_config object_lock; /* parsed ObjectLockConfigXML */
+  bool lock_enabled;               /* object lock is on (the config, or the legacy flag) */
   long long loaded_ns;
 } buckets_bucket_state;
 

@@ -14,13 +14,23 @@ All notable changes to this project are documented here. The format follows
   - GET/HEAD/GetObjectAttributes of a delete marker: NoSuchKey (or MethodNotAllowed by version ID) with the marker's headers
   - `ListObjectVersions` (`?versions`), with key and version-id markers, delimiters and `metadata=true`
   - delete markers on disk are byte-compatible with MinIO's `xlMetaV2DeleteMarker`; `tests/integration/versioning-interop.sh` moves versioned buckets between MinIO and bucketsd both ways
-- `tests/integration/s3diff.sh`: runs request scenarios against real MinIO and bucketsd and diffs the normalized responses (`scenarios/versioning.json` matches line for line).
+- Object lock (Phase 5):
+  - `X-Amz-Bucket-Object-Lock-Enabled` on CreateBucket (turns on versioning), and `?object-lock` GET/PUT with default GOVERNANCE/COMPLIANCE retention in days or years
+  - `?retention` and `?legal-hold` GET/PUT on objects, updating the version's metadata in place, and the `x-amz-object-lock-*` headers on PUT, CopyObject and CreateMultipartUpload
+  - locked versions refuse deletion unless governance is bypassed with `x-amz-bypass-governance-retention` and the matching permission; COMPLIANCE can only be extended
+  - retention and legal hold are stored under MinIO's metadata keys, so locks carry over between the two servers
+- `tests/integration/s3diff.sh`: runs request scenarios against real MinIO and bucketsd and diffs the normalized responses (`scenarios/{versioning,objectlock,uploads}.json` match line for line).
 
 ### Changed
 - XML escaping follows Go's `xml.EscapeText` (`&#34;`, `&#39;`), and S3 timestamps in XML carry milliseconds, as MinIO's do.
 - DeleteObjects requires Content-MD5 or an `x-amz-checksum-*` header and verifies it (`MissingContentMD5`, `BadDigest`), as MinIO does.
 - HEAD error responses have no body.
 - Emptiness checks for bucket deletion count every version and delete marker.
+- Bucket configuration documents keep the `xmlns` of the document that was PUT, as MinIO does.
+- ListMultipartUploads matches MinIO: uploads oldest first, paging by `upload-id-marker` with `NextUploadIdMarker` and `IsTruncated`, the 10000 default, `EncodingType` echoed, and empty Initiator/Owner/StorageClass.
+
+### Fixed
+- `encoding-type=url` listings encode keys as MinIO does (space as `+`, `*` kept, `~` escaped).
 
 ## [0.4.0] - 2026-09-28
 

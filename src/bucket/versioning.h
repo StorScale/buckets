@@ -20,6 +20,7 @@ typedef struct {
   char **excluded; /* prefixes, each ending in '/' */
   size_t nexcluded;
   bool exclude_folders;
+  char xmlns[128]; /* the document's namespace, kept as Go's XMLNS field does ("" for none) */
 } buckets_versioning;
 
 void buckets_versioning_free(buckets_versioning *v);

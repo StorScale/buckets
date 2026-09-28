@@ -72,6 +72,23 @@ buckets_s3_error buckets_s3_obj_error(buckets_obj_err e);
 /* Reads a (small) request body into c->doc and checks its payload hash and
  * Content-MD5. Object uploads verify inside the object layer instead. */
 buckets_s3_error buckets_s3_read_doc(s3_ctx *c);
+/* validateLengthAndChecksum + read: Content-MD5 or x-amz-checksum-* required and verified. */
+buckets_s3_error buckets_s3_read_checked_doc(s3_ctx *c);
+
+/* ---- object lock (objectlock.c) ---- */
+/* checkPutObjectLockAllowed: the retention and legal hold a write gets (from
+ * its headers or the bucket's default retention), added to meta. */
+buckets_s3_error buckets_s3_lock_put_meta(s3_ctx *c, const char *object, buckets_xl_kv **meta, size_t *nmeta);
+/* enforceRetentionBypassForDelete for removing a version by ID. */
+buckets_s3_error buckets_s3_lock_check_delete(s3_ctx *c, const char *object, const char *version_id);
+/* FilterObjectLockMetadata: drops lock metadata the caller may not read. */
+void buckets_s3_lock_filter_meta(s3_ctx *c, buckets_object_info *oi);
+void buckets_s3_put_object_retention(s3_ctx *c);
+void buckets_s3_get_object_retention(s3_ctx *c);
+void buckets_s3_put_object_legal_hold(s3_ctx *c);
+void buckets_s3_get_object_legal_hold(s3_ctx *c);
+void buckets_s3_put_bucket_object_lock(s3_ctx *c);
+void buckets_s3_get_bucket_object_lock(s3_ctx *c);
 
 /* Object-level handlers (s3/objects.c). */
 void buckets_s3_route_object(s3_ctx *c);

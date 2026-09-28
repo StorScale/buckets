@@ -27,6 +27,7 @@ bool buckets_versioning_parse(const char *xml, size_t len, buckets_versioning *o
     snprintf(err, errlen, "malformed XML");
     return false;
   }
+  buckets_xml_root_xmlns((buckets_str){xml, len}, out->xmlns, sizeof(out->xmlns));
   buckets_buf t = BUCKETS_BUF_INIT;
   bool ok = true;
   for (size_t c = d.nodes[0].first_child; c && ok; c = d.nodes[c].next_sibling) {
@@ -79,7 +80,10 @@ bool buckets_versioning_parse(const char *xml, size_t len, buckets_versioning *o
 }
 
 void buckets_versioning_xml(const buckets_versioning *v, buckets_buf *out) {
-  buckets_xml_open_ns(out, "VersioningConfiguration", BUCKETS_S3_XMLNS);
+  /* An unconfigured bucket reports the S3 namespace (BucketVersioningSys.Get). */
+  const char *ns = v->status == BUCKETS_VERSIONING_UNSET ? BUCKETS_S3_XMLNS : v->xmlns;
+  if (*ns) buckets_xml_open_ns(out, "VersioningConfiguration", ns);
+  else buckets_xml_open(out, "VersioningConfiguration");
   if (v->status == BUCKETS_VERSIONING_ENABLED) buckets_xml_elem(out, "Status", "Enabled");
   else if (v->status == BUCKETS_VERSIONING_SUSPENDED) buckets_xml_elem(out, "Status", "Suspended");
   for (size_t i = 0; i < v->nexcluded; i++) {

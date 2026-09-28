@@ -38,6 +38,9 @@ buckets_obj_err buckets_ep_open(buckets_epool *P, const char *bucket, const char
 buckets_obj_err buckets_ep_delete(buckets_epool *P, const char *bucket, const char *object, const char *version_id);
 buckets_obj_err buckets_ep_delete_ex(buckets_epool *P, const char *bucket, const char *object,
                                      const buckets_delete_opts *opts, buckets_delete_result *res);
+buckets_obj_err buckets_ep_update_meta(buckets_epool *P, const char *bucket, const char *object,
+                                       const char *version_id, buckets_meta_edit_fn fn, void *ud,
+                                       buckets_object_info *out);
 buckets_obj_err buckets_ep_list_versions(buckets_epool *P, const char *bucket, const char *prefix,
                                          const char *key_marker, const char *version_marker, const char *delimiter,
                                          int max_keys, buckets_obj_listing *out);

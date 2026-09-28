@@ -15,6 +15,7 @@
 #include "s3/checksum.h"
 #include "s3/chunked.h"
 #include "s3/internal.h"
+#include "bucket/objectlock.h"
 #include "crypto/md5.h"
 #include "s3/xml.h"
 
@@ -46,6 +47,7 @@ buckets_s3_error buckets_s3_obj_error(buckets_obj_err e) {
     case BUCKETS_OBJ_ERR_BUCKET_EXISTS: return BUCKETS_ERR_BUCKET_ALREADY_OWNED_BY_YOU;
     case BUCKETS_OBJ_ERR_BUCKET_NOT_EMPTY: return BUCKETS_ERR_BUCKET_NOT_EMPTY;
     case BUCKETS_OBJ_ERR_TIMEOUT: return BUCKETS_ERR_REQUEST_TIMEDOUT; /* MinIO: OperationTimedOut */
+    case BUCKETS_OBJ_ERR_METHOD_NOT_ALLOWED: return BUCKETS_ERR_METHOD_NOT_ALLOWED;
   }
   return BUCKETS_ERR_INTERNAL_ERROR;
 }
@@ -331,6 +333,7 @@ static void put_object(s3_ctx *c) {
   buckets_xl_kv *meta = NULL;
   size_t nmeta = 0;
   if (!serr) serr = extract_metadata(c, &meta, &nmeta);
+  if (!serr) serr = buckets_s3_lock_put_meta(c, c->object, &meta, &nmeta);
   if (serr) {
     free_kvs(meta, nmeta);
     body_close(&b);
@@ -613,6 +616,7 @@ static void get_object(s3_ctx *c, bool head) {
     }
     buckets_object_info_free(&oi2);
   }
+  buckets_s3_lock_filter_meta(c, &oi);
   write_object_headers(c, &oi);
   buckets_s3_version_header(c, oi.version_id);
   if (rs.present) {
@@ -645,6 +649,11 @@ static void delete_object(s3_ctx *c) {
       buckets_s3_write_error(c, BUCKETS_ERR_INVALID_VERSION_ID);
       return;
     }
+  }
+  buckets_s3_error lerr = buckets_s3_lock_check_delete(c, c->object, version);
+  if (lerr) {
+    buckets_s3_write_error(c, lerr);
+    return;
   }
   buckets_delete_opts o = {.version_id = version};
   buckets_s3_versioning(c, c->object, &o.versioned, &o.suspended);
@@ -749,15 +758,25 @@ static void copy_object(s3_ctx *c) {
     serr = extract_metadata(c, &meta, &nmeta);
   } else {
     for (size_t i = 0; i < src.nmeta; i++) {
-      buckets_xl_kv_set(&meta, &nmeta, src.meta[i].key, src.meta[i].value, src.meta[i].value_len);
+      const char *k = src.meta[i].key;
+      /* FilterObjectLockMetadata(src, true, true): the copy gets its own lock */
+      if (strcasecmp(k, BUCKETS_LOCK_MODE_META) == 0 || strcasecmp(k, BUCKETS_LOCK_UNTIL_META) == 0 ||
+          strcasecmp(k, BUCKETS_LOCK_HOLD_META) == 0)
+        continue;
+      buckets_xl_kv_set(&meta, &nmeta, k, src.meta[i].value, src.meta[i].value_len);
     }
   }
+  if (!serr) serr = buckets_s3_lock_put_meta(c, c->object, &meta, &nmeta);
   buckets_object_info oi;
   if (!serr) {
     buckets_put_opts opts = {.meta = meta, .nmeta = nmeta};
+    bool suspended;
+    buckets_s3_versioning(c, c->object, &opts.versioned, &suspended);
     err = buckets_obj_put(c->s->layer, c->bucket, c->object, reader_source, r, src.size, &opts, &oi);
     serr = buckets_s3_obj_error(err);
   }
+  char src_vid[37];
+  snprintf(src_vid, sizeof(src_vid), "%s", src.version_id);
   free_kvs(meta, nmeta);
   buckets_obj_reader_free(r);
   buckets_object_info_free(&src);
@@ -766,6 +785,8 @@ static void copy_object(s3_ctx *c) {
     buckets_s3_write_error(c, serr);
     return;
   }
+  if (strcmp(src_vid, "null") != 0) buckets_http_resp_header(c->resp, "X-Amz-Copy-Source-Version-Id", src_vid);
+  buckets_s3_version_header(c, oi.version_id);
   char lm[BUCKETS_TIME_ISO8601_LEN + 1];
   buckets_time_iso8601_ns(oi.mod_time_ns, lm);
   buckets_buf *b = &c->resp->body;
@@ -784,6 +805,7 @@ static void mpu_create(s3_ctx *c) {
   buckets_xl_kv *meta = NULL;
   size_t nmeta = 0;
   buckets_s3_error serr = extract_metadata(c, &meta, &nmeta);
+  if (!serr) serr = buckets_s3_lock_put_meta(c, c->object, &meta, &nmeta);
   uint32_t ctype = 0;
   buckets_str alg = buckets_http_header_get(c->req, "X-Amz-Checksum-Algorithm");
   buckets_str ot = buckets_http_header_get(c->req, "X-Amz-Checksum-Type");
@@ -1172,15 +1194,48 @@ static void mpu_complete(s3_ctx *c, const char *upload_id) {
   buckets_object_info_free(&oi);
 }
 
+static void xml_key(buckets_buf *b, const char *tag, const char *value, bool url);
+
+static int upload_cmp(const void *x, const void *y) {
+  const buckets_upload_info *a = x, *b = y;
+  return a->initiated_ns < b->initiated_ns ? -1 : a->initiated_ns > b->initiated_ns;
+}
+
+/* ListMultipartUploads, as MinIO's handler + erasureObjects.ListMultipartUploads:
+ * uploads of the one object named by prefix, oldest first, paged by upload-id-marker. */
 void buckets_s3_list_uploads(s3_ctx *c) {
   const char *prefix = buckets_query_get(&c->q, "prefix");
+  const char *key_marker = buckets_query_get(&c->q, "key-marker");
+  const char *id_marker = buckets_query_get(&c->q, "upload-id-marker");
+  const char *delimiter = buckets_query_get(&c->q, "delimiter");
+  const char *encoding = buckets_query_get(&c->q, "encoding-type");
   const char *mu = buckets_query_get(&c->q, "max-uploads");
-  long max = 1000;
-  if (mu) {
+  long max = 10000; /* maxUploadsList */
+  if (mu && *mu) {
     char *end;
     max = strtol(mu, &end, 10);
-    if (!*mu || *end || max < 0 || max > 2147483647L) {
+    if (*end || max < 0 || max > 2147483647L) {
       buckets_s3_write_error(c, BUCKETS_ERR_INVALID_MAX_UPLOADS);
+      return;
+    }
+  }
+  if (!prefix) prefix = "";
+  if (key_marker && *key_marker && strncmp(key_marker, prefix, strlen(prefix)) != 0) {
+    buckets_s3_write_error(c, BUCKETS_ERR_NOT_IMPLEMENTED); /* marker not common with prefix */
+    return;
+  }
+  if (id_marker && *id_marker) {
+    size_t kl = key_marker ? strlen(key_marker) : 0;
+    if (kl && key_marker[kl - 1] == '/') {
+      buckets_s3_write_error(c, BUCKETS_ERR_NOT_IMPLEMENTED);
+      return;
+    }
+    size_t il = strlen(id_marker);
+    uint8_t *dec = buckets_xmalloc(il + 3);
+    long dn = buckets_base64url_raw_decode(id_marker, il, dec);
+    free(dec);
+    if (dn < 0) {
+      buckets_s3_write_error(c, BUCKETS_ERR_NO_SUCH_UPLOAD);
       return;
     }
   }
@@ -1191,31 +1246,42 @@ void buckets_s3_list_uploads(s3_ctx *c) {
     buckets_s3_write_error(c, buckets_s3_obj_error(err));
     return;
   }
+  if (n) qsort(ups, n, sizeof(*ups), upload_cmp);
+  size_t start = 0;
+  if (id_marker && *id_marker) {
+    while (start < n && strcmp(ups[start].upload_id, id_marker) != 0) start++;
+    if (start < n) start++;
+  }
+  size_t end = start;
+  while (end < n) {
+    end++;
+    if ((long)(end - start) == max) break;
+  }
+  bool truncated = end < n;
+  bool url = encoding && strcasecmp(encoding, "url") == 0;
+
   buckets_buf *b = &c->resp->body;
   buckets_xml_header(b);
   buckets_xml_open_ns(b, "ListMultipartUploadsResult", BUCKETS_S3_XMLNS);
   buckets_xml_elem(b, "Bucket", c->bucket);
-  buckets_xml_elem(b, "KeyMarker", buckets_query_get(&c->q, "key-marker"));
-  buckets_xml_elem(b, "UploadIdMarker", buckets_query_get(&c->q, "upload-id-marker"));
+  xml_key(b, "KeyMarker", key_marker ? key_marker : "", url);
+  buckets_xml_elem(b, "UploadIdMarker", ""); /* MinIO never echoes it */
   buckets_xml_elem(b, "NextKeyMarker", "");
-  buckets_xml_elem(b, "NextUploadIdMarker", "");
-  buckets_xml_elem(b, "Delimiter", buckets_query_get(&c->q, "delimiter"));
-  buckets_xml_elem(b, "Prefix", prefix);
+  buckets_xml_elem(b, "NextUploadIdMarker", truncated && end > start ? ups[end - 1].upload_id : "");
+  if (delimiter && *delimiter) xml_key(b, "Delimiter", delimiter, url);
+  xml_key(b, "Prefix", prefix, url);
+  if (encoding && *encoding) buckets_xml_elem(b, "EncodingType", encoding);
   buckets_buf_appendf(b, "<MaxUploads>%ld</MaxUploads>", max);
-  buckets_xml_elem(b, "IsTruncated", "false");
-  for (size_t i = 0; i < n && (long)i < max; i++) {
+  buckets_xml_elem(b, "IsTruncated", truncated ? "true" : "false");
+  for (size_t i = start; i < end; i++) {
     char ts[BUCKETS_TIME_ISO8601_LEN + 1];
     buckets_time_iso8601_ns(ups[i].initiated_ns, ts);
     buckets_xml_open(b, "Upload");
-    buckets_xml_elem(b, "Key", ups[i].object);
+    xml_key(b, "Key", ups[i].object, url);
     buckets_xml_elem(b, "UploadId", ups[i].upload_id);
-    for (int who = 0; who < 2; who++) {
-      buckets_xml_open(b, who ? "Owner" : "Initiator");
-      buckets_xml_elem(b, "ID", BUCKETS_S3_OWNER_ID);
-      buckets_xml_elem(b, "DisplayName", BUCKETS_S3_OWNER_NAME);
-      buckets_xml_close(b, who ? "Owner" : "Initiator");
-    }
-    buckets_xml_elem(b, "StorageClass", "STANDARD");
+    /* MinIO leaves these empty. */
+    buckets_buf_append_c(b, "<Initiator><ID></ID><DisplayName></DisplayName></Initiator>"
+                              "<Owner><ID></ID><DisplayName></DisplayName></Owner><StorageClass></StorageClass>");
     buckets_xml_elem(b, "Initiated", ts);
     buckets_xml_close(b, "Upload");
   }
@@ -1477,6 +1543,13 @@ static bool authorize_object_request(s3_ctx *c) {
   } else if (buckets_query_has(&c->q, "acl")) {
     if (buckets_str_eq_c(m, "GET")) action = "s3:GetBucketPolicy";
     else if (buckets_str_eq_c(m, "PUT")) action = "s3:PutBucketPolicy";
+  } else if (buckets_query_has(&c->q, "retention")) {
+    /* PUT is authorized by the handler, with the retention's condition values */
+    if (buckets_str_eq_c(m, "GET")) action = "s3:GetObjectRetention";
+    else if (!buckets_str_eq_c(m, "PUT")) action = NULL;
+  } else if (buckets_query_has(&c->q, "legal-hold")) {
+    if (buckets_str_eq_c(m, "GET")) action = "s3:GetObjectLegalHold";
+    else if (buckets_str_eq_c(m, "PUT")) action = "s3:PutObjectLegalHold";
   } else if (buckets_str_eq_c(m, "PUT")) {
     action = "s3:PutObject"; /* plus s3:GetObject on a copy source, checked by the handler */
   } else if (buckets_str_eq_c(m, "GET") || buckets_str_eq_c(m, "HEAD")) {
@@ -1513,6 +1586,18 @@ void buckets_s3_route_object(s3_ctx *c) {
   }
   if (buckets_query_has(&c->q, "attributes") && buckets_str_eq_c(m, "GET")) {
     get_object_attributes(c);
+    return;
+  }
+  if (buckets_query_has(&c->q, "retention")) {
+    if (buckets_str_eq_c(m, "PUT")) buckets_s3_put_object_retention(c);
+    else if (buckets_str_eq_c(m, "GET")) buckets_s3_get_object_retention(c);
+    else buckets_s3_write_error(c, BUCKETS_ERR_METHOD_NOT_ALLOWED);
+    return;
+  }
+  if (buckets_query_has(&c->q, "legal-hold")) {
+    if (buckets_str_eq_c(m, "PUT")) buckets_s3_put_object_legal_hold(c);
+    else if (buckets_str_eq_c(m, "GET")) buckets_s3_get_object_legal_hold(c);
+    else buckets_s3_write_error(c, BUCKETS_ERR_METHOD_NOT_ALLOWED);
     return;
   }
   if (buckets_query_has(&c->q, "acl")) {
@@ -1554,40 +1639,37 @@ void buckets_s3_route_object(s3_ctx *c) {
 
 #define MAX_DELETE_LIST 1000
 
-void buckets_s3_delete_objects(s3_ctx *c) {
-  /* validateLengthAndChecksum: Content-MD5, or a checksum header, is required. */
+/* validateLengthAndChecksum: reads the body, which must come with Content-MD5
+ * or an x-amz-checksum-* header, and verifies it. */
+buckets_s3_error buckets_s3_read_checked_doc(s3_ctx *c) {
   buckets_str md5h = buckets_http_header_get(c->req, "Content-MD5");
   buckets_checksum want;
   bool has_cks = buckets_checksum_from_request(c->req, &want) == BUCKETS_ERR_NONE && want.type &&
                  !(want.type & BUCKETS_CKSUM_TRAILING);
   uint8_t md5_want[18];
   long md5_len = md5h.p && md5h.n ? buckets_base64_decode(md5h.p, md5h.n, md5_want) : -1;
-  if (md5h.p && md5h.n ? md5_len != 16 : !has_cks) {
-    buckets_s3_write_error(c, BUCKETS_ERR_MISSING_CONTENT_MD5);
-    return;
-  }
+  if (md5h.p && md5h.n ? md5_len != 16 : !has_cks) return BUCKETS_ERR_MISSING_CONTENT_MD5;
   buckets_s3_error err = buckets_s3_read_doc(c);
-  if (err) {
-    buckets_s3_write_error(c, err);
-    return;
-  }
+  if (err) return err;
   if (md5_len == 16) {
     uint8_t got[16];
     buckets_md5(c->doc.data ? c->doc.data : "", c->doc.len, got);
-    if (memcmp(got, md5_want, 16) != 0) {
-      buckets_s3_write_error(c, BUCKETS_ERR_BAD_DIGEST);
-      return;
-    }
-  } else {
-    buckets_cksum_hasher h;
-    buckets_cksum_hasher_init(&h, want.type & BUCKETS_CKSUM_BASE_MASK);
-    buckets_cksum_hasher_update(&h, c->doc.data ? c->doc.data : "", c->doc.len);
-    uint8_t raw[64];
-    size_t rl = buckets_cksum_hasher_final(&h, raw);
-    if (rl != want.raw_len || memcmp(raw, want.raw, rl) != 0) {
-      buckets_s3_write_error(c, BUCKETS_ERR_BAD_DIGEST);
-      return;
-    }
+    if (memcmp(got, md5_want, 16) != 0) return BUCKETS_ERR_BAD_DIGEST;
+    return BUCKETS_ERR_NONE;
+  }
+  buckets_cksum_hasher h;
+  buckets_cksum_hasher_init(&h, want.type & BUCKETS_CKSUM_BASE_MASK);
+  buckets_cksum_hasher_update(&h, c->doc.data ? c->doc.data : "", c->doc.len);
+  uint8_t raw[64];
+  size_t rl = buckets_cksum_hasher_final(&h, raw);
+  return rl != want.raw_len || memcmp(raw, want.raw, rl) != 0 ? BUCKETS_ERR_BAD_DIGEST : BUCKETS_ERR_NONE;
+}
+
+void buckets_s3_delete_objects(s3_ctx *c) {
+  buckets_s3_error err = buckets_s3_read_checked_doc(c);
+  if (err) {
+    buckets_s3_write_error(c, err);
+    return;
   }
   buckets_xml_doc doc;
   if (!buckets_xml_parse(buckets_buf_str(&c->doc), &doc) || !buckets_str_eq_c(doc.nodes[0].name, "Delete")) {
@@ -1629,6 +1711,8 @@ void buckets_s3_delete_objects(s3_ctx *c) {
       else snprintf(detail, sizeof(detail), " (invalid UUID format)");
     } else if ((e = buckets_s3_authorize(c, "s3:DeleteObject", c->bucket, key.data, ver.len ? ver.data : NULL))) {
       /* reported for this key */
+    } else if ((e = buckets_s3_lock_check_delete(c, key.data, ver.len ? ver.data : NULL))) {
+      /* locked */
     } else {
       buckets_delete_opts o = {.version_id = ver.len ? ver.data : NULL};
       buckets_s3_versioning(c, key.data, &o.versioned, &o.suspended);
@@ -1670,11 +1754,14 @@ void buckets_s3_delete_objects(s3_ctx *c) {
 /* ---- ListObjects v1 / v2 -------------------------------------------------- */
 
 /* s3URLEncode: like url.QueryEscape but '/' kept and space as %20. */
+/* MinIO's s3URLEncode: query escaping, but '/' and '*' kept and '~' escaped. */
 static void url_encode_key(buckets_buf *out, const char *s) {
   static const char hex[] = "0123456789ABCDEF";
   for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
-    if (isalnum(*p) || *p == '-' || *p == '_' || *p == '.' || *p == '~' || *p == '/') {
+    if (isalnum(*p) || *p == '-' || *p == '_' || *p == '.' || *p == '*' || *p == '/') {
       buckets_buf_append_char(out, (char)*p);
+    } else if (*p == ' ') {
+      buckets_buf_append_char(out, '+');
     } else {
       char e[3] = {'%', hex[*p >> 4], hex[*p & 15]};
       buckets_buf_append(out, e, 3);

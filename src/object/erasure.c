@@ -1084,7 +1084,7 @@ static buckets_obj_err obj_open(buckets_epool *L, const char *bucket, const char
   if (o.type == BUCKETS_XL_TYPE_DELETE) {
     buckets_xl_object_free(&o);
     free_metas(m, s->n);
-    return BUCKETS_OBJ_ERR_NO_SUCH_KEY;
+    return version_id && *version_id ? BUCKETS_OBJ_ERR_METHOD_NOT_ALLOWED : BUCKETS_OBJ_ERR_NO_SUCH_KEY;
   }
   buckets_obj_reader *r = reader_new(L, s, bucket, object, m, vidx, &o);
   if (info) fill_info(info, object, &o);
@@ -1546,6 +1546,93 @@ buckets_obj_err buckets_ep_delete_ex(buckets_epool *L, const char *bucket, const
   } else {
     err = add_delete_marker(L, bucket, object, opts->versioned, res);
   }
+  buckets_nslock_unlock(lk);
+  return err;
+}
+
+/* ---- metadata updates ------------------------------------------------------------- */
+
+static void kvs_clear(buckets_xl_kv **kv, size_t *n) {
+  for (size_t i = 0; i < *n; i++) {
+    free((*kv)[i].key);
+    free((*kv)[i].value);
+  }
+  free(*kv);
+  *kv = NULL;
+  *n = 0;
+}
+
+static void kvs_copy(const buckets_xl_kv *src, size_t n, buckets_xl_kv **dst, size_t *dn) {
+  kvs_clear(dst, dn);
+  for (size_t i = 0; i < n; i++) buckets_xl_kv_set(dst, dn, src[i].key, src[i].value, src[i].value_len);
+}
+
+typedef struct {
+  buckets_eset *s;
+  const char *bucket, *op;
+  dmeta *m;
+  const long *vidx;
+  const buckets_xl_object *o; /* the edited version */
+  bool ok[MAX_SET];
+} meta_ctx;
+
+/* Replaces drive i's copy of the version (keeping its own EcIndex) with the edited metadata. */
+static void meta_one(void *ctx, size_t i) {
+  meta_ctx *c = ctx;
+  c->ok[i] = false;
+  if (c->vidx[i] < 0 || !c->s->drives[i] || !c->m[i].loaded) return;
+  buckets_xlmeta *x = &c->m[i].x;
+  buckets_xl_object mine;
+  if (buckets_xl_object_decode(&x->versions[c->vidx[i]], &mine) != BUCKETS_XL_OK) return;
+  kvs_copy(c->o->meta_user, c->o->nmeta_user, &mine.meta_user, &mine.nmeta_user);
+  kvs_copy(c->o->meta_sys, c->o->nmeta_sys, &mine.meta_sys, &mine.nmeta_sys);
+  buckets_buf meta = BUCKETS_BUF_INIT;
+  buckets_xl_header hdr;
+  buckets_xl_object_encode(&mine, &meta, &hdr);
+  buckets_xl_object_free(&mine);
+  buckets_xlmeta_put_version(x, &hdr, (uint8_t *)meta.data, meta.len);
+  buckets_buf bytes = BUCKETS_BUF_INIT;
+  buckets_xlmeta_serialize(x, &bytes);
+  char *mp = join(c->op, XL_META);
+  c->ok[i] = buckets_drive_write_all(c->s->drives[i], c->bucket, mp, bytes.data, bytes.len) == BUCKETS_DRIVE_OK;
+  free(mp);
+  buckets_buf_free(&bytes);
+}
+
+buckets_obj_err buckets_ep_update_meta(buckets_epool *L, const char *bucket, const char *object,
+                                       const char *version_id, buckets_meta_edit_fn fn, void *ud,
+                                       buckets_object_info *out) {
+  buckets_nslock_entry *lk = lock_ns(L, bucket, object, true);
+  if (!lk) return BUCKETS_OBJ_ERR_TIMEOUT;
+  buckets_eset *s;
+  dmeta m[MAX_SET];
+  long vidx[MAX_SET];
+  buckets_xl_object o;
+  buckets_obj_err err = resolve(L, bucket, object, version_id, &s, m, vidx, &o);
+  if (err) {
+    buckets_nslock_unlock(lk);
+    return err;
+  }
+  if (o.type == BUCKETS_XL_TYPE_DELETE) {
+    err = BUCKETS_OBJ_ERR_METHOD_NOT_ALLOWED;
+  } else {
+    buckets_object_info cur;
+    fill_info(&cur, object, &o);
+    err = fn(ud, &cur, &o.meta_user, &o.nmeta_user, &o.meta_sys, &o.nmeta_sys);
+    buckets_object_info_free(&cur);
+  }
+  if (!err) {
+    char *op = obj_path(object);
+    meta_ctx c = {.s = s, .bucket = bucket, .op = op, .m = m, .vidx = vidx, .o = &o};
+    buckets_io_parallel(s->n, meta_one, &c);
+    free(op);
+    int ok = 0;
+    for (size_t i = 0; i < s->n; i++) ok += c.ok[i];
+    if (ok < write_quorum(o.ec_m, o.ec_n)) err = BUCKETS_OBJ_ERR_WRITE_QUORUM;
+    if (!err && out) fill_info(out, object, &o);
+  }
+  buckets_xl_object_free(&o);
+  free_metas(m, s->n);
   buckets_nslock_unlock(lk);
   return err;
 }

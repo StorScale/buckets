@@ -40,7 +40,12 @@ UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
 
 def norm_body(b):
     b = UUID.sub(lambda m: norm_id(m.group(0)), b)
-    b = re.sub(r"<(LastModified|RequestId|HostId|Resource)>[^<]*</\1>", r"<\1/>", b)
+    # upload IDs embed the deployment ID
+    b = re.sub(r"<(UploadId|UploadIdMarker|NextUploadIdMarker)>([^<]+)</\1>",
+               lambda m: "<%s>%s</%s>" % (m.group(1), norm_id(m.group(2)), m.group(1)), b)
+    b = re.sub(r"<(Initiated|LastModified|RequestId|HostId|Resource)>[^<]*</\1>", r"<\1/>", b)
+    # dates computed from "now" (default retention)
+    b = re.sub(r"<RetainUntilDate>20[0-8][0-9]-[^<]*</RetainUntilDate>", "<RetainUntilDate>(now+)</RetainUntilDate>", b)
     b = re.sub(r"<Owner>.*?</Owner>", "<Owner/>", b)
     b = re.sub(r"<\?xml[^>]*\?>", "", b)
     b = re.sub(r"\[minio_cache:[^\]]*\]", "", b)  # MinIO's metacache hint in markers
@@ -52,7 +57,8 @@ for i, st in enumerate(steps):
     q = sub(st.get("query", ""))
     url = ep + sub(st["path"]) + ("?" + q if q else "")
     open("/tmp/.s3diff.body", "w").close()
-    cmd = ["curl", "-s", "-g", "-D", "-", "-o", "/tmp/.s3diff.body", "-X", st["method"],
+    verb = ["-I"] if st["method"] == "HEAD" else ["-X", st["method"]]  # -X HEAD waits for a body
+    cmd = ["curl", "-s", "-g", "-D", "-", "-o", "/tmp/.s3diff.body"] + verb + [
            "--aws-sigv4", "aws:amz:us-east-1:s3", "--user", ak + ":" + sk]
     for k, v in st.get("headers", {}).items():
         cmd += ["-H", "%s: %s" % (k, sub(v))]
@@ -75,7 +81,7 @@ for i, st in enumerate(steps):
         if ":" in ln:
             k, v = ln.split(":", 1)
             hdrs[k.strip().lower()] = v.strip()
-    body = open("/tmp/.s3diff.body", errors="replace").read()
+    body = "" if st["method"] == "HEAD" else open("/tmp/.s3diff.body", errors="replace").read()
     for name, h in st.get("save", {}).items():
         if h.startswith("xml:"):
             m = re.search("<%s>([^<]*)</%s>" % (h[4:], h[4:]), body)

@@ -53,6 +53,7 @@ add_library(buckets STATIC
   bucket/metadata.c
   bucket/metasys.c
   bucket/versioning.c
+  bucket/objectlock.c
   erasure/rs.c
   erasure/layout.c
   heal/healer.c
@@ -67,6 +68,7 @@ add_library(buckets STATIC
   object/sysconfig.c
   s3/auth.c
   s3/sts.c
+  s3/objectlock.c
   admin/admin.c
   admin/info.c
   admin/config.c

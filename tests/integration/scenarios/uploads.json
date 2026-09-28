@@ -1,0 +1,20 @@
+[
+  {"method": "PUT", "path": "/ubkt"},
+  {"method": "POST", "path": "/ubkt/dir/k.bin", "query": "uploads", "save": {"u1": "xml:UploadId"}, "label": "initiate 1"},
+  {"method": "POST", "path": "/ubkt/dir/k.bin", "query": "uploads", "save": {"u2": "xml:UploadId"}, "label": "initiate 2"},
+  {"method": "POST", "path": "/ubkt/dir/k.bin", "query": "uploads", "save": {"u3": "xml:UploadId"}, "label": "initiate 3"},
+  {"method": "POST", "path": "/ubkt/o%20ther", "query": "uploads", "label": "initiate other"},
+  {"method": "GET", "path": "/ubkt", "query": "uploads&prefix=dir/k.bin", "label": "list by object"},
+  {"method": "GET", "path": "/ubkt", "query": "uploads&prefix=dir/k.bin&delimiter=/&encoding-type=url", "label": "list url"},
+  {"method": "GET", "path": "/ubkt", "query": "uploads&prefix=o%20ther&encoding-type=url", "label": "list url-encoded key"},
+  {"method": "GET", "path": "/ubkt", "query": "uploads&prefix=dir/k.bin&max-uploads=2", "label": "page 1",
+   "save": {"nu": "xml:NextUploadIdMarker"}},
+  {"method": "GET", "path": "/ubkt", "query": "uploads&prefix=dir/k.bin&max-uploads=2&key-marker=dir/k.bin&upload-id-marker=$nu", "label": "page 2"},
+  {"method": "GET", "path": "/ubkt", "query": "uploads&prefix=dir/k.bin&key-marker=zzz", "label": "marker outside prefix"},
+  {"method": "GET", "path": "/ubkt", "query": "uploads&prefix=dir/k.bin&key-marker=dir/k.bin&upload-id-marker=***", "label": "bad upload-id-marker"},
+  {"method": "GET", "path": "/ubkt", "query": "uploads&prefix=dir/k.bin&max-uploads=-1", "label": "negative max"},
+  {"method": "GET", "path": "/ubkt", "query": "uploads&prefix=dir/k.bin&max-uploads=x", "label": "bad max"},
+  {"method": "DELETE", "path": "/ubkt/dir/k.bin", "query": "uploadId=$u2", "label": "abort 2"},
+  {"method": "GET", "path": "/ubkt", "query": "uploads&prefix=dir/k.bin", "label": "list after abort"},
+  {"method": "GET", "path": "/ubkt", "query": "uploads&prefix=nothing", "label": "list none"}
+]

@@ -40,6 +40,10 @@ bool buckets_xml_parse(buckets_str input, buckets_xml_doc *doc);
 void buckets_xml_doc_free(buckets_xml_doc *doc);
 /* Finds a direct child by local name; returns its index or 0. */
 size_t buckets_xml_child(const buckets_xml_doc *doc, size_t parent, const char *name);
+/* The root element's default namespace (its xmlns="..." attribute), copied
+ * into out; false when it has none. Go's encoding/xml keeps it in an
+ * `xml:"xmlns,attr"` field and marshals it back. */
+bool buckets_xml_root_xmlns(buckets_str input, char *out, size_t cap);
 /* Unescapes a node's text into out (entities: amp lt gt quot apos, &#N; &#xN;). */
 bool buckets_xml_unescape(buckets_str text, buckets_buf *out);
 

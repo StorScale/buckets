@@ -681,10 +681,18 @@ static void create_bucket(s3_ctx *c) {
     return;
   }
   buckets_str lock = buckets_http_header_get(c->req, "X-Amz-Bucket-Object-Lock-Enabled");
-  if (lock.p && buckets_str_ieq_c(lock, "true")) {
-    buckets_s3_write_error(c, BUCKETS_ERR_NOT_IMPLEMENTED); /* object lock lands with bucket features */
-    return;
+  bool lock_enabled = false;
+  if (lock.p && lock.n) {
+    if (buckets_str_ieq_c(lock, "true")) lock_enabled = true;
+    else if (!buckets_str_ieq_c(lock, "false")) {
+      buckets_s3_write_error(c, BUCKETS_ERR_INVALID_REQUEST);
+      return;
+    }
   }
+  /* Creating a bucket with locking needs these permissions as well. */
+  if (lock_enabled && (!buckets_s3_require(c, "s3:PutBucketObjectLockConfiguration", c->bucket, NULL, NULL) ||
+                       !buckets_s3_require(c, "s3:PutBucketVersioning", c->bucket, NULL, NULL)))
+    return;
 
   buckets_s3_error derr = buckets_s3_read_doc(c);
   if (derr != BUCKETS_ERR_NONE) {
@@ -721,6 +729,12 @@ static void create_bucket(s3_ctx *c) {
       clock_gettime(CLOCK_REALTIME, &ts);
       buckets_bucket_meta bm;
       buckets_bucket_meta_init(&bm, c->bucket, (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec);
+      if (lock_enabled) { /* MinIO's enabledBucketVersioningConfig and enabledBucketObjectLockConfig */
+        buckets_buf_append_c(&bm.config[BUCKETS_BCFG_VERSIONING],
+                             "<VersioningConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Status>Enabled</Status></VersioningConfiguration>");
+        buckets_buf_append_c(&bm.config[BUCKETS_BCFG_OBJECT_LOCK],
+                             "<ObjectLockConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><ObjectLockEnabled>Enabled</ObjectLockEnabled></ObjectLockConfiguration>");
+      }
       if (!buckets_bucket_meta_save(c->s->layer, &bm)) buckets_log_warn("could not save metadata for bucket %s", c->bucket);
       buckets_bucket_meta_free(&bm);
       buckets_metasys_changed(c->s->meta, c->bucket);
@@ -802,7 +816,7 @@ static void put_bucket_versioning(s3_ctx *c) {
     return;
   }
   buckets_bucket_state *st = buckets_metasys_get(c->s->meta, c->bucket);
-  bool locked = st->meta.lock_enabled || st->meta.config[BUCKETS_BCFG_OBJECT_LOCK].len > 0;
+  bool locked = st->lock_enabled;
   buckets_bucket_state_release(st);
   if (locked && (v.status == BUCKETS_VERSIONING_SUSPENDED || v.nexcluded || v.exclude_folders)) {
     buckets_versioning_free(&v);
@@ -908,6 +922,7 @@ static bool authorize_bucket_request(s3_ctx *c) {
   } else if (buckets_str_eq_c(m, "PUT")) {
     if (c->q.n == 0) action = "s3:CreateBucket";
     else if (buckets_query_has(&c->q, "versioning")) action = "s3:PutBucketVersioning";
+    else if (buckets_query_has(&c->q, "object-lock")) action = "s3:PutBucketObjectLockConfiguration";
   } else if (buckets_str_eq_c(m, "HEAD")) {
     if (buckets_s3_authorize(c, "s3:HeadBucket", c->bucket, NULL, NULL) == BUCKETS_ERR_NONE) return true;
     action = "s3:ListBucket";
@@ -918,6 +933,7 @@ static bool authorize_bucket_request(s3_ctx *c) {
     if (buckets_query_has(&c->q, "location")) action = "s3:GetBucketLocation";
     else if (buckets_query_has(&c->q, "versioning")) action = "s3:GetBucketVersioning";
     else if (buckets_query_has(&c->q, "versions")) action = "s3:ListBucketVersions";
+    else if (buckets_query_has(&c->q, "object-lock")) action = "s3:GetBucketObjectLockConfiguration";
     else if (buckets_query_has(&c->q, "uploads")) action = "s3:ListBucketMultipartUploads";
     else if (!has_unhandled_subresource(&c->q)) action = "s3:ListBucket";
   }
@@ -962,6 +978,11 @@ static void route_bucket(s3_ctx *c) {
       else put_bucket_versioning(c);
       return;
     }
+    if (buckets_query_has(&c->q, "object-lock")) {
+      if (!bucket_exists(c)) buckets_s3_write_error(c, BUCKETS_ERR_NO_SUCH_BUCKET);
+      else buckets_s3_put_bucket_object_lock(c);
+      return;
+    }
     if (c->q.n > 0) {
       buckets_s3_write_error(c, BUCKETS_ERR_NOT_IMPLEMENTED);
       return;
@@ -993,6 +1014,8 @@ static void route_bucket(s3_ctx *c) {
       get_bucket_versioning(c);
     } else if (buckets_query_has(&c->q, "versions")) {
       buckets_s3_list_object_versions(c);
+    } else if (buckets_query_has(&c->q, "object-lock")) {
+      buckets_s3_get_bucket_object_lock(c);
     } else if (buckets_query_has(&c->q, "uploads")) {
       buckets_s3_list_uploads(c);
     } else if (has_unhandled_subresource(&c->q)) {

@@ -67,6 +67,13 @@ static buckets_bucket_state *build(const char *bucket, buckets_bucket_meta *meta
       st->policy = NULL;
     }
   }
+  const buckets_buf *lk = &st->meta.config[BUCKETS_BCFG_OBJECT_LOCK];
+  if (lk->len) {
+    char err[256];
+    if (!buckets_lock_config_parse(lk->data, lk->len, &st->object_lock, err, sizeof(err)))
+      buckets_log_warn("bucket %s: stored object lock configuration does not parse: %s", bucket, err);
+  }
+  st->lock_enabled = st->meta.lock_enabled || st->object_lock.enabled;
   const buckets_buf *ver = &st->meta.config[BUCKETS_BCFG_VERSIONING];
   if (ver->len) {
     char err[256];

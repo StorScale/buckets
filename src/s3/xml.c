@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 #include "s3/xml.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -292,4 +293,30 @@ bool buckets_xml_unescape(buckets_str text, buckets_buf *out) {
     i = (size_t)(semi - text.p);
   }
   return true;
+}
+
+bool buckets_xml_root_xmlns(buckets_str input, char *out, size_t cap) {
+  const char *p = input.p, *end = input.p + input.n;
+  /* skip the declaration, comments and whitespace up to the root's start tag */
+  while (p < end) {
+    while (p < end && *p != '<') p++;
+    if (p + 1 >= end) return false;
+    if (p[1] == '?' || p[1] == '!') {
+      p++;
+      continue;
+    }
+    break;
+  }
+  const char *gt = memchr(p, '>', (size_t)(end - p));
+  if (!gt) return false;
+  for (const char *a = p; a + 6 < gt; a++) {
+    if (memcmp(a, "xmlns=", 6) != 0 || !(a[-1] == ' ' || a[-1] == '\t' || a[-1] == '\n' || a[-1] == '\r')) continue;
+    char q = a[6];
+    if (q != '"' && q != '\'') return false;
+    const char *v = a + 7, *ve = memchr(v, q, (size_t)(gt - v));
+    if (!ve) return false;
+    snprintf(out, cap, "%.*s", (int)(ve - v), v);
+    return true;
+  }
+  return false;
 }
