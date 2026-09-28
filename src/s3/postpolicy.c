@@ -454,7 +454,7 @@ static buckets_s3_error verify_signature(s3_ctx *c, const fields *fs) {
   if (v2sig) {
     const char *ak = fields_get(fs, "AWSAccessKeyId");
     char secret[BUCKETS_SECRET_MAX];
-    if (!ak || !buckets_s3_lookup_secret(c->s, buckets_str_c(ak), secret)) return BUCKETS_ERR_INVALID_ACCESS_KEY_ID;
+    if (!ak || !buckets_s3_lookup_secret(c, buckets_str_c(ak), secret)) return BUCKETS_ERR_INVALID_ACCESS_KEY_ID;
     char want[32];
     buckets_sigv2_sign(secret, policy, strlen(policy), want);
     if (strcmp(want, v2sig) != 0) return BUCKETS_ERR_SIGNATURE_DOES_NOT_MATCH;
@@ -484,7 +484,7 @@ static buckets_s3_error verify_signature(s3_ctx *c, const fields *fs) {
   else if (*region_conf && strcmp(parts[2], region_conf) != 0) err = BUCKETS_ERR_AUTHORIZATION_HEADER_MALFORMED;
   else if (strlen(parts[1]) != 8) err = BUCKETS_ERR_MALFORMED_CREDENTIAL_DATE;
   char secret[BUCKETS_SECRET_MAX] = "";
-  if (!err && !buckets_s3_lookup_secret(c->s, buckets_str_c(parts[0]), secret)) err = BUCKETS_ERR_INVALID_ACCESS_KEY_ID;
+  if (!err && !buckets_s3_lookup_secret(c, buckets_str_c(parts[0]), secret)) err = BUCKETS_ERR_INVALID_ACCESS_KEY_ID;
   if (!err) {
     uint8_t key[32], mac[32];
     char hex[65];
@@ -624,6 +624,13 @@ void buckets_s3_post_policy(s3_ctx *c) {
       buckets_buf_free(&k);
     }
     err = verify_signature(c, &fs);
+    const char *tok = fields_get(&fs, "X-Amz-Security-Token");
+    err = buckets_s3_check_credential(c, err, tok ? tok : "");
+    /* PostPolicyBucketHandler: only the root credential itself is the owner. */
+    c->owner = c->ident && c->ident->type == BUCKETS_IAM_ROOT;
+    const char *obj = fields_get(&fs, "Key");
+    while (obj && *obj == '/') obj++;
+    if (!err && !buckets_s3_allowed(c, "s3:PutObject", c->bucket, obj, false)) err = BUCKETS_ERR_ACCESS_DENIED;
   }
   if (!err) {
     const char *p64 = fields_get(&fs, "Policy");

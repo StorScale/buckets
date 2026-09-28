@@ -32,6 +32,7 @@ All notable changes to this project are documented here. The format follows
     - loads keys on a cache miss
     - takes per-item peer reload notifications
   - HS256/384/512 JWTs for session tokens, and `.minio.sys` config object helpers.
+  - S3 requests authenticate against IAM, covering users, service accounts and STS with session-token checks. Each route is authorized with MinIO's policy action, using MinIO's condition values (`getConditionValues`), including copy sources, DeleteObjects keys and POST policy uploads. Keys that are disabled or unknown before IAM loads get MinIO's error codes.
 
 ### Fixed
 - RFC 3339 parsing no longer relies on `timegm()`, which fails on macOS for Go's zero time (year 1).

@@ -4,6 +4,7 @@
 
 #include <stdatomic.h>
 
+#include "iam/iam.h"
 #include "net/http.h"
 #include "object/object.h"
 
@@ -14,6 +15,7 @@ typedef struct {
   const char *root_user;
   const char *root_password;
   const char *region; /* "" accepts any region in signatures */
+  buckets_iam *iam;   /* credentials and policies (root-only until started) */
   char host_id[65];   /* x-amz-id-2 */
   _Atomic uint64_t request_seq;
 } buckets_s3_server;

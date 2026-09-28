@@ -662,6 +662,10 @@ static void copy_object(s3_ctx *c) {
   }
   *slash = '\0';
   const char *src_bucket = path, *src_object = slash + 1;
+  if (!buckets_s3_require(c, "s3:GetObject", src_bucket, src_object, NULL)) {
+    free(decoded);
+    return;
+  }
 
   buckets_str directive = buckets_http_header_get(c->req, "X-Amz-Metadata-Directive");
   bool replace = directive.p && buckets_str_eq_c(directive, "REPLACE");
@@ -847,6 +851,10 @@ static void mpu_put_part(s3_ctx *c, const char *upload_id) {
     if (!parse_copy_source(copy_src, &decoded, &sb, &so, &sv)) {
       free(decoded);
       buckets_s3_write_error(c, BUCKETS_ERR_INVALID_COPY_SOURCE);
+      return;
+    }
+    if (!buckets_s3_require(c, "s3:GetObject", sb, so, NULL)) {
+      free(decoded);
       return;
     }
     buckets_object_info src;
@@ -1405,7 +1413,40 @@ static bool refuse_sse(s3_ctx *c) {
   return true;
 }
 
+/* The policy action of an object-level request (MinIO's router + handlers). */
+static bool authorize_object_request(s3_ctx *c) {
+  buckets_str m = c->req->method;
+  const char *upload_id = buckets_query_get(&c->q, "uploadId");
+  const char *vid = buckets_query_get(&c->q, "versionId");
+  const char *action = NULL;
+  if (buckets_str_eq_c(m, "POST") && buckets_query_has(&c->q, "uploads")) {
+    action = "s3:PutObject";
+  } else if (upload_id) {
+    if (buckets_str_eq_c(m, "PUT") || buckets_str_eq_c(m, "POST")) action = "s3:PutObject";
+    else if (buckets_str_eq_c(m, "GET")) action = "s3:ListMultipartUploadParts";
+    else if (buckets_str_eq_c(m, "DELETE")) action = "s3:AbortMultipartUpload";
+  } else if (buckets_query_has(&c->q, "attributes") && buckets_str_eq_c(m, "GET")) {
+    bool versioned = vid && *vid;
+    if (!buckets_s3_require(c, versioned ? "s3:GetObjectVersionAttributes" : "s3:GetObjectAttributes", c->bucket,
+                            c->object, NULL)) {
+      return false;
+    }
+    action = versioned ? "s3:GetObjectVersion" : "s3:GetObject";
+  } else if (buckets_query_has(&c->q, "acl")) {
+    if (buckets_str_eq_c(m, "GET")) action = "s3:GetBucketPolicy";
+    else if (buckets_str_eq_c(m, "PUT")) action = "s3:PutBucketPolicy";
+  } else if (buckets_str_eq_c(m, "PUT")) {
+    action = "s3:PutObject"; /* plus s3:GetObject on a copy source, checked by the handler */
+  } else if (buckets_str_eq_c(m, "GET") || buckets_str_eq_c(m, "HEAD")) {
+    action = "s3:GetObject";
+  } else if (buckets_str_eq_c(m, "DELETE")) {
+    action = "s3:DeleteObject";
+  }
+  return !action || buckets_s3_require(c, action, c->bucket, c->object, vid);
+}
+
 void buckets_s3_route_object(s3_ctx *c) {
+  if (!authorize_object_request(c)) return;
   if (refuse_sse(c)) return;
   buckets_str m = c->req->method;
   const char *upload_id = buckets_query_get(&c->q, "uploadId");
@@ -1501,6 +1542,8 @@ void buckets_s3_delete_objects(s3_ctx *c) {
     buckets_s3_error e = BUCKETS_ERR_NONE;
     if (!ok) {
       e = BUCKETS_ERR_INVALID_OBJECT_NAME;
+    } else if ((e = buckets_s3_authorize(c, "s3:DeleteObject", c->bucket, key.data, ver.len ? ver.data : NULL))) {
+      /* reported for this key */
     } else {
       buckets_obj_err oe = buckets_obj_delete(c->s->layer, c->bucket, key.data, ver.len ? ver.data : NULL);
       if (oe && oe != BUCKETS_OBJ_ERR_NO_SUCH_KEY && oe != BUCKETS_OBJ_ERR_NO_SUCH_VERSION) e = buckets_s3_obj_error(oe);

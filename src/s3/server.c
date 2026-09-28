@@ -2,6 +2,7 @@
 #include "s3/server.h"
 
 #include <ctype.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -32,7 +33,26 @@ void buckets_s3_server_init(buckets_s3_server *s, buckets_objlayer *layer, const
   s->root_user = root_user;
   s->root_password = root_password;
   s->region = region ? region : "";
+  s->iam = buckets_iam_new(root_user, root_password);
   if (layer) buckets_s3_server_set_layer(s, layer);
+}
+
+/* Loads IAM once the object layer is up, retrying while it lacks quorum
+ * (other servers still starting); then refreshes it periodically. */
+static void *iam_start_main(void *arg) {
+  buckets_s3_server *s = arg;
+  int delay_ms = 250;
+  while (!buckets_iam_start(s->iam, s->layer)) {
+    buckets_log_warn("iam: unable to load IAM data yet, retrying");
+    struct timespec ts = {delay_ms / 1000, (delay_ms % 1000) * 1000000L};
+    nanosleep(&ts, NULL);
+    if (delay_ms < 5000) delay_ms *= 2;
+  }
+  const char *env = getenv("BUCKETS_IAM_REFRESH_INTERVAL");
+  if (!env) env = getenv("MINIO_IAM_REFRESH_INTERVAL");
+  int interval = env ? atoi(env) : 600;
+  buckets_iam_start_refresh(s->iam, interval > 0 ? interval : 600);
+  return NULL;
 }
 
 void buckets_s3_server_set_layer(buckets_s3_server *s, buckets_objlayer *layer) {
@@ -40,6 +60,8 @@ void buckets_s3_server_set_layer(buckets_s3_server *s, buckets_objlayer *layer) 
   buckets_sha256(layer->deployment_id_str, strlen(layer->deployment_id_str), h);
   buckets_hex_encode(h, 32, s->host_id);
   s->layer = layer; /* atomic store, after host_id */
+  pthread_t t;
+  if (pthread_create(&t, NULL, iam_start_main, s) == 0) pthread_detach(t);
 }
 
 /* ---- response helpers ---------------------------------------------------- */
@@ -112,11 +134,42 @@ static buckets_s3_error parse_path(s3_ctx *c) {
 }
 
 bool buckets_s3_lookup_secret(void *ud, buckets_str access_key, char secret[BUCKETS_SECRET_MAX]) {
-  buckets_s3_server *s = ud;
-  /* IAM (users, service accounts, STS) replaces this root-only lookup. */
-  if (!buckets_str_eq_c(access_key, s->root_user)) return false;
-  snprintf(secret, BUCKETS_SECRET_MAX, "%s", s->root_password);
+  s3_ctx *c = ud;
+  char *ak = buckets_xstrndup(access_key.p, access_key.n);
+  buckets_iam_ident *id;
+  c->key_status = buckets_iam_get_key(c->s->iam, ak, &id);
+  free(ak);
+  if (c->key_status != BUCKETS_IAM_KEY_OK) return false;
+  snprintf(secret, BUCKETS_SECRET_MAX, "%s", id->secret_key);
+  buckets_iam_ident_release(c->ident);
+  c->ident = id;
   return true;
+}
+
+/* getSessionToken: the header, else the query parameter. */
+static char *session_token(s3_ctx *c) {
+  buckets_str h = buckets_http_header_get(c->req, "X-Amz-Security-Token");
+  if (h.p && h.n) return buckets_xstrndup(h.p, h.n);
+  const char *q = buckets_query_get(&c->q, "X-Amz-Security-Token");
+  return q && *q ? buckets_xstrdup(q) : NULL;
+}
+
+buckets_s3_error buckets_s3_check_credential(s3_ctx *c, buckets_s3_error verify_err, const char *form_token) {
+  if (verify_err == BUCKETS_ERR_INVALID_ACCESS_KEY_ID) {
+    if (c->key_status == BUCKETS_IAM_KEY_DISABLED) return BUCKETS_ERR_ACCESS_KEY_DISABLED;
+    if (c->key_status == BUCKETS_IAM_KEY_NOT_READY) return BUCKETS_ERR_IAM_NOT_INITIALIZED;
+  }
+  if (verify_err != BUCKETS_ERR_NONE) return verify_err;
+  char *token = form_token ? buckets_xstrdup(form_token) : session_token(c);
+  buckets_iam_token_status ts = buckets_iam_check_token(c->s->iam, c->ident, token, &c->owner);
+  free(token);
+  switch (ts) {
+    case BUCKETS_IAM_TOKEN_OK: return BUCKETS_ERR_NONE;
+    case BUCKETS_IAM_TOKEN_NO_ACCESS_KEY: return BUCKETS_ERR_NO_ACCESS_KEY;
+    case BUCKETS_IAM_TOKEN_INVALID: return BUCKETS_ERR_INVALID_TOKEN;
+    case BUCKETS_IAM_TOKEN_EXPIRED: return BUCKETS_ERR_INVALID_ACCESS_KEY_ID;
+  }
+  return BUCKETS_ERR_ACCESS_DENIED;
 }
 
 static bool is_hex64(const char *s) {
@@ -167,7 +220,7 @@ static buckets_s3_error authenticate(s3_ctx *c) {
       .service = "s3",
       .now = time(NULL),
       .lookup = buckets_s3_lookup_secret,
-      .lookup_ud = c->s,
+      .lookup_ud = c,
   };
   buckets_sigv4_result *res = &c->sig;
   buckets_s3_error err;
@@ -180,9 +233,13 @@ static buckets_s3_error authenticate(s3_ctx *c) {
     case BUCKETS_AUTH_SIGV4_PRESIGNED:
       err = buckets_sigv4_verify_presigned(&cfg, c->req, &c->q, res);
       break;
-    case BUCKETS_AUTH_ANONYMOUS:
-      /* Anonymous access is governed by bucket policies, which are not implemented yet. */
-      return BUCKETS_ERR_ACCESS_DENIED;
+    case BUCKETS_AUTH_ANONYMOUS: {
+      /* Authorized per action against the bucket policy; a token needs a key. */
+      char *token = session_token(c);
+      bool has = token != NULL;
+      free(token);
+      return has ? BUCKETS_ERR_NO_ACCESS_KEY : BUCKETS_ERR_NONE;
+    }
     case BUCKETS_AUTH_SIGV2:
       err = buckets_sigv2_verify_header(&cfg, c->req, res);
       break;
@@ -196,7 +253,7 @@ static buckets_s3_error authenticate(s3_ctx *c) {
     default:
       return BUCKETS_ERR_SIGNATURE_VERSION_NOT_SUPPORTED;
   }
-  if (err != BUCKETS_ERR_NONE) return err;
+  if ((err = buckets_s3_check_credential(c, err, NULL)) != BUCKETS_ERR_NONE) return err;
   snprintf(c->access_key, sizeof(c->access_key), "%s", res->access_key);
   return BUCKETS_ERR_NONE;
 }
@@ -204,6 +261,18 @@ static buckets_s3_error authenticate(s3_ctx *c) {
 /* ---- service-level handlers ---------------------------------------------- */
 
 static void list_buckets(s3_ctx *c) {
+  /* ListAllMyBuckets, else only the buckets the caller may list or locate. */
+  buckets_s3_error aerr = buckets_s3_authorize(c, "s3:ListAllMyBuckets", NULL, NULL, NULL);
+  if (!c->ident) aerr = BUCKETS_ERR_ACCESS_DENIED;
+  if (aerr != BUCKETS_ERR_NONE && (aerr != BUCKETS_ERR_ACCESS_DENIED || !c->ident)) {
+    buckets_s3_write_error(c, aerr);
+    return;
+  }
+  bool filter = aerr == BUCKETS_ERR_ACCESS_DENIED;
+  if (filter) {
+    buckets_s3_cond_override(c, "prefix", "");
+    buckets_s3_cond_override(c, "delimiter", "/");
+  }
   buckets_bucket_info *vols;
   size_t n;
   buckets_obj_err lerr = buckets_obj_list_buckets(c->s->layer, &vols, &n);
@@ -221,6 +290,10 @@ static void list_buckets(s3_ctx *c) {
   buckets_xml_open(b, "Buckets");
   for (size_t i = 0; i < n; i++) {
     if (buckets_bucket_name_reserved(vols[i].name) || !buckets_bucket_name_valid(vols[i].name)) continue;
+    if (filter && !buckets_s3_allowed(c, "s3:ListBucket", vols[i].name, NULL, false) &&
+        !buckets_s3_allowed(c, "s3:GetBucketLocation", vols[i].name, NULL, false)) {
+      continue;
+    }
     /* Creation time comes from bucket metadata (as in MinIO), else the directory. */
     time_t created = vols[i].created;
     buckets_bucket_meta bm;
@@ -353,6 +426,31 @@ static bool has_unhandled_subresource(const buckets_query *q) {
   return false;
 }
 
+/* The policy action of a bucket-level request (MinIO's router + handlers). */
+static bool authorize_bucket_request(s3_ctx *c) {
+  buckets_str m = c->req->method;
+  const char *action = NULL;
+  if (buckets_query_has(&c->q, "acl")) {
+    if (buckets_str_eq_c(m, "GET")) action = "s3:GetBucketPolicy";
+    else if (buckets_str_eq_c(m, "PUT")) action = "s3:PutBucketPolicy";
+  } else if (buckets_str_eq_c(m, "PUT")) {
+    if (c->q.n == 0) action = "s3:CreateBucket";
+  } else if (buckets_str_eq_c(m, "HEAD")) {
+    if (buckets_s3_authorize(c, "s3:HeadBucket", c->bucket, NULL, NULL) == BUCKETS_ERR_NONE) return true;
+    action = "s3:ListBucket";
+  } else if (buckets_str_eq_c(m, "DELETE")) {
+    buckets_str force = buckets_http_header_get(c->req, "X-Minio-Force-Delete");
+    if (c->q.n == 0) action = force.p && buckets_str_ieq_c(force, "true") ? "s3:ForceDeleteBucket" : "s3:DeleteBucket";
+  } else if (buckets_str_eq_c(m, "GET")) {
+    if (buckets_query_has(&c->q, "location")) action = "s3:GetBucketLocation";
+    else if (buckets_query_has(&c->q, "versioning")) action = "s3:GetBucketVersioning";
+    else if (buckets_query_has(&c->q, "uploads")) action = "s3:ListBucketMultipartUploads";
+    else if (!has_unhandled_subresource(&c->q)) action = "s3:ListBucket";
+  }
+  /* DeleteObjects and POST policy uploads are authorized per object. */
+  return !action || buckets_s3_require(c, action, c->bucket, NULL, NULL);
+}
+
 static void route_bucket(s3_ctx *c) {
   if (buckets_bucket_name_reserved(c->bucket)) {
     buckets_s3_write_error(c, BUCKETS_ERR_ALL_ACCESS_DISABLED);
@@ -363,6 +461,7 @@ static void route_bucket(s3_ctx *c) {
     return;
   }
   buckets_str m = c->req->method;
+  if (!authorize_bucket_request(c)) return;
   if (buckets_query_has(&c->q, "acl")) {
     if (!bucket_exists(c)) {
       buckets_s3_write_error(c, BUCKETS_ERR_NO_SUCH_BUCKET);
@@ -501,4 +600,6 @@ done:
   free(c.bucket);
   free(c.object);
   buckets_buf_free(&c.doc);
+  buckets_iam_ident_release(c.ident);
+  buckets_s3_conds_free(c.conds);
 }
