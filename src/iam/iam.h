@@ -230,6 +230,7 @@ typedef struct {
   const char *session_policy; /* JSON, NULL/"" inherits the parent's policies */
   const char *name, *description;
   const buckets_iam_time *expiration;
+  const char *claims_json; /* extra claims (a JSON object) for the token, or NULL */
 } buckets_iam_svc_opts;
 
 /* Creates a service account; *out is a reference to the new credential. */

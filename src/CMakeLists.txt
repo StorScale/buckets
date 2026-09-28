@@ -56,6 +56,7 @@ add_library(buckets STATIC
   core/strmap.c
   object/sysconfig.c
   s3/auth.c
+  admin/admin.c
 )
 target_include_directories(buckets PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 # timegm, gmtime_r, arc4random_buf, strncasecmp live outside strict C17.

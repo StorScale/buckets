@@ -16,6 +16,7 @@
 #include "crypto/hex.h"
 #include "crypto/md5.h"
 #include "crypto/sha256.h"
+#include "admin/admin.h"
 #include "bucket/metadata.h"
 #include "s3/bucketname.h"
 #include "s3/errors.h"
@@ -571,8 +572,13 @@ void buckets_s3_handle(const buckets_http_request *req, buckets_http_response *r
     goto fail;
   }
   if ((err = parse_path(&c)) != BUCKETS_ERR_NONE) goto fail;
+  if (buckets_admin_is_admin_path(req->path)) {
+    if ((err = authenticate(&c)) != BUCKETS_ERR_NONE) buckets_admin_error(&c, err);
+    else buckets_admin_handle(&c);
+    goto done;
+  }
   if (buckets_str_has_prefix(req->path, "/minio/")) {
-    err = BUCKETS_ERR_NOT_IMPLEMENTED; /* admin, STS, metrics and peer APIs come later */
+    err = BUCKETS_ERR_NOT_IMPLEMENTED; /* STS, metrics and peer APIs come later */
     goto fail;
   }
   if ((err = authenticate(&c)) != BUCKETS_ERR_NONE) goto fail;

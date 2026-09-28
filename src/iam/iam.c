@@ -1871,6 +1871,18 @@ buckets_iam_err buckets_iam_add_svc(buckets_iam *iam, const buckets_iam_svc_opts
     yyjson_mut_obj_add_str(claims, root, "sa-policy", "inherited-policy");
   }
   free(sp);
+  /* The requestor's own claims carry over, without replacing ours. */
+  yyjson_doc *extra = o->claims_json ? yyjson_read(o->claims_json, strlen(o->claims_json), 0) : NULL;
+  if (extra && yyjson_is_obj(yyjson_doc_get_root(extra))) {
+    size_t idx, max;
+    yyjson_val *k, *v;
+    yyjson_obj_foreach(yyjson_doc_get_root(extra), idx, max, k, v) {
+      const char *name = yyjson_get_str(k);
+      if (strcmp(name, "exp") == 0 || yyjson_mut_obj_get(root, name)) continue;
+      yyjson_mut_obj_add(root, yyjson_mut_strcpy(claims, name), yyjson_val_mut_copy(claims, v));
+    }
+  }
+  yyjson_doc_free(extra);
   bool signed_ok = sign_token(id, claims, id->secret_key, iam->root->secret_key);
   yyjson_mut_doc_free(claims);
   if (!signed_ok) {

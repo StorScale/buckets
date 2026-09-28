@@ -32,6 +32,15 @@ All notable changes to this project are documented here. The format follows
     - loads keys on a cache miss
     - takes per-item peer reload notifications
   - HS256/384/512 JWTs for session tokens, and `.minio.sys` config object helpers.
+  - The madmin-compatible admin API (`/minio/admin/v3`) for IAM, which works with `mc admin user|group|policy|user svcacct`. It covers:
+    - add-user, remove-user, list-users, user-info, set-user-status
+    - update-group-members, group, groups, set-group-status
+    - list-, info-, add- and remove-canned-policy, set-user-or-group-policy, and `idp/builtin/policy/attach|detach`
+    - add-, update-, info-, list- and delete-service-account
+    - madmin encryption where MinIO uses it, and JSON errors
+  - Tests:
+    - `tests/integration/iam.sh`: the `mc admin` suite, including a restart
+    - `tests/integration/iam-interop.sh`: IAM state written by real MinIO is honoured by bucketsd, and the reverse
   - S3 requests authenticate against IAM, covering users, service accounts and STS with session-token checks. Each route is authorized with MinIO's policy action, using MinIO's condition values (`getConditionValues`), including copy sources, DeleteObjects keys and POST policy uploads. Keys that are disabled or unknown before IAM loads get MinIO's error codes.
 
 ### Fixed
