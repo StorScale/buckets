@@ -64,6 +64,7 @@ All notable changes to this project are documented here. The format follows
     - `policy_plugin` (and the older `policy_opa`), to which every authorization decision is delegated
     - `identity_plugin`, for `AssumeRoleWithCustomToken`, with its `idmp-` role ARN
     - Both are probed when set through `mc admin config`; `tests/integration/plugins.sh` covers them.
+  - `AssumeRoleWithCertificate` (identity_tls, enabled by `MINIO_IDENTITY_TLS_ENABLE`): the TLS server asks for (never requires) a client certificate; it must be the only leaf, verify for client authentication against the system roots and `certs/CAs` (or carry the clientAuth usage with `skip_verify`), and its CN names the policy of the `tls/<CN>` credentials, whose expiry never outlives the certificate (`tests/integration/certsts.sh`).
   - LDAP / Active Directory:
     - `src/net/ldap.c`, a compact LDAPv3 client (BER, simple bind, search, StartTLS, LDAPS) with go-ldap's filter compiler, filter escaping and DN normalization, checked against vectors generated from go-ldap (`tools/ldapvec`)
     - `identity_ldap` (`src/iam/ldapidp.c`, from MinIO's `identity/ldap` and minio/pkg `ldap`): validated against the directory on startup and on `mc admin config set`, lookup bind, user and group search with several base DNs, user attributes, SRV records, and trust in `certs/CAs`

@@ -14,6 +14,7 @@
 #include <mach-o/dyld.h>
 #endif
 
+#include "config/config.h"
 #include "core/log.h"
 #include "dist/dsync.h"
 #include "dist/endpoint.h"
@@ -649,6 +650,9 @@ int main(int argc, char **argv) {
       }
       buckets_log_info("TLS enabled with %zu certificate%s from %s", buckets_tls_cert_count(tls),
                        buckets_tls_cert_count(tls) == 1 ? "" : "s", certs_dir);
+      /* identity_tls: clients may present a certificate for AssumeRoleWithCertificate. */
+      if (buckets_config_parse_bool(buckets_config_getenv("MINIO_IDENTITY_TLS_ENABLE")) == 1)
+        buckets_tls_request_client_certs(tls, true);
     }
   }
   hcfg.tls = tls;

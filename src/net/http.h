@@ -36,6 +36,9 @@ typedef struct {
   int64_t body_len;  /* total body bytes in either representation */
   bool keep_alive;
   bool secure; /* arrived over TLS */
+  /* The TLS client's certificates (see buckets_tls_peer_chain), or NULL. */
+  const buckets_buf *peer_certs;
+  size_t npeer_certs;
   /* Set for large bodies streamed to the handler while they arrive (it runs
    * before the body is complete); read it with buckets_http_body_read. */
   struct buckets_body_pipe *pipe;

@@ -65,6 +65,9 @@ typedef struct conn {
   long fill_got;
   bool fill_inflight, pre_ready, waiting_fill, close_pending;
   buckets_tls_conn *tls;
+  buckets_buf peer_certs; /* the TLS client's certificates, read once after the handshake */
+  size_t npeer_certs;
+  bool peer_loaded;
   /* A streamed request body: the handler already runs and reads it from pipe. */
   struct buckets_body_pipe *pipe;
   bool read_paused;  /* pipe full: parsing and reading stop until it drains */
@@ -309,6 +312,9 @@ static void conn_close(conn *c) {
   if (c->body_fd >= 0) close(c->body_fd);
   buckets_loop_unwatch(srv->loop, c->fd);
   buckets_tls_conn_free(c->tls);
+  buckets_buf_free(&c->peer_certs);
+  c->npeer_certs = 0;
+  c->peer_loaded = false;
   close(c->fd);
   if (c->prev) c->prev->next = c->next;
   else srv->conns = c->next;
@@ -601,6 +607,12 @@ static void dispatch_request_mode(conn *c, bool streamed) {
   rq->keep_alive = llhttp_should_keep_alive(&c->parser) && !srv->shutting_down;
   rq->remote_addr = c->remote;
   rq->secure = c->tls != NULL;
+  if (c->tls && !c->peer_loaded) {
+    c->npeer_certs = buckets_tls_peer_chain(c->tls, &c->peer_certs);
+    c->peer_loaded = true;
+  }
+  rq->peer_certs = c->npeer_certs ? &c->peer_certs : NULL;
+  rq->npeer_certs = c->npeer_certs;
   if (streamed) {
     rq->pipe = c->pipe;
     rq->body_fd = -1;

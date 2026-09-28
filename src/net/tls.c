@@ -33,6 +33,7 @@ typedef struct {
 
 struct buckets_tls {
   char *dir;
+  bool request_client_certs; /* identity_tls: ask for (never require) a client certificate */
   cert certs[MAX_CERTS]; /* [0] is the default */
   size_t ncerts;
 };
@@ -73,6 +74,7 @@ static bool mtime_of(const char *path, struct timespec *out) {
 }
 
 static int sni_cb(SSL *ssl, int *alert, void *arg);
+static int accept_any_cert(int ok, X509_STORE_CTX *ctx);
 
 /* Builds a server context for dir/public.crt + dir/private.key. */
 static bool load_cert(buckets_tls *t, const char *dir, cert *out, char *err, size_t errlen) {
@@ -148,6 +150,7 @@ static int sni_cb(SSL *ssl, int *alert, void *arg) {
   for (size_t i = 1; i < t->ncerts; i++) {
     if (X509_check_host(t->certs[i].leaf, name, 0, 0, NULL) == 1) {
       SSL_set_SSL_CTX(ssl, t->certs[i].ctx);
+      if (t->request_client_certs) SSL_set_verify(ssl, SSL_VERIFY_PEER, accept_any_cert);
       break;
     }
   }
@@ -228,6 +231,171 @@ bool buckets_tls_reload(buckets_tls *t) {
 
 /* ---- connections ------------------------------------------------------------- */
 
+/* tls.RequestClientCert: the certificate is checked later, by the handler. */
+static int accept_any_cert(int ok, X509_STORE_CTX *ctx) {
+  (void)ok;
+  (void)ctx;
+  return 1;
+}
+
+void buckets_tls_request_client_certs(buckets_tls *t, bool on) { t->request_client_certs = on; }
+
+static void append_der(buckets_buf *out, size_t *n, X509 *x) {
+  unsigned char *der = NULL;
+  int len = i2d_X509(x, &der);
+  if (len <= 0) return;
+  uint32_t l = (uint32_t)len;
+  buckets_buf_append(out, &l, sizeof(l));
+  buckets_buf_append(out, der, (size_t)len);
+  OPENSSL_free(der);
+  (*n)++;
+}
+
+size_t buckets_tls_peer_chain(buckets_tls_conn *c, buckets_buf *out) {
+  size_t n = 0;
+  X509 *leaf = SSL_get1_peer_certificate(c->ssl);
+  if (!leaf) return 0;
+  append_der(out, &n, leaf);
+  STACK_OF(X509) *chain = SSL_get_peer_cert_chain(c->ssl); /* server side: without the leaf */
+  for (int i = 0; chain && i < sk_X509_num(chain); i++) {
+    X509 *x = sk_X509_value(chain, i);
+    if (X509_cmp(x, leaf) != 0) append_der(out, &n, x);
+  }
+  X509_free(leaf);
+  return n;
+}
+
+static void add_cas(X509_STORE *store, const char *path) {
+  struct stat st;
+  if (!path || stat(path, &st) != 0) return;
+  DIR *d = S_ISDIR(st.st_mode) ? opendir(path) : NULL;
+  for (struct dirent *e = d ? readdir(d) : NULL; S_ISREG(st.st_mode) || e; e = d ? readdir(d) : NULL) {
+    buckets_buf p = BUCKETS_BUF_INIT;
+    if (d) {
+      if (e->d_name[0] == '.') {
+        buckets_buf_free(&p);
+        continue;
+      }
+      buckets_buf_appendf(&p, "%s/%s", path, e->d_name);
+    } else {
+      buckets_buf_append_c(&p, path);
+    }
+    FILE *f = fopen(p.data, "r");
+    for (X509 *x; f && (x = PEM_read_X509(f, NULL, NULL, NULL)) != NULL;) {
+      X509_STORE_add_cert(store, x);
+      X509_free(x);
+    }
+    if (f) fclose(f);
+    ERR_clear_error();
+    buckets_buf_free(&p);
+    if (!d) break;
+  }
+  if (d) closedir(d);
+}
+
+static char *name_entry(const X509_NAME *nm, int nid, int *pos) {
+  int i = X509_NAME_get_index_by_NID(nm, nid, *pos);
+  if (i < 0) return NULL;
+  *pos = i;
+  unsigned char *utf8 = NULL;
+  int len = ASN1_STRING_to_UTF8(&utf8, X509_NAME_ENTRY_get_data(X509_NAME_get_entry(nm, i)));
+  if (len < 0) return NULL;
+  char *s = buckets_xstrndup((const char *)utf8, (size_t)len);
+  OPENSSL_free(utf8);
+  return s;
+}
+
+void buckets_client_cert_free(buckets_client_cert *c) {
+  free(c->cn);
+  free(c->issuer_cn);
+  for (size_t i = 0; i < c->norgs; i++) free(c->orgs[i]);
+  free(c->orgs);
+  memset(c, 0, sizeof(*c));
+}
+
+buckets_cert_status buckets_tls_check_client_cert(const buckets_buf *chain, size_t n, const char *ca_path,
+                                                  bool skip_verify, buckets_client_cert *out, char *err,
+                                                  size_t errlen) {
+  memset(out, 0, sizeof(*out));
+  STACK_OF(X509) *inter = sk_X509_new_null();
+  X509 *leaf = NULL;
+  size_t nleaves = 0, ncas = 0;
+  buckets_cert_status st = BUCKETS_CERT_OK;
+  const unsigned char *p = (const unsigned char *)(chain ? chain->data : NULL);
+  const unsigned char *end = p ? p + chain->len : NULL;
+  for (size_t i = 0; i < n && p && p + 4 <= end; i++) {
+    uint32_t l;
+    memcpy(&l, p, 4);
+    p += 4;
+    const unsigned char *q = p;
+    X509 *x = d2i_X509(NULL, &q, l);
+    p += l;
+    if (!x) continue;
+    if (X509_check_ca(x)) {
+      if (++ncas > 10) {
+        X509_free(x);
+        snprintf(err, errlen, "client certificate contains more than %d intermediate CAs", 10);
+        st = BUCKETS_CERT_TOO_MANY_CAS;
+        goto out;
+      }
+      sk_X509_push(inter, x);
+    } else {
+      nleaves++;
+      if (!leaf) leaf = x;
+      else X509_free(x);
+    }
+  }
+  if (!nleaves) {
+    snprintf(err, errlen, "No client certificate provided");
+    st = BUCKETS_CERT_NONE;
+    goto out;
+  }
+  if (nleaves > 1) {
+    snprintf(err, errlen, "More than one client certificate provided");
+    st = BUCKETS_CERT_MULTIPLE;
+    goto out;
+  }
+  if (!skip_verify) {
+    X509_STORE *store = X509_STORE_new();
+    X509_STORE_set_default_paths(store);
+    add_cas(store, ca_path);
+    X509_STORE_CTX *vctx = X509_STORE_CTX_new();
+    X509_STORE_CTX_init(vctx, store, leaf, inter);
+    X509_STORE_CTX_set_purpose(vctx, X509_PURPOSE_SSL_CLIENT);
+    int ok = X509_verify_cert(vctx);
+    if (ok != 1) {
+      snprintf(err, errlen, "x509: %s", X509_verify_cert_error_string(X509_STORE_CTX_get_error(vctx)));
+      st = BUCKETS_CERT_INVALID;
+    }
+    X509_STORE_CTX_free(vctx);
+    X509_STORE_free(store);
+    ERR_clear_error();
+    if (st) goto out;
+  } else {
+    uint32_t xku = X509_get_extended_key_usage(leaf);
+    if (xku == UINT32_MAX || !(xku & (XKU_SSL_CLIENT | XKU_ANYEKU))) {
+      snprintf(err, errlen, "certificate is not valid for client authentication");
+      st = BUCKETS_CERT_BAD_USAGE;
+      goto out;
+    }
+  }
+  int pos = -1;
+  out->cn = name_entry(X509_get_subject_name(leaf), NID_commonName, &pos);
+  pos = -1;
+  for (char *o; (o = name_entry(X509_get_subject_name(leaf), NID_organizationName, &pos)) != NULL;) {
+    out->orgs = buckets_xrealloc(out->orgs, (out->norgs + 1) * sizeof(char *));
+    out->orgs[out->norgs++] = o;
+  }
+  pos = -1;
+  out->issuer_cn = name_entry(X509_get_issuer_name(leaf), NID_commonName, &pos);
+  struct tm tm;
+  if (ASN1_TIME_to_tm(X509_get0_notAfter(leaf), &tm) == 1) out->not_after = timegm(&tm);
+out:
+  X509_free(leaf);
+  sk_X509_pop_free(inter, X509_free);
+  return st;
+}
+
 buckets_tls_conn *buckets_tls_accept(buckets_tls *t, int fd) {
   SSL *ssl = SSL_new(t->certs[0].ctx);
   if (!ssl) return NULL;
@@ -236,6 +404,7 @@ buckets_tls_conn *buckets_tls_accept(buckets_tls *t, int fd) {
     return NULL;
   }
   SSL_set_accept_state(ssl);
+  if (t->request_client_certs) SSL_set_verify(ssl, SSL_VERIFY_PEER, accept_any_cert);
   buckets_tls_conn *c = buckets_xcalloc(1, sizeof(*c));
   c->ssl = ssl;
   return c;

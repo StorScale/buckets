@@ -9,6 +9,7 @@
 #include <time.h>
 #include <yyjson.h>
 
+#include "config/sys.h"
 #include "core/timefmt.h"
 #include "iam/ldapidp.h"
 #include "iam/openid.h"
@@ -32,6 +33,9 @@ typedef enum {
   STS_INTERNAL_ERROR,
   STS_EXPIRED_TOKEN_WEB,
   STS_UPSTREAM_ERROR,
+  STS_INSECURE_CONNECTION,
+  STS_INVALID_CLIENT_CERTIFICATE,
+  STS_TOO_MANY_INTERMEDIATE_CAS,
 } sts_err;
 
 static const struct {
@@ -53,6 +57,14 @@ static const struct {
     [STS_UPSTREAM_ERROR] = {"InternalError", "An upstream service required for this operation failed - please try again "
                                              "or contact an administrator.",
                             500},
+    [STS_INSECURE_CONNECTION] = {"InsecureConnection",
+                                 "The request was made over a plain HTTP connection. A TLS connection is required.", 400},
+    [STS_INVALID_CLIENT_CERTIFICATE] = {"InvalidClientCertificate",
+                                        "The provided client certificate is invalid. Retry with a different certificate.",
+                                        400},
+    [STS_TOO_MANY_INTERMEDIATE_CAS] = {"TooManyIntermediateCAs",
+                                       "The provided client certificate contains too many intermediate CA certificates",
+                                       400},
 };
 
 static void sts_error(s3_ctx *c, sts_err e, const char *message) {
@@ -435,6 +447,82 @@ out:
   buckets_plugins_release(pl);
 }
 
+/* ---- AssumeRoleWithCertificate (identity_tls) ---- */
+
+static void assume_role_certificate(s3_ctx *c, const buckets_query *form, const buckets_query *url) {
+  if (!buckets_iam_ready(c->s->iam)) {
+    sts_error(c, STS_NOT_INITIALIZED, "IAM sub-system not initialized");
+    return;
+  }
+  /* identity_tls is enabled from the environment only, as in MinIO. */
+  if (buckets_config_parse_bool(buckets_config_getenv("MINIO_IDENTITY_TLS_ENABLE")) != 1) {
+    sts_error(c, STS_NOT_INITIALIZED, "STS API 'AssumeRoleWithCertificate' is disabled");
+    return;
+  }
+  if (!c->req->secure) {
+    sts_error(c, STS_INSECURE_CONNECTION, "No TLS connection attempt");
+    return;
+  }
+  const char *sv = buckets_config_getenv("MINIO_IDENTITY_TLS_SKIP_VERIFY");
+  char *cfg_sv = NULL;
+  if (!sv && c->s->config) sv = cfg_sv = buckets_config_sys_value(c->s->config, "identity_tls", NULL, "skip_verify");
+  bool skip = buckets_config_parse_bool(sv) == 1;
+  free(cfg_sv);
+  buckets_client_cert cert;
+  char err[512];
+  switch (buckets_tls_check_client_cert(c->req->peer_certs, c->req->npeer_certs, c->s->ca_path, skip, &cert, err,
+                                        sizeof(err))) {
+    case BUCKETS_CERT_OK: break;
+    case BUCKETS_CERT_TOO_MANY_CAS: sts_error(c, STS_TOO_MANY_INTERMEDIATE_CAS, err); return;
+    case BUCKETS_CERT_MULTIPLE: sts_error(c, STS_INVALID_PARAMETER_VALUE, err); return;
+    case BUCKETS_CERT_INVALID: sts_error(c, STS_INVALID_CLIENT_CERTIFICATE, err); return;
+    default: sts_error(c, STS_MISSING_PARAMETER, err); return;
+  }
+  yyjson_mut_doc *claims = NULL;
+  buckets_iam_ident *cred = NULL;
+  if (!cert.cn || !*cert.cn) {
+    sts_error(c, STS_MISSING_PARAMETER, "certificate subject CN cannot be empty");
+    goto out;
+  }
+  const char *ds = form_get(form, url, "DurationSeconds");
+  long long expiry = 3600;
+  if (ds && *ds) {
+    char *end;
+    expiry = strtoll(ds, &end, 10);
+    if (*end || expiry < 15 * 60 || expiry > 365LL * 24 * 3600) {
+      sts_error(c, STS_MISSING_PARAMETER, "invalid token expiry");
+      goto out;
+    }
+  }
+  /* never outliving the certificate */
+  long long now = (long long)time(NULL);
+  if (cert.not_after && (long long)cert.not_after - now < expiry) expiry = (long long)cert.not_after - now;
+  char parent[600];
+  snprintf(parent, sizeof(parent), "tls/%s", cert.cn);
+  claims = yyjson_mut_doc_new(NULL);
+  yyjson_mut_val *root = yyjson_mut_obj(claims);
+  yyjson_mut_doc_set_root(claims, root);
+  yyjson_mut_obj_add_int(claims, root, "exp", now + expiry);
+  yyjson_mut_obj_add_strcpy(claims, root, "sub", cert.cn);
+  if (cert.norgs) {
+    yyjson_mut_val *aud = yyjson_mut_obj_add_arr(claims, root, "aud");
+    for (size_t i = 0; i < cert.norgs; i++) yyjson_mut_arr_add_strcpy(claims, aud, cert.orgs[i]);
+  } else {
+    yyjson_mut_obj_add_null(claims, root, "aud");
+  }
+  yyjson_mut_obj_add_strcpy(claims, root, "iss", cert.issuer_cn ? cert.issuer_cn : "");
+  yyjson_mut_obj_add_strcpy(claims, root, "parent", parent);
+  const char *revoke = form_get(form, url, "TokenRevokeType");
+  if (revoke && *revoke) yyjson_mut_obj_add_strcpy(claims, root, "tokenRevokeType", revoke);
+  /* The certificate's CN names its policy. */
+  cred = issue(c, parent, NULL, 0, claims, cert.cn);
+  if (cred) write_credentials(c, "AssumeRoleWithCertificate", cred, NULL, NULL);
+out:
+  buckets_iam_ident_release(cred);
+  yyjson_mut_doc_free(claims);
+  buckets_client_cert_free(&cert);
+}
+
 /* ---- AssumeRoleWithLDAPIdentity ---- */
 
 static void assume_role_ldap(s3_ctx *c, const buckets_query *form, const buckets_query *url) {
@@ -567,6 +655,8 @@ void buckets_sts_handle(s3_ctx *c) {
     assume_role_sso(c, &form, &c->q, action);
   } else if (action && strcmp(action, "AssumeRoleWithCustomToken") == 0) {
     assume_role_custom(c, &form, &c->q);
+  } else if (action && strcmp(action, "AssumeRoleWithCertificate") == 0) {
+    assume_role_certificate(c, &form, &c->q);
   } else if (action && strcmp(action, "AssumeRoleWithLDAPIdentity") == 0) {
     assume_role_ldap(c, &form, &c->q);
   } else {

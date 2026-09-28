@@ -3,7 +3,9 @@
 #define BUCKETS_NET_TLS_H
 
 #include <stddef.h>
+#include <time.h>
 
+#include "core/buf.h"
 #include "core/common.h"
 
 /* Server-side TLS over OpenSSL, laid out like MinIO's certs directory:
@@ -45,6 +47,39 @@ long buckets_tls_send(buckets_tls_conn *c, const void *buf, size_t n);
 /* Decrypted bytes already buffered, which the socket will not signal. */
 bool buckets_tls_pending(const buckets_tls_conn *c);
 /* ---- client side (internode) ---- */
+/* identity_tls (AssumeRoleWithCertificate): ask clients for a certificate
+ * during the handshake, without requiring or verifying it. */
+void buckets_tls_request_client_certs(buckets_tls *t, bool on);
+/* The client's certificates after the handshake, leaf first, appended to
+ * out as (uint32 length, DER) records. Returns how many. */
+size_t buckets_tls_peer_chain(buckets_tls_conn *c, buckets_buf *out);
+
+typedef enum {
+  BUCKETS_CERT_OK = 0,
+  BUCKETS_CERT_NONE,         /* no leaf certificate */
+  BUCKETS_CERT_MULTIPLE,     /* more than one leaf */
+  BUCKETS_CERT_TOO_MANY_CAS, /* more than 10 intermediates */
+  BUCKETS_CERT_INVALID,      /* does not verify for client authentication */
+  BUCKETS_CERT_BAD_USAGE,    /* (skip_verify) no clientAuth extended key usage */
+} buckets_cert_status;
+
+typedef struct {
+  char *cn;
+  char **orgs;
+  size_t norgs;
+  char *issuer_cn;
+  time_t not_after;
+} buckets_client_cert;
+void buckets_client_cert_free(buckets_client_cert *c);
+
+/* The checks of AssumeRoleWithCertificate: exactly one leaf (CAs among the
+ * certificates are intermediates), verified for client authentication
+ * against the system roots and ca_path (a file or directory), unless
+ * skip_verify, which still requires the clientAuth usage. */
+buckets_cert_status buckets_tls_check_client_cert(const buckets_buf *chain, size_t n, const char *ca_path,
+                                                  bool skip_verify, buckets_client_cert *out, char *err,
+                                                  size_t errlen);
+
 typedef struct buckets_tls_client buckets_tls_client;
 /* Trusts the system roots plus every PEM file in ca_dir (MinIO's certs/CAs),
  * or the certificates in ca_dir when it names a file (a CA bundle such as a
