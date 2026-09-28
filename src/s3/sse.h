@@ -78,6 +78,10 @@ int64_t buckets_s3_sse_actual_size(const buckets_object_info *oi);
 /* The ETag clients see: SSE-S3 single-part ETags are unsealed with key (NULL:
  * unseal via the KMS); others keep their last 32 hex digits. */
 void buckets_s3_sse_client_etag(s3_ctx *c, const buckets_object_info *oi, const uint8_t *key, char out[80]);
+/* Replaces an encrypted object's stored checksum (sealed with the object
+ * key, metadataEncrypter "object-checksum") with its plaintext; false when
+ * it does not open. */
+bool buckets_s3_sse_unseal_checksum(const uint8_t key[32], buckets_object_info *oi);
 /* x-amz-server-side-encryption* response headers for an encrypted object. */
 void buckets_s3_sse_headers(s3_ctx *c, const buckets_object_info *oi);
 /* The KMS key ID as AWS shows it ("arn:aws:kms:" + id), or "". */

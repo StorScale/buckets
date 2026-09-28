@@ -870,7 +870,19 @@ static void get_object(s3_ctx *c, bool head) {
   }
   if (part_number > 0 && oi.nparts > 1) buckets_http_resp_headerf(c->resp, "X-Amz-Mp-Parts-Count", "%zu", oi.nparts);
   buckets_str cm = buckets_http_header_get(c->req, "X-Amz-Checksum-Mode");
-  if (cm.p && buckets_str_eq_c(cm, "ENABLED") && oi.checksum && (!rs.present || part_number > 0)) {
+  bool cmode = cm.p && buckets_str_eq_c(cm, "ENABLED") && oi.checksum && (!rs.present || part_number > 0);
+  if (cmode && encrypted) {
+    uint8_t ck[32];
+    bool ok = buckets_s3_sse_object_key(c, &oi, c->bucket, c->object, false, ck) == BUCKETS_ERR_NONE;
+    if (ok) buckets_s3_sse_unseal_checksum(ck, &oi);
+    else {
+      free(oi.checksum);
+      oi.checksum = NULL;
+    }
+    OPENSSL_cleanse(ck, sizeof(ck));
+    cmode = oi.checksum != NULL;
+  }
+  if (cmode) {
     buckets_checksum_write_headers(oi.checksum, oi.checksum_len, (int)part_number, c->resp);
   }
   if (!head) response_overrides(c);
@@ -1988,6 +2000,26 @@ static void get_object_attributes(s3_ctx *c) {
     buckets_http_resp_header(c->resp, "X-Amz-Delete-Marker", "true");
     buckets_s3_write_error(c, version && *version ? BUCKETS_ERR_METHOD_NOT_ALLOWED : BUCKETS_ERR_NO_SUCH_KEY);
     buckets_object_info_free(&oi);
+    return;
+  }
+  /* DecryptObjectInfo, then decryptPartsChecksums */
+  buckets_s3_error serr = buckets_s3_sse_check_read(c, &oi, false);
+  if (!serr && buckets_s3_sse_encrypted(&oi)) {
+    uint8_t key[32];
+    serr = buckets_s3_sse_object_key(c, &oi, c->bucket, c->object, false, key);
+    if (!serr) {
+      char etag[80];
+      buckets_s3_sse_client_etag(c, &oi, key, etag);
+      snprintf(oi.etag, sizeof(oi.etag), "%s", etag);
+      oi.size = buckets_s3_sse_actual_size(&oi);
+      for (size_t k = 0; k < oi.nparts; k++) oi.parts[k].size = oi.parts[k].actual_size;
+      buckets_s3_sse_unseal_checksum(key, &oi);
+      OPENSSL_cleanse(key, sizeof(key));
+    }
+  }
+  if (serr) {
+    buckets_object_info_free(&oi);
+    buckets_s3_sse_write_error(c, serr);
     return;
   }
   if (check_preconditions(c, &oi)) {

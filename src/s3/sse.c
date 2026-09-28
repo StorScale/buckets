@@ -636,3 +636,23 @@ void buckets_sse_reader_free(void *ud) {
   free(r->plain);
   free(r);
 }
+
+bool buckets_s3_sse_unseal_checksum(const uint8_t key[32], buckets_object_info *oi) {
+  if (!oi->checksum || !oi->checksum_len) return true;
+  uint8_t k[32];
+  buckets_hmac_sha256(key, 32, "object-checksum", 15, k);
+  uint8_t *plain = buckets_xmalloc(oi->checksum_len);
+  long n = buckets_dare_decrypt_buffer(k, oi->checksum, oi->checksum_len, plain);
+  OPENSSL_cleanse(k, sizeof(k));
+  if (n < 0) {
+    free(plain);
+    free(oi->checksum);
+    oi->checksum = NULL;
+    oi->checksum_len = 0;
+    return false;
+  }
+  free(oi->checksum);
+  oi->checksum = plain;
+  oi->checksum_len = (size_t)n;
+  return true;
+}
