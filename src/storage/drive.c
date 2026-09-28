@@ -1,0 +1,280 @@
+/* SPDX-License-Identifier: AGPL-3.0-or-later */
+#include "storage/drive.h"
+
+#include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <yyjson.h>
+
+#include "core/buf.h"
+#include "core/log.h"
+
+/* format.json constants, matching MinIO cmd/format-meta.go and format-erasure.go. */
+#define FORMAT_META_VERSION "1"
+#define FORMAT_BACKEND_SINGLE "xl-single"
+#define FORMAT_BACKEND_ERASURE "xl"
+#define FORMAT_ERASURE_VERSION "3"
+#define FORMAT_DISTRIBUTION_ALGO "SIPMOD+PARITY"
+
+const char *buckets_drive_strerror(buckets_drive_err e) {
+  switch (e) {
+    case BUCKETS_DRIVE_OK: return "ok";
+    case BUCKETS_DRIVE_ERR_EXISTS: return "already exists";
+    case BUCKETS_DRIVE_ERR_NOT_FOUND: return "not found";
+    case BUCKETS_DRIVE_ERR_NOT_EMPTY: return "not empty";
+    case BUCKETS_DRIVE_ERR_CORRUPT: return "format.json is corrupt";
+    case BUCKETS_DRIVE_ERR_FOREIGN: return "drive belongs to an unsupported deployment layout";
+    case BUCKETS_DRIVE_ERR_IO: return "I/O error";
+  }
+  return "unknown";
+}
+
+static buckets_drive_err from_errno(int e) {
+  switch (e) {
+    case EEXIST: return BUCKETS_DRIVE_ERR_EXISTS;
+    case ENOENT: return BUCKETS_DRIVE_ERR_NOT_FOUND;
+    case ENOTEMPTY: return BUCKETS_DRIVE_ERR_NOT_EMPTY;
+    default: return BUCKETS_DRIVE_ERR_IO;
+  }
+}
+
+static char *path_join(const char *a, const char *b) {
+  buckets_buf p = BUCKETS_BUF_INIT;
+  buckets_buf_appendf(&p, "%s/%s", a, b);
+  return p.data;
+}
+
+static int mkdir_p(const char *path) {
+  char *tmp = buckets_xstrdup(path);
+  for (char *s = tmp + 1; *s; s++) {
+    if (*s != '/') continue;
+    *s = '\0';
+    if (mkdir(tmp, 0755) != 0 && errno != EEXIST) {
+      free(tmp);
+      return -1;
+    }
+    *s = '/';
+  }
+  int rc = (mkdir(tmp, 0755) == 0 || errno == EEXIST) ? 0 : -1;
+  free(tmp);
+  return rc;
+}
+
+static int fsync_dir(const char *dir) {
+  int fd = open(dir, O_RDONLY);
+  if (fd < 0) return -1;
+  int rc = fsync(fd);
+  close(fd);
+  return rc;
+}
+
+/* Writes data to <dir>/<name> atomically via a temp file + rename + fsync. */
+static buckets_drive_err write_atomic(buckets_drive *d, const char *dir, const char *name, const char *data,
+                                      size_t n) {
+  char tmpname[BUCKETS_UUID_STR_LEN + 1];
+  buckets_uuid_v4(tmpname);
+  char *tmpdir = path_join(d->root, BUCKETS_META_BUCKET "/tmp");
+  char *tmp = path_join(tmpdir, tmpname);
+  char *dst = path_join(dir, name);
+  buckets_drive_err err = BUCKETS_DRIVE_OK;
+
+  int fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+  if (fd < 0) {
+    err = from_errno(errno);
+    goto out;
+  }
+  size_t off = 0;
+  while (off < n) {
+    ssize_t w = write(fd, data + off, n - off);
+    if (w < 0 && errno == EINTR) continue;
+    if (w < 0) {
+      err = BUCKETS_DRIVE_ERR_IO;
+      break;
+    }
+    off += (size_t)w;
+  }
+  if (err == BUCKETS_DRIVE_OK && fsync(fd) != 0) err = BUCKETS_DRIVE_ERR_IO;
+  close(fd);
+  if (err == BUCKETS_DRIVE_OK && rename(tmp, dst) != 0) err = from_errno(errno);
+  if (err == BUCKETS_DRIVE_OK) fsync_dir(dir);
+  if (err != BUCKETS_DRIVE_OK) unlink(tmp);
+out:
+  free(tmpdir);
+  free(tmp);
+  free(dst);
+  return err;
+}
+
+static buckets_drive_err write_format(buckets_drive *d) {
+  yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+  yyjson_mut_val *root = yyjson_mut_obj(doc);
+  yyjson_mut_doc_set_root(doc, root);
+  yyjson_mut_obj_add_str(doc, root, "version", FORMAT_META_VERSION);
+  yyjson_mut_obj_add_str(doc, root, "format", FORMAT_BACKEND_SINGLE);
+  yyjson_mut_obj_add_str(doc, root, "id", d->deployment_id);
+  yyjson_mut_val *xl = yyjson_mut_obj_add_obj(doc, root, "xl");
+  yyjson_mut_obj_add_str(doc, xl, "version", FORMAT_ERASURE_VERSION);
+  yyjson_mut_obj_add_str(doc, xl, "this", d->drive_id);
+  yyjson_mut_val *sets = yyjson_mut_obj_add_arr(doc, xl, "sets");
+  yyjson_mut_val *set = yyjson_mut_arr_add_arr(doc, sets);
+  yyjson_mut_arr_add_str(doc, set, d->drive_id);
+  yyjson_mut_obj_add_str(doc, xl, "distributionAlgo", FORMAT_DISTRIBUTION_ALGO);
+
+  size_t len = 0;
+  char *json = yyjson_mut_write(doc, 0, &len);
+  yyjson_mut_doc_free(doc);
+  if (!json) return BUCKETS_DRIVE_ERR_IO;
+  char *meta = path_join(d->root, BUCKETS_META_BUCKET);
+  buckets_drive_err err = write_atomic(d, meta, "format.json", json, len);
+  free(meta);
+  free(json);
+  return err;
+}
+
+static buckets_drive_err read_format(buckets_drive *d, const char *path) {
+  yyjson_read_err rerr;
+  yyjson_doc *doc = yyjson_read_file(path, 0, NULL, &rerr);
+  if (!doc) return BUCKETS_DRIVE_ERR_CORRUPT;
+  buckets_drive_err err = BUCKETS_DRIVE_OK;
+  yyjson_val *root = yyjson_doc_get_root(doc);
+  const char *version = yyjson_get_str(yyjson_obj_get(root, "version"));
+  const char *format = yyjson_get_str(yyjson_obj_get(root, "format"));
+  const char *id = yyjson_get_str(yyjson_obj_get(root, "id"));
+  yyjson_val *xl = yyjson_obj_get(root, "xl");
+  const char *this_id = yyjson_get_str(yyjson_obj_get(xl, "this"));
+  const char *xl_version = yyjson_get_str(yyjson_obj_get(xl, "version"));
+  if (!version || !format || !id || !this_id || !xl_version || strcmp(version, FORMAT_META_VERSION) != 0 ||
+      strlen(id) != BUCKETS_UUID_STR_LEN || strlen(this_id) != BUCKETS_UUID_STR_LEN) {
+    err = BUCKETS_DRIVE_ERR_CORRUPT;
+  } else if (strcmp(format, FORMAT_BACKEND_SINGLE) != 0 || strcmp(xl_version, FORMAT_ERASURE_VERSION) != 0) {
+    /* Multi-drive "xl" drives are adopted by the erasure layer, not here. */
+    err = BUCKETS_DRIVE_ERR_FOREIGN;
+  } else {
+    memcpy(d->deployment_id, id, BUCKETS_UUID_STR_LEN + 1);
+    memcpy(d->drive_id, this_id, BUCKETS_UUID_STR_LEN + 1);
+  }
+  yyjson_doc_free(doc);
+  return err;
+}
+
+buckets_drive_err buckets_drive_open(const char *path, buckets_drive **out) {
+  buckets_drive *d = buckets_xcalloc(1, sizeof(*d));
+  d->root = buckets_xstrdup(path);
+  size_t rl = strlen(d->root);
+  while (rl > 1 && d->root[rl - 1] == '/') d->root[--rl] = '\0';
+
+  static const char *const meta_dirs[] = {"tmp", "buckets", "multipart", "config"};
+  buckets_drive_err err = BUCKETS_DRIVE_OK;
+  for (size_t i = 0; i < BUCKETS_ARRAY_LEN(meta_dirs); i++) {
+    buckets_buf p = BUCKETS_BUF_INIT;
+    buckets_buf_appendf(&p, "%s/" BUCKETS_META_BUCKET "/%s", d->root, meta_dirs[i]);
+    int rc = mkdir_p(p.data);
+    buckets_buf_free(&p);
+    if (rc != 0) {
+      buckets_log_error("create %s/%s: %s", d->root, meta_dirs[i], strerror(errno));
+      err = BUCKETS_DRIVE_ERR_IO;
+      goto fail;
+    }
+  }
+
+  char *fmt = path_join(d->root, BUCKETS_META_BUCKET "/format.json");
+  struct stat st;
+  if (stat(fmt, &st) == 0) {
+    err = read_format(d, fmt);
+  } else if (errno == ENOENT) {
+    buckets_uuid_v4(d->deployment_id);
+    buckets_uuid_v4(d->drive_id);
+    err = write_format(d);
+    d->freshly_formatted = err == BUCKETS_DRIVE_OK;
+  } else {
+    err = BUCKETS_DRIVE_ERR_IO;
+  }
+  free(fmt);
+  if (err != BUCKETS_DRIVE_OK) goto fail;
+  *out = d;
+  return BUCKETS_DRIVE_OK;
+
+fail:
+  buckets_drive_close(d);
+  return err;
+}
+
+void buckets_drive_close(buckets_drive *d) {
+  if (!d) return;
+  free(d->root);
+  free(d);
+}
+
+buckets_drive_err buckets_drive_make_vol(buckets_drive *d, const char *name) {
+  char *p = path_join(d->root, name);
+  buckets_drive_err err = mkdir(p, 0755) == 0 ? BUCKETS_DRIVE_OK : from_errno(errno);
+  if (err == BUCKETS_DRIVE_OK) fsync_dir(d->root);
+  free(p);
+  return err;
+}
+
+buckets_drive_err buckets_drive_stat_vol(buckets_drive *d, const char *name, time_t *created) {
+  char *p = path_join(d->root, name);
+  struct stat st;
+  buckets_drive_err err = BUCKETS_DRIVE_OK;
+  if (stat(p, &st) != 0) {
+    err = from_errno(errno);
+  } else if (!S_ISDIR(st.st_mode)) {
+    err = BUCKETS_DRIVE_ERR_NOT_FOUND;
+  } else if (created) {
+    /* Same as MinIO's StatVol (directory mtime). The authoritative creation
+     * time moves to .minio.sys/buckets/<b>/.metadata.bin with bucket metadata. */
+    *created = st.st_mtime;
+  }
+  free(p);
+  return err;
+}
+
+buckets_drive_err buckets_drive_delete_vol(buckets_drive *d, const char *name) {
+  char *p = path_join(d->root, name);
+  buckets_drive_err err = BUCKETS_DRIVE_OK;
+  if (rmdir(p) != 0) {
+    /* POSIX allows EEXIST for a non-empty directory. */
+    err = errno == EEXIST ? BUCKETS_DRIVE_ERR_NOT_EMPTY : from_errno(errno);
+  } else {
+    fsync_dir(d->root);
+  }
+  free(p);
+  return err;
+}
+
+static int vol_cmp(const void *a, const void *b) {
+  return strcmp(((const buckets_vol_info *)a)->name, ((const buckets_vol_info *)b)->name);
+}
+
+buckets_drive_err buckets_drive_list_vols(buckets_drive *d, buckets_vol_info **vols, size_t *n) {
+  *vols = NULL;
+  *n = 0;
+  DIR *dir = opendir(d->root);
+  if (!dir) return from_errno(errno);
+  struct dirent *ent;
+  size_t cap = 0;
+  while ((ent = readdir(dir)) != NULL) {
+    if (ent->d_name[0] == '.') continue;
+    time_t created;
+    if (buckets_drive_stat_vol(d, ent->d_name, &created) != BUCKETS_DRIVE_OK) continue;
+    if (*n == cap) {
+      cap = cap ? cap * 2 : 16;
+      *vols = buckets_xrealloc(*vols, cap * sizeof(buckets_vol_info));
+    }
+    (*vols)[(*n)++] = (buckets_vol_info){buckets_xstrdup(ent->d_name), created};
+  }
+  closedir(dir);
+  if (*n) qsort(*vols, *n, sizeof(buckets_vol_info), vol_cmp);
+  return BUCKETS_DRIVE_OK;
+}
+
+void buckets_vol_info_free(buckets_vol_info *vols, size_t n) {
+  for (size_t i = 0; i < n; i++) free(vols[i].name);
+  free(vols);
+}

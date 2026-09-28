@@ -1,0 +1,6 @@
+BasedOnStyle: Google
+ColumnLimit: 110
+IndentWidth: 2
+AllowShortCaseLabelsOnASingleLine: true
+AllowShortIfStatementsOnASingleLine: WithoutElse
+SortIncludes: true

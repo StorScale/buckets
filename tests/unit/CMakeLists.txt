@@ -1,0 +1,11 @@
+function(buckets_unit_test name)
+  add_executable(${name} ${name}.c)
+  target_link_libraries(${name} PRIVATE buckets cmocka::cmocka)
+  add_test(NAME ${name} COMMAND ${name})
+endfunction()
+
+buckets_unit_test(test_crypto)
+buckets_unit_test(test_core)
+buckets_unit_test(test_xml)
+buckets_unit_test(test_sigv4)
+buckets_unit_test(test_drive)

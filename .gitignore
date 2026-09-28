@@ -1,0 +1,11 @@
+/build*/
+/out/
+compile_commands.json
+.cache/
+*.o
+*.a
+*.dSYM/
+crash-*
+leak-*
+timeout-*
+.DS_Store

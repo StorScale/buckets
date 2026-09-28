@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# The full CI gate, runnable locally and from any CI host:
+#   1. release build + unit tests + fuzz corpus replay
+#   2. ASan/UBSan build + unit tests + end-to-end smoke test
+#   3. TSan build + unit tests (Linux only; the server is single-threaded today)
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+run() { echo "+ $*"; "$@"; }
+
+build() {
+  local dir=$1
+  shift
+  run cmake -S . -B "$dir" -G Ninja "$@" >/dev/null
+  run ninja -C "$dir"
+  run ctest --test-dir "$dir" --output-on-failure
+}
+
+build build-ci -DCMAKE_BUILD_TYPE=RelWithDebInfo
+run tests/integration/smoke.sh build-ci/src/bucketsd
+
+build build-ci-asan -DCMAKE_BUILD_TYPE=Debug -DBUCKETS_SANITIZE=address,undefined
+run tests/integration/smoke.sh build-ci-asan/src/bucketsd
+
+if [[ "$(uname -s)" == Linux ]]; then
+  build build-ci-tsan -DCMAKE_BUILD_TYPE=Debug -DBUCKETS_SANITIZE=thread
+fi
+
+echo "ci: all gates passed"
