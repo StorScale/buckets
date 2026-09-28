@@ -405,6 +405,7 @@ buckets_s3_error buckets_sigv4_verify_header(const buckets_sigv4_config *cfg, co
 
   char payload[80];
   buckets_str ph = buckets_http_header_get(req, "X-Amz-Content-Sha256");
+  if (cfg->payload_hash) ph = buckets_str_c(cfg->payload_hash);
   snprintf(payload, sizeof(payload), BUCKETS_STR_FMT, ph.p ? (int)ph.n : (int)strlen(BUCKETS_EMPTY_SHA256),
            ph.p ? ph.p : BUCKETS_EMPTY_SHA256);
 

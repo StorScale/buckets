@@ -577,8 +577,13 @@ void buckets_s3_handle(const buckets_http_request *req, buckets_http_response *r
     else buckets_admin_handle(&c);
     goto done;
   }
+  c.auth = buckets_auth_classify(req, &c.q);
+  if (buckets_sts_matches(&c)) {
+    buckets_sts_handle(&c);
+    goto done;
+  }
   if (buckets_str_has_prefix(req->path, "/minio/")) {
-    err = BUCKETS_ERR_NOT_IMPLEMENTED; /* STS, metrics and peer APIs come later */
+    err = BUCKETS_ERR_NOT_IMPLEMENTED; /* metrics and other MinIO APIs come later */
     goto fail;
   }
   if ((err = authenticate(&c)) != BUCKETS_ERR_NONE) goto fail;

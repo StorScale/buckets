@@ -44,6 +44,9 @@ typedef struct {
   time_t now;
   buckets_secret_lookup lookup;
   void *lookup_ud;
+  /* The body's hex SHA-256 to sign over instead of X-Amz-Content-Sha256
+   * (STS computes it from the body, as getContentSha256Cksum does). */
+  const char *payload_hash;
 } buckets_sigv4_config;
 
 typedef struct {

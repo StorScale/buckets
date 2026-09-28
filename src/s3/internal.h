@@ -40,6 +40,11 @@ typedef struct {
   buckets_iam_key_status key_status; /* from the signature's key lookup */
 } s3_ctx;
 
+/* ---- STS (sts.c) ---- */
+/* POST / with a form body and no query: MinIO's STS route. */
+bool buckets_sts_matches(const s3_ctx *c);
+void buckets_sts_handle(s3_ctx *c);
+
 /* ---- authorization (auth.c) ---- */
 /* IAMSys.IsAllowed with this request's condition values (anonymous
  * requests: the bucket policy). */

@@ -105,6 +105,29 @@ ok mc admin user svcacct rm root alicesvc02
 # A user creates a service account for itself.
 ok mc admin user svcacct add alice alice --access-key alicesvc03 --secret-key alicesvcsecret3
 
+echo "== STS AssumeRole"
+sts() { # user secret [extra --data-urlencode args...]
+  local u=$1 p=$2; shift 2
+  curl -s --aws-sigv4 "aws:amz:us-east-1:sts" --user "$u:$p" -X POST \
+    -H "Content-Type: application/x-www-form-urlencoded" --data-urlencode Action=AssumeRole \
+    --data-urlencode Version=2011-06-15 "$@" "$EP/"
+}
+xml() { sed -n "s:.*<$1>\(.*\)</$1>.*:\1:p"; }
+r=$(sts alice alicesecret123 --data-urlencode DurationSeconds=900)
+tak=$(xml AccessKeyId <<<"$r"); tsk=$(xml SecretAccessKey <<<"$r"); ttok=$(xml SessionToken <<<"$r")
+[[ -n "$tak" && -n "$ttok" ]] || fail "AssumeRole: $r"
+s3tmp() { curl -sf --aws-sigv4 "aws:amz:us-east-1:s3" --user "$tak:$tsk" "$@"; }
+[[ "$(s3tmp -H "X-Amz-Security-Token: $ttok" "$EP/photos/a.txt")" == hello ]] || fail "STS read"
+denied s3tmp -H "X-Amz-Security-Token: $ttok" "$EP/logs/f.txt"
+denied s3tmp "$EP/photos/a.txt" # the token is required
+r=$(sts alice alicesecret123 --data-urlencode \
+  'Policy={"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetObject"],"Resource":["arn:aws:s3:::photos/a.txt"]}]}')
+tak=$(xml AccessKeyId <<<"$r"); tsk=$(xml SecretAccessKey <<<"$r"); ttok=$(xml SessionToken <<<"$r")
+ok s3tmp -H "X-Amz-Security-Token: $ttok" "$EP/photos/a.txt"
+denied s3tmp -H "X-Amz-Security-Token: $ttok" -X PUT --data x "$EP/photos/q.txt"
+# Service accounts cannot assume roles.
+sts alicesvc01 alicesvcsecret1 | grep AccessDenied >/dev/null || fail "svcacct AssumeRole should be denied"
+
 echo "== disabled users"
 ok mc admin user disable root alice
 out=$(mc cat alice/photos/a.txt 2>&1 || true)

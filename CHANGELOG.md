@@ -38,6 +38,10 @@ All notable changes to this project are documented here. The format follows
     - list-, info-, add- and remove-canned-policy, set-user-or-group-policy, and `idp/builtin/policy/attach|detach`
     - add-, update-, info-, list- and delete-service-account
     - madmin encryption where MinIO uses it, and JSON errors
+  - STS `AssumeRole`:
+    - SigV4 for the `sts` service, over the body's hash
+    - session policies, `DurationSeconds`, and `MINIO_STS_DURATION`
+    - MinIO's XML responses and errors
   - Tests:
     - `tests/integration/iam.sh`: the `mc admin` suite, including a restart
     - `tests/integration/iam-interop.sh`: IAM state written by real MinIO is honoured by bucketsd, and the reverse
