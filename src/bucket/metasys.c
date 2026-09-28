@@ -74,6 +74,12 @@ static buckets_bucket_state *build(const char *bucket, buckets_bucket_meta *meta
       buckets_log_warn("bucket %s: stored object lock configuration does not parse: %s", bucket, err);
   }
   st->lock_enabled = st->meta.lock_enabled || st->object_lock.enabled;
+  const buckets_buf *qt = &st->meta.config[BUCKETS_BCFG_QUOTA];
+  if (qt->len) {
+    char err[256];
+    st->has_quota = buckets_quota_parse(qt->data, qt->len, &st->quota, err, sizeof(err));
+    if (!st->has_quota) buckets_log_warn("bucket %s: stored quota configuration does not parse: %s", bucket, err);
+  }
   const buckets_buf *ver = &st->meta.config[BUCKETS_BCFG_VERSIONING];
   if (ver->len) {
     char err[256];

@@ -209,14 +209,29 @@ static void ldap_sync(buckets_s3_server *s) {
   buckets_ldapidp_release(p);
 }
 
+/* Sleeps up to ms; false when the server is stopping. */
+static bool bg_sleep(buckets_s3_server *s, long ms) {
+  struct timespec until;
+  clock_gettime(CLOCK_REALTIME, &until);
+  until.tv_sec += ms / 1000;
+  until.tv_nsec += (ms % 1000) * 1000000L;
+  if (until.tv_nsec >= 1000000000L) {
+    until.tv_sec++;
+    until.tv_nsec -= 1000000000L;
+  }
+  pthread_mutex_lock(&s->bg_mu);
+  while (!s->bg_stop && pthread_cond_timedwait(&s->bg_cv, &s->bg_mu, &until) == 0) {
+  }
+  bool stop = s->bg_stop;
+  pthread_mutex_unlock(&s->bg_mu);
+  return !stop;
+}
+
 static void *ldap_sync_main(void *arg) {
   buckets_s3_server *s = arg;
   const char *env = getenv("BUCKETS_LDAP_SYNC_INTERVAL");
   int interval = env && atoi(env) > 0 ? atoi(env) : 3600; /* MinIO: once an hour */
-  for (;;) {
-    sleep((unsigned)interval);
-    ldap_sync(s);
-  }
+  while (bg_sleep(s, interval * 1000L)) ldap_sync(s);
   return NULL;
 }
 
@@ -332,6 +347,8 @@ void buckets_s3_server_init(buckets_s3_server *s, buckets_objlayer *layer, const
   pthread_mutex_init(&s->oidc_mu, NULL);
   pthread_mutex_init(&s->freeze_mu, NULL);
   pthread_cond_init(&s->freeze_cv, NULL);
+  pthread_mutex_init(&s->bg_mu, NULL);
+  pthread_cond_init(&s->bg_cv, NULL);
   g_region = s->region;
   buckets_config_register_validator("identity_openid", validate_openid);
   buckets_config_register_validator("identity_ldap", validate_ldap);
@@ -352,8 +369,7 @@ static void *iam_start_main(void *arg) {
   char err[512];
   while (!buckets_config_sys_load(s->config, s->layer, err, sizeof(err))) {
     buckets_log_warn("config: %s; retrying", err);
-    struct timespec ts = {delay_ms / 1000, (delay_ms % 1000) * 1000000L};
-    nanosleep(&ts, NULL);
+    if (!bg_sleep(s, delay_ms)) return NULL;
     if (delay_ms < 5000) delay_ms *= 2;
   }
   rebuild_openid(s);
@@ -363,18 +379,18 @@ static void *iam_start_main(void *arg) {
   delay_ms = 250;
   while (!buckets_iam_start(s->iam, s->layer)) {
     buckets_log_warn("iam: unable to load IAM data yet, retrying");
-    struct timespec ts = {delay_ms / 1000, (delay_ms % 1000) * 1000000L};
-    nanosleep(&ts, NULL);
+    if (!bg_sleep(s, delay_ms)) return NULL;
     if (delay_ms < 5000) delay_ms *= 2;
   }
+  pthread_mutex_lock(&s->bg_mu);
+  bool stopping = s->bg_stop;
+  pthread_mutex_unlock(&s->bg_mu);
+  if (stopping) return NULL;
   const char *env = getenv("BUCKETS_IAM_REFRESH_INTERVAL");
   if (!env) env = getenv("MINIO_IAM_REFRESH_INTERVAL");
   int interval = env ? atoi(env) : 600;
   buckets_iam_start_refresh(s->iam, interval > 0 ? interval : 600);
-  if (buckets_iam_ldap_mode(s->iam)) {
-    pthread_t t;
-    if (pthread_create(&t, NULL, ldap_sync_main, s) == 0) pthread_detach(t);
-  }
+  if (buckets_iam_ldap_mode(s->iam)) s->ldap_thread_started = pthread_create(&s->ldap_thread, NULL, ldap_sync_main, s) == 0;
   return NULL;
 }
 
@@ -385,8 +401,19 @@ void buckets_s3_server_set_layer(buckets_s3_server *s, buckets_objlayer *layer) 
   s->meta = buckets_metasys_new(layer, s->meta_ttl_ms);
   buckets_metasys_set_notify(s->meta, notify_bucket, s);
   s->layer = layer; /* atomic store, after host_id and meta */
-  pthread_t t;
-  if (pthread_create(&t, NULL, iam_start_main, s) == 0) pthread_detach(t);
+  s->iam_thread_started = pthread_create(&s->iam_thread, NULL, iam_start_main, s) == 0;
+}
+
+void buckets_s3_server_stop(buckets_s3_server *s) {
+  pthread_mutex_lock(&s->bg_mu);
+  s->bg_stop = true;
+  pthread_cond_broadcast(&s->bg_cv);
+  pthread_mutex_unlock(&s->bg_mu);
+  if (s->iam_thread_started) pthread_join(s->iam_thread, NULL); /* it starts the others */
+  s->iam_thread_started = false;
+  if (s->ldap_thread_started) pthread_join(s->ldap_thread, NULL);
+  s->ldap_thread_started = false;
+  buckets_iam_stop_refresh(s->iam);
 }
 
 /* ---- response helpers ---------------------------------------------------- */
@@ -414,6 +441,27 @@ void buckets_s3_write_error_msg(s3_ctx *c, buckets_s3_error e, const char *messa
 
 void buckets_s3_write_error(s3_ctx *c, buckets_s3_error e) { buckets_s3_write_error_msg(c, e, NULL); }
 
+void buckets_s3_write_rejected(s3_ctx *c) {
+  /* notImplementedHandler runs before any handler names the bucket or key */
+  char *b = c->bucket, *o = c->object;
+  c->bucket = c->object = NULL;
+  buckets_s3_write_error(c, BUCKETS_ERR_NOT_IMPLEMENTED);
+  c->bucket = b;
+  c->object = o;
+}
+
+/* Real MinIO sub-resources not implemented yet: NotImplemented rather than
+ * falling through to the catch-all bucket routes. */
+static bool pending_subresource(const s3_ctx *c, bool put) {
+  static const char *const put_pending[] = {"encryption", "lifecycle", "notification", "replication", "replication-reset"};
+  static const char *const del_pending[] = {"encryption", "lifecycle", "replication"};
+  const char *const *list = put ? put_pending : del_pending;
+  size_t n = put ? BUCKETS_ARRAY_LEN(put_pending) : BUCKETS_ARRAY_LEN(del_pending);
+  for (size_t i = 0; i < n; i++)
+    if (buckets_query_has(&c->q, list[i])) return true;
+  return false;
+}
+
 void buckets_s3_write_custom_error(s3_ctx *c, int status, const char *code, const char *message) {
   c->resp->status = status;
   buckets_http_resp_header(c->resp, "Content-Type", "application/xml");
@@ -425,8 +473,8 @@ void buckets_s3_write_custom_error(s3_ctx *c, int status, const char *code, cons
   buckets_xml_elem(b, "Message", message);
   const char *eo = c->err_object ? c->err_object : c->object;
   const char *eb = c->err_bucket ? c->err_bucket : c->bucket;
-  if (eo) buckets_xml_elem(b, "Key", eo);
-  if (eb) buckets_xml_elem(b, "BucketName", eb);
+  if (eo && *eo) buckets_xml_elem(b, "Key", eo);
+  if (eb && *eb) buckets_xml_elem(b, "BucketName", eb);
   buckets_xml_elem(b, "Resource", c->path ? c->path : "/");
   buckets_xml_elem(b, "RequestId", c->request_id);
   buckets_xml_elem(b, "HostId", c->s->host_id);
@@ -915,25 +963,25 @@ static bool has_unhandled_subresource(const buckets_query *q) {
 static bool authorize_bucket_request(s3_ctx *c) {
   buckets_str m = c->req->method;
   const char *action = NULL;
-  if (buckets_query_has(&c->q, "acl")) {
-    if (buckets_str_eq_c(m, "GET")) action = "s3:GetBucketPolicy";
-    else if (buckets_str_eq_c(m, "PUT")) action = "s3:PutBucketPolicy";
-  } else if (buckets_query_has(&c->q, "policy")) {
+  if (buckets_query_has(&c->q, "acl") && (buckets_str_eq_c(m, "GET") || buckets_str_eq_c(m, "PUT"))) {
+    action = buckets_str_eq_c(m, "GET") ? "s3:GetBucketPolicy" : "s3:PutBucketPolicy";
+  } else if (buckets_query_has(&c->q, "policy") && !buckets_str_eq_c(m, "HEAD") && !buckets_str_eq_c(m, "POST")) {
     if (buckets_str_eq_c(m, "GET")) action = "s3:GetBucketPolicy";
     else if (buckets_str_eq_c(m, "PUT")) action = "s3:PutBucketPolicy";
     else if (buckets_str_eq_c(m, "DELETE")) action = "s3:DeleteBucketPolicy";
   } else if (buckets_str_eq_c(m, "PUT")) {
-    if (c->q.n == 0) action = "s3:CreateBucket";
-    else if (buckets_query_has(&c->q, "versioning")) action = "s3:PutBucketVersioning";
+    if (buckets_query_has(&c->q, "versioning")) action = "s3:PutBucketVersioning";
     else if (buckets_query_has(&c->q, "object-lock")) action = "s3:PutBucketObjectLockConfiguration";
     else if (buckets_query_has(&c->q, "tagging")) action = "s3:PutBucketTagging";
+    else if (!pending_subresource(c, true)) action = "s3:CreateBucket"; /* the catch-all PUT route */
   } else if (buckets_str_eq_c(m, "HEAD")) {
     if (buckets_s3_authorize(c, "s3:HeadBucket", c->bucket, NULL, NULL) == BUCKETS_ERR_NONE) return true;
     action = "s3:ListBucket";
   } else if (buckets_str_eq_c(m, "DELETE")) {
     buckets_str force = buckets_http_header_get(c->req, "X-Minio-Force-Delete");
-    if (c->q.n == 0) action = force.p && buckets_str_ieq_c(force, "true") ? "s3:ForceDeleteBucket" : "s3:DeleteBucket";
-    else if (buckets_query_has(&c->q, "tagging")) action = "s3:PutBucketTagging"; /* as MinIO */
+    if (buckets_query_has(&c->q, "tagging")) action = "s3:PutBucketTagging"; /* as MinIO */
+    else if (!pending_subresource(c, false))
+      action = force.p && buckets_str_ieq_c(force, "true") ? "s3:ForceDeleteBucket" : "s3:DeleteBucket";
   } else if (buckets_str_eq_c(m, "GET")) {
     if (buckets_query_has(&c->q, "location")) action = "s3:GetBucketLocation";
     else if (buckets_query_has(&c->q, "versioning")) action = "s3:GetBucketVersioning";
@@ -947,6 +995,92 @@ static bool authorize_bucket_request(s3_ctx *c) {
   return !action || buckets_s3_require(c, action, c->bucket, NULL, NULL);
 }
 
+/* Sub-resources MinIO answers with fixed responses (dummy-handlers.go) or
+ * rejects outright (rejectedBucketAPIs, which skip authorization). Returns
+ * true when the request was one of them. */
+static bool route_dummy_bucket(s3_ctx *c) {
+  /* rejectedBucketAPIs register after the catch-all PUT, DELETE and HEAD
+   * bucket routes, so only their GETs are ever reached. */
+  static const char *const rejected_get[] = {"inventory",         "metrics",             "publicAccessBlock",
+                                             "ownershipControls", "intelligent-tiering", "analytics"};
+  static const struct {
+    const char *query, *body; /* body NULL: an error */
+    buckets_s3_error err;
+  } get_dummies[] = {
+      {"website", NULL, BUCKETS_ERR_NO_SUCH_WEBSITE_CONFIGURATION},
+      {"accelerate",
+       "<?xml version=\"1.0\" encoding=\"UTF-8\"?><AccelerateConfiguration "
+       "xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"/>",
+       BUCKETS_ERR_NONE},
+      {"requestPayment",
+       "<?xml version=\"1.0\" encoding=\"UTF-8\"?><RequestPaymentConfiguration "
+       "xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Payer>BucketOwner</Payer></RequestPaymentConfiguration>",
+       BUCKETS_ERR_NONE},
+      {"logging",
+       "<?xml version=\"1.0\" encoding=\"UTF-8\"?><BucketLoggingStatus "
+       "xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><!--<LoggingEnabled><TargetBucket>myLogsBucket</TargetBucket>"
+       "<TargetPrefix>add/this/prefix/to/my/log/files/access_log-</TargetPrefix></LoggingEnabled>--></BucketLoggingStatus>",
+       BUCKETS_ERR_NONE},
+  };
+  buckets_str m = c->req->method;
+  char mc = m.n ? m.p[0] : 0;
+  bool get = buckets_str_eq_c(m, "GET");
+
+  if (buckets_query_has(&c->q, "cors") && (get || buckets_str_eq_c(m, "PUT") || buckets_str_eq_c(m, "DELETE"))) {
+    const char *action = get ? "s3:GetBucketCors" : mc == 'P' ? "s3:PutBucketCors" : "s3:DeleteBucketCors";
+    if (!buckets_s3_require(c, action, c->bucket, NULL, NULL)) return true;
+    if (!bucket_exists(c)) buckets_s3_write_error(c, BUCKETS_ERR_NO_SUCH_BUCKET);
+    else buckets_s3_write_error(c, get ? BUCKETS_ERR_NO_SUCH_CORS_CONFIGURATION : BUCKETS_ERR_NOT_IMPLEMENTED);
+    return true;
+  }
+  if (get) {
+    for (size_t i = 0; i < BUCKETS_ARRAY_LEN(get_dummies); i++) {
+      if (!buckets_query_has(&c->q, get_dummies[i].query)) continue;
+      if (!buckets_s3_require(c, "s3:GetBucketPolicy", c->bucket, NULL, NULL)) return true;
+      if (!bucket_exists(c)) {
+        buckets_s3_write_error(c, BUCKETS_ERR_NO_SUCH_BUCKET);
+      } else if (!get_dummies[i].body) {
+        buckets_s3_write_error(c, get_dummies[i].err);
+      } else {
+        buckets_buf_append_c(&c->resp->body, get_dummies[i].body);
+        buckets_s3_write_xml(c, 200);
+      }
+      return true;
+    }
+    if (buckets_query_has(&c->q, "policyStatus")) {
+      if (buckets_s3_authorize(c, "s3:GetBucketPolicyStatus", c->bucket, NULL, NULL) != BUCKETS_ERR_NONE) {
+        buckets_s3_require(c, "s3:GetBucketPolicyStatus", c->bucket, NULL, NULL);
+        buckets_buf_reset(&c->resp->body); /* writeErrorResponseHeadersOnly */
+        return true;
+      }
+      if (!bucket_exists(c)) {
+        buckets_s3_write_error(c, BUCKETS_ERR_NO_SUCH_BUCKET);
+        return true;
+      }
+      bool pub = buckets_s3_bucket_policy_allows(c, "s3:ListBucket", c->bucket, NULL) &&
+                 buckets_s3_bucket_policy_allows(c, "s3:PutObject", c->bucket, NULL);
+      buckets_buf *b = &c->resp->body;
+      buckets_xml_header(b);
+      buckets_xml_open_ns(b, "PolicyStatus", BUCKETS_S3_XMLNS);
+      buckets_xml_elem(b, "IsPublic", pub ? "TRUE" : "FALSE");
+      buckets_xml_close(b, "PolicyStatus");
+      buckets_s3_write_xml(c, 200);
+      return true;
+    }
+  }
+  if (buckets_str_eq_c(m, "DELETE") && buckets_query_has(&c->q, "website")) {
+    c->resp->status = 200; /* DeleteBucketWebsiteHandler: success, nothing else */
+    return true;
+  }
+  for (size_t i = 0; get && i < BUCKETS_ARRAY_LEN(rejected_get); i++) {
+    if (buckets_query_has(&c->q, rejected_get[i])) {
+      buckets_s3_write_rejected(c);
+      return true;
+    }
+  }
+  return false;
+}
+
 static void route_bucket(s3_ctx *c) {
   if (buckets_bucket_name_reserved(c->bucket)) {
     buckets_s3_write_error(c, BUCKETS_ERR_ALL_ACCESS_DISABLED);
@@ -957,20 +1091,15 @@ static void route_bucket(s3_ctx *c) {
     return;
   }
   buckets_str m = c->req->method;
+  if (route_dummy_bucket(c)) return;
   if (!authorize_bucket_request(c)) return;
-  if (buckets_query_has(&c->q, "acl")) {
-    if (!bucket_exists(c)) {
-      buckets_s3_write_error(c, BUCKETS_ERR_NO_SUCH_BUCKET);
-    } else if (buckets_str_eq_c(m, "GET")) {
-      buckets_s3_write_private_acl(c);
-    } else if (buckets_str_eq_c(m, "PUT")) {
-      buckets_s3_put_acl(c);
-    } else {
-      buckets_s3_write_error(c, BUCKETS_ERR_METHOD_NOT_ALLOWED);
-    }
+  if (buckets_query_has(&c->q, "acl") && (buckets_str_eq_c(m, "GET") || buckets_str_eq_c(m, "PUT"))) {
+    if (!bucket_exists(c)) buckets_s3_write_error(c, BUCKETS_ERR_NO_SUCH_BUCKET);
+    else if (buckets_str_eq_c(m, "GET")) buckets_s3_write_private_acl(c);
+    else buckets_s3_put_acl(c);
     return;
   }
-  if (buckets_query_has(&c->q, "policy")) {
+  if (buckets_query_has(&c->q, "policy") && !buckets_str_eq_c(m, "HEAD") && !buckets_str_eq_c(m, "POST")) {
     if (!bucket_exists(c)) buckets_s3_write_error(c, BUCKETS_ERR_NO_SUCH_BUCKET);
     else if (buckets_str_eq_c(m, "GET")) get_bucket_policy(c);
     else if (buckets_str_eq_c(m, "PUT")) put_bucket_policy(c);
@@ -994,11 +1123,11 @@ static void route_bucket(s3_ctx *c) {
       else buckets_s3_put_bucket_tagging(c);
       return;
     }
-    if (c->q.n > 0) {
+    if (pending_subresource(c, true)) {
       buckets_s3_write_error(c, BUCKETS_ERR_NOT_IMPLEMENTED);
       return;
     }
-    create_bucket(c);
+    create_bucket(c); /* PutBucketHandler takes any other query */
     return;
   }
 
@@ -1024,11 +1153,11 @@ static void route_bucket(s3_ctx *c) {
       buckets_s3_delete_bucket_tagging(c);
       return;
     }
-    if (c->q.n > 0) {
+    if (pending_subresource(c, false)) {
       buckets_s3_write_error(c, BUCKETS_ERR_NOT_IMPLEMENTED);
       return;
     }
-    delete_bucket(c);
+    delete_bucket(c); /* DeleteBucketHandler takes any other query */
     return;
   }
   if (buckets_str_eq_c(m, "GET")) {
@@ -1078,8 +1207,93 @@ static bool is_health_path(buckets_str path) {
   return false;
 }
 
+/* ---- CORS (MinIO's corsHandler around github.com/rs/cors) ---------------- */
+
+/* wildcard.MatchSimple: '*' matches any run, '?' one character. */
+static bool wildcard_match(const char *pat, const char *s) {
+  for (; *pat; pat++, s++) {
+    if (*pat == '*') {
+      if (!pat[1]) return true;
+      for (; *s; s++)
+        if (wildcard_match(pat + 1, s)) return true;
+      return wildcard_match(pat + 1, s);
+    }
+    if (!*s || (*pat != '?' && *pat != *s)) return false;
+  }
+  return !*s;
+}
+
+/* An origin in `api cors_allow_origin` (comma separated, default "*"). */
+static bool cors_origin_allowed(buckets_s3_server *s, const char *origin) {
+  char *list = s->config ? buckets_config_sys_value(s->config, "api", "", "cors_allow_origin") : NULL;
+  if (!list) list = buckets_xstrdup("*");
+  bool ok = false;
+  for (char *save = NULL, *o = strtok_r(list, ",", &save); o && !ok; o = strtok_r(NULL, ",", &save)) {
+    while (*o == ' ') o++;
+    ok = wildcard_match(o, origin);
+  }
+  free(list);
+  return ok;
+}
+
+static bool cors_method_allowed(buckets_str m) {
+  static const char *const methods[] = {"GET", "PUT", "HEAD", "POST", "DELETE", "OPTIONS", "PATCH"};
+  for (size_t i = 0; i < BUCKETS_ARRAY_LEN(methods); i++)
+    if (buckets_str_eq_c(m, methods[i])) return true;
+  return false;
+}
+
+#define CORS_EXPOSE                                                                                                   \
+  "Date, Etag, Server, Connection, Accept-Ranges, Content-Range, Content-Encoding, Content-Length, Content-Type, "   \
+  "Content-Disposition, Last-Modified, Content-Language, Cache-Control, Retry-After, X-Amz-Bucket-Region, Expires, " \
+  "X-Amz*, X-Amz*, *"
+
+/* A preflight (OPTIONS with Access-Control-Request-Method): answered here,
+ * 204, never reaching the API. Returns false for any other request. */
+static bool cors_preflight(buckets_s3_server *s, const buckets_http_request *req, buckets_http_response *resp) {
+  buckets_str rm = buckets_http_header_get(req, "Access-Control-Request-Method");
+  if (!buckets_str_eq_c(req->method, "OPTIONS") || !rm.p || !rm.n) return false;
+  resp->status = 204;
+  buckets_http_resp_header(resp, "Vary", "Origin, Access-Control-Request-Method, Access-Control-Request-Headers");
+  buckets_str origin = buckets_http_header_get(req, "Origin");
+  if (!origin.p || !origin.n || !cors_method_allowed(rm)) return true;
+  char *o = buckets_str_dup(origin);
+  bool allowed = cors_origin_allowed(s, o);
+  if (allowed) {
+    buckets_http_resp_header(resp, "Access-Control-Allow-Origin", o);
+    char *m = buckets_str_dup(rm);
+    buckets_http_resp_header(resp, "Access-Control-Allow-Methods", m);
+    free(m);
+    buckets_str rh = buckets_http_header_get(req, "Access-Control-Request-Headers");
+    if (rh.p && rh.n) {
+      char *h = buckets_str_dup(rh);
+      buckets_http_resp_header(resp, "Access-Control-Allow-Headers", h);
+      free(h);
+    }
+    buckets_http_resp_header(resp, "Access-Control-Allow-Credentials", "true");
+  }
+  free(o);
+  return true;
+}
+
+/* handleActualRequest: CORS headers for an allowed Origin (Vary: Origin is
+ * among the common headers). */
+static void cors_actual(buckets_s3_server *s, const buckets_http_request *req, buckets_http_response *resp) {
+  buckets_str origin = buckets_http_header_get(req, "Origin");
+  if (!origin.p || !origin.n || !cors_method_allowed(req->method)) return;
+  char *o = buckets_str_dup(origin);
+  if (cors_origin_allowed(s, o)) {
+    buckets_http_resp_header(resp, "Access-Control-Allow-Origin", o);
+    buckets_http_resp_header(resp, "Access-Control-Expose-Headers", CORS_EXPOSE);
+    buckets_http_resp_header(resp, "Access-Control-Allow-Credentials", "true");
+  }
+  free(o);
+}
+
 void buckets_s3_handle(const buckets_http_request *req, buckets_http_response *resp, void *ud) {
   buckets_s3_server *s = ud;
+  if (cors_preflight(s, req, resp)) return;
+  cors_actual(s, req, resp);
 
   buckets_objlayer *layer = s->layer;
   if (is_health_path(req->path) && (buckets_str_eq_c(req->method, "GET") || buckets_str_eq_c(req->method, "HEAD"))) {

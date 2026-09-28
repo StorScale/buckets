@@ -56,6 +56,8 @@ bool buckets_s3_allowed(s3_ctx *c, const char *action, const char *bucket, const
  * deletes, and ListBucket standing in for ListBucketVersions. */
 buckets_s3_error buckets_s3_authorize(s3_ctx *c, const char *action, const char *bucket, const char *object,
                                       const char *version_id);
+/* Whether the bucket policy alone allows action to an anonymous caller. */
+bool buckets_s3_bucket_policy_allows(s3_ctx *c, const char *action, const char *bucket, const char *object);
 /* buckets_s3_authorize, writing the error response when denied. */
 bool buckets_s3_require(s3_ctx *c, const char *action, const char *bucket, const char *object, const char *version_id);
 /* Sets one condition value (e.g. object-lock keys for retention checks). */
@@ -67,6 +69,8 @@ void buckets_s3_versioning(s3_ctx *c, const char *object, bool *enabled, bool *s
 /* x-amz-version-id for a version other than "null" (setPutObjHeaders). */
 void buckets_s3_version_header(s3_ctx *c, const char *version_id);
 /* An error with a code outside the generated table (APIError literals). */
+/* NotImplemented for MinIO's rejected APIs: no bucket or key in the document. */
+void buckets_s3_write_rejected(s3_ctx *c);
 void buckets_s3_write_custom_error(s3_ctx *c, int status, const char *code, const char *message);
 void buckets_s3_write_error(s3_ctx *c, buckets_s3_error e);
 void buckets_s3_write_error_msg(s3_ctx *c, buckets_s3_error e, const char *message);
@@ -77,6 +81,10 @@ buckets_s3_error buckets_s3_obj_error(buckets_obj_err e);
 buckets_s3_error buckets_s3_read_doc(s3_ctx *c);
 /* validateLengthAndChecksum + read: Content-MD5 or x-amz-checksum-* required and verified. */
 buckets_s3_error buckets_s3_read_checked_doc(s3_ctx *c);
+
+/* enforceBucketQuotaHard: false (with the error written) when writing size
+ * more bytes to bucket would exceed its hard quota. */
+bool buckets_s3_enforce_quota(s3_ctx *c, const char *bucket, int64_t size);
 
 /* ---- tagging (tagging.c) ---- */
 /* Writes the S3 error for a tags parse error (buckets_tags_error). */

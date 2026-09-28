@@ -30,6 +30,9 @@ void buckets_admin_error_msg(s3_ctx *c, buckets_s3_error e, const char *message)
   yyjson_mut_doc_set_root(d, root);
   yyjson_mut_obj_add_str(d, root, "Code", info->code);
   yyjson_mut_obj_add_strcpy(d, root, "Message", message ? message : info->message);
+  /* reqInfo's bucket and key, when a handler named them (APIErrorResponse omitempty) */
+  if (c->err_object && *c->err_object) yyjson_mut_obj_add_strcpy(d, root, "Key", c->err_object);
+  if (c->err_bucket && *c->err_bucket) yyjson_mut_obj_add_strcpy(d, root, "BucketName", c->err_bucket);
   yyjson_mut_obj_add_strcpy(d, root, "Resource", c->path ? c->path : "/");
   yyjson_mut_obj_add_str(d, root, "RequestId", c->request_id);
   yyjson_mut_obj_add_str(d, root, "HostId", c->s->host_id);
@@ -2113,6 +2116,8 @@ static const route k_routes[] = {
     {"GET", "/info-access-key", h_info_access_key},
     {"GET", "/temporary-account-info", h_temp_account_info},
     {"GET", "/idp/builtin/policy-entities", h_policy_entities},
+    {"GET", "/get-bucket-quota", buckets_admin_get_bucket_quota},
+    {"PUT", "/set-bucket-quota", buckets_admin_set_bucket_quota},
 };
 
 bool buckets_admin_is_admin_path(buckets_str path) { return buckets_str_has_prefix(path, ADMIN_PREFIX "/"); }

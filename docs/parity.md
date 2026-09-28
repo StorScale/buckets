@@ -5,9 +5,9 @@ registers is listed; statuses live in the script's `STATUS` table.
 
 ✅ done · 🟡 partial · ⬜ not started
 
-**Overall:** 81 done, 13 partial, 128 not started (222 handlers).
+**Overall:** 111 done, 9 partial, 102 not started (222 handlers).
 
-## S3 API (20/76)
+## S3 API (49/76)
 
 Source: `cmd/api-router.go`
 
@@ -15,51 +15,51 @@ Source: `cmd/api-router.go`
 |---|---|---|
 | ✅ | `AbortMultipartUploadHandler` |  |
 | ✅ | `CompleteMultipartUploadHandler` |  |
-| 🟡 | `CopyObjectHandler` | no SSE/tagging directives yet |
+| 🟡 | `CopyObjectHandler` | no SSE yet |
 | ✅ | `CopyObjectPartHandler` |  |
-| ⬜ | `DeleteBucketCorsHandler` |  |
+| ✅ | `DeleteBucketCorsHandler` | dummy, as MinIO |
 | ⬜ | `DeleteBucketEncryptionHandler` |  |
 | 🟡 | `DeleteBucketHandler` | no x-minio-force-delete |
 | ⬜ | `DeleteBucketLifecycleHandler` |  |
 | ✅ | `DeleteBucketPolicyHandler` |  |
 | ⬜ | `DeleteBucketReplicationConfigHandler` |  |
-| ⬜ | `DeleteBucketTaggingHandler` |  |
-| ⬜ | `DeleteBucketWebsiteHandler` |  |
-| 🟡 | `DeleteMultipleObjectsHandler` | unversioned buckets only |
-| 🟡 | `DeleteObjectHandler` | unversioned buckets only |
-| ⬜ | `DeleteObjectTaggingHandler` |  |
+| ✅ | `DeleteBucketTaggingHandler` |  |
+| ✅ | `DeleteBucketWebsiteHandler` | dummy, as MinIO |
+| ✅ | `DeleteMultipleObjectsHandler` |  |
+| ✅ | `DeleteObjectHandler` |  |
+| ✅ | `DeleteObjectTaggingHandler` |  |
 | ✅ | `GetBucketACLHandler` | canned private, as MinIO |
-| ⬜ | `GetBucketAccelerateHandler` |  |
-| ⬜ | `GetBucketCorsHandler` |  |
+| ✅ | `GetBucketAccelerateHandler` | dummy, as MinIO |
+| ✅ | `GetBucketCorsHandler` | dummy, as MinIO; CORS is the global api cors_allow_origin |
 | ⬜ | `GetBucketEncryptionHandler` |  |
 | ⬜ | `GetBucketLifecycleHandler` |  |
 | ✅ | `GetBucketLocationHandler` |  |
-| ⬜ | `GetBucketLoggingHandler` |  |
+| ✅ | `GetBucketLoggingHandler` | dummy, as MinIO |
 | ⬜ | `GetBucketNotificationHandler` |  |
-| ⬜ | `GetBucketObjectLockConfigHandler` |  |
+| ✅ | `GetBucketObjectLockConfigHandler` |  |
 | ✅ | `GetBucketPolicyHandler` |  |
-| ⬜ | `GetBucketPolicyStatusHandler` |  |
+| ✅ | `GetBucketPolicyStatusHandler` |  |
 | ⬜ | `GetBucketReplicationConfigHandler` |  |
 | ⬜ | `GetBucketReplicationMetricsHandler` |  |
 | ⬜ | `GetBucketReplicationMetricsV2Handler` |  |
-| ⬜ | `GetBucketRequestPaymentHandler` |  |
-| ⬜ | `GetBucketTaggingHandler` |  |
-| 🟡 | `GetBucketVersioningHandler` | always reports unversioned |
-| ⬜ | `GetBucketWebsiteHandler` |  |
+| ✅ | `GetBucketRequestPaymentHandler` | dummy, as MinIO |
+| ✅ | `GetBucketTaggingHandler` |  |
+| ✅ | `GetBucketVersioningHandler` |  |
+| ✅ | `GetBucketWebsiteHandler` | dummy, as MinIO |
 | ✅ | `GetObjectACLHandler` | canned private, as MinIO |
 | ✅ | `GetObjectAttributesHandler` |  |
-| 🟡 | `GetObjectHandler` | no SSE/versioning/zip-extract yet |
+| 🟡 | `GetObjectHandler` | no SSE/compression/zip-extract yet |
 | ⬜ | `GetObjectLambdaHandler` |  |
-| ⬜ | `GetObjectLegalHoldHandler` |  |
-| ⬜ | `GetObjectRetentionHandler` |  |
-| ⬜ | `GetObjectTaggingHandler` |  |
+| ✅ | `GetObjectLegalHoldHandler` |  |
+| ✅ | `GetObjectRetentionHandler` |  |
+| ✅ | `GetObjectTaggingHandler` |  |
 | ✅ | `HeadBucketHandler` |  |
-| 🟡 | `HeadObjectHandler` | no SSE/versioning yet |
+| 🟡 | `HeadObjectHandler` | no SSE/compression yet |
 | ✅ | `ListBucketsHandler` |  |
-| 🟡 | `ListMultipartUploadsHandler` | per-object listing, like MinIO; no pagination markers |
+| ✅ | `ListMultipartUploadsHandler` | per-object listing, like MinIO |
 | ✅ | `ListObjectPartsHandler` |  |
-| ⬜ | `ListObjectVersionsHandler` |  |
-| ⬜ | `ListObjectVersionsMHandler` |  |
+| ✅ | `ListObjectVersionsHandler` |  |
+| ✅ | `ListObjectVersionsMHandler` | metadata=true extension |
 | ✅ | `ListObjectsV1Handler` |  |
 | ✅ | `ListObjectsV2Handler` |  |
 | ✅ | `ListObjectsV2MHandler` | metadata=true extension |
@@ -68,29 +68,29 @@ Source: `cmd/api-router.go`
 | 🟡 | `PostPolicyBucketHandler` | no SSE form fields yet |
 | ⬜ | `PostRestoreObjectHandler` |  |
 | ✅ | `PutBucketACLHandler` | canned private, as MinIO |
-| ⬜ | `PutBucketCorsHandler` |  |
+| ✅ | `PutBucketCorsHandler` | dummy, as MinIO |
 | ⬜ | `PutBucketEncryptionHandler` |  |
-| 🟡 | `PutBucketHandler` | object-lock flag pending |
+| ✅ | `PutBucketHandler` |  |
 | ⬜ | `PutBucketLifecycleHandler` |  |
 | ⬜ | `PutBucketNotificationHandler` |  |
-| ⬜ | `PutBucketObjectLockConfigHandler` |  |
+| ✅ | `PutBucketObjectLockConfigHandler` |  |
 | ✅ | `PutBucketPolicyHandler` |  |
 | ⬜ | `PutBucketReplicationConfigHandler` |  |
-| ⬜ | `PutBucketTaggingHandler` |  |
-| ⬜ | `PutBucketVersioningHandler` |  |
+| ✅ | `PutBucketTaggingHandler` |  |
+| ✅ | `PutBucketVersioningHandler` |  |
 | ✅ | `PutObjectACLHandler` | canned private, as MinIO |
 | ⬜ | `PutObjectExtractHandler` |  |
-| 🟡 | `PutObjectHandler` | no SSE/tagging/object-lock/versioning yet |
-| ⬜ | `PutObjectLegalHoldHandler` |  |
+| 🟡 | `PutObjectHandler` | no SSE/compression yet |
+| ✅ | `PutObjectLegalHoldHandler` |  |
 | ✅ | `PutObjectPartHandler` |  |
-| ⬜ | `PutObjectRetentionHandler` |  |
-| ⬜ | `PutObjectTaggingHandler` |  |
+| ✅ | `PutObjectRetentionHandler` |  |
+| ✅ | `PutObjectTaggingHandler` |  |
 | ⬜ | `ResetBucketReplicationStartHandler` |  |
 | ⬜ | `ResetBucketReplicationStatusHandler` |  |
 | ⬜ | `SelectObjectContentHandler` |  |
 | ⬜ | `ValidateBucketReplicationCredsHandler` |  |
 
-## Admin API (madmin / mc admin) (50/123)
+## Admin API (madmin / mc admin) (51/123)
 
 Source: `cmd/admin-router.go`
 
@@ -124,7 +124,7 @@ Source: `cmd/admin-router.go`
 | ⬜ | `ExportBucketMetadataHandler` |  |
 | ✅ | `ExportIAM` |  |
 | ⬜ | `ForceUnlockHandler` |  |
-| ⬜ | `GetBucketQuotaConfigHandler` |  |
+| ✅ | `GetBucketQuotaConfigHandler` |  |
 | ✅ | `GetConfigHandler` |  |
 | ✅ | `GetConfigKVHandler` |  |
 | ✅ | `GetGroup` |  |
@@ -165,7 +165,7 @@ Source: `cmd/admin-router.go`
 | ⬜ | `NetperfHandler` |  |
 | ⬜ | `ObjectSpeedTestHandler` |  |
 | ⬜ | `ProfileHandler` |  |
-| ⬜ | `PutBucketQuotaConfigHandler` |  |
+| 🟡 | `PutBucketQuotaConfigHandler` | enforced on object size alone until the scanner reports bucket usage |
 | ⬜ | `RebalanceStart` |  |
 | ⬜ | `RebalanceStatus` |  |
 | ⬜ | `RebalanceStop` |  |

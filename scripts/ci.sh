@@ -42,6 +42,7 @@ run tests/integration/cluster.sh build-ci-asan/src/bucketsd
 for t in iam config openid plugins ldap certsts service; do
   run tests/integration/$t.sh build-ci-asan/src/bucketsd
 done
+run tests/integration/s3diff.sh build-ci-asan/src/bucketsd
 
 # MinIO interoperability (skipped unless MC_BIN and MINIO_BIN are set;
 # tools/build-oracles.sh builds both).

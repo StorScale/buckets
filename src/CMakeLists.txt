@@ -54,6 +54,7 @@ add_library(buckets STATIC
   bucket/metasys.c
   bucket/versioning.c
   bucket/tags.c
+  bucket/quota.c
   bucket/objectlock.c
   erasure/rs.c
   erasure/layout.c
@@ -75,6 +76,7 @@ add_library(buckets STATIC
   admin/info.c
   admin/config.c
   admin/iamxfer.c
+  admin/bucket.c
   config/config.c
   config/sys.c
 )

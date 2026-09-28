@@ -341,6 +341,11 @@ static bool bucket_policy_allows(s3_ctx *c, const char *action, const char *buck
   return ok;
 }
 
+bool buckets_s3_bucket_policy_allows(s3_ctx *c, const char *action, const char *bucket, const char *object) {
+  if (!c->conds) c->conds = build_conds(c);
+  return bucket_policy_allows(c, action, bucket, object);
+}
+
 bool buckets_s3_allowed(s3_ctx *c, const char *action, const char *bucket, const char *object, bool deny_only) {
   if (!c->conds) c->conds = build_conds(c);
   if (!c->ident) return bucket_policy_allows(c, action, bucket, object);

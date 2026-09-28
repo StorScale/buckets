@@ -98,6 +98,8 @@ bool buckets_iam_ready(const buckets_iam *iam);
 bool buckets_iam_reload(buckets_iam *iam);
 /* Starts a thread that reloads every interval_sec seconds. */
 void buckets_iam_start_refresh(buckets_iam *iam, int interval_sec);
+/* Stops and joins the periodic reload (before the object layer goes away). */
+void buckets_iam_stop_refresh(buckets_iam *iam);
 
 /* Called after every change with what changed, for peer notification.
  * kind: "user", "svc", "sts", "group", "policy", "policydb-user",

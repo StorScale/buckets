@@ -712,6 +712,7 @@ int main(int argc, char **argv) {
   buckets_pool_free(api_pool); /* finishes in-flight handlers before their connections go */
   buckets_pool_free(control_pool);
   buckets_pool_free(internode_pool);
+  buckets_s3_server_stop(&s3); /* its background threads use the object layer */
   buckets_http_server_free(app.http);
   buckets_tls_free(tls);
   buckets_healer_stop(boot.healer);

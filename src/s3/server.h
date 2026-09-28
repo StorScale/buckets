@@ -33,6 +33,17 @@ typedef struct buckets_s3_server {
   /* restart / stop the process (set by main), after the response is sent */
   void (*service)(void *ud, const char *action);
   void *service_ud;
+  /* A bucket's size in bytes from the latest data usage (0 when unknown),
+   * for hard quotas; NULL until the scanner provides one. */
+  uint64_t (*bucket_usage)(void *ud, const char *bucket);
+  void *bucket_usage_ud;
+  /* Background threads (IAM start and refresh, LDAP sync), stopped and
+   * joined by buckets_s3_server_stop before the object layer is freed. */
+  pthread_mutex_t bg_mu;
+  pthread_cond_t bg_cv;
+  bool bg_stop;
+  pthread_t iam_thread, ldap_thread;
+  bool iam_thread_started, ldap_thread_started;
   char host_id[65];   /* x-amz-id-2 */
   _Atomic uint64_t request_seq;
 } buckets_s3_server;
@@ -43,6 +54,9 @@ void buckets_s3_server_init(buckets_s3_server *s, buckets_objlayer *layer, const
  * get 503 XMinioServerNotInitialized and readiness probes fail. */
 void buckets_s3_server_set_layer(buckets_s3_server *s, buckets_objlayer *layer);
 void buckets_s3_handle(const buckets_http_request *req, buckets_http_response *resp, void *ud);
+/* Stops the background threads; call once requests have drained and
+ * before freeing the object layer. */
+void buckets_s3_server_stop(buckets_s3_server *s);
 /* Applies peers' notifications (the ud of buckets_peer_server_handle). */
 void buckets_s3_peer_iam(void *server, const char *kind, const char *name);
 void buckets_s3_peer_bucket(void *server, const char *bucket);

@@ -6,6 +6,7 @@
 
 #include "bucket/metadata.h"
 #include "bucket/objectlock.h"
+#include "bucket/quota.h"
 #include "bucket/versioning.h"
 #include "iam/policy.h"
 
@@ -21,6 +22,8 @@ typedef struct {
   buckets_versioning versioning; /* parsed VersioningConfigXML (status UNSET when none) */
   buckets_lock_config object_lock; /* parsed ObjectLockConfigXML */
   bool lock_enabled;               /* object lock is on (the config, or the legacy flag) */
+  buckets_quota quota;             /* parsed QuotaConfigJSON, when has_quota */
+  bool has_quota;
   long long loaded_ns;
 } buckets_bucket_state;
 

@@ -15,6 +15,7 @@
 #include "s3/checksum.h"
 #include "s3/chunked.h"
 #include "s3/internal.h"
+#include "bucket/metasys.h"
 #include "bucket/objectlock.h"
 #include "crypto/md5.h"
 #include "s3/xml.h"
@@ -112,6 +113,19 @@ static void remove_kv(buckets_xl_kv *kvs, size_t *n, const char *key) {
     memmove(&kvs[i], &kvs[i + 1], (*n - i - 1) * sizeof(*kvs));
     (*n)--;
   }
+}
+
+bool buckets_s3_enforce_quota(s3_ctx *c, const char *bucket, int64_t size) {
+  if (!c->s->meta) return true;
+  buckets_bucket_state *st = buckets_metasys_get(c->s->meta, bucket);
+  bool over = false;
+  if (st->has_quota && buckets_quota_hard_limit(&st->quota)) {
+    uint64_t used = c->s->bucket_usage ? c->s->bucket_usage(c->s->bucket_usage_ud, bucket) : 0;
+    over = buckets_quota_exceeded(&st->quota, size, used);
+  }
+  buckets_bucket_state_release(st);
+  if (over) buckets_s3_write_error(c, BUCKETS_ERR_ADMIN_BUCKET_QUOTA_EXCEEDED);
+  return !over;
 }
 
 static void free_kvs(buckets_xl_kv *kvs, size_t n) {
@@ -347,6 +361,11 @@ static void put_object(s3_ctx *c) {
   size_t nmeta = 0;
   if (!serr) serr = extract_metadata(c, &meta, &nmeta);
   if (!serr && !buckets_s3_check_tagging_header(c)) {
+    free_kvs(meta, nmeta);
+    body_close(&b);
+    return;
+  }
+  if (!serr && !buckets_s3_enforce_quota(c, c->bucket, b.size)) {
     free_kvs(meta, nmeta);
     body_close(&b);
     return;
@@ -792,6 +811,13 @@ static void copy_object(s3_ctx *c) {
     buckets_s3_write_error(c, BUCKETS_ERR_PRECONDITION_FAILED);
     return;
   }
+  bool same = strcmp(src_bucket, c->bucket) == 0 && strcmp(src_object, c->object) == 0;
+  if (!same && !buckets_s3_enforce_quota(c, c->bucket, src.size)) {
+    buckets_obj_reader_free(r);
+    buckets_object_info_free(&src);
+    free(decoded);
+    return;
+  }
 
   buckets_xl_kv *meta = NULL;
   size_t nmeta = 0;
@@ -981,6 +1007,11 @@ static void mpu_put_part(s3_ctx *c, const char *upload_id) {
         return;
       }
     }
+    if (!buckets_s3_enforce_quota(c, c->bucket, len)) {
+      buckets_object_info_free(&src);
+      free(decoded);
+      return;
+    }
     buckets_obj_reader *r;
     buckets_object_info tmp;
     err = buckets_obj_open(c->s->layer, sb, so, sv, off, len, &r, &tmp);
@@ -1016,6 +1047,10 @@ static void mpu_put_part(s3_ctx *c, const char *upload_id) {
   if (serr) {
     body_close(&bsrc);
     buckets_s3_write_error(c, serr);
+    return;
+  }
+  if (!buckets_s3_enforce_quota(c, c->bucket, bsrc.size)) {
+    body_close(&bsrc);
     return;
   }
   buckets_put_opts opts = {.want_md5 = bsrc.has_md5 ? bsrc.md5 : NULL,
@@ -1620,6 +1655,13 @@ static bool authorize_object_request(s3_ctx *c) {
 }
 
 void buckets_s3_route_object(s3_ctx *c) {
+  /* rejectedObjAPIs: matched before any object route, without authorization */
+  buckets_str rm = c->req->method;
+  if ((buckets_query_has(&c->q, "torrent") && !buckets_str_eq_c(rm, "HEAD") && !buckets_str_eq_c(rm, "POST")) ||
+      (buckets_query_has(&c->q, "acl") && buckets_str_eq_c(rm, "DELETE"))) {
+    buckets_s3_write_rejected(c);
+    return;
+  }
   if (!authorize_object_request(c)) return;
   if (refuse_sse(c)) return;
   /* getOpts: a versionId must be "null" or a UUID. */

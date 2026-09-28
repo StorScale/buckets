@@ -80,6 +80,7 @@ def norm_body(b):
     # dates computed from "now" (default retention)
     b = re.sub(r"<RetainUntilDate>20[0-8][0-9]-[^<]*</RetainUntilDate>", "<RetainUntilDate>(now+)</RetainUntilDate>", b)
     b = re.sub(r"<Owner>.*?</Owner>", "<Owner/>", b)
+    b = re.sub(r'"(RequestId|HostId|Resource)":"[^"]*"', r'"\1":""', b)  # admin JSON errors
     b = re.sub(r"<\?xml[^>]*\?>", "", b)
     b = re.sub(r"\[minio_cache:[^\]]*\]", "", b)  # MinIO's metacache hint in markers
     b = re.sub(r">\s+<", "><", b.strip())

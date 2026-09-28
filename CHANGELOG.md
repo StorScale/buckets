@@ -24,7 +24,10 @@ All notable changes to this project are documented here. The format follows
   - bucket `?tagging` GET/PUT/DELETE, stored as the bucket metadata's `TaggingConfigXML`
   - `X-Amz-Tagging` validated on PutObject and CreateMultipartUpload (minio-go's rules: 10 object / 50 bucket tags, key and value charset and lengths, duplicates), the `tagging` field of POST policy uploads, and `x-amz-tagging-directive` COPY/REPLACE on CopyObject
   - `x-amz-tagging-count` on GET/HEAD (plus the tags themselves with MinIO's `X-Amz-Tagging-Directive: ACCESS`), and `UserTags` in `metadata=true` listings
-- `tests/integration/s3diff.sh`: runs request scenarios against real MinIO and bucketsd and diffs the normalized responses (`scenarios/{versioning,objectlock,uploads,tagging}.json` match line for line); it signs requests itself, since curl's `--aws-sigv4` misorders `x-amz-tagging` and `x-amz-tagging-directive`.
+- CORS: the global middleware MinIO runs (rs/cors with `api cors_allow_origin`): preflights answered with 204 and the requested method and headers, `Access-Control-Allow-Origin`/`-Expose-Headers`/`-Allow-Credentials` on allowed origins.
+- MinIO's fixed sub-resources: bucket `?cors` (NoSuchCORSConfiguration / NotImplemented), `?website`, `?accelerate`, `?requestPayment`, `?logging` and `?policyStatus` (public when the bucket policy lets anyone list and write); the rejected GETs (`?inventory`, `?metrics`, `?publicAccessBlock`, `?ownershipControls`, `?intelligent-tiering`, `?analytics`) and object `?torrent` / DELETE `?acl` answer NotImplemented without naming the bucket, as MinIO does.
+- Bucket quotas (Phase 5): `mc quota set|info|clear` (admin `set-bucket-quota` / `get-bucket-quota`, stored as the bucket metadata's `QuotaConfigJSON`), enforced as MinIO's hard quota on PutObject, CopyObject, UploadPart and UploadPartCopy. Until the scanner reports bucket usage, only the object's own size counts.
+- `tests/integration/s3diff.sh`: runs request scenarios against real MinIO and bucketsd and diffs the normalized responses (`scenarios/{versioning,objectlock,uploads,tagging,subresources,quota}.json` match line for line; admin JSON errors are normalized too); it signs requests itself, since curl's `--aws-sigv4` misorders `x-amz-tagging` and `x-amz-tagging-directive`.
 
 ### Changed
 - XML escaping follows Go's `xml.EscapeText` (`&#34;`, `&#39;`), and S3 timestamps in XML carry milliseconds, as MinIO's do.
@@ -35,6 +38,8 @@ All notable changes to this project are documented here. The format follows
 - ListMultipartUploads matches MinIO: uploads oldest first, paging by `upload-id-marker` with `NextUploadIdMarker` and `IsTruncated`, the 10000 default, `EncodingType` echoed, and empty Initiator/Owner/StorageClass.
 
 ### Fixed
+- Shutdown no longer frees the object layer under the IAM loader, its periodic refresh or the LDAP sync thread: they sleep on a condition variable and are joined first (an ASan use-after-free in the cluster test).
+- PUT, DELETE and HEAD on a bucket with an unrecognized query go to CreateBucket, DeleteBucket and HeadBucket, like MinIO's catch-all routes, instead of NotImplemented; `?acl` and `?policy` only take the methods MinIO routes to them.
 - `metadata=true` listings report each object's real erasure data and parity counts in `Internal`, not 1/0.
 - Errors from CopyObject after the source is authorized name the source bucket and key, as MinIO's do.
 - `encoding-type=url` listings encode keys as MinIO does (space as `+`, `*` kept, `~` escaped).

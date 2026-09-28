@@ -387,6 +387,9 @@ struct buckets_iam {
   int refresh_sec;
   pthread_t refresher;
   bool refresher_started;
+  pthread_mutex_t stop_mu; /* with stop_cv: wakes the refresher to stop */
+  pthread_cond_t stop_cv;
+  bool stopping;
   buckets_iam_openid_hooks oidc;
   buckets_iam_authz_fn authz;
   void *authz_ud;
@@ -427,6 +430,8 @@ buckets_iam *buckets_iam_new(const char *root_access_key, const char *root_secre
   snprintf(iam->root_password, n, "%s:%s", root_access_key, root_secret_key);
   pthread_rwlock_init(&iam->lock, NULL);
   pthread_mutex_init(&iam->write_mu, NULL);
+  pthread_mutex_init(&iam->stop_mu, NULL);
+  pthread_cond_init(&iam->stop_cv, NULL);
   return iam;
 }
 
@@ -774,7 +779,15 @@ bool buckets_iam_reload(buckets_iam *iam) { return iam->layer && reload(iam, fal
 static void *refresh_main(void *arg) {
   buckets_iam *iam = arg;
   for (;;) {
-    sleep((unsigned)iam->refresh_sec);
+    struct timespec until;
+    clock_gettime(CLOCK_REALTIME, &until);
+    until.tv_sec += iam->refresh_sec;
+    pthread_mutex_lock(&iam->stop_mu);
+    while (!iam->stopping && pthread_cond_timedwait(&iam->stop_cv, &iam->stop_mu, &until) == 0) {
+    }
+    bool stop = iam->stopping;
+    pthread_mutex_unlock(&iam->stop_mu);
+    if (stop) break;
     if (!buckets_iam_reload(iam)) buckets_log_warn("iam: periodic reload failed");
   }
   return NULL;
@@ -783,10 +796,16 @@ static void *refresh_main(void *arg) {
 void buckets_iam_start_refresh(buckets_iam *iam, int interval_sec) {
   if (iam->refresher_started || interval_sec <= 0) return;
   iam->refresh_sec = interval_sec;
-  if (pthread_create(&iam->refresher, NULL, refresh_main, iam) == 0) {
-    pthread_detach(iam->refresher);
-    iam->refresher_started = true;
-  }
+  if (pthread_create(&iam->refresher, NULL, refresh_main, iam) == 0) iam->refresher_started = true;
+}
+
+void buckets_iam_stop_refresh(buckets_iam *iam) {
+  pthread_mutex_lock(&iam->stop_mu);
+  iam->stopping = true;
+  pthread_cond_broadcast(&iam->stop_cv);
+  pthread_mutex_unlock(&iam->stop_mu);
+  if (iam->refresher_started) pthread_join(iam->refresher, NULL);
+  iam->refresher_started = false;
 }
 
 /* Marks an in-memory change; call with the write lock held. */
