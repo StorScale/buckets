@@ -38,6 +38,11 @@ All notable changes to this project are documented here. The format follows
     - list-, info-, add- and remove-canned-policy, set-user-or-group-policy, and `idp/builtin/policy/attach|detach`
     - add-, update-, info-, list- and delete-service-account
     - madmin encryption where MinIO uses it, and JSON errors
+  - Bucket policies (`policy.BucketPolicy`):
+    - parsing and evaluation, checked against 5,323 golden vectors from the Go package (`policygen bpvectors`)
+    - `?policy` PUT, GET and DELETE
+    - anonymous requests authorized against the policy; works with `mc anonymous`, and in both directions with MinIO
+  - A bucket-metadata cache (`src/bucket/metasys`): refcounted snapshots, invalidated on local writes, with a TTL in distributed mode.
   - STS `AssumeRole`:
     - SigV4 for the `sts` service, over the body's hash
     - session policies, `DurationSeconds`, and `MINIO_STS_DURATION`

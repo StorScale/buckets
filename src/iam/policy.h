@@ -36,6 +36,7 @@ typedef struct {
   const char *action; /* e.g. "s3:GetObject", "admin:ServerInfo" */
   const char *bucket;
   const char *object;
+  const char *account; /* bucket policies: the principal (access key; "" anonymous) */
   bool owner;     /* the account owns everything: only Deny statements apply */
   bool deny_only; /* check Deny statements only */
   const buckets_cond_value *conds;
@@ -47,12 +48,21 @@ bool buckets_policy_allowed(const buckets_policy *p, const buckets_policy_args *
  * NULL entries are skipped. */
 bool buckets_policies_allowed(const buckets_policy *const *ps, size_t n, const buckets_policy_args *a);
 
+/* Bucket policies (policy.BucketPolicy): statements carry a Principal, and
+ * every Resource must fall within the bucket. The result is freed with
+ * buckets_policy_free and evaluated with buckets_bucket_policy_allowed. */
+bool buckets_bucket_policy_parse(const char *json, size_t len, const char *bucket, buckets_policy **out, char *err,
+                                 size_t errlen);
+bool buckets_bucket_policy_allowed(const buckets_policy *p, const buckets_policy_args *a);
+
 /* Merges several policies into one (MinIO's MergePolicies): the union of
  * their statements. The inputs stay owned by the caller. */
 buckets_policy *buckets_policy_merge(const buckets_policy *const *ps, size_t n);
 
 /* wildcard.Match from minio/pkg: '*' any run, '?' exactly one byte. */
 bool buckets_wildcard_match(const char *pattern, const char *name);
+/* wildcard.MatchSimple: '*' only. */
+bool buckets_wildcard_match_simple(const char *pattern, const char *name);
 
 /* Canned policies MinIO ships: readwrite, readonly, writeonly, diagnostics,
  * consoleAdmin. NULL when name is not one of them. */

@@ -493,6 +493,8 @@ int main(int argc, char **argv) {
 
   buckets_s3_server s3;
   buckets_s3_server_init(&s3, NULL, root_user, root_password, region);
+  /* Other servers change bucket metadata too: trust snapshots only briefly. */
+  s3.meta_ttl_ms = topo.distributed ? 5000 : 0;
   boot_state boot = {.topo = &topo, .s3 = &s3};
   if (!topo.distributed && !bootstrap(&boot)) return 1; /* a single node formats before it serves */
 

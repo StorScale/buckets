@@ -18,6 +18,7 @@
 #include "crypto/sha256.h"
 #include "admin/admin.h"
 #include "bucket/metadata.h"
+#include "bucket/metasys.h"
 #include "s3/bucketname.h"
 #include "s3/errors.h"
 #include "s3/sigv4.h"
@@ -60,7 +61,8 @@ void buckets_s3_server_set_layer(buckets_s3_server *s, buckets_objlayer *layer) 
   uint8_t h[32];
   buckets_sha256(layer->deployment_id_str, strlen(layer->deployment_id_str), h);
   buckets_hex_encode(h, 32, s->host_id);
-  s->layer = layer; /* atomic store, after host_id */
+  s->meta = buckets_metasys_new(layer, s->meta_ttl_ms);
+  s->layer = layer; /* atomic store, after host_id and meta */
   pthread_t t;
   if (pthread_create(&t, NULL, iam_start_main, s) == 0) pthread_detach(t);
 }
@@ -368,6 +370,7 @@ static void create_bucket(s3_ctx *c) {
       buckets_bucket_meta_init(&bm, c->bucket, (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec);
       if (!buckets_bucket_meta_save(c->s->layer, &bm)) buckets_log_warn("could not save metadata for bucket %s", c->bucket);
       buckets_bucket_meta_free(&bm);
+      buckets_metasys_invalidate(c->s->meta, c->bucket);
       buckets_http_resp_headerf(c->resp, "Location", "/%s", c->bucket);
       c->resp->status = 200;
       return;
@@ -388,6 +391,7 @@ static void delete_bucket(s3_ctx *c) {
     return;
   }
   buckets_bucket_meta_delete(c->s->layer, c->bucket);
+  buckets_metasys_invalidate(c->s->meta, c->bucket);
   c->resp->status = 204;
 }
 
@@ -408,6 +412,77 @@ static void get_bucket_versioning(s3_ctx *c) {
   buckets_xml_header(b);
   buckets_buf_appendf(b, "<VersioningConfiguration xmlns=\"%s\"></VersioningConfiguration>", BUCKETS_S3_XMLNS);
   buckets_s3_write_xml(c, 200);
+}
+
+/* ---- bucket policy (?policy) -------------------------------------------------- */
+
+#define MAX_BUCKET_POLICY_SIZE (20 * 1024)
+
+static void put_bucket_policy(s3_ctx *c) {
+  if (c->req->body_len <= 0) {
+    buckets_s3_write_error(c, BUCKETS_ERR_MISSING_CONTENT_LENGTH);
+    return;
+  }
+  if (c->req->body_len > MAX_BUCKET_POLICY_SIZE) {
+    buckets_s3_write_error(c, BUCKETS_ERR_POLICY_TOO_LARGE);
+    return;
+  }
+  buckets_s3_error derr = buckets_s3_read_doc(c);
+  if (derr) {
+    buckets_s3_write_error(c, derr);
+    return;
+  }
+  buckets_policy *p;
+  char err[512];
+  if (!buckets_bucket_policy_parse(c->doc.data, c->doc.len, c->bucket, &p, err, sizeof(err))) {
+    /* APIError{Code: "MalformedPolicy", 400, err.Error()} */
+    c->resp->status = 400;
+    buckets_http_resp_header(c->resp, "Content-Type", "application/xml");
+    buckets_buf *b = &c->resp->body;
+    buckets_buf_reset(b);
+    buckets_xml_header(b);
+    buckets_xml_open(b, "Error");
+    buckets_xml_elem(b, "Code", "MalformedPolicy");
+    buckets_xml_elem(b, "Message", err);
+    buckets_xml_elem(b, "BucketName", c->bucket);
+    buckets_xml_elem(b, "Resource", c->path);
+    buckets_xml_elem(b, "RequestId", c->request_id);
+    buckets_xml_elem(b, "HostId", c->s->host_id);
+    buckets_xml_close(b, "Error");
+    return;
+  }
+  bool no_version = !*buckets_policy_version(p);
+  buckets_policy_free(p);
+  if (no_version) {
+    buckets_s3_write_error(c, BUCKETS_ERR_POLICY_INVALID_VERSION);
+    return;
+  }
+  if (!buckets_metasys_update(c->s->meta, c->bucket, BUCKETS_BCFG_POLICY, c->doc.data, c->doc.len)) {
+    buckets_s3_write_error(c, BUCKETS_ERR_INTERNAL_ERROR);
+    return;
+  }
+  c->resp->status = 204;
+}
+
+static void get_bucket_policy(s3_ctx *c) {
+  buckets_bucket_state *st = buckets_metasys_get(c->s->meta, c->bucket);
+  const buckets_buf *pol = &st->meta.config[BUCKETS_BCFG_POLICY];
+  if (!pol->len) {
+    buckets_s3_write_error(c, BUCKETS_ERR_NO_SUCH_BUCKET_POLICY);
+  } else {
+    c->resp->status = 200;
+    buckets_http_resp_header(c->resp, "Content-Type", "application/json");
+    buckets_buf_append(&c->resp->body, pol->data, pol->len);
+  }
+  buckets_bucket_state_release(st);
+}
+
+static void delete_bucket_policy(s3_ctx *c) {
+  if (!buckets_metasys_update(c->s->meta, c->bucket, BUCKETS_BCFG_POLICY, NULL, 0)) {
+    buckets_s3_write_error(c, BUCKETS_ERR_INTERNAL_ERROR);
+    return;
+  }
+  c->resp->status = 204;
 }
 
 /* Query keys that select a bucket sub-resource (as opposed to list parameters). */
@@ -434,6 +509,10 @@ static bool authorize_bucket_request(s3_ctx *c) {
   if (buckets_query_has(&c->q, "acl")) {
     if (buckets_str_eq_c(m, "GET")) action = "s3:GetBucketPolicy";
     else if (buckets_str_eq_c(m, "PUT")) action = "s3:PutBucketPolicy";
+  } else if (buckets_query_has(&c->q, "policy")) {
+    if (buckets_str_eq_c(m, "GET")) action = "s3:GetBucketPolicy";
+    else if (buckets_str_eq_c(m, "PUT")) action = "s3:PutBucketPolicy";
+    else if (buckets_str_eq_c(m, "DELETE")) action = "s3:DeleteBucketPolicy";
   } else if (buckets_str_eq_c(m, "PUT")) {
     if (c->q.n == 0) action = "s3:CreateBucket";
   } else if (buckets_str_eq_c(m, "HEAD")) {
@@ -473,6 +552,14 @@ static void route_bucket(s3_ctx *c) {
     } else {
       buckets_s3_write_error(c, BUCKETS_ERR_METHOD_NOT_ALLOWED);
     }
+    return;
+  }
+  if (buckets_query_has(&c->q, "policy")) {
+    if (!bucket_exists(c)) buckets_s3_write_error(c, BUCKETS_ERR_NO_SUCH_BUCKET);
+    else if (buckets_str_eq_c(m, "GET")) get_bucket_policy(c);
+    else if (buckets_str_eq_c(m, "PUT")) put_bucket_policy(c);
+    else if (buckets_str_eq_c(m, "DELETE")) delete_bucket_policy(c);
+    else buckets_s3_write_error(c, BUCKETS_ERR_METHOD_NOT_ALLOWED);
     return;
   }
   if (buckets_str_eq_c(m, "PUT")) {

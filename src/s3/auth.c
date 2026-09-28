@@ -8,6 +8,7 @@
 #include <strings.h>
 #include <time.h>
 
+#include "bucket/metasys.h"
 #include "core/query.h"
 #include "s3/internal.h"
 
@@ -320,9 +321,29 @@ void buckets_s3_cond_override(s3_ctx *c, const char *key, const char *value) {
   cond_set(c->conds, key, value);
 }
 
+/* PolicySys.IsAllowed: anonymous requests against the bucket's policy. */
+static bool bucket_policy_allows(s3_ctx *c, const char *action, const char *bucket, const char *object) {
+  if (!bucket || !*bucket || !c->s->meta) return false;
+  buckets_bucket_state *st = buckets_metasys_get(c->s->meta, bucket);
+  bool ok = false;
+  if (st->policy) {
+    buckets_policy_args a = {
+        .account = "",
+        .action = action,
+        .bucket = bucket,
+        .object = object ? object : "",
+        .conds = cond_view(c->conds),
+        .nconds = c->conds->n,
+    };
+    ok = buckets_bucket_policy_allowed(st->policy, &a);
+  }
+  buckets_bucket_state_release(st);
+  return ok;
+}
+
 bool buckets_s3_allowed(s3_ctx *c, const char *action, const char *bucket, const char *object, bool deny_only) {
-  if (!c->ident) return false; /* anonymous: bucket policies (not supported yet) */
   if (!c->conds) c->conds = build_conds(c);
+  if (!c->ident) return bucket_policy_allows(c, action, bucket, object);
   buckets_policy_args a = {
       .action = action,
       .bucket = bucket ? bucket : "",

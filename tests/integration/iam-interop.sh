@@ -73,6 +73,7 @@ cat >"$WORK/ro.json" <<'JSON'
 {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetObject"],"Resource":["arn:aws:s3:::photos/*"]}]}
 JSON
 ok mc admin user svcacct add root alice --access-key alicesvc02 --secret-key alicesvcsecret2 --policy "$WORK/ro.json"
+ok mc anonymous set download root/logs
 stop
 
 echo "== bucketsd honours it"
@@ -95,6 +96,9 @@ ok mc cat asvc2/photos/a.txt
 denied mc cp "$WORK/f.txt" asvc2/photos/d.txt
 mc admin user ls root | grep "disabled.*carl" >/dev/null || fail "carl should be listed disabled"
 mc admin group info root devs | grep "Policy: readonly" >/dev/null || fail "group policy"
+[[ $(curl -s -o /dev/null -w '%{http_code}' "$EP/logs/f.txt") == 200 ]] || fail "MinIO's bucket policy (anonymous read)"
+[[ $(curl -s -o /dev/null -w '%{http_code}' "$EP/photos/a.txt") == 403 ]] || fail "photos has no bucket policy"
+ok mc anonymous set upload root/photos
 mc admin policy info root photos-rw | grep "arn:aws:s3:::photos/\*" >/dev/null || fail "policy info"
 
 echo "== bucketsd writes, MinIO reads"
@@ -118,6 +122,8 @@ ok mc cat dsvc/logs/f.txt
 out=$(mc cat carl/logs/f.txt 2>&1 || true)
 if echo "$out" | grep -i "disabled" >/dev/null; then fail "carl should be enabled in MinIO: $out"; fi
 mc admin group info root devs | grep "dana" >/dev/null || fail "MinIO sees dana in devs"
+[[ $(curl -s -o /dev/null -w '%{http_code}' -X PUT --data z "$EP/photos/anon.txt") == 200 ]] ||
+  fail "MinIO honours bucketsd's bucket policy"
 ok mc cat alice/photos/b.txt
 stop
 echo "PASS"

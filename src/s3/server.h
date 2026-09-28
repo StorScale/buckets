@@ -16,6 +16,8 @@ typedef struct {
   const char *root_password;
   const char *region; /* "" accepts any region in signatures */
   buckets_iam *iam;   /* credentials and policies (root-only until started) */
+  struct buckets_metasys *meta; /* bucket metadata cache, once the layer is up */
+  int meta_ttl_ms;              /* its snapshot lifetime (0: until invalidated) */
   char host_id[65];   /* x-amz-id-2 */
   _Atomic uint64_t request_seq;
 } buckets_s3_server;

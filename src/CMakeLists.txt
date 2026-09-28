@@ -47,6 +47,7 @@ add_library(buckets STATIC
   object/nslock.c
   object/pools.c
   bucket/metadata.c
+  bucket/metasys.c
   erasure/rs.c
   erasure/layout.c
   heal/healer.c

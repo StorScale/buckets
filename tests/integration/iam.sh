@@ -128,6 +128,30 @@ denied s3tmp -H "X-Amz-Security-Token: $ttok" -X PUT --data x "$EP/photos/q.txt"
 # Service accounts cannot assume roles.
 sts alicesvc01 alicesvcsecret1 | grep AccessDenied >/dev/null || fail "svcacct AssumeRole should be denied"
 
+echo "== bucket policies (anonymous access)"
+code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
+[[ $(code "$EP/photos/a.txt") == 403 ]] || fail "anonymous read before any policy"
+ok mc anonymous set download root/photos
+[[ $(code "$EP/photos/a.txt") == 200 ]] || fail "anonymous read with download policy"
+[[ $(code "$EP/photos?list-type=2") == 200 ]] || fail "anonymous list with download policy"
+[[ $(code -X PUT --data y "$EP/photos/anon.txt") == 403 ]] || fail "anonymous write with download policy"
+mc anonymous get root/photos | grep download >/dev/null || fail "anonymous get"
+cat >"$WORK/bp.json" <<'JSON'
+{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":["*"]},"Action":["s3:PutObject"],"Resource":["arn:aws:s3:::photos/drop/*"]}]}
+JSON
+ok mc anonymous set-json "$WORK/bp.json" root/photos
+[[ $(code -X PUT --data y "$EP/photos/drop/anon.txt") == 200 ]] || fail "anonymous write into drop/"
+[[ $(code -X PUT --data y "$EP/photos/other.txt") == 403 ]] || fail "anonymous write outside drop/"
+[[ $(code "$EP/photos/a.txt") == 403 ]] || fail "download policy replaced"
+sed 's/photos/logs/g' "$WORK/bp.json" >"$WORK/bp-wrong.json"
+denied mc anonymous set-json "$WORK/bp-wrong.json" root/photos # Resource outside the bucket
+# "mc anonymous set none" only drops the statements mc manages; delete the whole policy.
+[[ $(code --aws-sigv4 "aws:amz:us-east-1:s3" --user rootadmin:rootsecret123 -X DELETE "$EP/photos?policy") == 204 ]] ||
+  fail "DeleteBucketPolicy"
+[[ $(code -X PUT --data y "$EP/photos/drop/anon2.txt") == 403 ]] || fail "policy removed"
+[[ $(code --aws-sigv4 "aws:amz:us-east-1:s3" --user rootadmin:rootsecret123 "$EP/photos?policy") == 404 ]] ||
+  fail "GetBucketPolicy after delete"
+
 echo "== disabled users"
 ok mc admin user disable root alice
 out=$(mc cat alice/photos/a.txt 2>&1 || true)

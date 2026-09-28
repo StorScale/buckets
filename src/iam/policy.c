@@ -80,6 +80,12 @@ bool buckets_wildcard_match(const char *pattern, const char *name) {
   return deep_match(name, strlen(name), pattern, strlen(pattern), false);
 }
 
+bool buckets_wildcard_match_simple(const char *pattern, const char *name) {
+  if (!*pattern) return !*name;
+  if (strcmp(pattern, "*") == 0) return true;
+  return deep_match(name, strlen(name), pattern, strlen(pattern), true);
+}
+
 /* ---- Go's path.Clean ------------------------------------------------------------ */
 
 static char *path_clean(const char *p) {
@@ -809,6 +815,7 @@ typedef struct {
   resource *res, *not_res;
   size_t nres, nnot_res;
   functions conds;
+  strset principals; /* bucket policies: Principal.AWS */
 } statement;
 
 static void statement_free(statement *s) {
@@ -821,6 +828,7 @@ static void statement_free(statement *s) {
   free(s->res);
   free(s->not_res);
   functions_free(&s->conds);
+  set_free(&s->principals);
 }
 
 struct buckets_policy {
@@ -1074,10 +1082,30 @@ static bool parse_resources(yyjson_val *v, resource **out, size_t *n, char *err,
   return true;
 }
 
+/* Principal.UnmarshalJSON: {"AWS": <string set>}, or the string "*". */
+static bool parse_principal(yyjson_val *v, strset *out, char *err, size_t errlen) {
+  set_free(out);
+  if (yyjson_is_null(v)) return true;
+  if (yyjson_is_str(v)) {
+    if (strcmp(yyjson_get_str(v), "*") != 0) return fail(err, errlen, "invalid principal '%s'", yyjson_get_str(v));
+    set_add(out, "*");
+    return true;
+  }
+  if (!yyjson_is_obj(v)) return fail(err, errlen, "cannot unmarshal Principal");
+  static const char *const fields[] = {"AWS"};
+  size_t i, max;
+  yyjson_val *k, *e;
+  yyjson_obj_foreach(v, i, max, k, e) {
+    if (field_of(yyjson_get_str(k), fields, 1) == 0 && !parse_string_set(e, out, err, errlen)) return false;
+  }
+  return true;
+}
+
 static bool parse_statement(yyjson_val *o, statement *s, char *err, size_t errlen) {
   memset(s, 0, sizeof(*s));
   if (!yyjson_is_obj(o)) return fail(err, errlen, "cannot unmarshal statement");
-  static const char *const fields[] = {"Sid", "Effect", "Action", "NotAction", "Resource", "NotResource", "Condition"};
+  static const char *const fields[] = {"Sid",         "Effect",    "Action",   "NotAction",
+                                       "Resource",    "NotResource", "Condition", "Principal"};
   size_t i, max;
   yyjson_val *k, *v;
   yyjson_obj_foreach(o, i, max, k, v) {
@@ -1110,6 +1138,9 @@ static bool parse_statement(yyjson_val *o, statement *s, char *err, size_t errle
       case 6:
         functions_free(&s->conds);
         if (!parse_conditions(v, &s->conds, err, errlen)) return false;
+        break;
+      case 7:
+        if (!parse_principal(v, &s->principals, err, errlen)) return false;
         break;
       default:
         break; /* unknown fields are ignored (Policy.UnmarshalJSON re-decodes leniently) */
@@ -1160,12 +1191,16 @@ static bool res_equal(const resource *a, size_t an, const resource *b, size_t bn
 }
 
 static bool statements_equal(const statement *a, const statement *b) {
-  return a->eff == b->eff && sets_equal(&a->actions, &b->actions) && sets_equal(&a->not_actions, &b->not_actions) &&
+  return a->eff == b->eff && sets_equal(&a->principals, &b->principals) && sets_equal(&a->actions, &b->actions) && sets_equal(&a->not_actions, &b->not_actions) &&
          res_equal(a->res, a->nres, b->res, b->nres) && res_equal(a->not_res, a->nnot_res, b->not_res, b->nnot_res) &&
          conds_equal(&a->conds, &b->conds);
 }
 
-bool buckets_policy_parse(const char *json, size_t len, buckets_policy **out, char *err, size_t errlen) {
+static bool bp_statement_valid(const statement *s, const char *bucket, char *err, size_t errlen);
+
+/* Decodes a policy document; bucket (non-NULL) selects BucketPolicy rules. */
+static bool parse_doc(const char *json, size_t len, const char *bucket, buckets_policy **out, char *err,
+                      size_t errlen) {
   *out = NULL;
   yyjson_doc *doc = yyjson_read(json, len, 0);
   if (!doc) return fail(err, errlen, "invalid JSON");
@@ -1230,7 +1265,9 @@ bool buckets_policy_parse(const char *json, size_t len, buckets_policy **out, ch
     ok = fail(err, errlen, "invalid version '%s'", p->version);
     goto done;
   }
-  for (size_t s = 0; s < p->n && ok; s++) ok = statement_valid(&p->st[s], err, errlen);
+  for (size_t s = 0; s < p->n && ok; s++) {
+    ok = bucket ? bp_statement_valid(&p->st[s], bucket, err, errlen) : statement_valid(&p->st[s], err, errlen);
+  }
 done:
   yyjson_doc_free(doc);
   if (!ok) {
@@ -1239,6 +1276,133 @@ done:
   }
   *out = p;
   return true;
+}
+
+bool buckets_policy_parse(const char *json, size_t len, buckets_policy **out, char *err, size_t errlen) {
+  return parse_doc(json, len, NULL, out, err, errlen);
+}
+
+/* ---- bucket policies (policy.BucketPolicy) --------------------------------------------- */
+
+static bool is_object_action(const char *action) {
+  for (int i = 0; i < K_OBJECT_ACTIONS_N; i++) {
+    if (buckets_wildcard_match(action, k_object_actions[i])) return true;
+  }
+  return false;
+}
+
+static bool any_pattern(const resource *r, size_t n, bool object) {
+  for (size_t i = 0; i < n; i++) {
+    const char *p = r[i].pattern;
+    bool m = object ? (strchr(p, '/') || strchr(p, '*')) : (!strchr(p, '/') || strcmp(p, "*") == 0);
+    if (m) return true;
+  }
+  return false;
+}
+
+/* wildcard.MatchAsPatternPrefix */
+static bool match_as_pattern_prefix(const char *pattern, const char *text) {
+  size_t pl = strlen(pattern), tl = strlen(text);
+  for (size_t i = 0; i < tl && i < pl; i++) {
+    if (pattern[i] == '*') return true;
+    if (pattern[i] == '?') continue;
+    if (pattern[i] != text[i]) return false;
+  }
+  return tl <= pl;
+}
+
+static bool res_validate_bucket(const resource *r, const char *bucket, char *err, size_t errlen) {
+  if (!res_valid(r)) return fail(err, errlen, "invalid resource");
+  size_t n = strlen(bucket);
+  char *prefix = buckets_xmalloc(n + 2);
+  memcpy(prefix, bucket, n);
+  prefix[n] = '/';
+  prefix[n + 1] = '\0';
+  bool ok = buckets_wildcard_match(r->pattern, bucket) || match_as_pattern_prefix(r->pattern, prefix);
+  free(prefix);
+  return ok || fail(err, errlen, "bucket name does not match");
+}
+
+/* BPStatement.isValid + Validate(bucket). */
+static bool bp_statement_valid(const statement *s, const char *bucket, char *err, size_t errlen) {
+  if (s->eff == EFFECT_NONE) return fail(err, errlen, "invalid Effect %s", s->eff_raw ? s->eff_raw : "");
+  if (s->principals.n == 0) return fail(err, errlen, "invalid Principal");
+  if (s->actions.n == 0 && s->not_actions.n == 0) return fail(err, errlen, "Action must not be empty");
+  if (s->actions.n > 0 && s->not_actions.n > 0) {
+    return fail(err, errlen, "Action and NotAction cannot be specified in the same statement");
+  }
+  if (s->nres == 0 && s->nnot_res == 0) return fail(err, errlen, "Resource must not be empty");
+  if (s->nres > 0 && s->nnot_res > 0) {
+    return fail(err, errlen, "Resource and NotResource cannot be specified in the same statement");
+  }
+  for (size_t i = 0; i < s->actions.n; i++) {
+    bool obj = is_object_action(s->actions.v[i]);
+    if ((s->nres > 0 && !any_pattern(s->res, s->nres, obj)) ||
+        (s->nnot_res > 0 && !any_pattern(s->not_res, s->nnot_res, obj))) {
+      return fail(err, errlen, "unsupported Resource found for action %s", s->actions.v[i]);
+    }
+  }
+  if (!check_keys(s, false, false, err, errlen)) return false;
+  for (size_t i = 0; i < s->nres; i++) {
+    if (!res_validate_bucket(&s->res[i], bucket, err, errlen)) return false;
+  }
+  for (size_t i = 0; i < s->nnot_res; i++) {
+    if (!res_validate_bucket(&s->not_res[i], bucket, err, errlen)) return false;
+  }
+  return true;
+}
+
+bool buckets_bucket_policy_parse(const char *json, size_t len, const char *bucket, buckets_policy **out, char *err,
+                                 size_t errlen) {
+  return parse_doc(json, len, bucket, out, err, errlen);
+}
+
+static bool bp_statement_allowed(const statement *s, const buckets_policy_args *a) {
+  bool matched = false;
+  const char *account = a->account ? a->account : "";
+  bool principal = false;
+  for (size_t i = 0; i < s->principals.n && !principal; i++) {
+    principal = buckets_wildcard_match_simple(s->principals.v[i], account);
+  }
+  if (!principal) goto out;
+  if ((!action_match(&s->actions, a->action) && s->actions.n != 0) || action_match(&s->not_actions, a->action)) {
+    goto out;
+  }
+  {
+    buckets_buf res = BUCKETS_BUF_INIT;
+    buckets_buf_append_c(&res, a->bucket ? a->bucket : "");
+    if (a->object && *a->object) {
+      if (a->object[0] != '/') buckets_buf_append_char(&res, '/');
+      buckets_buf_append_c(&res, a->object);
+    }
+    const char *rs = res.data ? res.data : "";
+    matched = true;
+    if (s->nres > 0) {
+      bool any = false;
+      for (size_t i = 0; i < s->nres && !any; i++) any = res_match(&s->res[i], rs, a);
+      if (!any) matched = false;
+    }
+    if (matched && s->nnot_res > 0) {
+      bool any = false;
+      for (size_t i = 0; i < s->nnot_res && !any; i++) any = res_match(&s->not_res[i], rs, a);
+      if (any) matched = false;
+    }
+    for (size_t i = 0; i < s->conds.n && matched; i++) matched = func_eval(&s->conds.f[i], a);
+    buckets_buf_free(&res);
+  }
+out:
+  return s->eff == EFFECT_ALLOW ? matched : !matched;
+}
+
+bool buckets_bucket_policy_allowed(const buckets_policy *p, const buckets_policy_args *a) {
+  for (size_t i = 0; i < p->n; i++) {
+    if (p->st[i].eff == EFFECT_DENY && !bp_statement_allowed(&p->st[i], a)) return false;
+  }
+  if (a->owner) return true;
+  for (size_t i = 0; i < p->n; i++) {
+    if (p->st[i].eff == EFFECT_ALLOW && bp_statement_allowed(&p->st[i], a)) return true;
+  }
+  return false;
 }
 
 void buckets_policy_free(buckets_policy *p) {
@@ -1276,6 +1440,7 @@ bool buckets_policies_allowed(const buckets_policy *const *ps, size_t n, const b
 static void statement_copy(statement *dst, const statement *src) {
   memset(dst, 0, sizeof(*dst));
   dst->sid = src->sid ? buckets_xstrdup(src->sid) : NULL;
+  for (size_t i = 0; i < src->principals.n; i++) set_add(&dst->principals, src->principals.v[i]);
   dst->eff = src->eff;
   dst->eff_raw = src->eff_raw ? buckets_xstrdup(src->eff_raw) : NULL;
   set_copy(&dst->actions, &src->actions);

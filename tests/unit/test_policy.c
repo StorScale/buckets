@@ -12,6 +12,7 @@
 
 #include "iam/policy.h"
 #include "policy_vectors.inc"
+#include "bp_vectors.inc"
 
 static void test_wildcard(void **state) {
   (void)state;
@@ -103,6 +104,46 @@ static void test_eval(void **state) {
   assert_int_equal(bad, 0);
 }
 
+/* Bucket policies, against vectors from policy.ParseBucketPolicyConfig
+ * (bucket "photos") and BucketPolicy.IsAllowed. */
+static void test_bucket_policy(void **state) {
+  (void)state;
+  size_t nd = sizeof(k_bp_parse_vectors) / sizeof(k_bp_parse_vectors[0]);
+  buckets_policy **ps = calloc(nd, sizeof(*ps));
+  int bad = 0;
+  for (size_t i = 0; i < nd; i++) {
+    char err[256] = "";
+    const char *d = k_bp_parse_vectors[i].doc;
+    bool ok = buckets_bucket_policy_parse(d, strlen(d), "photos", &ps[i], err, sizeof(err));
+    if (ok != k_bp_parse_vectors[i].valid) {
+      print_error("bp parse #%zu: got %s (%s), want %s: %s\n", i, ok ? "valid" : "invalid", err,
+                  k_bp_parse_vectors[i].valid ? "valid" : "invalid", d);
+      bad++;
+    }
+  }
+  for (size_t i = 0; i < sizeof(k_bp_eval_vectors) / sizeof(k_bp_eval_vectors[0]); i++) {
+    conds c;
+    parse_conds(k_bp_eval_vectors[i].cond, &c);
+    buckets_policy_args a = {.account = k_bp_eval_vectors[i].account, .action = k_bp_eval_vectors[i].action,
+                             .bucket = k_bp_eval_vectors[i].bucket, .object = k_bp_eval_vectors[i].object,
+                             .owner = k_bp_eval_vectors[i].owner, .conds = c.v, .nconds = c.n};
+    const buckets_policy *p = ps[k_bp_eval_vectors[i].doc];
+    if (!p) continue; /* reported by the parse check */
+    bool got = buckets_bucket_policy_allowed(p, &a);
+    if (got != k_bp_eval_vectors[i].allowed) {
+      if (bad < 20) {
+        print_error("bp eval #%zu: got %d want %d: [%s] %s %s/%s owner=%d cond=%s\n  %s\n", i, got,
+                    k_bp_eval_vectors[i].allowed, a.account, a.action, a.bucket, a.object, a.owner,
+                    k_bp_eval_vectors[i].cond, k_bp_parse_vectors[k_bp_eval_vectors[i].doc].doc);
+      }
+      bad++;
+    }
+  }
+  for (size_t i = 0; i < nd; i++) buckets_policy_free(ps[i]);
+  free(ps);
+  assert_int_equal(bad, 0);
+}
+
 static void test_canned(void **state) {
   (void)state;
   const char *names[] = {"readwrite", "readonly", "writeonly", "diagnostics", "consoleAdmin"};
@@ -123,7 +164,7 @@ static void test_canned(void **state) {
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_wildcard), cmocka_unit_test(test_parse), cmocka_unit_test(test_eval),
-      cmocka_unit_test(test_canned),
+      cmocka_unit_test(test_canned), cmocka_unit_test(test_bucket_policy),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }
