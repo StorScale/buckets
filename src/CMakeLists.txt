@@ -9,6 +9,7 @@ add_library(buckets STATIC
   core/uuid.c
   core/loop.c
   core/msgpack.c
+  core/pool.c
   crypto/sha256.c
   crypto/md5.c
   crypto/hex.c
@@ -43,7 +44,8 @@ target_include_directories(buckets PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 # timegm, gmtime_r, arc4random_buf, strncasecmp live outside strict C17.
 target_compile_definitions(buckets PUBLIC _GNU_SOURCE _DARWIN_C_SOURCE
   BUCKETS_VERSION="${PROJECT_VERSION}")
-target_link_libraries(buckets PUBLIC llhttp::llhttp yyjson)
+find_package(Threads REQUIRED)
+target_link_libraries(buckets PUBLIC llhttp::llhttp yyjson Threads::Threads)
 buckets_warnings(buckets)
 
 add_executable(bucketsd cmd/bucketsd/main.c)

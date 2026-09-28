@@ -8,6 +8,7 @@
 #include <time.h>
 
 #include "core/log.h"
+#include "core/pool.h"
 #include "core/loop.h"
 #include "net/http.h"
 #include "s3/server.h"
@@ -78,7 +79,8 @@ static void usage(FILE *f) {
           "  BUCKETS_ROOT_USER / MINIO_ROOT_USER          root access key (default minioadmin)\n"
           "  BUCKETS_ROOT_PASSWORD / MINIO_ROOT_PASSWORD  root secret key (default minioadmin)\n"
           "  BUCKETS_REGION / MINIO_REGION                server region (default: accept any)\n"
-          "  BUCKETS_LOG_LEVEL                            debug|info|warn|error\n");
+          "  BUCKETS_LOG_LEVEL                            debug|info|warn|error\n"
+          "  BUCKETS_IO_THREADS                           drive I/O threads (default: set size - 1)\n");
 }
 
 static bool parse_address(const char *addr, char **host, int *port) {
@@ -200,6 +202,15 @@ int main(int argc, char **argv) {
   if (buckets_objlayer_online(layer) < layout.ndrives) {
     buckets_log_warn("%zu of %zu drives are offline", layout.ndrives - buckets_objlayer_online(layer), layout.ndrives);
   }
+  /* Drive I/O threads: by default one per drive of a set, so every drive in
+   * a set is read and written at once (the event-loop thread takes part). */
+  const char *iot = getenv("BUCKETS_IO_THREADS");
+  long nio = iot ? strtol(iot, NULL, 10) : (long)layout.set_size - 1;
+  buckets_pool *io_pool = NULL;
+  if (nio > 0) {
+    io_pool = buckets_pool_new((int)BUCKETS_MIN(nio, 1024L));
+    buckets_io_pool_set(io_pool);
+  }
   buckets_format_result_free(&fr);
   buckets_layout_free(&layout);
 
@@ -243,6 +254,8 @@ int main(int argc, char **argv) {
   buckets_http_server_free(app.http);
   buckets_loop_free(g_loop);
   buckets_objlayer_free(layer);
+  buckets_io_pool_set(NULL);
+  buckets_pool_free(io_pool);
   free(host);
   buckets_log_info("bucketsd stopped");
   return rc == 0 ? 0 : 1;

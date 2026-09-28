@@ -9,6 +9,7 @@
 #include "core/buf.h"
 #include "core/log.h"
 #include "core/msgpack.h"
+#include "core/pool.h"
 #include "core/uuid.h"
 #include "crypto/base64.h"
 #include "crypto/hex.h"
@@ -230,17 +231,28 @@ typedef struct {
   bool missing; /* no xl.meta on this drive */
 } dmeta;
 
+typedef struct {
+  buckets_eset *s;
+  const char *vol, *path;
+  dmeta *m;
+} load_ctx;
+
+static void load_one(void *ctx, size_t i) {
+  load_ctx *c = ctx;
+  dmeta *m = &c->m[i];
+  memset(m, 0, sizeof(*m));
+  if (!c->s->drives[i]) return;
+  buckets_buf raw = BUCKETS_BUF_INIT;
+  buckets_drive_err e = buckets_drive_read_all(c->s->drives[i], c->vol, c->path, &raw);
+  if (e == BUCKETS_DRIVE_ERR_NOT_FOUND) m->missing = true;
+  else if (e == BUCKETS_DRIVE_OK) m->loaded = buckets_xlmeta_parse(raw.data, raw.len, &m->x) == BUCKETS_XL_OK;
+  buckets_buf_free(&raw);
+}
+
 static void load_metas(buckets_eset *s, const char *vol, const char *dir, dmeta *m) {
   char *path = join(dir, XL_META);
-  for (size_t i = 0; i < s->n; i++) {
-    memset(&m[i], 0, sizeof(m[i]));
-    if (!s->drives[i]) continue;
-    buckets_buf raw = BUCKETS_BUF_INIT;
-    buckets_drive_err e = buckets_drive_read_all(s->drives[i], vol, path, &raw);
-    if (e == BUCKETS_DRIVE_ERR_NOT_FOUND) m[i].missing = true;
-    else if (e == BUCKETS_DRIVE_OK) m[i].loaded = buckets_xlmeta_parse(raw.data, raw.len, &m[i].x) == BUCKETS_XL_OK;
-    buckets_buf_free(&raw);
-  }
+  load_ctx c = {s, vol, path, m};
+  buckets_io_parallel(s->n, load_one, &c);
   free(path);
 }
 
@@ -407,7 +419,52 @@ typedef struct {
   bool alive[MAX_SET];
   buckets_drive_writer *w[MAX_SET];
   buckets_buf ibuf[MAX_SET]; /* inline shards */
+  /* per-stage scratch shared with the I/O workers */
+  const char *file;
+  uint8_t **shards;
+  size_t sl;
+  bool abort_writes;
 } encoder;
+
+static void enc_open(void *ctx, size_t i) {
+  encoder *e = ctx;
+  buckets_eset *s = e->set;
+  e->alive[i] = s->drives[i] != NULL;
+  e->ibuf[i] = BUCKETS_BUF_INIT;
+  e->w[i] = NULL;
+  if (e->alive[i] && !e->inline_mode &&
+      buckets_drive_create_file(s->drives[i], BUCKETS_META_BUCKET, e->file, &e->w[i]) != BUCKETS_DRIVE_OK) {
+    e->alive[i] = false;
+  }
+}
+
+/* Hashes drive i's shard of the current block and appends hash + shard. */
+static void enc_write(void *ctx, size_t i) {
+  encoder *e = ctx;
+  if (!e->alive[i]) return;
+  const uint8_t *shard = e->shards[e->dist[i] - 1];
+  uint8_t h[HASH_LEN];
+  buckets_hh256(buckets_bitrot_key, shard, e->sl, h);
+  if (e->inline_mode) {
+    buckets_buf_append(&e->ibuf[i], h, HASH_LEN);
+    buckets_buf_append(&e->ibuf[i], shard, e->sl);
+  } else if (buckets_drive_writer_write(e->w[i], h, HASH_LEN) != BUCKETS_DRIVE_OK ||
+             buckets_drive_writer_write(e->w[i], shard, e->sl) != BUCKETS_DRIVE_OK) {
+    buckets_log_warn("write to %s failed; continuing with the remaining drives", e->set->drives[i]->root);
+    buckets_drive_writer_abort(e->w[i]);
+    e->w[i] = NULL;
+    e->alive[i] = false;
+  }
+}
+
+/* Flushes (fsync) and closes drive i's file, or aborts it. */
+static void enc_close(void *ctx, size_t i) {
+  encoder *e = ctx;
+  if (!e->w[i]) return;
+  if (e->abort_writes) buckets_drive_writer_abort(e->w[i]);
+  else if (buckets_drive_writer_close(e->w[i]) != BUCKETS_DRIVE_OK) e->alive[i] = false;
+  e->w[i] = NULL;
+}
 
 /* Streams `size` bytes from src, erasure-coded across the set: drive i
  * receives shard dist[i]-1 of every block, each preceded by its bitrot hash,
@@ -415,20 +472,14 @@ typedef struct {
 static buckets_obj_err encode_stream(encoder *e, source *src, int64_t size, const char *file) {
   buckets_eset *s = e->set;
   int total = e->data + e->parity;
-  for (size_t i = 0; i < s->n; i++) {
-    e->alive[i] = s->drives[i] != NULL;
-    e->ibuf[i] = BUCKETS_BUF_INIT;
-    e->w[i] = NULL;
-    if (e->alive[i] && !e->inline_mode &&
-        buckets_drive_create_file(s->drives[i], BUCKETS_META_BUCKET, file, &e->w[i]) != BUCKETS_DRIVE_OK) {
-      e->alive[i] = false;
-    }
-  }
+  e->file = file;
+  buckets_io_parallel(s->n, enc_open, e);
   buckets_rs *rs = buckets_rs_new(e->data, e->parity);
   size_t shard_cap = (size_t)ceil_div(BUCKETS_BLOCK_SIZE, e->data);
   uint8_t *block = buckets_xmalloc(BUCKETS_BLOCK_SIZE);
   uint8_t *shards[MAX_SET];
   for (int k = 0; k < total; k++) shards[k] = buckets_xmalloc(shard_cap);
+  e->shards = shards;
   buckets_obj_err err = BUCKETS_OBJ_OK;
   int wq = write_quorum(e->data, e->parity);
   while (src->remaining > 0 && !err) {
@@ -445,25 +496,10 @@ static buckets_obj_err encode_stream(encoder *e, source *src, int64_t size, cons
       memset(shards[k] + take, 0, sl - take);
     }
     if (e->parity) buckets_rs_encode(rs, shards, sl);
+    e->sl = sl;
+    buckets_io_parallel(s->n, enc_write, e);
     int ok = 0;
-    for (size_t i = 0; i < s->n; i++) {
-      if (!e->alive[i]) continue;
-      const uint8_t *shard = shards[e->dist[i] - 1];
-      uint8_t h[HASH_LEN];
-      buckets_hh256(buckets_bitrot_key, shard, sl, h);
-      if (e->inline_mode) {
-        buckets_buf_append(&e->ibuf[i], h, HASH_LEN);
-        buckets_buf_append(&e->ibuf[i], shard, sl);
-      } else if (buckets_drive_writer_write(e->w[i], h, HASH_LEN) != BUCKETS_DRIVE_OK ||
-                 buckets_drive_writer_write(e->w[i], shard, sl) != BUCKETS_DRIVE_OK) {
-        buckets_log_warn("write to %s failed; continuing with the remaining drives", s->drives[i]->root);
-        buckets_drive_writer_abort(e->w[i]);
-        e->w[i] = NULL;
-        e->alive[i] = false;
-        continue;
-      }
-      ok++;
-    }
+    for (size_t i = 0; i < s->n; i++) ok += e->alive[i];
     if (ok < wq) err = BUCKETS_OBJ_ERR_WRITE_QUORUM;
   }
   if (!err) {
@@ -471,21 +507,10 @@ static buckets_obj_err encode_stream(encoder *e, source *src, int64_t size, cons
     if (extra > 0) err = BUCKETS_OBJ_ERR_INCOMPLETE_BODY;
     else if (extra < 0) err = BUCKETS_OBJ_ERR_READER;
   }
+  e->abort_writes = err != BUCKETS_OBJ_OK;
+  buckets_io_parallel(s->n, enc_close, e);
   int ok = 0;
-  for (size_t i = 0; i < s->n; i++) {
-    if (!e->w[i]) {
-      ok += e->alive[i];
-      continue;
-    }
-    if (err) {
-      buckets_drive_writer_abort(e->w[i]);
-    } else if (buckets_drive_writer_close(e->w[i]) != BUCKETS_DRIVE_OK) {
-      e->alive[i] = false;
-    } else {
-      ok++;
-    }
-    e->w[i] = NULL;
-  }
+  for (size_t i = 0; i < s->n; i++) ok += e->alive[i];
   if (!err && ok < wq) err = BUCKETS_OBJ_ERR_WRITE_QUORUM;
   for (int k = 0; k < total; k++) free(shards[k]);
   free(block);
@@ -528,6 +553,69 @@ static buckets_obj_err check_namespace(buckets_eset *s, const char *bucket, cons
   return err;
 }
 
+typedef struct {
+  buckets_eset *s;
+  const char *bucket, *object, *op, *src_dir;
+  const buckets_xl_object *o;
+  const int *dist;
+  const bool *alive;
+  const buckets_buf *ibuf;
+  bool has_data_dir;
+  char key[37], data_dir[37];
+  bool ok[MAX_SET];
+} commit_ctx;
+
+static void commit_one(void *ctx, size_t i) {
+  commit_ctx *c = ctx;
+  c->ok[i] = false;
+  if (!c->alive[i] || !c->s->drives[i]) return;
+  buckets_drive *d = c->s->drives[i];
+  buckets_buf raw = BUCKETS_BUF_INIT;
+  char *mpath = join(c->op, XL_META);
+  buckets_xlmeta x;
+  memset(&x, 0, sizeof(x));
+  if (buckets_drive_read_all(d, c->bucket, mpath, &raw) == BUCKETS_DRIVE_OK &&
+      buckets_xlmeta_parse(raw.data, raw.len, &x) != BUCKETS_XL_OK) {
+    memset(&x, 0, sizeof(x)); /* unreadable: replaced (healing would do the same) */
+  }
+  buckets_buf_free(&raw);
+  free(mpath);
+  char old_dir[37] = "";
+  long prev = buckets_xlmeta_find(&x, c->o->version_id);
+  if (prev >= 0) {
+    buckets_xl_object po;
+    if (buckets_xl_object_decode(&x.versions[prev], &po) == BUCKETS_XL_OK) {
+      if (po.type == BUCKETS_XL_TYPE_OBJECT && !buckets_xl_kv_get(po.meta_sys, po.nmeta_sys, BUCKETS_XL_META_INLINE)) {
+        buckets_xl_version_id_string(po.data_dir, old_dir);
+      }
+      buckets_xl_object_free(&po);
+    }
+  }
+  buckets_xl_object mine = *c->o; /* shallow: only this drive's EcIndex differs */
+  mine.ec_index = c->dist[i];
+  buckets_buf meta = BUCKETS_BUF_INIT;
+  buckets_xl_header hdr;
+  buckets_xl_object_encode(&mine, &meta, &hdr);
+  buckets_xlmeta_put_version(&x, &hdr, (uint8_t *)meta.data, meta.len);
+  if (c->ibuf) buckets_xlmeta_inline_put(&x, c->key, c->ibuf[i].data ? c->ibuf[i].data : "", c->ibuf[i].len);
+  else buckets_xlmeta_inline_remove(&x, c->key);
+  buckets_buf bytes = BUCKETS_BUF_INIT;
+  buckets_xlmeta_serialize(&x, &bytes);
+  buckets_xlmeta_free(&x);
+  if (buckets_drive_rename_data(d, BUCKETS_META_BUCKET, c->src_dir, c->has_data_dir ? c->data_dir : NULL, c->bucket,
+                                c->op, bytes.data, bytes.len) == BUCKETS_DRIVE_OK) {
+    c->ok[i] = true;
+    if (old_dir[0] && strcmp(old_dir, c->data_dir) != 0) {
+      char *stale = join(c->op, old_dir);
+      buckets_drive_delete(d, c->bucket, stale, true, false);
+      free(stale);
+    }
+  } else {
+    buckets_log_warn("commit of %s/%s failed on %s", c->bucket, c->object, d->root);
+  }
+  buckets_buf_free(&bytes);
+}
+
 /* Installs version o on every live drive: merges it into that drive's xl.meta
  * (with the drive's own EcIndex and inline shard) and moves the staged data
  * directory <.minio.sys>/<src_dir>/<data_dir> into place. */
@@ -535,65 +623,30 @@ static buckets_obj_err commit_version(buckets_eset *s, const char *bucket, const
                                       const int *dist, const bool *alive, const buckets_buf *ibuf,
                                       const char *src_dir, bool has_data_dir, int quorum) {
   char *op = obj_path(object);
-  char key[37], data_dir[37];
-  buckets_xl_version_id_string(o->version_id, key);
-  buckets_xl_version_id_string(o->data_dir, data_dir);
+  commit_ctx c = {.s = s, .bucket = bucket, .object = object, .op = op, .src_dir = src_dir, .o = o,
+                  .dist = dist, .alive = alive, .ibuf = ibuf, .has_data_dir = has_data_dir};
+  buckets_xl_version_id_string(o->version_id, c.key);
+  buckets_xl_version_id_string(o->data_dir, c.data_dir);
+  buckets_io_parallel(s->n, commit_one, &c);
   int ok = 0;
-  for (size_t i = 0; i < s->n; i++) {
-    if (!alive[i] || !s->drives[i]) continue;
-    buckets_drive *d = s->drives[i];
-    buckets_buf raw = BUCKETS_BUF_INIT;
-    char *mpath = join(op, XL_META);
-    buckets_xlmeta x;
-    memset(&x, 0, sizeof(x));
-    if (buckets_drive_read_all(d, bucket, mpath, &raw) == BUCKETS_DRIVE_OK &&
-        buckets_xlmeta_parse(raw.data, raw.len, &x) != BUCKETS_XL_OK) {
-      memset(&x, 0, sizeof(x)); /* unreadable: replaced (healing would do the same) */
-    }
-    buckets_buf_free(&raw);
-    free(mpath);
-    char old_dir[37] = "";
-    long prev = buckets_xlmeta_find(&x, o->version_id);
-    if (prev >= 0) {
-      buckets_xl_object po;
-      if (buckets_xl_object_decode(&x.versions[prev], &po) == BUCKETS_XL_OK) {
-        if (po.type == BUCKETS_XL_TYPE_OBJECT && !buckets_xl_kv_get(po.meta_sys, po.nmeta_sys, BUCKETS_XL_META_INLINE)) {
-          buckets_xl_version_id_string(po.data_dir, old_dir);
-        }
-        buckets_xl_object_free(&po);
-      }
-    }
-    o->ec_index = dist[i];
-    buckets_buf meta = BUCKETS_BUF_INIT;
-    buckets_xl_header hdr;
-    buckets_xl_object_encode(o, &meta, &hdr);
-    buckets_xlmeta_put_version(&x, &hdr, (uint8_t *)meta.data, meta.len);
-    if (ibuf) buckets_xlmeta_inline_put(&x, key, ibuf[i].data ? ibuf[i].data : "", ibuf[i].len);
-    else buckets_xlmeta_inline_remove(&x, key);
-    buckets_buf bytes = BUCKETS_BUF_INIT;
-    buckets_xlmeta_serialize(&x, &bytes);
-    buckets_xlmeta_free(&x);
-    if (buckets_drive_rename_data(d, BUCKETS_META_BUCKET, src_dir, has_data_dir ? data_dir : NULL, bucket, op,
-                                  bytes.data, bytes.len) == BUCKETS_DRIVE_OK) {
-      ok++;
-      if (old_dir[0] && strcmp(old_dir, data_dir) != 0) {
-        char *stale = join(op, old_dir);
-        buckets_drive_delete(d, bucket, stale, true, false);
-        free(stale);
-      }
-    } else {
-      buckets_log_warn("commit of %s/%s failed on %s", bucket, object, d->root);
-    }
-    buckets_buf_free(&bytes);
-  }
+  for (size_t i = 0; i < s->n; i++) ok += c.ok[i];
   free(op);
   return ok >= quorum ? BUCKETS_OBJ_OK : BUCKETS_OBJ_ERR_WRITE_QUORUM;
 }
 
+typedef struct {
+  buckets_eset *s;
+  const char *tmp_dir;
+} cleanup_ctx;
+
+static void cleanup_one(void *ctx, size_t i) {
+  cleanup_ctx *c = ctx;
+  if (c->s->drives[i]) buckets_drive_delete(c->s->drives[i], BUCKETS_META_BUCKET, c->tmp_dir, true, false);
+}
+
 static void cleanup_tmp(buckets_eset *s, const char *tmp_dir) {
-  for (size_t i = 0; i < s->n; i++) {
-    if (s->drives[i]) buckets_drive_delete(s->drives[i], BUCKETS_META_BUCKET, tmp_dir, true, false);
-  }
+  cleanup_ctx c = {s, tmp_dir};
+  buckets_io_parallel(s->n, cleanup_one, &c);
 }
 
 static void new_uuid_bytes(uint8_t id[16], char str[37]) {
@@ -710,8 +763,8 @@ struct buckets_obj_reader {
   size_t nparts, part;
   int64_t part_off, remaining;
   size_t shard_cap;
-  uint8_t *shards[MAX_SET];
-  uint8_t *frame;
+  uint8_t *frames[MAX_SET]; /* bitrot hash + shard, as stored */
+  uint8_t *shards[MAX_SET]; /* frames[k] + HASH_LEN */
   uint8_t *block;
   int64_t block_index;
   size_t block_len;
@@ -721,9 +774,8 @@ void buckets_obj_reader_free(buckets_obj_reader *r) {
   if (!r) return;
   for (int i = 0; i < MAX_SET; i++) {
     free(r->inl[i]);
-    free(r->shards[i]);
+    free(r->frames[i]);
   }
-  free(r->frame);
   free(r->block);
   free(r->parts);
   free(r->bucket);
@@ -822,18 +874,21 @@ buckets_obj_err buckets_obj_open(buckets_objlayer *L, const char *bucket, const 
   r->part_off = off;
   r->remaining = offset >= total_size ? 0 : BUCKETS_MIN(length, total_size - offset);
   r->shard_cap = (size_t)ceil_div(BUCKETS_BLOCK_SIZE, r->data);
-  for (int k = 0; k < r->total; k++) r->shards[k] = buckets_xmalloc(r->shard_cap);
-  r->frame = buckets_xmalloc(r->shard_cap + HASH_LEN);
+  for (int k = 0; k < r->total; k++) {
+    r->frames[k] = buckets_xmalloc(r->shard_cap + HASH_LEN);
+    r->shards[k] = r->frames[k] + HASH_LEN;
+  }
   r->block = buckets_xmalloc(BUCKETS_BLOCK_SIZE);
   r->block_index = -1;
   *out = r;
   return BUCKETS_OBJ_OK;
 }
 
-/* Reads one verified shard block from the drive holding shard k. */
+/* Reads one verified shard block from the drive holding shard k into frames[k]. */
 static bool read_shard(buckets_obj_reader *r, int k, int64_t bi, size_t sl) {
   int i = r->drive_of_shard[k];
   if (i < 0 || r->bad[i] || !r->set->drives[i]) return false;
+  uint8_t *frame = r->frames[k];
   size_t flen = HASH_LEN + sl;
   int64_t foff = bi * (int64_t)(r->shard_cap + HASH_LEN);
   if (r->is_inline) {
@@ -841,12 +896,12 @@ static bool read_shard(buckets_obj_reader *r, int k, int64_t bi, size_t sl) {
       r->bad[i] = true;
       return false;
     }
-    memcpy(r->frame, r->inl[i] + foff, flen);
+    memcpy(frame, r->inl[i] + foff, flen);
   } else {
     buckets_buf path = BUCKETS_BUF_INIT;
     buckets_buf_appendf(&path, "%s/%s/part.%d", r->op, r->data_dir, r->parts[r->part].number);
     size_t got = 0;
-    buckets_drive_err e = buckets_drive_read_at(r->set->drives[i], r->bucket, path.data, foff, r->frame, flen, &got);
+    buckets_drive_err e = buckets_drive_read_at(r->set->drives[i], r->bucket, path.data, foff, frame, flen, &got);
     buckets_buf_free(&path);
     if (e || got != flen) {
       r->bad[i] = true;
@@ -854,28 +909,55 @@ static bool read_shard(buckets_obj_reader *r, int k, int64_t bi, size_t sl) {
     }
   }
   uint8_t h[HASH_LEN];
-  buckets_hh256(buckets_bitrot_key, r->frame + HASH_LEN, sl, h);
-  if (!buckets_ct_equal(h, r->frame, HASH_LEN)) {
+  buckets_hh256(buckets_bitrot_key, frame + HASH_LEN, sl, h);
+  if (!buckets_ct_equal(h, frame, HASH_LEN)) {
     buckets_log_warn("bitrot detected in %s/%s on %s (shard %d, block %lld)", r->bucket, r->op,
                      r->set->drives[i]->root, k, (long long)bi);
     r->bad[i] = true;
     return false;
   }
-  memcpy(r->shards[k], r->frame + HASH_LEN, sl);
   return true;
+}
+
+typedef struct {
+  buckets_obj_reader *r;
+  int64_t bi;
+  size_t sl;
+  int want[MAX_SET];
+  bool got[MAX_SET];
+} fetch_ctx;
+
+static void fetch_one(void *ctx, size_t j) {
+  fetch_ctx *c = ctx;
+  c->got[j] = read_shard(c->r, c->want[j], c->bi, c->sl);
 }
 
 static bool load_block(buckets_obj_reader *r, int64_t bi) {
   int64_t ps = r->parts[r->part].size;
   size_t blen = (size_t)BUCKETS_MIN((int64_t)BUCKETS_BLOCK_SIZE, ps - bi * BUCKETS_BLOCK_SIZE);
   size_t sl = (size_t)ceil_div((int64_t)blen, r->data);
-  bool present[MAX_SET] = {false};
+  bool present[MAX_SET] = {false}, tried[MAX_SET] = {false};
   int have = 0;
-  for (int k = 0; k < r->total && have < r->data; k++) {
-    if (read_shard(r, k, bi, sl)) {
-      present[k] = true;
-      have++;
+  fetch_ctx c = {.r = r, .bi = bi, .sl = sl};
+  /* Data shards first, all at once; then as many parity shards as are still
+   * missing, in waves, until enough verified shards are in hand. */
+  for (;;) {
+    size_t nw = 0;
+    for (int k = 0; k < r->total && have + (int)nw < r->data; k++) {
+      if (tried[k]) continue;
+      tried[k] = true;
+      int i = r->drive_of_shard[k];
+      if (i >= 0 && !r->bad[i] && r->set->drives[i]) c.want[nw++] = k;
     }
+    if (nw == 0) break;
+    buckets_io_parallel(nw, fetch_one, &c);
+    for (size_t j = 0; j < nw; j++) {
+      if (c.got[j]) {
+        present[c.want[j]] = true;
+        have++;
+      }
+    }
+    if (have >= r->data) break;
   }
   if (have < r->data) return false;
   bool missing_data = false;
@@ -922,6 +1004,54 @@ long buckets_obj_read(buckets_obj_reader *r, void *buf, size_t n) {
 
 /* ---- delete -------------------------------------------------------------------------- */
 
+typedef struct {
+  buckets_eset *s;
+  const char *bucket, *op;
+  dmeta *m;
+  uint8_t id[16];
+  char key[37];
+  bool found[MAX_SET], done[MAX_SET];
+} del_ctx;
+
+/* Removes the version from drive i's xl.meta, and the object dir with its last version. */
+static void delete_one(void *ctx, size_t i) {
+  del_ctx *c = ctx;
+  dmeta *m = &c->m[i];
+  c->found[i] = c->done[i] = false;
+  if (!m->loaded) return;
+  long k = buckets_xlmeta_find(&m->x, c->id);
+  if (k < 0) return;
+  c->found[i] = true;
+  char dd[37] = "";
+  buckets_xl_object o;
+  if (buckets_xl_object_decode(&m->x.versions[k], &o) == BUCKETS_XL_OK) {
+    if (o.type == BUCKETS_XL_TYPE_OBJECT && !buckets_xl_kv_get(o.meta_sys, o.nmeta_sys, BUCKETS_XL_META_INLINE)) {
+      buckets_xl_version_id_string(o.data_dir, dd);
+    }
+    buckets_xl_object_free(&o);
+  }
+  buckets_xlmeta_remove_version(&m->x, c->id);
+  buckets_xlmeta_inline_remove(&m->x, c->key);
+  buckets_drive *d = c->s->drives[i];
+  buckets_drive_err de;
+  if (m->x.n == 0) {
+    de = buckets_drive_delete(d, c->bucket, c->op, true, true);
+  } else {
+    buckets_buf bytes = BUCKETS_BUF_INIT;
+    buckets_xlmeta_serialize(&m->x, &bytes);
+    char *mp = join(c->op, XL_META);
+    de = buckets_drive_write_all(d, c->bucket, mp, bytes.data, bytes.len);
+    free(mp);
+    buckets_buf_free(&bytes);
+    if (!de && dd[0]) {
+      char *dp = join(c->op, dd);
+      buckets_drive_delete(d, c->bucket, dp, true, false);
+      free(dp);
+    }
+  }
+  c->done[i] = de == BUCKETS_DRIVE_OK;
+}
+
 buckets_obj_err buckets_obj_delete(buckets_objlayer *L, const char *bucket, const char *object, const char *version_id) {
   buckets_obj_err err = buckets_obj_stat_bucket(L, bucket);
   if (err) return err;
@@ -932,41 +1062,14 @@ buckets_obj_err buckets_obj_delete(buckets_objlayer *L, const char *bucket, cons
   char *op = obj_path(object);
   dmeta m[MAX_SET];
   load_metas(s, bucket, op, m);
+  del_ctx c = {.s = s, .bucket = bucket, .op = op, .m = m};
+  memcpy(c.id, id, 16);
+  buckets_xl_version_id_string(id, c.key);
+  buckets_io_parallel(s->n, delete_one, &c);
   size_t found = 0, done = 0;
-  char key[37];
-  buckets_xl_version_id_string(id, key);
   for (size_t i = 0; i < s->n; i++) {
-    if (!m[i].loaded) continue;
-    long k = buckets_xlmeta_find(&m[i].x, id);
-    if (k < 0) continue;
-    found++;
-    char dd[37] = "";
-    buckets_xl_object o;
-    if (buckets_xl_object_decode(&m[i].x.versions[k], &o) == BUCKETS_XL_OK) {
-      if (o.type == BUCKETS_XL_TYPE_OBJECT && !buckets_xl_kv_get(o.meta_sys, o.nmeta_sys, BUCKETS_XL_META_INLINE)) {
-        buckets_xl_version_id_string(o.data_dir, dd);
-      }
-      buckets_xl_object_free(&o);
-    }
-    buckets_xlmeta_remove_version(&m[i].x, id);
-    buckets_xlmeta_inline_remove(&m[i].x, key);
-    buckets_drive_err de;
-    if (m[i].x.n == 0) {
-      de = buckets_drive_delete(s->drives[i], bucket, op, true, true);
-    } else {
-      buckets_buf bytes = BUCKETS_BUF_INIT;
-      buckets_xlmeta_serialize(&m[i].x, &bytes);
-      char *mp = join(op, XL_META);
-      de = buckets_drive_write_all(s->drives[i], bucket, mp, bytes.data, bytes.len);
-      free(mp);
-      buckets_buf_free(&bytes);
-      if (!de && dd[0]) {
-        char *dp = join(op, dd);
-        buckets_drive_delete(s->drives[i], bucket, dp, true, false);
-        free(dp);
-      }
-    }
-    if (!de) done++;
+    found += c.found[i];
+    done += c.done[i];
   }
   free_metas(m, s->n);
   free(op);

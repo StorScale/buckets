@@ -6,7 +6,11 @@
 #include <cmocka.h>
 #include <string.h>
 
+#include <pthread.h>
+#include <stdatomic.h>
+
 #include "core/buf.h"
+#include "core/pool.h"
 #include "core/query.h"
 #include "core/str.h"
 #include "core/timefmt.h"
@@ -92,10 +96,52 @@ static void test_bucket_names(void **state) {
   assert_true(buckets_bucket_name_reserved("minio"));
 }
 
+typedef struct {
+  buckets_pool *pool;
+  atomic_int hits[64];
+  atomic_int inner;
+} par_ctx;
+
+static void inner_fn(void *ctx, size_t i) {
+  (void)i;
+  atomic_fetch_add(&((par_ctx *)ctx)->inner, 1);
+}
+
+static void outer_fn(void *ctx, size_t i) {
+  par_ctx *c = ctx;
+  atomic_fetch_add(&c->hits[i], 1);
+  buckets_parallel(c->pool, 8, inner_fn, c); /* nested: the caller helps, so no deadlock */
+}
+
+static void *concurrent_caller(void *arg) {
+  par_ctx *c = arg;
+  for (int r = 0; r < 50; r++) buckets_parallel(c->pool, 64, outer_fn, c);
+  return NULL;
+}
+
+static void test_pool(void **state) {
+  (void)state;
+  static par_ctx c;
+  for (int threads = 0; threads <= 4; threads += 4) {
+    memset(&c, 0, sizeof(c));
+    c.pool = threads ? buckets_pool_new(threads) : NULL;
+    buckets_parallel(c.pool, 64, outer_fn, &c);
+    for (int i = 0; i < 64; i++) assert_int_equal(atomic_load(&c.hits[i]), 1);
+    assert_int_equal(atomic_load(&c.inner), 64 * 8);
+    pthread_t t[3];
+    for (int k = 0; k < 3; k++) pthread_create(&t[k], NULL, concurrent_caller, &c);
+    for (int k = 0; k < 3; k++) pthread_join(t[k], NULL);
+    for (int i = 0; i < 64; i++) assert_int_equal(atomic_load(&c.hits[i]), 1 + 3 * 50);
+    assert_int_equal(atomic_load(&c.inner), (1 + 3 * 50) * 64 * 8);
+    buckets_pool_free(c.pool);
+  }
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_buf),   cmocka_unit_test(test_str),          cmocka_unit_test(test_time),
-      cmocka_unit_test(test_query), cmocka_unit_test(test_bucket_names),
+      cmocka_unit_test(test_query), cmocka_unit_test(test_bucket_names), cmocka_unit_test(test_pool),
+      cmocka_unit_test(test_pool),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }
