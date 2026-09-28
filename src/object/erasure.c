@@ -2,6 +2,9 @@
  * erasure-multipart.go, erasure-sets.go, erasure-server-pool.go subset).
  * SPDX-License-Identifier: AGPL-3.0-or-later */
 #include <pthread.h>
+#ifdef __APPLE__
+#include <pthread/qos.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -490,37 +493,92 @@ static void enc_write(void *ctx, size_t i) {
  * block, overlapping the next block's read, parity and writes; the encoder
  * alternates two block buffers and waits for the task before reusing one. */
 
+/* The hashes get a thread of their own for multi-block objects: queued on
+ * the drive I/O pool they would wait behind shard writes, and the whole
+ * PUT runs at the speed of MD5. Blocks circulate through a ring of
+ * HASH_RING buffers, so neither side waits on the other block by block. */
+#define HASH_RING 4
+
 typedef struct {
   source *src;
-  const uint8_t *block;
-  size_t len;
+  uint8_t *bufs[HASH_RING];
+  size_t lens[HASH_RING];
+  uint64_t submitted, hashed; /* blocks handed over / finished */
   pthread_mutex_t mu;
   pthread_cond_t cv;
-  bool busy;
+  bool stop, threaded;
+  pthread_t thread;
 } hasher;
 
-static void hash_task(void *ctx, size_t i) {
-  hasher *h = ctx;
-  (void)i;
-  for (int k = 0; k < 3; k++) source_hash(h->src, k, h->block, h->len);
+static void hash_block(hasher *h, uint64_t b) {
+  for (int k = 0; k < 3; k++) source_hash(h->src, k, h->bufs[b % HASH_RING], h->lens[b % HASH_RING]);
+}
+
+static void *hash_thread(void *arg) {
+  hasher *h = arg;
+#ifdef __APPLE__
+  /* The PUT's critical path: keep it on a performance core. */
+  pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+#endif
   pthread_mutex_lock(&h->mu);
-  h->busy = false;
-  pthread_cond_signal(&h->cv);
+  for (;;) {
+    while (h->hashed == h->submitted && !h->stop) pthread_cond_wait(&h->cv, &h->mu);
+    if (h->hashed == h->submitted) break;
+    uint64_t b = h->hashed;
+    pthread_mutex_unlock(&h->mu);
+    hash_block(h, b);
+    pthread_mutex_lock(&h->mu);
+    h->hashed++;
+    pthread_cond_broadcast(&h->cv);
+  }
+  pthread_mutex_unlock(&h->mu);
+  return NULL;
+}
+
+static void hasher_init(hasher *h, source *src, bool threaded) {
+  memset(h, 0, sizeof(*h));
+  h->src = src;
+  for (int i = 0; i < (threaded ? HASH_RING : 1); i++) h->bufs[i] = buckets_xmalloc(BUCKETS_BLOCK_SIZE);
+  pthread_mutex_init(&h->mu, NULL);
+  pthread_cond_init(&h->cv, NULL);
+  h->threaded = threaded && pthread_create(&h->thread, NULL, hash_thread, h) == 0;
+}
+
+/* The buffer for the next block, once the thread is done with its old contents. */
+static uint8_t *hasher_next_buffer(hasher *h) {
+  if (!h->threaded) return h->bufs[0];
+  pthread_mutex_lock(&h->mu);
+  while (h->submitted - h->hashed >= HASH_RING) pthread_cond_wait(&h->cv, &h->mu);
+  uint8_t *buf = h->bufs[h->submitted % HASH_RING];
+  pthread_mutex_unlock(&h->mu);
+  return buf;
+}
+
+/* Hands the block just read into hasher_next_buffer() over for hashing. */
+static void hasher_submit(hasher *h, size_t len) {
+  if (!h->threaded) {
+    h->lens[0] = len;
+    hash_block(h, 0);
+    return;
+  }
+  pthread_mutex_lock(&h->mu);
+  h->lens[h->submitted % HASH_RING] = len;
+  h->submitted++;
+  pthread_cond_broadcast(&h->cv);
   pthread_mutex_unlock(&h->mu);
 }
 
-static void hasher_wait(hasher *h) {
-  pthread_mutex_lock(&h->mu);
-  while (h->busy) pthread_cond_wait(&h->cv, &h->mu);
-  pthread_mutex_unlock(&h->mu);
-}
-
-static void hasher_start(hasher *h, const uint8_t *block, size_t len) {
-  hasher_wait(h);
-  h->block = block;
-  h->len = len;
-  h->busy = true;
-  buckets_pool_submit(buckets_io_pool(), hash_task, h); /* inline without a pool */
+static void hasher_destroy(hasher *h) {
+  if (h->threaded) {
+    pthread_mutex_lock(&h->mu);
+    h->stop = true;
+    pthread_cond_broadcast(&h->cv);
+    pthread_mutex_unlock(&h->mu);
+    pthread_join(h->thread, NULL); /* finishes every submitted block first */
+  }
+  for (int i = 0; i < HASH_RING; i++) free(h->bufs[i]);
+  pthread_cond_destroy(&h->cv);
+  pthread_mutex_destroy(&h->mu);
 }
 
 /* Parity for one byte range (parity bytes depend only on the data bytes at
@@ -534,6 +592,15 @@ static void enc_parity(void *ctx, size_t k) {
   uint8_t *part[MAX_SET];
   for (int j = 0; j < e->data + e->parity; j++) part[j] = e->shards[j] + off;
   buckets_rs_encode(e->rs, part, len);
+}
+
+/* Writing a shard into a buffered writer is cheap: one pool task per few
+ * drives keeps the pool's lock out of the way. */
+#define WRITE_GROUP 4
+
+static void enc_write_group(void *ctx, size_t g) {
+  encoder *e = ctx;
+  for (size_t i = g * WRITE_GROUP; i < BUCKETS_MIN((g + 1) * WRITE_GROUP, e->set->n); i++) enc_write(ctx, i);
 }
 
 /* Flushes (fsync) and closes drive i's file, or aborts it. */
@@ -555,17 +622,15 @@ static buckets_obj_err encode_stream(encoder *e, source *src, int64_t size, cons
   buckets_io_parallel(s->n, enc_open, e);
   buckets_rs *rs = buckets_rs_new(e->data, e->parity);
   size_t shard_cap = (size_t)ceil_div(BUCKETS_BLOCK_SIZE, e->data);
-  uint8_t *bufs[2] = {buckets_xmalloc(BUCKETS_BLOCK_SIZE), buckets_xmalloc(BUCKETS_BLOCK_SIZE)};
   uint8_t *shards[MAX_SET];
   for (int k = 0; k < total; k++) shards[k] = buckets_xmalloc(shard_cap);
   e->shards = shards;
-  hasher h = {.src = src};
-  pthread_mutex_init(&h.mu, NULL);
-  pthread_cond_init(&h.cv, NULL);
+  hasher h;
+  hasher_init(&h, src, size > BUCKETS_BLOCK_SIZE);
   buckets_obj_err err = BUCKETS_OBJ_OK;
   int wq = write_quorum(e->data, e->parity);
-  for (unsigned b = 0; src->remaining > 0 && !err; b++) {
-    uint8_t *block = bufs[b & 1]; /* the other buffer may still be hashing */
+  while (src->remaining > 0 && !err) {
+    uint8_t *block = hasher_next_buffer(&h);
     size_t n = source_read(src, block, BUCKETS_BLOCK_SIZE);
     if (src->err) {
       err = src->err;
@@ -578,20 +643,19 @@ static buckets_obj_err encode_stream(encoder *e, source *src, int64_t size, cons
       if (take) memcpy(shards[k], block + off, take);
       memset(shards[k] + take, 0, sl - take);
     }
-    hasher_start(&h, block, n);
+    hasher_submit(&h, n);
     e->sl = sl;
     e->rs = rs;
     if (e->parity) buckets_io_parallel(RS_CHUNKS, enc_parity, e);
-    buckets_io_parallel(s->n, enc_write, e);
+    buckets_io_parallel((s->n + WRITE_GROUP - 1) / WRITE_GROUP, enc_write_group, e);
     int ok = 0;
     for (size_t i = 0; i < s->n; i++) ok += e->alive[i];
     if (ok < wq) err = BUCKETS_OBJ_ERR_WRITE_QUORUM;
   }
-  hasher_wait(&h);
-  pthread_cond_destroy(&h.cv);
-  pthread_mutex_destroy(&h.mu);
+  hasher_destroy(&h);
   if (!err) {
-    long extra = src->rd(src->ud, bufs[0], 1); /* must be at EOF; lets chunked decoders read trailers */
+    uint8_t one;
+    long extra = src->rd(src->ud, &one, 1); /* must be at EOF; lets chunked decoders read trailers */
     if (extra > 0) err = BUCKETS_OBJ_ERR_INCOMPLETE_BODY;
     else if (extra < 0) err = BUCKETS_OBJ_ERR_READER;
   }
@@ -601,8 +665,6 @@ static buckets_obj_err encode_stream(encoder *e, source *src, int64_t size, cons
   for (size_t i = 0; i < s->n; i++) ok += e->alive[i];
   if (!err && ok < wq) err = BUCKETS_OBJ_ERR_WRITE_QUORUM;
   for (int k = 0; k < total; k++) free(shards[k]);
-  free(bufs[0]);
-  free(bufs[1]);
   buckets_rs_free(rs);
   return err;
 }
@@ -880,7 +942,14 @@ struct buckets_obj_reader {
   size_t shard_cap;
   uint8_t *frames[MAX_SET]; /* bitrot hash + shard, as stored */
   uint8_t *shards[MAX_SET]; /* frames[k] + HASH_LEN */
-  uint8_t *block;
+  size_t block_sl; /* shard length of the loaded block */
+  /* read-ahead of the next block into a second buffer set */
+  uint8_t *pf_frames[MAX_SET], *pf_shards[MAX_SET];
+  int64_t pf_index; /* -1: none */
+  bool pf_busy, pf_ok;
+  size_t pf_sl, pf_len;
+  pthread_mutex_t pf_mu;
+  pthread_cond_t pf_cv;
   int64_t block_index;
   size_t block_len;
   buckets_nslock_entry *lk; /* read lock, held until EOF or free */
@@ -888,8 +957,14 @@ struct buckets_obj_reader {
   int fh_part[MAX_SET];            /* the part number fh[i] has open */
 };
 
+static bool prefetch_wait(buckets_obj_reader *r, int64_t bi);
+
 void buckets_obj_reader_free(buckets_obj_reader *r) {
   if (!r) return;
+  prefetch_wait(r, -1);
+  pthread_cond_destroy(&r->pf_cv);
+  pthread_mutex_destroy(&r->pf_mu);
+  for (int i = 0; i < MAX_SET; i++) free(r->pf_frames[i]);
   buckets_nslock_unlock(r->lk);
   for (int i = 0; i < MAX_SET; i++) buckets_drive_file_close(r->fh[i]);
   for (int i = 0; i < MAX_SET; i++) r->degraded |= r->bad[i];
@@ -898,7 +973,7 @@ void buckets_obj_reader_free(buckets_obj_reader *r) {
     free(r->inl[i]);
     free(r->frames[i]);
   }
-  free(r->block);
+
   free(r->parts);
   free(r->bucket);
   free(r->object);
@@ -983,8 +1058,11 @@ static buckets_obj_reader *reader_new(buckets_epool *L, buckets_eset *s, const c
     r->frames[k] = buckets_xmalloc(r->shard_cap + HASH_LEN);
     r->shards[k] = r->frames[k] + HASH_LEN;
   }
-  r->block = buckets_xmalloc(BUCKETS_BLOCK_SIZE);
+
   r->block_index = -1;
+  r->pf_index = -1;
+  pthread_mutex_init(&r->pf_mu, NULL);
+  pthread_cond_init(&r->pf_cv, NULL);
   return r;
 }
 
@@ -1018,10 +1096,10 @@ static buckets_obj_err obj_open(buckets_epool *L, const char *bucket, const char
 }
 
 /* Reads one verified shard block from the drive holding shard k into frames[k]. */
-static bool read_shard(buckets_obj_reader *r, int k, int64_t bi, size_t sl) {
+static bool read_shard(buckets_obj_reader *r, uint8_t *const *frames, int k, int64_t bi, size_t sl) {
   int i = r->drive_of_shard[k];
   if (i < 0 || r->bad[i] || !r->set->drives[i]) return false;
-  uint8_t *frame = r->frames[k];
+  uint8_t *frame = frames[k];
   size_t flen = HASH_LEN + sl;
   int64_t foff = bi * (int64_t)(r->shard_cap + HASH_LEN);
   if (r->is_inline) {
@@ -1063,6 +1141,7 @@ static bool read_shard(buckets_obj_reader *r, int k, int64_t bi, size_t sl) {
 
 typedef struct {
   buckets_obj_reader *r;
+  uint8_t *const *frames;
   int64_t bi;
   size_t sl;
   int want[MAX_SET];
@@ -1071,16 +1150,19 @@ typedef struct {
 
 static void fetch_one(void *ctx, size_t j) {
   fetch_ctx *c = ctx;
-  c->got[j] = read_shard(c->r, c->want[j], c->bi, c->sl);
+  c->got[j] = read_shard(c->r, c->frames, c->want[j], c->bi, c->sl);
 }
 
-static bool load_block(buckets_obj_reader *r, int64_t bi) {
+/* Loads and verifies block bi of the current part into the given buffer
+ * set, reconstructing missing data shards. */
+static bool load_block_into(buckets_obj_reader *r, int64_t bi, uint8_t *const *frames, uint8_t *const *shards,
+                            size_t *out_sl, size_t *out_len) {
   int64_t ps = r->parts[r->part].size;
   size_t blen = (size_t)BUCKETS_MIN((int64_t)BUCKETS_BLOCK_SIZE, ps - bi * BUCKETS_BLOCK_SIZE);
   size_t sl = (size_t)ceil_div((int64_t)blen, r->data);
   bool present[MAX_SET] = {false}, tried[MAX_SET] = {false};
   int have = 0;
-  fetch_ctx c = {.r = r, .bi = bi, .sl = sl};
+  fetch_ctx c = {.r = r, .frames = frames, .bi = bi, .sl = sl};
   /* Data shards first, all at once; then as many parity shards as are still
    * missing, in waves, until enough verified shards are in hand. */
   for (;;) {
@@ -1104,14 +1186,81 @@ static bool load_block(buckets_obj_reader *r, int64_t bi) {
   if (have < r->data) return false;
   bool missing_data = false;
   for (int k = 0; k < r->data; k++) missing_data |= !present[k];
-  if (missing_data && !buckets_rs_reconstruct(r->rs, r->shards, present, sl, true)) return false;
-  for (int k = 0; k < r->data; k++) {
-    size_t off = (size_t)k * sl;
-    if (off >= blen) break;
-    memcpy(r->block + off, r->shards[k], BUCKETS_MIN(sl, blen - off));
-  }
+  if (missing_data && !buckets_rs_reconstruct(r->rs, shards, present, sl, true)) return false;
+  *out_sl = sl;
+  *out_len = blen;
+  return true;
+}
+
+/* The block is the data shards back to back; reads copy straight out of
+ * them rather than assembling it first. */
+static bool load_block(buckets_obj_reader *r, int64_t bi) {
+  size_t sl, blen;
+  if (!load_block_into(r, bi, r->frames, r->shards, &sl, &blen)) return false;
   r->block_index = bi;
   r->block_len = blen;
+  r->block_sl = sl;
+  return true;
+}
+
+/* ---- read-ahead: the next block loads while this one is copied out ---- */
+
+static void prefetch_task(void *ctx, size_t i) {
+  buckets_obj_reader *r = ctx;
+  (void)i;
+  size_t sl = 0, blen = 0;
+  bool ok = load_block_into(r, r->pf_index, r->pf_frames, r->pf_shards, &sl, &blen);
+  pthread_mutex_lock(&r->pf_mu);
+  r->pf_ok = ok;
+  r->pf_sl = sl;
+  r->pf_len = blen;
+  r->pf_busy = false;
+  pthread_cond_broadcast(&r->pf_cv);
+  pthread_mutex_unlock(&r->pf_mu);
+}
+
+/* Waits out an in-flight read-ahead. Returns whether it holds block bi. */
+static bool prefetch_wait(buckets_obj_reader *r, int64_t bi) {
+  if (r->pf_index < 0) return false;
+  pthread_mutex_lock(&r->pf_mu);
+  while (r->pf_busy) pthread_cond_wait(&r->pf_cv, &r->pf_mu);
+  pthread_mutex_unlock(&r->pf_mu);
+  bool hit = r->pf_index == bi && r->pf_ok;
+  r->pf_index = -1;
+  return hit;
+}
+
+static void prefetch_start(buckets_obj_reader *r, int64_t bi) {
+  if (!buckets_io_pool() || r->is_inline || bi * BUCKETS_BLOCK_SIZE >= r->parts[r->part].size) return;
+  if (!r->pf_frames[0]) {
+    for (int k = 0; k < r->total; k++) {
+      r->pf_frames[k] = buckets_xmalloc(r->shard_cap + HASH_LEN);
+      r->pf_shards[k] = r->pf_frames[k] + HASH_LEN;
+    }
+  }
+  r->pf_index = bi;
+  r->pf_busy = true;
+  buckets_pool_submit(buckets_io_pool(), prefetch_task, r);
+}
+
+/* Makes block bi current: from the read-ahead when it has it, else loaded
+ * now; then starts reading the block after it. */
+static bool next_block(buckets_obj_reader *r, int64_t bi) {
+  if (prefetch_wait(r, bi)) {
+    for (int k = 0; k < r->total; k++) { /* swap the buffer sets */
+      uint8_t *f = r->frames[k], *sh = r->shards[k];
+      r->frames[k] = r->pf_frames[k];
+      r->shards[k] = r->pf_shards[k];
+      r->pf_frames[k] = f;
+      r->pf_shards[k] = sh;
+    }
+    r->block_index = bi;
+    r->block_len = r->pf_len;
+    r->block_sl = r->pf_sl;
+  } else if (!load_block(r, bi)) {
+    return false;
+  }
+  prefetch_start(r, bi + 1);
   return true;
 }
 
@@ -1141,7 +1290,7 @@ buckets_obj_err buckets_ep_open(buckets_epool *L, const char *bucket, const char
     r->part++;
     r->part_off = 0;
   }
-  if (r->remaining > 0 && (r->part >= r->nparts || !load_block(r, r->part_off / BUCKETS_BLOCK_SIZE))) {
+  if (r->remaining > 0 && (r->part >= r->nparts || !next_block(r, r->part_off / BUCKETS_BLOCK_SIZE))) {
     buckets_log_error("cannot read %s/%s: fewer than %d intact shards", bucket, object, r->data);
     r->degraded = true;
     buckets_obj_reader_free(r);
@@ -1162,6 +1311,7 @@ long buckets_obj_read(buckets_obj_reader *r, void *buf, size_t n) {
     if (r->part >= r->nparts) return -1;
     int64_t ps = r->parts[r->part].size;
     if (r->part_off >= ps) {
+      prefetch_wait(r, -1);
       r->part++;
       r->part_off = 0;
       r->block_index = -1;
@@ -1169,7 +1319,7 @@ long buckets_obj_read(buckets_obj_reader *r, void *buf, size_t n) {
       continue;
     }
     int64_t bi = r->part_off / BUCKETS_BLOCK_SIZE;
-    if (bi != r->block_index && !load_block(r, bi)) {
+    if (bi != r->block_index && !next_block(r, bi)) {
       buckets_log_error("cannot read %s/%s: fewer than %d intact shards (part %d, block %lld)", r->bucket, r->op,
                         r->data, r->parts[r->part].number, (long long)bi);
       return -1;
@@ -1177,7 +1327,12 @@ long buckets_obj_read(buckets_obj_reader *r, void *buf, size_t n) {
     size_t in_block = (size_t)(r->part_off - bi * BUCKETS_BLOCK_SIZE);
     size_t take = BUCKETS_MIN(r->block_len - in_block, n - done);
     take = (size_t)BUCKETS_MIN((int64_t)take, r->remaining);
-    memcpy((uint8_t *)buf + done, r->block + in_block, take);
+    for (size_t copied = 0; copied < take;) {
+      size_t at = in_block + copied, k = at / r->block_sl, o = at % r->block_sl;
+      size_t chunk = BUCKETS_MIN(take - copied, r->block_sl - o);
+      memcpy((uint8_t *)buf + done + copied, r->shards[k] + o, chunk);
+      copied += chunk;
+    }
     done += take;
     r->part_off += (int64_t)take;
     r->remaining -= (int64_t)take;

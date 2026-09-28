@@ -105,8 +105,8 @@ static void test_ct_equal(void **state) {
 
 static void test_hh_simd_matches_scalar(void **state) {
   (void)state;
-  uint8_t *buf = malloc(70000);
-  for (size_t i = 0; i < 70000; i++) buf[i] = (uint8_t)(i * 2654435761u >> 13);
+  uint8_t *buf = malloc(70008); /* lengths up to 69999 at offsets up to 7 */
+  for (size_t i = 0; i < 70008; i++) buf[i] = (uint8_t)(i * 2654435761u >> 13);
   static const size_t lens[] = {0, 1, 31, 32, 33, 63, 64, 65, 100, 1000, 4096, 65536, 69999};
   for (size_t k = 0; k < sizeof(lens) / sizeof(lens[0]); k++) {
     uint8_t a[32], b[32];

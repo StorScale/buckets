@@ -384,11 +384,35 @@ buckets_drive_err buckets_drive_write_all(buckets_drive *d, const char *vol, con
   return err;
 }
 
+#define WRITER_BUFFER (1u << 20)
+
+/* Local writers buffer in user space: shard blocks arrive as a 32-byte hash
+ * plus a shard, and two syscalls per block per drive added up. */
 struct buckets_drive_writer {
   int fd;
   char *path;
   struct buckets_rwriter *remote;
+  uint8_t *buf;
+  size_t len;
 };
+
+static buckets_drive_err write_fd(int fd, const void *data, size_t n) {
+  const char *c = data;
+  while (n) {
+    ssize_t r = write(fd, c, n);
+    if (r < 0 && errno == EINTR) continue;
+    if (r < 0) return BUCKETS_DRIVE_ERR_IO;
+    c += r;
+    n -= (size_t)r;
+  }
+  return BUCKETS_DRIVE_OK;
+}
+
+static buckets_drive_err writer_flush(buckets_drive_writer *w) {
+  buckets_drive_err e = w->len ? write_fd(w->fd, w->buf, w->len) : BUCKETS_DRIVE_OK;
+  w->len = 0;
+  return e;
+}
 
 buckets_drive_err buckets_drive_create_file(buckets_drive *d, const char *vol, const char *path,
                                             buckets_drive_writer **w) {
@@ -416,14 +440,14 @@ buckets_drive_writer *buckets_drive_writer_wrap_remote(struct buckets_rwriter *r
 
 buckets_drive_err buckets_drive_writer_write(buckets_drive_writer *w, const void *data, size_t n) {
   if (w->remote) return buckets_rwriter_write(w->remote, data, n);
-  const char *c = data;
-  while (n) {
-    ssize_t r = write(w->fd, c, n);
-    if (r < 0 && errno == EINTR) continue;
-    if (r < 0) return BUCKETS_DRIVE_ERR_IO;
-    c += r;
-    n -= (size_t)r;
+  if (w->len + n > WRITER_BUFFER) {
+    buckets_drive_err e = writer_flush(w);
+    if (e) return e;
   }
+  if (n >= WRITER_BUFFER) return write_fd(w->fd, data, n);
+  if (!w->buf) w->buf = buckets_xmalloc(WRITER_BUFFER);
+  memcpy(w->buf + w->len, data, n);
+  w->len += n;
   return BUCKETS_DRIVE_OK;
 }
 
@@ -433,8 +457,10 @@ buckets_drive_err buckets_drive_writer_close(buckets_drive_writer *w) {
     free(w);
     return e;
   }
-  buckets_drive_err err = data_sync(w->fd) == 0 ? BUCKETS_DRIVE_OK : BUCKETS_DRIVE_ERR_IO;
+  buckets_drive_err err = writer_flush(w);
+  if (!err && data_sync(w->fd) != 0) err = BUCKETS_DRIVE_ERR_IO;
   close(w->fd);
+  free(w->buf);
   free(w->path);
   free(w);
   return err;
@@ -449,6 +475,7 @@ void buckets_drive_writer_abort(buckets_drive_writer *w) {
   }
   close(w->fd);
   unlink(w->path);
+  free(w->buf);
   free(w->path);
   free(w);
 }

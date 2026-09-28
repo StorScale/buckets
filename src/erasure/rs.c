@@ -2,6 +2,7 @@
 #include "erasure/rs.h"
 
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -9,6 +10,8 @@
 
 static uint8_t g_exp[512], g_log[256];
 static uint8_t g_mul[256][256];
+/* Split-nibble tables for SIMD multiply: c*x = lo[c][x & 15] ^ hi[c][x >> 4]. */
+static uint8_t g_nib[256][2][16];
 static pthread_once_t g_once = PTHREAD_ONCE_INIT;
 
 static void gf_init(void) {
@@ -23,6 +26,12 @@ static void gf_init(void) {
   for (int a = 0; a < 256; a++) {
     for (int b = 0; b < 256; b++) {
       g_mul[a][b] = (a && b) ? g_exp[g_log[a] + g_log[b]] : 0;
+    }
+  }
+  for (int c = 0; c < 256; c++) {
+    for (int i = 0; i < 16; i++) {
+      g_nib[c][0][i] = g_mul[c][i];
+      g_nib[c][1][i] = g_mul[c][i << 4];
     }
   }
 }
@@ -138,7 +147,7 @@ void buckets_rs_free(buckets_rs *rs) {
 }
 
 /* out[o][i] = XOR_j coeff[o][j] * in[j][i] */
-static void code_some(const uint8_t *coeff, int ncoeff_cols, uint8_t *const *in, int nin, uint8_t *const *out,
+static void code_some_scalar(const uint8_t *coeff, int ncoeff_cols, uint8_t *const *in, int nin, uint8_t *const *out,
                       int nout, size_t len) {
   for (int o = 0; o < nout; o++) {
     uint8_t *dst = out[o];
@@ -155,6 +164,101 @@ static void code_some(const uint8_t *coeff, int ncoeff_cols, uint8_t *const *in,
       }
     }
   }
+}
+
+/* The same in 128-bit SIMD, 16 bytes at a time (klauspost's technique):
+ * each input chunk is loaded once and split into nibbles, each output is
+ * accumulated in a register and stored once. Bytes past the last whole
+ * chunk go through the scalar code. */
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#define HAVE_SIMD 1
+static void code_some_simd(const uint8_t *coeff, int ncoeff_cols, uint8_t *const *in, int nin, uint8_t *const *out,
+                           int nout, size_t len) {
+  uint8x16_t lo[BUCKETS_RS_MAX_SHARDS], hi[BUCKETS_RS_MAX_SHARDS], raw[BUCKETS_RS_MAX_SHARDS];
+  const uint8x16_t mask = vdupq_n_u8(0x0f);
+  for (size_t i = 0; i + 16 <= len; i += 16) {
+    for (int j = 0; j < nin; j++) {
+      raw[j] = vld1q_u8(in[j] + i);
+      lo[j] = vandq_u8(raw[j], mask);
+      hi[j] = vshrq_n_u8(raw[j], 4);
+    }
+    for (int o = 0; o < nout; o++) {
+      const uint8_t *row = coeff + o * ncoeff_cols;
+      uint8x16_t acc = vdupq_n_u8(0);
+      for (int j = 0; j < nin; j++) {
+        uint8_t c = row[j];
+        if (c == 0) continue;
+        if (c == 1) {
+          acc = veorq_u8(acc, raw[j]);
+        } else {
+          acc = veorq_u8(acc, veorq_u8(vqtbl1q_u8(vld1q_u8(g_nib[c][0]), lo[j]),
+                                       vqtbl1q_u8(vld1q_u8(g_nib[c][1]), hi[j])));
+        }
+      }
+      vst1q_u8(out[o] + i, acc);
+    }
+  }
+}
+static bool simd_ok(void) { return true; }
+#elif defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+#include <immintrin.h>
+#define HAVE_SIMD 1
+__attribute__((target("ssse3"))) static void code_some_simd(const uint8_t *coeff, int ncoeff_cols, uint8_t *const *in,
+                                                           int nin, uint8_t *const *out, int nout, size_t len) {
+  __m128i lo[BUCKETS_RS_MAX_SHARDS], hi[BUCKETS_RS_MAX_SHARDS], raw[BUCKETS_RS_MAX_SHARDS];
+  const __m128i mask = _mm_set1_epi8(0x0f);
+  for (size_t i = 0; i + 16 <= len; i += 16) {
+    for (int j = 0; j < nin; j++) {
+      raw[j] = _mm_loadu_si128((const __m128i *)(in[j] + i));
+      lo[j] = _mm_and_si128(raw[j], mask);
+      hi[j] = _mm_and_si128(_mm_srli_epi64(raw[j], 4), mask);
+    }
+    for (int o = 0; o < nout; o++) {
+      const uint8_t *row = coeff + o * ncoeff_cols;
+      __m128i acc = _mm_setzero_si128();
+      for (int j = 0; j < nin; j++) {
+        uint8_t c = row[j];
+        if (c == 0) continue;
+        if (c == 1) {
+          acc = _mm_xor_si128(acc, raw[j]);
+        } else {
+          acc = _mm_xor_si128(acc, _mm_xor_si128(
+              _mm_shuffle_epi8(_mm_loadu_si128((const __m128i *)g_nib[c][0]), lo[j]),
+              _mm_shuffle_epi8(_mm_loadu_si128((const __m128i *)g_nib[c][1]), hi[j])));
+        }
+      }
+      _mm_storeu_si128((__m128i *)(out[o] + i), acc);
+    }
+  }
+}
+static bool simd_ok(void) { return __builtin_cpu_supports("ssse3"); }
+#endif
+
+static _Atomic int g_simd = -1; /* -1: decide on first use */
+
+void buckets_rs_set_simd(bool on) { g_simd = on; }
+
+static void code_some(const uint8_t *coeff, int ncoeff_cols, uint8_t *const *in, int nin, uint8_t *const *out,
+                      int nout, size_t len) {
+#ifdef HAVE_SIMD
+  int simd = atomic_load_explicit(&g_simd, memory_order_relaxed);
+  if (simd < 0) {
+    simd = simd_ok() && !getenv("BUCKETS_NO_SIMD");
+    atomic_store_explicit(&g_simd, simd, memory_order_relaxed);
+  }
+  if (simd && len >= 16) {
+    size_t whole = len & ~(size_t)15;
+    code_some_simd(coeff, ncoeff_cols, in, nin, out, nout, whole);
+    if (whole == len) return;
+    uint8_t *tin[BUCKETS_RS_MAX_SHARDS], *tout[BUCKETS_RS_MAX_SHARDS];
+    for (int j = 0; j < nin; j++) tin[j] = in[j] + whole;
+    for (int o = 0; o < nout; o++) tout[o] = out[o] + whole;
+    code_some_scalar(coeff, ncoeff_cols, tin, nin, tout, nout, len - whole);
+    return;
+  }
+#endif
+  code_some_scalar(coeff, ncoeff_cols, in, nin, out, nout, len);
 }
 
 void buckets_rs_encode(const buckets_rs *rs, uint8_t *const *shards, size_t len) {

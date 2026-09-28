@@ -6,16 +6,15 @@ temp directories on one disk, so it measures the server's CPU path (payload
 hashing, erasure coding, bitrot checks, HTTP) rather than the disks. GETs
 come from the page cache.
 
-## Results (0.3.x, Apple M-series laptop, 1 GiB object, release build)
+## Results (Apple M-series laptop, 1 GiB object, release build)
 
-| Drives | Buckets PUT | MinIO PUT | Buckets GET (warm) | MinIO GET (warm) |
+| Drives | Buckets PUT | MinIO PUT | Buckets GET (cold / warm) | MinIO GET (cold / warm) |
 |---|---|---|---|---|
-| 1 | 1.06 s | 1.17 s | 0.22 s | 0.21 s |
-| 4 (EC 2+2) | 1.14 s | 1.19 s | 0.19 s | 0.17 s |
-| 16 (EC 12+4) | 1.25–1.6 s | 1.20 s | 0.15 s | 0.17 s |
+| 1 | 1.05 s | 1.18 s | 0.15 / 0.14 s | 0.21 / 0.21 s |
+| 4 (EC 2+2) | 1.08–1.16 s | 1.20 s | 0.13 / 0.12 s | 0.41 / 0.17 s |
+| 16 (EC 12+4) | 1.17–1.21 s | 1.20 s | 0.11 / 0.11 s | 0.46 / 0.17 s |
 
-- **Cold GET:** MinIO's first GET after startup is 2–4× slower (0.4–0.6 s); Buckets' is not.
-- **16-drive PUT:** varies run to run on macOS. Both servers sync every shard file.
+**PUT floor.** A single-stream PUT cannot finish before the whole object's MD5 is computed for the ETag. MD5's 64 dependent rounds per block leave no parallelism, and OpenSSL's assembly MD5 runs at about 1.03 GB/s here, which is roughly 1.04 s per GiB. Buckets sits at that floor on one drive and within a few percent of it on 16. MinIO is bound by the same floor. Concurrent PUTs scale across cores.
 
 ## What moved the numbers
 
@@ -28,9 +27,14 @@ The starting point was PUT at 0.80–1.03 s per 256 MiB (2.6–3.3× MinIO) and 
 5. **HighwayHash in SIMD.** The bitrot hash dominated GET. NEON (arm64) and SSSE3 (x86-64, chosen at runtime) versions of its update loop are bit-identical to the portable one; the golden vectors and a randomized comparison test check this.
 6. **Open files kept open.** Object readers hold each drive's part file open instead of opening it for every shard block (about 12,000 opens per GiB on 16 drives).
 7. **Double-buffered responses.** A worker fills the next response chunk while the event loop sends the current one.
+8. **SIMD Reed-Solomon.** GF(2^8) multiplication uses split-nibble table lookups, 16 bytes per instruction (`vqtbl1q_u8` on NEON, `pshufb` on SSSE3), as in klauspost/reedsolomon. Each input chunk is loaded once, and each output is written once. A randomized test checks it against the scalar code for encode and reconstruct.
+9. **The MD5 thread.** Each multi-block PUT hashes on its own thread, instead of queueing behind shard writes on the I/O pool. Blocks circulate through a four-buffer ring, so the hasher and the encoder don't wait on each other block by block. On macOS that thread asks for a performance core.
+10. **Buffered drive writers.** Writers buffer 1 MiB, so a block no longer costs two `write()` calls per drive (hash, then shard). Shard writes are grouped four drives per pool task.
+11. **Direct GET copies.** GETs copy straight out of the verified shard buffers instead of assembling each block first.
+12. **GET read-ahead.** The reader loads and verifies block N+1 in the background, into a second set of shard buffers, while block N is sent.
 
 ## Known headroom
 
-- **Reed-Solomon:** the GF(2^8) multiply is table-driven scalar code. klauspost's split-nibble SIMD (NEON/AVX2) is several times faster.
-- **Single stream:** a single-stream PUT is bound by MD5 at ~1 GB/s, as it is for MinIO. Concurrent streams scale across cores.
-- **Event loop:** one event-loop thread moves all bytes for a node. Multiple reactors come with the rest of the I/O work.
+- **Single-stream PUT:** bound by MD5, as it is for MinIO. The only ways around it would change the ETag's meaning, which S3 clients rely on.
+- **Event loop:** one event-loop thread per node moves every byte for all connections. It is not the bottleneck for one stream (GET reaches ~9 GB/s), but it will matter under many concurrent clients. Multiple reactors are planned.
+- **AVX2:** the x86 paths use SSSE3 (128-bit). AVX2 versions would roughly double RS and HighwayHash throughput on x86 servers.

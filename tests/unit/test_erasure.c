@@ -161,8 +161,48 @@ static void test_reconstruct_any(void **state) {
   buckets_rs_free(rs);
 }
 
+static void test_rs_simd_matches_scalar(void **state) {
+  (void)state;
+  static const int layouts[][2] = {{1, 1}, {2, 2}, {4, 4}, {6, 2}, {8, 8}, {12, 4}, {5, 3}, {14, 2}};
+  static const size_t lens[] = {1, 15, 16, 17, 100, 4096, 87382, 262145};
+  uint32_t seed = 12345;
+  for (size_t l = 0; l < sizeof(layouts) / sizeof(layouts[0]); l++) {
+    int d = layouts[l][0], p = layouts[l][1];
+    buckets_rs *rs = buckets_rs_new(d, p);
+    for (size_t k = 0; k < sizeof(lens) / sizeof(lens[0]); k++) {
+      size_t len = lens[k];
+      uint8_t *a[32], *b[32];
+      for (int i = 0; i < d + p; i++) {
+        a[i] = malloc(len);
+        b[i] = malloc(len);
+        for (size_t x = 0; x < len && i < d; x++) {
+          seed = seed * 1103515245u + 12345u;
+          a[i][x] = b[i][x] = (uint8_t)(seed >> 16);
+        }
+      }
+      buckets_rs_set_simd(false);
+      buckets_rs_encode(rs, a, len);
+      buckets_rs_set_simd(true);
+      buckets_rs_encode(rs, b, len);
+      for (int i = d; i < d + p; i++) assert_memory_equal(a[i], b[i], len);
+      /* Lose the first p shards and rebuild them with SIMD. */
+      bool present[32];
+      for (int i = 0; i < d + p; i++) present[i] = i >= p;
+      for (int i = 0; i < p; i++) memset(b[i], 0, len);
+      assert_true(buckets_rs_reconstruct(rs, b, present, len, false));
+      for (int i = 0; i < d + p; i++) assert_memory_equal(a[i], b[i], len);
+      for (int i = 0; i < d + p; i++) {
+        free(a[i]);
+        free(b[i]);
+      }
+    }
+    buckets_rs_free(rs);
+  }
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
+      cmocka_unit_test(test_rs_simd_matches_scalar),
       cmocka_unit_test(test_minio_selftest),
       cmocka_unit_test(test_reconstruct_any),
   };

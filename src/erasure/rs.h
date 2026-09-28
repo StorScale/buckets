@@ -33,4 +33,7 @@ static inline size_t buckets_rs_shard_size(const buckets_rs *rs, size_t n) {
   return (n + (size_t)d - 1) / (size_t)d;
 }
 
+/* Tests: force the portable (false) or SIMD (true) arithmetic. */
+void buckets_rs_set_simd(bool on);
+
 #endif
