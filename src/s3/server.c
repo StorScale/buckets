@@ -19,6 +19,7 @@
 #include "admin/admin.h"
 #include "admin/info.h"
 #include "config/sys.h"
+#include "iam/openid.h"
 #include "bucket/metadata.h"
 #include "bucket/metasys.h"
 #include "dist/peer.h"
@@ -51,8 +52,59 @@ void buckets_s3_peer_iam(void *server, const char *kind, const char *name) {
   buckets_iam_on_notify(s->iam, kind, name);
 }
 
+/* ---- OpenID providers ---- */
+
+static const char *g_region = ""; /* for role ARNs built while validating a config */
+
+buckets_openid *buckets_s3_openid(buckets_s3_server *s) {
+  pthread_mutex_lock(&s->oidc_mu);
+  buckets_openid *o = buckets_openid_ref(s->openid);
+  pthread_mutex_unlock(&s->oidc_mu);
+  return o;
+}
+
+static void rebuild_openid(buckets_s3_server *s) {
+  buckets_config *cfg = buckets_config_sys_snapshot(s->config);
+  char err[512];
+  buckets_openid *o = buckets_openid_build(cfg, s->region, err, sizeof(err));
+  buckets_config_free(cfg);
+  if (!o) {
+    buckets_log_error("identity_openid: %s", err);
+    return;
+  }
+  if (buckets_openid_enabled(o)) buckets_log_info("identity_openid: OpenID configured");
+  pthread_mutex_lock(&s->oidc_mu);
+  buckets_openid *old = s->openid;
+  s->openid = o;
+  pthread_mutex_unlock(&s->oidc_mu);
+  buckets_openid_release(old);
+}
+
+/* mc admin config set identity_openid: the providers must be reachable. */
+static bool validate_openid(const buckets_config *cfg, char *err, size_t errlen) {
+  buckets_openid *o = buckets_openid_build(cfg, g_region, err, errlen);
+  buckets_openid_release(o);
+  return o != NULL;
+}
+
+static char *oidc_claim_name(void *ud) {
+  buckets_openid *o = buckets_s3_openid(ud);
+  char *n = buckets_xstrdup(buckets_openid_claim_name(o));
+  buckets_openid_release(o);
+  return n;
+}
+
+static char *oidc_role_policy(void *ud, const char *arn) {
+  buckets_openid *o = buckets_s3_openid(ud);
+  const char *p = o ? buckets_openid_role_policy(o, arn) : NULL;
+  char *r = p ? buckets_xstrdup(p) : NULL;
+  buckets_openid_release(o);
+  return r;
+}
+
 static void config_changed(void *ud, const char *subsys, bool local) {
   buckets_s3_server *s = ud;
+  if (!*subsys || strcmp(subsys, "identity_openid") == 0) rebuild_openid(s);
   if (local && s->peers) buckets_peer_notify_iam(s->peers, "config", *subsys ? subsys : "all");
 }
 
@@ -73,6 +125,11 @@ void buckets_s3_server_init(buckets_s3_server *s, buckets_objlayer *layer, const
   buckets_iam_set_notify(s->iam, notify_iam, s);
   s->config = buckets_config_sys_new(root_user, root_password);
   buckets_config_sys_set_hook(s->config, config_changed, s);
+  pthread_mutex_init(&s->oidc_mu, NULL);
+  g_region = s->region;
+  buckets_config_register_validator("identity_openid", validate_openid);
+  buckets_iam_openid_hooks hooks = {oidc_claim_name, oidc_role_policy, s};
+  buckets_iam_set_openid_hooks(s->iam, &hooks);
   if (layer) buckets_s3_server_set_layer(s, layer);
 }
 
@@ -89,6 +146,7 @@ static void *iam_start_main(void *arg) {
     nanosleep(&ts, NULL);
     if (delay_ms < 5000) delay_ms *= 2;
   }
+  rebuild_openid(s);
   delay_ms = 250;
   while (!buckets_iam_start(s->iam, s->layer)) {
     buckets_log_warn("iam: unable to load IAM data yet, retrying");

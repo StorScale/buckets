@@ -24,6 +24,7 @@ add_library(buckets STATIC
   net/http.c
   net/tls.c
   net/client.c
+  net/fetch.c
   s3/errors.c
   s3/errors_gen.c
   s3/xml.c
@@ -54,7 +55,9 @@ add_library(buckets STATIC
   heal/healer.c
   iam/policy.c
   iam/iam.c
+  iam/openid.c
   crypto/jwt.c
+  crypto/jwk.c
   core/strmap.c
   object/sysconfig.c
   s3/auth.c

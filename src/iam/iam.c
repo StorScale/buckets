@@ -385,7 +385,10 @@ struct buckets_iam {
   int refresh_sec;
   pthread_t refresher;
   bool refresher_started;
+  buckets_iam_openid_hooks oidc;
 };
+
+void buckets_iam_set_openid_hooks(buckets_iam *iam, const buckets_iam_openid_hooks *hooks) { iam->oidc = *hooks; }
 
 const char *buckets_iam_root_access_key(const buckets_iam *iam) { return iam->root->access_key; }
 const char *buckets_iam_root_secret_key(const buckets_iam *iam) { return iam->root->secret_key; }
@@ -1004,11 +1007,15 @@ static void policy_db_get(const cache *c, const char *name, char *const *groups,
   set_free(&gp);
 }
 
-/* policy.GetPoliciesFromClaims(claims, "policy"): a comma-separated string
- * or an array of them. */
-static void policies_from_claims(const buckets_iam_ident *id, strset *out) {
-  if (!id->claims) return;
-  yyjson_val *v = yyjson_obj_get(yyjson_doc_get_root(id->claims), "policy");
+/* policy.GetPoliciesFromClaims(claims, <OpenID claim name>): a
+ * comma-separated string or an array of them. Returns whether the claim is
+ * there at all. */
+static bool policies_from_claims(buckets_iam *iam, const buckets_iam_ident *id, strset *out) {
+  if (!id->claims || !iam->oidc.claim_name) return false;
+  char *name = iam->oidc.claim_name(iam->oidc.ud);
+  yyjson_val *v = name && *name ? yyjson_obj_get(yyjson_doc_get_root(id->claims), name) : NULL;
+  free(name);
+  if (!yyjson_is_str(v) && !yyjson_is_arr(v)) return false;
   if (yyjson_is_str(v)) set_add_csv(out, yyjson_get_str(v));
   if (yyjson_is_arr(v)) {
     size_t i, max;
@@ -1017,6 +1024,17 @@ static void policies_from_claims(const buckets_iam_ident *id, strset *out) {
       if (yyjson_is_str(e)) set_add_csv(out, yyjson_get_str(e));
     }
   }
+  return true;
+}
+
+/* The policies of the credential's role ARN claim (rolesMap), when it has one. */
+static bool role_policies(buckets_iam *iam, const buckets_iam_ident *id, strset *out) {
+  const char *arn = buckets_iam_ident_claim(id, "roleArn");
+  if (!arn || !*arn) return false;
+  char *p = iam->oidc.role_policy ? iam->oidc.role_policy(iam->oidc.ud, arn) : NULL;
+  if (p) set_add_csv(out, p);
+  free(p);
+  return true;
 }
 
 /* Evaluates the named policies that exist (MergePolicies + IsAllowed);
@@ -1047,8 +1065,14 @@ static bool allowed_sts(buckets_iam *iam, const buckets_iam_ident *id, const buc
   strset names = {0};
   bool combined = true;
   if (!owner_derived) {
-    policy_db_get(&iam->c, parent, id->groups, id->ngroups, &names);
-    if (!names.n) policies_from_claims(id, &names);
+    if (!role_policies(iam, id, &names)) {
+      policy_db_get(&iam->c, parent, id->groups, id->ngroups, &names);
+      /* No mapping for the parent: the token's policy claim, which must be there. */
+      if (!names.n && !policies_from_claims(iam, id, &names)) {
+        set_free(&names);
+        return false;
+      }
+    }
     combined = names.n > 0 && eval_named(&iam->c, &names, a);
     if (!names.n) {
       set_free(&names);
@@ -1072,8 +1096,10 @@ static bool allowed_svc(buckets_iam *iam, const buckets_iam_ident *id, const buc
   bool combined = true;
   if (!owner_derived) {
     strset names = {0};
-    policy_db_get(&iam->c, parent, id->groups, id->ngroups, &names);
-    if (!names.n) policies_from_claims(id, &names);
+    if (!role_policies(iam, id, &names)) {
+      policy_db_get(&iam->c, parent, id->groups, id->ngroups, &names);
+      if (!names.n) policies_from_claims(iam, id, &names);
+    }
     if (!names.n) {
       set_free(&names);
       return false;
@@ -1735,6 +1761,37 @@ buckets_iam_err buckets_iam_policy_update(buckets_iam *iam, const char *name, bo
   set_free(&delta);
   pthread_mutex_unlock(&iam->write_mu);
   return e;
+}
+
+char *buckets_iam_existing_policies(buckets_iam *iam, const char *csv) {
+  strset in = {0}, out = {0};
+  set_add_csv(&in, csv);
+  pthread_rwlock_rdlock(&iam->lock);
+  for (size_t i = 0; i < in.n; i++) {
+    if (buckets_strmap_get(&iam->c.policies, in.v[i])) set_add(&out, in.v[i]);
+  }
+  pthread_rwlock_unlock(&iam->lock);
+  char *r = set_join(&out);
+  set_free(&in);
+  set_free(&out);
+  return r;
+}
+
+bool buckets_iam_policies_allow(buckets_iam *iam, const char *csv, const buckets_policy_args *args) {
+  strset names = {0};
+  set_add_csv(&names, csv);
+  pthread_rwlock_rdlock(&iam->lock);
+  const buckets_policy **ps = buckets_xcalloc(names.n ? names.n : 1, sizeof(*ps));
+  size_t n = 0;
+  for (size_t i = 0; i < names.n; i++) {
+    const policy_doc *d = buckets_strmap_get(&iam->c.policies, names.v[i]);
+    if (d) ps[n++] = d->p;
+  }
+  bool ok = buckets_policies_allowed(ps, n, args);
+  pthread_rwlock_unlock(&iam->lock);
+  free(ps);
+  set_free(&names);
+  return ok;
 }
 
 char *buckets_iam_mapped_policies(buckets_iam *iam, const char *name, bool is_group) {

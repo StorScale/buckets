@@ -2,6 +2,7 @@
 #ifndef BUCKETS_S3_SERVER_H
 #define BUCKETS_S3_SERVER_H
 
+#include <pthread.h>
 #include <stdatomic.h>
 
 #include "iam/iam.h"
@@ -21,6 +22,8 @@ typedef struct buckets_s3_server {
   struct buckets_peer_sys *peers; /* other servers, told about IAM and bucket changes */
   struct buckets_cluster_info *cluster; /* nodes and drive endpoints, for the admin API */
   struct buckets_config_sys *config;    /* the server configuration, once loaded */
+  pthread_mutex_t oidc_mu;
+  struct buckets_openid *openid; /* identity_openid providers (guarded by oidc_mu) */
   char host_id[65];   /* x-amz-id-2 */
   _Atomic uint64_t request_seq;
 } buckets_s3_server;
@@ -35,5 +38,7 @@ void buckets_s3_handle(const buckets_http_request *req, buckets_http_response *r
 void buckets_s3_peer_iam(void *server, const char *kind, const char *name);
 void buckets_s3_peer_bucket(void *server, const char *bucket);
 char *buckets_s3_peer_server_info(void *server);
+/* The current OpenID providers (a reference to release), or NULL. */
+struct buckets_openid *buckets_s3_openid(buckets_s3_server *s);
 
 #endif

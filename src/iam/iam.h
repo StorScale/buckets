@@ -110,6 +110,16 @@ void buckets_iam_on_notify(buckets_iam *iam, const char *kind, const char *name)
 const char *buckets_iam_root_access_key(const buckets_iam *iam);
 const char *buckets_iam_root_secret_key(const buckets_iam *iam);
 
+/* OpenID hooks: the JWT policy claim name (claim_prefix + claim_name) and
+ * the policies of a role ARN (role_policy). Both return malloc'd strings
+ * (NULL: none). */
+typedef struct {
+  char *(*claim_name)(void *ud);
+  char *(*role_policy)(void *ud, const char *arn);
+  void *ud;
+} buckets_iam_openid_hooks;
+void buckets_iam_set_openid_hooks(buckets_iam *iam, const buckets_iam_openid_hooks *hooks);
+
 /* ---- authentication ------------------------------------------------------- */
 
 typedef enum {
@@ -216,6 +226,10 @@ buckets_iam_err buckets_iam_policy_set(buckets_iam *iam, const char *name, bool 
  * resulting mapping, *changed the policies actually added/removed. */
 buckets_iam_err buckets_iam_policy_update(buckets_iam *iam, const char *name, bool is_group, bool attach,
                                           const char *const *policies, size_t n, char **changed, char **effective);
+/* CurrentPolicies: the names in csv that exist, comma-separated ("" if none). */
+char *buckets_iam_existing_policies(buckets_iam *iam, const char *csv);
+/* doesPolicyAllow: the named policies (comma-separated) evaluated together. */
+bool buckets_iam_policies_allow(buckets_iam *iam, const char *csv, const buckets_policy_args *args);
 /* The mapped policies of a user (with its groups) or a group, comma-separated. */
 char *buckets_iam_mapped_policies(buckets_iam *iam, const char *name, bool is_group);
 
