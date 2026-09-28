@@ -5,6 +5,8 @@ add_library(buckets_operator STATIC
   src/manifests.c
   src/reconcile.c
   src/lease.c
+  src/s3client.c
+  src/iam.c
 )
 target_include_directories(buckets_operator PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(buckets_operator PUBLIC buckets)

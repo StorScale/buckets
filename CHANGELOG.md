@@ -50,6 +50,11 @@ All notable changes to this project are documented here. The format follows
     - SigV4 for the `sts` service, over the body's hash
     - session policies, `DurationSeconds`, and `MINIO_STS_DURATION`
     - MinIO's XML responses and errors
+  - The operator reconciles `BucketsUser`, `BucketsPolicy` and `Bucket` through the cluster's admin and S3 APIs, using a SigV4-signing client with madmin encryption:
+    - users, with their policies and group memberships, and policies, are applied idempotently; unchanged objects are skipped by a hash kept in status
+    - a finalizer removes users and policies from the cluster when their objects are deleted; deleting a `Bucket` leaves the bucket and its data
+    - `buckets.io/endpoint` overrides the service address
+    - envtest now checks all of this against a real bucketsd (45 checks)
   - Tests:
     - `tests/integration/iam.sh`: the `mc admin` suite, including a restart
     - `tests/integration/iam-interop.sh`: IAM state written by real MinIO is honoured by bucketsd, and the reverse

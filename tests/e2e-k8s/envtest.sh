@@ -3,11 +3,12 @@
 # controller-runtime uses). There are no nodes or controllers, so the test
 # plays their part: it marks StatefulSets ready and creates the pods a
 # StatefulSet would, then checks what the operator does about them.
-#   tests/e2e-k8s/envtest.sh [buckets-operator]
+#   tests/e2e-k8s/envtest.sh [buckets-operator] [bucketsd]
 # ENVTEST_BIN: directory with kube-apiserver, etcd and kubectl (downloaded
 # into .deps/envtest when unset).
 set -euo pipefail
 OP=${1:-build/operator/buckets-operator}
+BUCKETSD=${2:-build/src/bucketsd}
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 ENVTEST_VERSION=v1.33.0
 BIN=${ENVTEST_BIN:-$ROOT/.deps/envtest/$ENVTEST_VERSION}
@@ -157,15 +158,73 @@ expect "phase" "$(jp bc/tiny '{.status.phase}')" Invalid
 expect "reason" "$(jp bc/tiny '{.status.conditions[0].reason}')" InvalidSpec
 expect "nothing created for it" "$(k -n tenant get sts tiny-pool-0 -o name 2>/dev/null || echo none)" none
 
-echo "== IAM kinds wait for the admin API"
+echo "== IAM kinds are applied through the admin API"
+# A local bucketsd stands in for the cluster's pods, with its root credentials;
+# the endpoint annotation points the operator at it.
+BPORT=${BPORT:-17900}
+rootu=$(k -n tenant get secret store-root -o jsonpath='{.data.rootUser}' | base64 -d)
+rootp=$(k -n tenant get secret store-root -o jsonpath='{.data.rootPassword}' | base64 -d)
+mkdir -p "$WORK/bk/d1" "$WORK/bk/d2" "$WORK/bk/d3" "$WORK/bk/d4"
+BUCKETS_ROOT_USER=$rootu BUCKETS_ROOT_PASSWORD=$rootp "$BUCKETSD" server --address "127.0.0.1:$BPORT" \
+  "$WORK/bk/d{1...4}" 2>>"$WORK/bucketsd.log" &
+PIDS+=($!)
+until_true 'curl -sf http://127.0.0.1:$BPORT/minio/health/ready'
+k -n tenant annotate bc store buckets.io/endpoint="http://127.0.0.1:$BPORT" >/dev/null
 k apply -f - >/dev/null <<YAML
+apiVersion: v1
+kind: Secret
+metadata: {name: alice-creds, namespace: tenant}
+stringData: {accessKey: alice, secretKey: alicesecret123}
+---
+apiVersion: buckets.io/v1alpha1
+kind: BucketsPolicy
+metadata: {name: photos-rw, namespace: tenant}
+spec:
+  cluster: store
+  policy:
+    Version: "2012-10-17"
+    Statement:
+      - {Effect: Allow, Action: ["s3:*"], Resource: ["arn:aws:s3:::photos", "arn:aws:s3:::photos/*"]}
+---
+apiVersion: buckets.io/v1alpha1
+kind: Bucket
+metadata: {name: photos, namespace: tenant}
+spec: {cluster: store}
+---
 apiVersion: buckets.io/v1alpha1
 kind: BucketsUser
 metadata: {name: alice, namespace: tenant}
-spec: {cluster: store, credsSecret: {name: alice-creds}}
+spec: {cluster: store, credsSecret: {name: alice-creds}, policies: [photos-rw], groups: [devs]}
 YAML
-until_true '[[ $(k -n tenant get bucketsuser alice -o jsonpath={.status.phase}) == Pending ]]'
-expect "BucketsUser status" "$(k -n tenant get bucketsuser alice -o jsonpath='{.status.phase}')" Pending
+until_true '[[ $(jp bucketsuser/alice {.status.phase}) == Ready ]]' || true
+expect "BucketsPolicy ready" "$(jp bucketspolicy/photos-rw '{.status.phase}')" Ready
+expect "Bucket ready" "$(jp bucket/photos '{.status.phase}')" Ready
+expect "BucketsUser ready" "$(jp bucketsuser/alice '{.status.phase}')" Ready
+expect "BucketsUser groups" "$(jp bucketsuser/alice '{.status.groups[0]}')" devs
+expect "finalizer held" "$(jp bucketsuser/alice '{.metadata.finalizers[0]}')" buckets.io/cleanup
+alice() { curl -s -o /dev/null -w '%{http_code}' --aws-sigv4 "aws:amz:us-east-1:s3" --user alice:alicesecret123 "$@"; }
+expect "alice writes to photos" "$(alice -X PUT --data hi "http://127.0.0.1:$BPORT/photos/a.txt")" 200
+expect "alice cannot create buckets" "$(alice -X PUT "http://127.0.0.1:$BPORT/other")" 403
+k -n tenant patch bucketsuser alice --type merge -p '{"spec":{"policies":[]}}' >/dev/null
+until_true '[[ $(alice "http://127.0.0.1:$BPORT/photos/a.txt") == 403 ]]' || true
+expect "policy removed from alice" "$(alice "http://127.0.0.1:$BPORT/photos/a.txt")" 403
+k -n tenant delete bucketsuser alice --wait=false >/dev/null
+until_true '! k -n tenant get bucketsuser alice' || true
+expect "BucketsUser deleted" "$(k -n tenant get bucketsuser alice -o name 2>/dev/null || echo gone)" gone
+code=$(curl -s --aws-sigv4 "aws:amz:us-east-1:s3" --user alice:alicesecret123 "http://127.0.0.1:$BPORT/photos/a.txt" |
+  sed -n 's:.*<Code>\(.*\)</Code>.*:\1:p')
+expect "alice removed from the cluster" "$code" InvalidAccessKeyId
+k -n tenant delete bucketspolicy photos-rw --wait=false >/dev/null
+until_true '! k -n tenant get bucketspolicy photos-rw' || true
+expect "BucketsPolicy deleted" "$(k -n tenant get bucketspolicy photos-rw -o name 2>/dev/null || echo gone)" gone
+k apply -f - >/dev/null <<YAML
+apiVersion: buckets.io/v1alpha1
+kind: BucketsUser
+metadata: {name: bob, namespace: tenant}
+spec: {cluster: store, credsSecret: {name: bob-creds}}
+YAML
+until_true '[[ $(jp bucketsuser/bob {.status.phase}) == Pending ]]' || true
+expect "missing Secret is reported" "$(jp bucketsuser/bob '{.status.phase}')" Pending
 
 echo "== leader election"
 start_operator opb

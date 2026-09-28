@@ -18,8 +18,11 @@ metadata:
   name: buckets-operator
 rules:
   - apiGroups: [buckets.io]
-    resources: [bucketsclusters, bucketsusers, bucketspolicies, buckets]
+    resources: [bucketsclusters, buckets]
     verbs: [get, list, watch]
+  - apiGroups: [buckets.io] # patch: the cleanup finalizer
+    resources: [bucketsusers, bucketspolicies]
+    verbs: [get, list, watch, patch]
   - apiGroups: [buckets.io]
     resources: [bucketsclusters/status, bucketsusers/status, bucketspolicies/status, buckets/status]
     verbs: [get, patch, update]

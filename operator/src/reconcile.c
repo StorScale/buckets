@@ -10,6 +10,7 @@
 #include "core/log.h"
 #include "core/timefmt.h"
 #include "core/uuid.h"
+#include "iam.h"
 #include "manifests.h"
 
 #define GROUP_PATH "/apis/buckets.io/v1alpha1"
@@ -300,40 +301,6 @@ static void reconcile_cluster(op_ctx *o, yyjson_val *bc) {
   bc_objects_free(objs, n);
 }
 
-/* The IAM kinds need the admin API (Phase 4); say so rather than stay silent. */
-static void note_pending(op_ctx *o, const char *plural, const char *kind) {
-  buckets_buf path = BUCKETS_BUF_INIT;
-  if (o->namespace) buckets_buf_appendf(&path, GROUP_PATH "/namespaces/%s/%s", o->namespace, plural);
-  else buckets_buf_appendf(&path, GROUP_PATH "/%s", plural);
-  yyjson_doc *doc;
-  if (kube_get(o->k, path.data, &doc) == 200) {
-    size_t i, max;
-    yyjson_val *it;
-    yyjson_arr_foreach(yyjson_obj_get(yyjson_doc_get_root(doc), "items"), i, max, it) {
-      if (get_str(it, "status.phase")) continue;
-      yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
-      yyjson_mut_val *root = yyjson_mut_obj(d);
-      yyjson_mut_doc_set_root(d, root);
-      yyjson_mut_obj_add_str(d, root, "apiVersion", BC_API_VERSION);
-      yyjson_mut_obj_add_strcpy(d, root, "kind", kind);
-      yyjson_mut_val *meta = yyjson_mut_obj_add_obj(d, root, "metadata");
-      yyjson_mut_obj_add_strcpy(d, meta, "name", get_str(it, "metadata.name"));
-      yyjson_mut_obj_add_strcpy(d, meta, "namespace", get_str(it, "metadata.namespace"));
-      yyjson_mut_val *st = yyjson_mut_obj_add_obj(d, root, "status");
-      yyjson_mut_obj_add_str(d, st, "phase", "Pending");
-      yyjson_mut_obj_add_str(d, st, "message", "reconciled once the Buckets admin API is available (Phase 4)");
-      buckets_buf p = BUCKETS_BUF_INIT;
-      buckets_buf_appendf(&p, GROUP_PATH "/namespaces/%s/%s/%s/status", get_str(it, "metadata.namespace"), plural,
-                          get_str(it, "metadata.name"));
-      kube_apply(o->k, p.data, d, NULL);
-      buckets_buf_free(&p);
-      yyjson_mut_doc_free(d);
-    }
-  }
-  yyjson_doc_free(doc);
-  buckets_buf_free(&path);
-}
-
 void op_reconcile_all(op_ctx *o) {
   buckets_buf path = BUCKETS_BUF_INIT;
   if (o->namespace) buckets_buf_appendf(&path, GROUP_PATH "/namespaces/%s/bucketsclusters", o->namespace);
@@ -349,10 +316,8 @@ void op_reconcile_all(op_ctx *o) {
       if (get_str(bc, "metadata.deletionTimestamp")) continue; /* garbage collection removes the rest */
       reconcile_cluster(o, bc);
     }
+    op_reconcile_iam(o, yyjson_obj_get(yyjson_doc_get_root(doc), "items"));
   }
   yyjson_doc_free(doc);
   buckets_buf_free(&path);
-  note_pending(o, "bucketsusers", "BucketsUser");
-  note_pending(o, "bucketspolicies", "BucketsPolicy");
-  note_pending(o, "buckets", "Bucket");
 }
