@@ -34,6 +34,7 @@ typedef struct {
 } s3_ctx;
 
 void buckets_s3_write_error(s3_ctx *c, buckets_s3_error e);
+void buckets_s3_write_error_msg(s3_ctx *c, buckets_s3_error e, const char *message);
 void buckets_s3_write_xml(s3_ctx *c, int status);
 buckets_s3_error buckets_s3_obj_error(buckets_obj_err e);
 /* Reads a (small) request body into c->doc and checks its payload hash and
@@ -47,5 +48,6 @@ void buckets_s3_delete_objects(s3_ctx *c);
 void buckets_s3_list_uploads(s3_ctx *c);
 void buckets_s3_write_private_acl(s3_ctx *c);
 void buckets_s3_put_acl(s3_ctx *c);
+void buckets_s3_post_policy(s3_ctx *c);
 
 #endif

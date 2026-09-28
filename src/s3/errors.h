@@ -20,5 +20,8 @@ static inline const buckets_s3_error_info *buckets_s3_error_get(buckets_s3_error
 /* Serializes an S3 <Error> document. bucket/key may be NULL. */
 void buckets_s3_error_xml(buckets_buf *out, buckets_s3_error e, const char *resource, const char *bucket,
                           const char *key, const char *request_id, const char *host_id);
+/* Same, with MinIO's ToAPIErrWithErr-style message override (NULL keeps the default). */
+void buckets_s3_error_xml_msg(buckets_buf *out, buckets_s3_error e, const char *message, const char *resource,
+                              const char *bucket, const char *key, const char *request_id, const char *host_id);
 
 #endif

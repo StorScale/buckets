@@ -7,6 +7,7 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Changed
+- The error generator splits acronym boundaries (for example `ErrMalformedPOSTRequest` becomes `BUCKETS_ERR_MALFORMED_POST_REQUEST`).
 - Signed aws-chunked trailers are hashed with exactly one trailing newline, as in MinIO. minio-go already sends one.
 - The storage class is stored under MinIO's lowercase `x-amz-storage-class` key, and `STANDARD` is not stored.
 - Object uploads now read the body to EOF after the declared length. Extra bytes are rejected as IncompleteBody, and trailers are always consumed.
@@ -28,9 +29,16 @@ All notable changes to this project are documented here. The format follows
 - AWS Signature V2 (header and presigned), verified against AWS's published examples.
 - `partNumber` on GET/HEAD (206, `x-amz-mp-parts-count`, per-part checksums).
 - GetObjectAttributes (ETag, Checksum, ObjectParts, StorageClass, ObjectSize).
+- POST-policy browser uploads:
+  - multipart/form-data parsed as a stream
+  - V4 and V2 policy signatures
+  - MinIO's condition rules and exact failure messages
+  - `content-length-range`
+  - checksum form fields
+  - `success_action_redirect` and `success_action_status`
 - Bucket and object ACL APIs: canned `private` only, as in MinIO.
 - `ListObjectsV2` with `metadata=true` (MinIO's ListObjectsV2M extension).
-- `tests/conformance/minio-go.sh` runs minio-go's functional suite (mint's Go suite). Current result: 76 pass, 2 fail (POST policy), 24 not implemented.
+- `tests/conformance/minio-go.sh` runs minio-go's functional suite (mint's Go suite). Current result: 78 pass, 0 fail, 24 not implemented (versioning, tagging, CORS, policies and notifications come in later phases).
 - `tests/integration/interop.sh`: round trips through `mc` and a real MinIO build in both directions. `tools/build-oracles.sh` builds the oracles.
 - aws-chunked uploads: signed chunks (chained chunk signatures), signed trailers, and unsigned trailers.
 - HTTP request bodies over 1 MiB spool to disk (up to 5 TiB), and responses stream from the object reader.

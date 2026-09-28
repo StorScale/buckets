@@ -249,10 +249,13 @@ static void test_sigv2_examples(void **state) {
   buckets_sigv2_sign(S3_SK, sts, strlen(sts), sig);
   char target[256], enc[64] = "";
   for (size_t i = 0, o = 0; sig[i]; i++) {
-    if (sig[i] == '+') o += (size_t)sprintf(enc + o, "%%2B");
-    else if (sig[i] == '/') o += (size_t)sprintf(enc + o, "%%2F");
-    else if (sig[i] == '=') o += (size_t)sprintf(enc + o, "%%3D");
-    else enc[o++] = sig[i];
+    const char *esc = sig[i] == '+' ? "%2B" : sig[i] == '/' ? "%2F" : sig[i] == '=' ? "%3D" : NULL;
+    if (esc) {
+      memcpy(enc + o, esc, 3);
+      o += 3;
+    } else {
+      enc[o++] = sig[i];
+    }
   }
   snprintf(target, sizeof(target), "/johnsmith/photos/puppy.jpg?AWSAccessKeyId=%s&Expires=1175139620&Signature=%s",
            S3_AK, enc);

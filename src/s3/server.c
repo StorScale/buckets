@@ -50,14 +50,16 @@ static void common_headers(s3_ctx *c) {
   buckets_http_resp_header(r, "Strict-Transport-Security", "max-age=31536000; includeSubDomains");
 }
 
-void buckets_s3_write_error(s3_ctx *c, buckets_s3_error e) {
+void buckets_s3_write_error_msg(s3_ctx *c, buckets_s3_error e, const char *message) {
   const buckets_s3_error_info *info = buckets_s3_error_get(e);
   c->resp->status = info->status;
   buckets_http_resp_header(c->resp, "Content-Type", "application/xml");
   buckets_buf_reset(&c->resp->body);
-  buckets_s3_error_xml(&c->resp->body, e, c->path ? c->path : "/", c->bucket, c->object, c->request_id,
-                       c->s->host_id);
+  buckets_s3_error_xml_msg(&c->resp->body, e, message, c->path ? c->path : "/", c->bucket, c->object, c->request_id,
+                           c->s->host_id);
 }
+
+void buckets_s3_write_error(s3_ctx *c, buckets_s3_error e) { buckets_s3_write_error_msg(c, e, NULL); }
 
 void buckets_s3_write_xml(s3_ctx *c, int status) {
   c->resp->status = status;
@@ -182,6 +184,7 @@ static buckets_s3_error authenticate(s3_ctx *c) {
       err = buckets_sigv2_verify_presigned(&cfg, c->req, res);
       break;
     case BUCKETS_AUTH_POST_POLICY:
+      return BUCKETS_ERR_NONE; /* the signed policy inside the form is verified by the handler */
     case BUCKETS_AUTH_JWT:
       return BUCKETS_ERR_NOT_IMPLEMENTED;
     default:
@@ -394,8 +397,10 @@ static void route_bucket(s3_ctx *c) {
   if (buckets_str_eq_c(m, "POST")) {
     if (buckets_query_has(&c->q, "delete")) {
       buckets_s3_delete_objects(c);
+    } else if (c->auth == BUCKETS_AUTH_POST_POLICY) {
+      buckets_s3_post_policy(c);
     } else {
-      buckets_s3_write_error(c, BUCKETS_ERR_NOT_IMPLEMENTED); /* POST policy uploads */
+      buckets_s3_write_error(c, BUCKETS_ERR_METHOD_NOT_ALLOWED);
     }
     return;
   }

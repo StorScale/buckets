@@ -29,6 +29,7 @@ add_library(buckets STATIC
   s3/objects.c
   s3/chunked.c
   s3/checksum.c
+  s3/postpolicy.c
   storage/drive.c
   storage/xlmeta.c
   object/xlsingle.c
