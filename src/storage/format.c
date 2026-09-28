@@ -114,8 +114,8 @@ static bool same_layout(const fmt *a, const fmt *b) {
   return true;
 }
 
-bool buckets_format_negotiate(buckets_drive **drives, size_t n, size_t set_size, buckets_format_result *out,
-                              char *err, size_t errlen) {
+bool buckets_format_negotiate(buckets_drive **drives, size_t n, size_t set_size, const char *deployment_id,
+                              buckets_format_result *out, char *err, size_t errlen) {
   memset(out, 0, sizeof(*out));
   if (set_size == 0 || n % set_size) {
     snprintf(err, errlen, "%zu drives cannot form sets of %zu", n, set_size);
@@ -139,7 +139,8 @@ bool buckets_format_negotiate(buckets_drive **drives, size_t n, size_t set_size,
   } else if (unformatted == n) {
     /* Fresh deployment: every drive gets a UUID; sets follow command-line order. */
     char dep[BUCKETS_UUID_STR_LEN + 1];
-    buckets_uuid_v4(dep);
+    if (deployment_id) snprintf(dep, sizeof(dep), "%s", deployment_id); /* a new pool joins the deployment */
+    else buckets_uuid_v4(dep);
     char **ids = buckets_xcalloc(n, sizeof(char *));
     for (size_t i = 0; i < n; i++) {
       ids[i] = buckets_xmalloc(BUCKETS_UUID_STR_LEN + 1);
@@ -181,6 +182,10 @@ bool buckets_format_negotiate(buckets_drive **drives, size_t n, size_t set_size,
     } else if (f[best].nsets != nsets || f[best].set_size != set_size) {
       snprintf(err, errlen, "drives are formatted as %zu sets of %zu, but the command line gives %zu sets of %zu",
                f[best].nsets, f[best].set_size, nsets, set_size);
+      ok = false;
+    }
+    if (ok && deployment_id && strcmp(f[best].id, deployment_id) != 0) {
+      snprintf(err, errlen, "pool drives belong to deployment %s, not %s", f[best].id, deployment_id);
       ok = false;
     }
     for (size_t i = 0; ok && i < n; i++) {

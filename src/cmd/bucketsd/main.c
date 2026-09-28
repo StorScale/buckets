@@ -165,57 +165,90 @@ int main(int argc, char **argv) {
   }
   const char *region = env2("BUCKETS_REGION", "MINIO_REGION");
 
-  /* Drives -> erasure sets (MinIO's ellipses + set sizing), then format.json
-   * negotiation places each drive by its UUID. */
+  /* Drives -> pools -> erasure sets (MinIO's ellipses + set sizing), then
+   * format.json negotiation places each drive by its UUID. As in MinIO, every
+   * ellipsis argument is its own pool; plain drive lists form one pool. */
   const char *sdc = env2("BUCKETS_ERASURE_SET_DRIVE_COUNT", "MINIO_ERASURE_SET_DRIVE_COUNT");
-  char lerr[512];
-  buckets_pool_layout layout;
-  if (!buckets_layout_pool(drive_args, ndrive_args, sdc ? (size_t)strtoul(sdc, NULL, 10) : 0, &layout, lerr,
-                           sizeof(lerr))) {
-    buckets_log_error("invalid drive layout: %s", lerr);
+  size_t nell = 0;
+  for (size_t i = 0; i < ndrive_args; i++) nell += buckets_ell_has(drive_args[i]);
+  if (nell && nell != ndrive_args) {
+    buckets_log_error("all drive arguments must use ellipses (one pool each), or none may");
     return 1;
   }
-  free(drive_args);
-  buckets_drive **drives = buckets_xcalloc(layout.ndrives, sizeof(buckets_drive *));
-  for (size_t i = 0; i < layout.ndrives; i++) {
-    if (strstr(layout.drives[i], "://")) {
-      buckets_log_error("remote drives (%s) are not supported yet; distributed mode is in progress", layout.drives[i]);
+  size_t npools = nell ? ndrive_args : 1;
+  buckets_pool_layout *layouts = buckets_xcalloc(npools, sizeof(*layouts));
+  buckets_format_result *fr = buckets_xcalloc(npools, sizeof(*fr));
+  char lerr[512];
+  size_t total_drives = 0;
+  for (size_t p = 0; p < npools; p++) {
+    char *const *args = nell ? &drive_args[p] : drive_args;
+    size_t nargs = nell ? 1 : ndrive_args;
+    if (!buckets_layout_pool(args, nargs, sdc ? (size_t)strtoul(sdc, NULL, 10) : 0, &layouts[p], lerr,
+                             sizeof(lerr))) {
+      buckets_log_error("invalid drive layout%s: %s", npools > 1 ? " in a pool" : "", lerr);
       return 1;
     }
-    if (buckets_drive_open_raw(layout.drives[i], &drives[i]) != BUCKETS_DRIVE_OK) {
-      buckets_log_warn("drive %s is unavailable; continuing without it", layout.drives[i]);
-      drives[i] = NULL;
+    if (npools > 1 && layouts[p].ndrives == 1) {
+      buckets_log_error("a single-drive deployment cannot be expanded with more pools");
+      return 1;
     }
+    buckets_drive **drives = buckets_xcalloc(layouts[p].ndrives, sizeof(buckets_drive *));
+    for (size_t i = 0; i < layouts[p].ndrives; i++) {
+      const char *path = layouts[p].drives[i];
+      if (strstr(path, "://")) {
+        buckets_log_error("remote drives (%s) are not supported yet; distributed mode is in progress", path);
+        return 1;
+      }
+      if (buckets_drive_open_raw(path, &drives[i]) != BUCKETS_DRIVE_OK) {
+        buckets_log_warn("drive %s is unavailable; continuing without it", path);
+        drives[i] = NULL;
+      }
+    }
+    if (!buckets_format_negotiate(drives, layouts[p].ndrives, layouts[p].set_size, p ? fr[0].deployment_id : NULL,
+                                  &fr[p], lerr, sizeof(lerr))) {
+      buckets_log_error("%s%s", npools > 1 ? "pool: " : "", lerr);
+      return 1;
+    }
+    free(drives);
+    total_drives += layouts[p].ndrives;
   }
-  buckets_format_result fr;
-  if (!buckets_format_negotiate(drives, layout.ndrives, layout.set_size, &fr, lerr, sizeof(lerr))) {
-    buckets_log_error("%s", lerr);
-    return 1;
-  }
-  free(drives);
+  free(drive_args);
   /* Parity: MINIO_STORAGE_CLASS_STANDARD=EC:N, else MinIO's default for the set size. */
   int parity = -1;
   const char *sc = env2("BUCKETS_STORAGE_CLASS_STANDARD", "MINIO_STORAGE_CLASS_STANDARD");
   if (sc && strncasecmp(sc, "EC:", 3) == 0) parity = atoi(sc + 3);
-  buckets_objlayer *layer = buckets_objlayer_new(&fr, parity);
-  buckets_log_info("%zu drive%s in %zu set%s of %zu (EC %d+%d), deployment %s%s", layout.ndrives,
-                   layout.ndrives == 1 ? "" : "s", layer->nsets, layer->nsets == 1 ? "" : "s", layout.set_size,
-                   (int)layout.set_size - layer->sets[0].parity, layer->sets[0].parity, layer->deployment_id_str,
-                   fr.formatted_fresh ? " (newly formatted)" : "");
-  if (buckets_objlayer_online(layer) < layout.ndrives) {
-    buckets_log_warn("%zu of %zu drives are offline", layout.ndrives - buckets_objlayer_online(layer), layout.ndrives);
+  buckets_objlayer *layer = buckets_objlayer_new(fr, npools, parity);
+  size_t first = 0;
+  for (size_t p = 0; p < npools; p++) {
+    buckets_drive_place pl;
+    buckets_objlayer_place(layer, first, &pl);
+    buckets_log_info("%s%zu drive%s in %zu set%s of %zu (EC %d+%d), deployment %s%s",
+                     npools > 1 ? "pool: " : "", layouts[p].ndrives, layouts[p].ndrives == 1 ? "" : "s", pl.nsets,
+                     pl.nsets == 1 ? "" : "s", pl.set_size, (int)pl.set_size - pl.parity, pl.parity,
+                     layer->deployment_id_str, fr[p].formatted_fresh == layouts[p].ndrives ? " (newly formatted)" : "");
+    first += layouts[p].ndrives;
   }
+  if (buckets_objlayer_online(layer) < total_drives) {
+    buckets_log_warn("%zu of %zu drives are offline", total_drives - buckets_objlayer_online(layer), total_drives);
+  }
+  size_t max_set = 0;
+  for (size_t p = 0; p < npools; p++) max_set = BUCKETS_MAX(max_set, layouts[p].set_size);
+  for (size_t p = 0; p < npools; p++) {
+    buckets_format_result_free(&fr[p]);
+    buckets_layout_free(&layouts[p]);
+  }
+  free(fr);
+  free(layouts);
+
   /* Drive I/O threads: by default one per drive of a set, so every drive in
    * a set is read and written at once (the event-loop thread takes part). */
   const char *iot = getenv("BUCKETS_IO_THREADS");
-  long nio = iot ? strtol(iot, NULL, 10) : (long)layout.set_size - 1;
+  long nio = iot ? strtol(iot, NULL, 10) : (long)max_set - 1;
   buckets_pool *io_pool = NULL;
   if (nio > 0) {
     io_pool = buckets_pool_new((int)BUCKETS_MIN(nio, 1024L));
     buckets_io_pool_set(io_pool);
   }
-  buckets_format_result_free(&fr);
-  buckets_layout_free(&layout);
 
   buckets_healer *healer = buckets_healer_start(layer);
 

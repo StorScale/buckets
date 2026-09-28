@@ -24,6 +24,13 @@ All notable changes to this project are documented here. The format follows
   - an MRF queue fed by reads that hit a missing or rotten shard (bitrot queues a deep scan) and by writes that missed a drive
   - replaced drives are filled in the background, with a resumable tracker in `.minio.sys/buckets-healing.json`
 - `tests/integration/heal.sh` covers bitrot, missing and inline repairs, an unreadable object that must not be purged, a dangling object that must be, and a replaced drive.
+- Server pools (`object/pools.c`, after MinIO's erasure-server-pool.go):
+  - each ellipsis argument is a pool, and a new pool joins the deployment's format
+  - buckets are created on every pool
+  - reads resolve the pool with the newest copy, and overwrites stay in their pool
+  - new objects go to a pool picked at random, weighted by free space
+  - listings merge across pools, deletes reach every pool, and multipart uploads find their pool
+  - real MinIO reads an expanded deployment written by Buckets (`tests/integration/pools.sh`)
 - `tests/integration/concurrency.sh`: racing PUTs of one key (every drive must agree), 24 parallel round trips, overwrite during a slow read, CopyObject onto itself, and parallel multipart parts.
 - `tests/integration/erasure.sh`: 4- and 16-drive sets, bitrot, drive loss up to and beyond parity, drive replacement, and MinIO interop. `DRIVES=4` runs the minio-go conformance suite on an erasure set.
 

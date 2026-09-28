@@ -62,12 +62,15 @@ typedef struct {
   int parity; /* default parity for new objects */
 } buckets_eset;
 
+/* The object layer: one or more server pools (MinIO's erasureServerPools),
+ * each a set of erasure sets over its own drives. New objects go to a pool
+ * chosen by free space; existing objects stay in the pool holding them. */
 typedef struct buckets_objlayer {
-  buckets_eset *sets;
-  size_t nsets;
+  struct buckets_epool **pools;
+  size_t npools;
   uint8_t deployment_id[16];
   char deployment_id_str[BUCKETS_UUID_STR_LEN + 1];
-  buckets_drive **all; /* every slot, set-major */
+  buckets_drive **all; /* every slot of every pool, pool-major (owned by the pools) */
   size_t nall;
   struct buckets_nslock *locks;
   void (*on_degraded)(void *ud, const char *bucket, const char *object, const char *version_id, bool deep);
@@ -82,13 +85,24 @@ typedef void (*buckets_degraded_fn)(void *ud, const char *bucket, const char *ob
                                     bool deep);
 void buckets_objlayer_set_degraded_hook(buckets_objlayer *L, buckets_degraded_fn fn, void *ud);
 
-/* Takes ownership of the drives in f (f->slots is cleared). parity < 0 uses
- * MinIO's default for the set size. */
-buckets_objlayer *buckets_objlayer_new(buckets_format_result *f, int parity);
+/* One format result per pool, all of the same deployment. Takes ownership of
+ * their drives (slots are cleared). parity < 0 uses MinIO's default for each
+ * pool's set size. */
+buckets_objlayer *buckets_objlayer_new(buckets_format_result *pools, size_t npools, int parity);
 void buckets_objlayer_free(buckets_objlayer *L);
 /* An online drive to use for local scratch space (spooling). */
 buckets_drive *buckets_objlayer_scratch(const buckets_objlayer *L);
 size_t buckets_objlayer_online(const buckets_objlayer *L);
+/* Where drive all[i] sits, and the shape of its pool. */
+typedef struct {
+  size_t pool, set;
+  size_t pool_first, pool_drives; /* its pool's slice of all[] */
+  size_t set_size, nsets;
+  int parity;
+} buckets_drive_place;
+void buckets_objlayer_place(const buckets_objlayer *L, size_t i, buckets_drive_place *out);
+/* The erasure set an object hashes to within a pool. */
+size_t buckets_objlayer_object_set(const buckets_objlayer *L, size_t pool, const char *object);
 
 /* ---- buckets ---- */
 typedef struct {

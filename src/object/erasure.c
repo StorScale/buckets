@@ -19,6 +19,7 @@
 #include "erasure/layout.h"
 #include "erasure/rs.h"
 #include "object/nslock.h"
+#include "object/epool.h"
 #include "object/object.h"
 
 #define XL_META "xl.meta"
@@ -103,14 +104,15 @@ static int64_t now_ns(void) {
 
 /* ---- layer ----------------------------------------------------------------- */
 
-buckets_objlayer *buckets_objlayer_new(buckets_format_result *f, int parity) {
-  buckets_objlayer *L = buckets_xcalloc(1, sizeof(*L));
+buckets_epool *buckets_epool_new(struct buckets_objlayer *top, size_t index, buckets_format_result *f, int parity) {
+  buckets_epool *L = buckets_xcalloc(1, sizeof(*L));
+  L->top = top;
+  L->index = index;
   L->nsets = f->nsets;
   L->sets = buckets_xcalloc(f->nsets, sizeof(buckets_eset));
   L->nall = f->nsets * f->set_size;
   L->all = f->slots;
   f->slots = NULL;
-  L->locks = buckets_nslock_new();
   for (size_t s = 0; s < f->nsets; s++) {
     L->sets[s].drives = L->all + s * f->set_size;
     L->sets[s].n = f->set_size;
@@ -123,29 +125,21 @@ buckets_objlayer *buckets_objlayer_new(buckets_format_result *f, int parity) {
   return L;
 }
 
-void buckets_objlayer_free(buckets_objlayer *L) {
+void buckets_epool_free(buckets_epool *L) {
   if (!L) return;
   for (size_t i = 0; i < L->nall; i++) buckets_drive_close(L->all[i]);
   free(L->all);
   free(L->sets);
-  buckets_nslock_free(L->locks);
   free(L);
 }
 
-buckets_drive *buckets_objlayer_scratch(const buckets_objlayer *L) {
-  for (size_t i = 0; i < L->nall; i++) {
-    if (L->all[i]) return L->all[i];
-  }
-  return NULL;
-}
-
-size_t buckets_objlayer_online(const buckets_objlayer *L) {
+size_t buckets_ep_online(const buckets_epool *L) {
   size_t c = 0;
   for (size_t i = 0; i < L->nall; i++) c += L->all[i] != NULL;
   return c;
 }
 
-static buckets_eset *set_for(buckets_objlayer *L, const char *object) {
+buckets_eset *buckets_ep_set_for(buckets_epool *L, const char *object) {
   return &L->sets[L->nsets == 1 ? 0 : buckets_set_index(object, L->nsets, L->deployment_id)];
 }
 
@@ -159,9 +153,9 @@ void buckets_bucket_info_free(buckets_bucket_info *b, size_t n) {
   free(b);
 }
 
-static size_t bucket_quorum(const buckets_objlayer *L) { return L->nall / 2 + 1; }
+static size_t bucket_quorum(const buckets_epool *L) { return L->nall / 2 + 1; }
 
-buckets_obj_err buckets_obj_stat_bucket(buckets_objlayer *L, const char *bucket) {
+buckets_obj_err buckets_ep_stat_bucket(buckets_epool *L, const char *bucket) {
   size_t ok = 0, missing = 0;
   for (size_t i = 0; i < L->nall; i++) {
     if (!L->all[i]) continue;
@@ -174,7 +168,7 @@ buckets_obj_err buckets_obj_stat_bucket(buckets_objlayer *L, const char *bucket)
   return BUCKETS_OBJ_ERR_READ_QUORUM;
 }
 
-buckets_obj_err buckets_obj_make_bucket(buckets_objlayer *L, const char *bucket) {
+buckets_obj_err buckets_ep_make_bucket(buckets_epool *L, const char *bucket) {
   size_t made = 0, exists = 0;
   for (size_t i = 0; i < L->nall; i++) {
     if (!L->all[i]) continue;
@@ -186,7 +180,7 @@ buckets_obj_err buckets_obj_make_bucket(buckets_objlayer *L, const char *bucket)
   return made + exists >= bucket_quorum(L) ? BUCKETS_OBJ_OK : BUCKETS_OBJ_ERR_WRITE_QUORUM;
 }
 
-buckets_obj_err buckets_obj_list_buckets(buckets_objlayer *L, buckets_bucket_info **out, size_t *n) {
+buckets_obj_err buckets_ep_list_buckets(buckets_epool *L, buckets_bucket_info **out, size_t *n) {
   *out = NULL;
   *n = 0;
   /* Union across drives; a bucket counts if a quorum of drives has it. */
@@ -231,25 +225,20 @@ buckets_obj_err buckets_obj_list_buckets(buckets_objlayer *L, buckets_bucket_inf
 
 #define LOCK_TIMEOUT_MS 30000
 
-static buckets_nslock_entry *lock_ns(buckets_objlayer *L, const char *vol, const char *path, bool write) {
-  buckets_nslock_entry *e = buckets_nslock_lock(L->locks, vol, path, write, LOCK_TIMEOUT_MS);
+static buckets_nslock_entry *lock_ns(buckets_epool *L, const char *vol, const char *path, bool write) {
+  buckets_nslock_entry *e = buckets_nslock_lock(L->top->locks, vol, path, write, LOCK_TIMEOUT_MS);
   if (!e) buckets_log_warn("timed out waiting for %s lock on %s/%s", write ? "write" : "read", vol, path);
   return e;
 }
 
 /* ---- healing hand-off --------------------------------------------------- */
 
-void buckets_objlayer_set_degraded_hook(buckets_objlayer *L, buckets_degraded_fn fn, void *ud) {
-  L->on_degraded = fn;
-  L->on_degraded_ud = ud;
-}
-
 /* An object that is readable but not whole on every online drive. version_id
  * is the canonical string ("null" for the null version). */
-static void report_degraded(buckets_objlayer *L, const char *bucket, const char *object, const char *version_id,
+static void report_degraded(buckets_epool *L, const char *bucket, const char *object, const char *version_id,
                             bool deep) {
-  if (L->on_degraded) {
-    L->on_degraded(L->on_degraded_ud, bucket, object, version_id, deep);
+  if (L->top->on_degraded) {
+    L->top->on_degraded(L->top->on_degraded_ud, bucket, object, version_id, deep);
   }
 }
 
@@ -676,7 +665,7 @@ static void cleanup_one(void *ctx, size_t i) {
 }
 
 /* A write that reached quorum but not every online drive goes to the MRF queue. */
-static void report_partial(buckets_objlayer *L, buckets_eset *s, const char *bucket, const char *object,
+static void report_partial(buckets_epool *L, buckets_eset *s, const char *bucket, const char *object,
                            const buckets_xl_object *o, size_t committed) {
   size_t online = 0;
   for (size_t i = 0; i < s->n; i++) online += s->drives[i] != NULL;
@@ -715,12 +704,12 @@ static void init_version(buckets_xl_object *o, const uint8_t data_dir[16], int64
 
 /* ---- put --------------------------------------------------------------------------- */
 
-buckets_obj_err buckets_obj_put(buckets_objlayer *L, const char *bucket, const char *object, buckets_read_fn rd,
+buckets_obj_err buckets_ep_put(buckets_epool *L, const char *bucket, const char *object, buckets_read_fn rd,
                                 void *rd_ud, int64_t size, const buckets_put_opts *opts, buckets_object_info *out) {
-  buckets_obj_err err = buckets_obj_stat_bucket(L, bucket);
+  buckets_obj_err err = buckets_ep_stat_bucket(L, bucket);
   if (err) return err;
   if ((err = buckets_obj_check_name(object)) != BUCKETS_OBJ_OK) return err;
-  buckets_eset *s = set_for(L, object);
+  buckets_eset *s = buckets_ep_set_for(L, object);
   if ((err = check_namespace(s, bucket, object)) != BUCKETS_OBJ_OK) return err;
   if (size < 0) return BUCKETS_OBJ_ERR_INCOMPLETE_BODY;
 
@@ -797,7 +786,7 @@ buckets_obj_err buckets_obj_put(buckets_objlayer *L, const char *bucket, const c
 /* ---- read ----------------------------------------------------------------------------- */
 
 struct buckets_obj_reader {
-  buckets_objlayer *L;
+  buckets_epool *L;
   buckets_eset *set;
   char *bucket, *object, *op;
   char data_dir[37], version_id[37];
@@ -842,12 +831,12 @@ void buckets_obj_reader_free(buckets_obj_reader *r) {
   free(r);
 }
 
-static buckets_obj_err resolve(buckets_objlayer *L, const char *bucket, const char *object, const char *version_id,
+static buckets_obj_err resolve(buckets_epool *L, const char *bucket, const char *object, const char *version_id,
                                buckets_eset **set, dmeta *m, long *vidx, buckets_xl_object *o) {
-  buckets_obj_err err = buckets_obj_stat_bucket(L, bucket);
+  buckets_obj_err err = buckets_ep_stat_bucket(L, bucket);
   if (err) return err;
   if ((err = buckets_obj_check_name(object)) != BUCKETS_OBJ_OK) return err;
-  *set = set_for(L, object);
+  *set = buckets_ep_set_for(L, object);
   char *op = obj_path(object);
   load_metas(*set, bucket, op, m);
   free(op);
@@ -856,7 +845,7 @@ static buckets_obj_err resolve(buckets_objlayer *L, const char *bucket, const ch
   return err;
 }
 
-static buckets_obj_err obj_stat(buckets_objlayer *L, const char *bucket, const char *object, const char *version_id,
+static buckets_obj_err obj_stat(buckets_epool *L, const char *bucket, const char *object, const char *version_id,
                                 buckets_object_info *out) {
   buckets_eset *s;
   dmeta m[MAX_SET];
@@ -872,7 +861,7 @@ static buckets_obj_err obj_stat(buckets_objlayer *L, const char *bucket, const c
 
 /* A reader over version o, from the drives whose metadata agrees (vidx >= 0),
  * positioned at the start. */
-static buckets_obj_reader *reader_new(buckets_objlayer *L, buckets_eset *s, const char *bucket, const char *object,
+static buckets_obj_reader *reader_new(buckets_epool *L, buckets_eset *s, const char *bucket, const char *object,
                                      const dmeta *m, const long *vidx, const buckets_xl_object *o) {
   buckets_obj_reader *r = buckets_xcalloc(1, sizeof(*r));
   r->L = L;
@@ -923,7 +912,7 @@ static buckets_obj_reader *reader_new(buckets_objlayer *L, buckets_eset *s, cons
   return r;
 }
 
-static buckets_obj_err obj_open(buckets_objlayer *L, const char *bucket, const char *object, const char *version_id,
+static buckets_obj_err obj_open(buckets_epool *L, const char *bucket, const char *object, const char *version_id,
                                 int64_t offset, int64_t length, buckets_obj_reader **out, buckets_object_info *info) {
   buckets_eset *s;
   dmeta m[MAX_SET];
@@ -1042,7 +1031,7 @@ static bool load_block(buckets_obj_reader *r, int64_t bi) {
   return true;
 }
 
-buckets_obj_err buckets_obj_stat(buckets_objlayer *L, const char *bucket, const char *object, const char *version_id,
+buckets_obj_err buckets_ep_stat(buckets_epool *L, const char *bucket, const char *object, const char *version_id,
                                  buckets_object_info *out) {
   buckets_nslock_entry *lk = lock_ns(L, bucket, object, false);
   if (!lk) return BUCKETS_OBJ_ERR_TIMEOUT;
@@ -1051,7 +1040,7 @@ buckets_obj_err buckets_obj_stat(buckets_objlayer *L, const char *bucket, const 
   return err;
 }
 
-buckets_obj_err buckets_obj_open(buckets_objlayer *L, const char *bucket, const char *object, const char *version_id,
+buckets_obj_err buckets_ep_open(buckets_epool *L, const char *bucket, const char *object, const char *version_id,
                                  int64_t offset, int64_t length, buckets_obj_reader **out,
                                  buckets_object_info *info) {
   buckets_nslock_entry *lk = lock_ns(L, bucket, object, false);
@@ -1166,13 +1155,13 @@ static void delete_one(void *ctx, size_t i) {
   c->done[i] = de == BUCKETS_DRIVE_OK;
 }
 
-static buckets_obj_err obj_delete(buckets_objlayer *L, const char *bucket, const char *object, const char *version_id) {
-  buckets_obj_err err = buckets_obj_stat_bucket(L, bucket);
+static buckets_obj_err obj_delete(buckets_epool *L, const char *bucket, const char *object, const char *version_id) {
+  buckets_obj_err err = buckets_ep_stat_bucket(L, bucket);
   if (err) return err;
   if ((err = buckets_obj_check_name(object)) != BUCKETS_OBJ_OK) return err;
   uint8_t id[16] = {0};
   if (version_id && *version_id && !buckets_xl_version_id_parse(version_id, id)) return BUCKETS_OBJ_ERR_NO_SUCH_VERSION;
-  buckets_eset *s = set_for(L, object);
+  buckets_eset *s = buckets_ep_set_for(L, object);
   char *op = obj_path(object);
   dmeta m[MAX_SET];
   load_metas(s, bucket, op, m);
@@ -1192,7 +1181,7 @@ static buckets_obj_err obj_delete(buckets_objlayer *L, const char *bucket, const
                                                                               : BUCKETS_OBJ_ERR_WRITE_QUORUM;
 }
 
-buckets_obj_err buckets_obj_delete(buckets_objlayer *L, const char *bucket, const char *object, const char *version_id) {
+buckets_obj_err buckets_ep_delete(buckets_epool *L, const char *bucket, const char *object, const char *version_id) {
   buckets_nslock_entry *lk = lock_ns(L, bucket, object, true);
   if (!lk) return BUCKETS_OBJ_ERR_TIMEOUT;
   buckets_obj_err err = obj_delete(L, bucket, object, version_id);
@@ -1372,10 +1361,10 @@ static int merged_cmp(const void *a, const void *b) {
   return c ? c : (int)y->is_prefix - (int)x->is_prefix;
 }
 
-buckets_obj_err buckets_obj_list(buckets_objlayer *L, const char *bucket, const char *prefix, const char *marker,
+buckets_obj_err buckets_ep_list(buckets_epool *L, const char *bucket, const char *prefix, const char *marker,
                                  const char *delimiter, int max_keys, buckets_obj_listing *out) {
   memset(out, 0, sizeof(*out));
-  buckets_obj_err err = buckets_obj_stat_bucket(L, bucket);
+  buckets_obj_err err = buckets_ep_stat_bucket(L, bucket);
   if (err) return err;
   if (max_keys <= 0) return BUCKETS_OBJ_OK;
   if (max_keys > BUCKETS_MAX_LIST_KEYS) max_keys = BUCKETS_MAX_LIST_KEYS;
@@ -1440,9 +1429,9 @@ void buckets_obj_list_free(buckets_obj_listing *l) {
   memset(l, 0, sizeof(*l));
 }
 
-buckets_obj_err buckets_obj_delete_bucket(buckets_objlayer *L, const char *bucket) {
+buckets_obj_err buckets_ep_delete_bucket(buckets_epool *L, const char *bucket) {
   buckets_obj_listing l;
-  buckets_obj_err err = buckets_obj_list(L, bucket, "", NULL, NULL, 1, &l);
+  buckets_obj_err err = buckets_ep_list(L, bucket, "", NULL, NULL, 1, &l);
   if (err) return err;
   bool empty = l.nobjects == 0 && l.nprefixes == 0;
   buckets_obj_list_free(&l);
@@ -1453,7 +1442,7 @@ buckets_obj_err buckets_obj_delete_bucket(buckets_objlayer *L, const char *bucke
     /* No objects remain; leftover empty prefix directories go too. */
     if (buckets_drive_delete(L->all[i], bucket, "", true, false) == BUCKETS_DRIVE_OK) ok++;
   }
-  return ok >= bucket_quorum(L) || ok == buckets_objlayer_online(L) ? BUCKETS_OBJ_OK : BUCKETS_OBJ_ERR_WRITE_QUORUM;
+  return ok >= bucket_quorum(L) || ok == buckets_ep_online(L) ? BUCKETS_OBJ_OK : BUCKETS_OBJ_ERR_WRITE_QUORUM;
 }
 
 /* ---- multipart ------------------------------------------------------------------------- */
@@ -1509,10 +1498,10 @@ typedef struct {
   bool has[MAX_SET]; /* drive holds the upload */
 } upload;
 
-static buckets_obj_err load_upload(buckets_objlayer *L, const char *bucket, const char *object, const char *dir,
+static buckets_obj_err load_upload(buckets_epool *L, const char *bucket, const char *object, const char *dir,
                                    upload *u) {
   memset(u, 0, sizeof(*u));
-  u->set = set_for(L, object);
+  u->set = buckets_ep_set_for(L, object);
   dmeta m[MAX_SET];
   long vidx[MAX_SET];
   load_metas(u->set, BUCKETS_META_BUCKET, dir, m);
@@ -1529,12 +1518,12 @@ static buckets_obj_err load_upload(buckets_objlayer *L, const char *bucket, cons
   return err;
 }
 
-buckets_obj_err buckets_obj_mpu_new(buckets_objlayer *L, const char *bucket, const char *object, const buckets_xl_kv *meta,
+buckets_obj_err buckets_ep_mpu_new(buckets_epool *L, const char *bucket, const char *object, const buckets_xl_kv *meta,
                                     size_t nmeta, char upload_id[BUCKETS_UPLOAD_ID_MAX]) {
-  buckets_obj_err err = buckets_obj_stat_bucket(L, bucket);
+  buckets_obj_err err = buckets_ep_stat_bucket(L, bucket);
   if (err) return err;
   if ((err = buckets_obj_check_name(object)) != BUCKETS_OBJ_OK) return err;
-  buckets_eset *s = set_for(L, object);
+  buckets_eset *s = buckets_ep_set_for(L, object);
   if ((err = check_namespace(s, bucket, object)) != BUCKETS_OBJ_OK) return err;
   int data = set_data(s), dist[MAX_SET];
   char *key = join(bucket, object);
@@ -1638,10 +1627,10 @@ static bool decode_part_meta(const buckets_buf *raw, buckets_part_info *p) {
   return !r.err;
 }
 
-static buckets_obj_err mpu_put_part(buckets_objlayer *L, const char *bucket, const char *object, const char *upload_id,
+static buckets_obj_err mpu_put_part(buckets_epool *L, const char *bucket, const char *object, const char *upload_id,
                                     int part_number, buckets_read_fn rd, void *rd_ud, int64_t size,
                                          const buckets_put_opts *opts, buckets_part_info *out) {
-  buckets_obj_err err = buckets_obj_stat_bucket(L, bucket);
+  buckets_obj_err err = buckets_ep_stat_bucket(L, bucket);
   if (err) return err;
   if (part_number < 1 || part_number > BUCKETS_MAX_PARTS) return BUCKETS_OBJ_ERR_INVALID_PART;
   char *dir = upload_dir(bucket, object, upload_id);
@@ -1755,13 +1744,13 @@ static void read_parts(const upload *u, const char *dir, buckets_part_info **par
   if (*n) qsort(*parts, *n, sizeof(buckets_part_info), part_cmp);
 }
 
-buckets_obj_err buckets_obj_mpu_list_parts(buckets_objlayer *L, const char *bucket, const char *object,
+buckets_obj_err buckets_ep_mpu_list_parts(buckets_epool *L, const char *bucket, const char *object,
                                            const char *upload_id, int marker, int max, buckets_part_info **parts,
                                            size_t *n, bool *truncated) {
   *parts = NULL;
   *n = 0;
   *truncated = false;
-  buckets_obj_err err = buckets_obj_stat_bucket(L, bucket);
+  buckets_obj_err err = buckets_ep_stat_bucket(L, bucket);
   if (err) return err;
   char *dir = upload_dir(bucket, object, upload_id);
   if (!dir) return BUCKETS_OBJ_ERR_NO_SUCH_UPLOAD;
@@ -1791,8 +1780,8 @@ buckets_obj_err buckets_obj_mpu_list_parts(buckets_objlayer *L, const char *buck
   return BUCKETS_OBJ_OK;
 }
 
-static buckets_obj_err mpu_abort(buckets_objlayer *L, const char *bucket, const char *object, const char *upload_id) {
-  buckets_obj_err err = buckets_obj_stat_bucket(L, bucket);
+static buckets_obj_err mpu_abort(buckets_epool *L, const char *bucket, const char *object, const char *upload_id) {
+  buckets_obj_err err = buckets_ep_stat_bucket(L, bucket);
   if (err) return err;
   char *dir = upload_dir(bucket, object, upload_id);
   if (!dir) return BUCKETS_OBJ_ERR_NO_SUCH_UPLOAD;
@@ -1814,10 +1803,10 @@ static void canonical_etag(const char *in, char *out, size_t cap) {
   snprintf(out, cap, "%.*s", (int)n, in);
 }
 
-static buckets_obj_err mpu_complete(buckets_objlayer *L, const char *bucket, const char *object,
+static buckets_obj_err mpu_complete(buckets_epool *L, const char *bucket, const char *object,
                                     const char *upload_id, const buckets_complete_part *req, size_t nreq,
                                     const buckets_checksum *want, buckets_object_info *out) {
-  buckets_obj_err err = buckets_obj_stat_bucket(L, bucket);
+  buckets_obj_err err = buckets_ep_stat_bucket(L, bucket);
   if (err) return err;
   if ((err = buckets_obj_check_name(object)) != BUCKETS_OBJ_OK) return err;
   char *dir = upload_dir(bucket, object, upload_id);
@@ -1976,7 +1965,7 @@ static buckets_obj_err mpu_complete(buckets_objlayer *L, const char *bucket, con
 }
 
 /* Upload-ID locks: parts share a read lock, abort/complete take it exclusively. */
-static buckets_nslock_entry *lock_upload(buckets_objlayer *L, const char *bucket, const char *object,
+static buckets_nslock_entry *lock_upload(buckets_epool *L, const char *bucket, const char *object,
                                         const char *upload_id, bool write, buckets_obj_err *err) {
   char *dir = upload_dir(bucket, object, upload_id);
   *err = BUCKETS_OBJ_OK;
@@ -1987,7 +1976,7 @@ static buckets_nslock_entry *lock_upload(buckets_objlayer *L, const char *bucket
   return lk;
 }
 
-buckets_obj_err buckets_obj_mpu_put_part(buckets_objlayer *L, const char *bucket, const char *object, const char *upload_id,
+buckets_obj_err buckets_ep_mpu_put_part(buckets_epool *L, const char *bucket, const char *object, const char *upload_id,
                                          int part_number, buckets_read_fn rd, void *rd_ud, int64_t size,
                                          const buckets_put_opts *opts, buckets_part_info *out) {
   buckets_obj_err err;
@@ -1997,7 +1986,7 @@ buckets_obj_err buckets_obj_mpu_put_part(buckets_objlayer *L, const char *bucket
   return err;
 }
 
-buckets_obj_err buckets_obj_mpu_abort(buckets_objlayer *L, const char *bucket, const char *object, const char *upload_id) {
+buckets_obj_err buckets_ep_mpu_abort(buckets_epool *L, const char *bucket, const char *object, const char *upload_id) {
   buckets_obj_err err;
   buckets_nslock_entry *lk = lock_upload(L, bucket, object, upload_id, true, &err);
   if (!err) err = mpu_abort(L, bucket, object, upload_id);
@@ -2005,7 +1994,7 @@ buckets_obj_err buckets_obj_mpu_abort(buckets_objlayer *L, const char *bucket, c
   return err;
 }
 
-buckets_obj_err buckets_obj_mpu_complete(buckets_objlayer *L, const char *bucket, const char *object,
+buckets_obj_err buckets_ep_mpu_complete(buckets_epool *L, const char *bucket, const char *object,
                                          const char *upload_id, const buckets_complete_part *req, size_t nreq,
                                          const buckets_checksum *want, buckets_object_info *out) {
   buckets_obj_err err;
@@ -2015,14 +2004,14 @@ buckets_obj_err buckets_obj_mpu_complete(buckets_objlayer *L, const char *bucket
   return err;
 }
 
-buckets_obj_err buckets_obj_mpu_list_uploads(buckets_objlayer *L, const char *bucket, const char *object,
+buckets_obj_err buckets_ep_mpu_list_uploads(buckets_epool *L, const char *bucket, const char *object,
                                              buckets_upload_info **uploads, size_t *n) {
   *uploads = NULL;
   *n = 0;
-  buckets_obj_err err = buckets_obj_stat_bucket(L, bucket);
+  buckets_obj_err err = buckets_ep_stat_bucket(L, bucket);
   if (err) return err;
   if (!object || !*object || buckets_obj_check_name(object) != BUCKETS_OBJ_OK) return BUCKETS_OBJ_OK;
-  buckets_eset *s = set_for(L, object);
+  buckets_eset *s = buckets_ep_set_for(L, object);
   char *sd = sha_dir(bucket, object);
   size_t cap = 0;
   for (size_t i = 0; i < s->n; i++) {
@@ -2157,7 +2146,7 @@ static void remove_stale(void *ctx, size_t i) {
 }
 
 /* Rebuilds the shards of version o on the outdated drives and commits them. */
-static buckets_obj_err rebuild(buckets_objlayer *L, buckets_eset *s, const char *bucket, const char *object,
+static buckets_obj_err rebuild(buckets_epool *L, buckets_eset *s, const char *bucket, const char *object,
                                const dmeta *m, const long *vidx_good, const buckets_xl_object *o, bool is_inline,
                                bool *outdated, size_t *committed) {
   int dist[MAX_SET];
@@ -2258,7 +2247,7 @@ static void purge_one(void *ctx, size_t i) {
   free(arr);
 }
 
-static buckets_obj_err heal_version(buckets_objlayer *L, buckets_eset *s, const char *bucket, const char *object,
+static buckets_obj_err heal_version(buckets_epool *L, buckets_eset *s, const char *bucket, const char *object,
                                     const uint8_t id[16], const buckets_heal_opts *opts, buckets_heal_result *res) {
   char *op = obj_path(object);
   dmeta m[MAX_SET];
@@ -2367,15 +2356,15 @@ static buckets_obj_err heal_version(buckets_objlayer *L, buckets_eset *s, const 
   return err;
 }
 
-buckets_obj_err buckets_obj_heal(buckets_objlayer *L, const char *bucket, const char *object, const char *version_id,
+buckets_obj_err buckets_ep_heal(buckets_epool *L, const char *bucket, const char *object, const char *version_id,
                                  const buckets_heal_opts *opts, buckets_heal_result *res) {
   buckets_heal_result local;
   if (!res) res = &local;
   memset(res, 0, sizeof(*res));
-  buckets_obj_err err = buckets_obj_stat_bucket(L, bucket);
+  buckets_obj_err err = buckets_ep_stat_bucket(L, bucket);
   if (err) return err;
   if ((err = buckets_obj_check_name(object)) != BUCKETS_OBJ_OK) return err;
-  buckets_eset *s = set_for(L, object);
+  buckets_eset *s = buckets_ep_set_for(L, object);
   buckets_nslock_entry *lk = lock_ns(L, bucket, object, true);
   if (!lk) return BUCKETS_OBJ_ERR_TIMEOUT;
   /* The versions to visit: one, or the union over every drive. */
@@ -2426,7 +2415,7 @@ buckets_obj_err buckets_obj_heal(buckets_objlayer *L, const char *bucket, const 
   return err;
 }
 
-size_t buckets_obj_heal_bucket(buckets_objlayer *L, const char *bucket) {
+size_t buckets_ep_heal_bucket(buckets_epool *L, const char *bucket) {
   size_t made = 0;
   for (size_t i = 0; i < L->nall; i++) {
     if (!L->all[i]) continue;

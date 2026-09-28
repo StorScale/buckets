@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 #include <yyjson.h>
 
@@ -530,6 +531,14 @@ void buckets_dir_list_free(buckets_dir_list *l) {
   for (size_t i = 0; i < l->n; i++) free(l->names[i]);
   free(l->names);
   memset(l, 0, sizeof(*l));
+}
+
+buckets_drive_err buckets_drive_disk_info(buckets_drive *d, uint64_t *total, uint64_t *free_bytes) {
+  struct statvfs sv;
+  if (statvfs(d->root, &sv) != 0) return from_errno(errno);
+  *total = (uint64_t)sv.f_blocks * sv.f_frsize;
+  *free_bytes = (uint64_t)sv.f_bavail * sv.f_frsize;
+  return BUCKETS_DRIVE_OK;
 }
 
 buckets_drive_err buckets_drive_file_size(buckets_drive *d, const char *vol, const char *path, int64_t *size) {

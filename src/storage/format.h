@@ -21,9 +21,11 @@ typedef struct {
 
 /* drives[i] may be NULL (unreachable). Takes ownership of the drives: each is
  * either placed in a slot or closed. Returns false (err set) on a hard error:
- * no quorum, foreign deployment, or layout mismatch. */
-bool buckets_format_negotiate(buckets_drive **drives, size_t ndrives, size_t set_size, buckets_format_result *out,
-                              char *err, size_t errlen);
+ * no quorum, foreign deployment, or layout mismatch. deployment_id, when
+ * given (pools after the first), is used for a fresh format and required of
+ * an existing one. */
+bool buckets_format_negotiate(buckets_drive **drives, size_t ndrives, size_t set_size, const char *deployment_id,
+                              buckets_format_result *out, char *err, size_t errlen);
 void buckets_format_result_free(buckets_format_result *r);
 
 #endif

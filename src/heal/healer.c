@@ -9,7 +9,6 @@
 
 #include "core/buf.h"
 #include "core/log.h"
-#include "erasure/layout.h"
 #include "storage/drive.h"
 
 #define MRF_MAX 100000 /* MinIO's mrfOpsQueueSize */
@@ -133,20 +132,15 @@ static bool stopping(buckets_healer *h) {
   return s;
 }
 
-static size_t set_of(buckets_objlayer *L, buckets_drive *d) {
-  for (size_t i = 0; i < L->nall; i++) {
-    if (L->all[i] == d) return i / L->sets[0].n;
-  }
-  return SIZE_MAX;
-}
-
 /* Heals every bucket and every object of d's erasure set, resuming from the
  * tracker. Returns true when the drive is complete. */
-static bool heal_drive(buckets_healer *h, buckets_drive *d) {
+static bool heal_drive(buckets_healer *h, size_t di) {
   buckets_objlayer *L = h->L;
+  buckets_drive *d = L->all[di];
   tracker t;
   if (!tracker_load(d, &t)) return true;
-  size_t my_set = set_of(L, d);
+  buckets_drive_place pl;
+  buckets_objlayer_place(L, di, &pl);
   buckets_log_info("healing drive %s (resuming after %s/%s)", d->root, t.bucket, t.object);
   buckets_bucket_info *bk = NULL;
   size_t nb = 0;
@@ -179,8 +173,7 @@ static bool heal_drive(buckets_healer *h, buckets_drive *d) {
       }
       for (size_t i = 0; i < l.nobjects; i++) {
         const char *name = l.objects[i].name;
-        buckets_eset *s = &L->sets[buckets_set_index(name, L->nsets, L->deployment_id)];
-        if (s != &L->sets[my_set]) continue;
+        if (buckets_objlayer_object_set(L, pl.pool, name) != pl.set) continue; /* not this drive's set */
         buckets_heal_result r;
         if (buckets_obj_heal(L, bk[b].name, name, NULL, &opts, &r) == BUCKETS_OBJ_OK) t.healed++;
         else t.failed++;
@@ -224,7 +217,7 @@ static void heal_drives(buckets_healer *h) {
   pthread_mutex_unlock(&h->mu);
   for (size_t i = 0; i < L->nall && !stopping(h); i++) {
     if (!L->all[i] || buckets_drive_stat(L->all[i], BUCKETS_META_BUCKET, BUCKETS_HEALING_TRACKER) != 1) continue;
-    if (heal_drive(h, L->all[i])) {
+    if (heal_drive(h, i)) {
       pthread_mutex_lock(&h->mu);
       h->st.drives_healing--;
       pthread_mutex_unlock(&h->mu);
@@ -293,11 +286,16 @@ buckets_healer *buckets_healer_start(buckets_objlayer *L) {
   pthread_mutex_init(&h->mu, NULL);
   pthread_cond_init(&h->cv, NULL);
   pthread_cond_init(&h->idle_cv, NULL);
-  /* A drive formatted into an existing deployment starts empty: track it. */
-  bool fresh_deployment = true;
-  for (size_t i = 0; i < L->nall; i++) fresh_deployment &= !L->all[i] || L->all[i]->freshly_formatted;
-  for (size_t i = 0; i < L->nall && !fresh_deployment; i++) {
-    if (L->all[i] && L->all[i]->freshly_formatted) {
+  /* A drive formatted into an existing pool starts empty: track it. (A whole
+   * pool formatted at once is new, not replaced.) */
+  for (size_t i = 0; i < L->nall; i++) {
+    buckets_drive_place pl;
+    buckets_objlayer_place(L, i, &pl);
+    bool fresh_pool = true;
+    for (size_t j = pl.pool_first; j < pl.pool_first + pl.pool_drives; j++) {
+      fresh_pool &= !L->all[j] || L->all[j]->freshly_formatted;
+    }
+    if (!fresh_pool && L->all[i] && L->all[i]->freshly_formatted) {
       tracker t = {0};
       tracker_save(L->all[i], &t);
       buckets_log_info("drive %s was replaced; healing it in the background", L->all[i]->root);
