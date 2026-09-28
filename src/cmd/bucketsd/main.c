@@ -74,8 +74,10 @@ static const char *env2(const char *primary, const char *compat) {
 
 static void usage(FILE *f) {
   fprintf(f,
-          "Usage: bucketsd server [--address [HOST]:PORT] DRIVE...\n"
-          "  DRIVE may use MinIO ellipses, e.g. /mnt/disk{1...16}\n"
+          "Usage: bucketsd server [--address [HOST]:PORT] [--certs-dir DIR] DRIVE...\n"
+          "  DRIVE may use MinIO ellipses, e.g. /mnt/disk{1...16}; each ellipsis argument is a pool\n"
+          "  --certs-dir: public.crt + private.key enable HTTPS (default ~/.buckets/certs,\n"
+          "               then ~/.minio/certs); subdirectories add certificates chosen by SNI\n"
           "\n"
           "Environment:\n"
           "  BUCKETS_ROOT_USER / MINIO_ROOT_USER          root access key (default minioadmin)\n"
@@ -118,11 +120,14 @@ int main(int argc, char **argv) {
   }
 
   const char *address = ":9000";
+  const char *certs_dir = NULL;
   char **drive_args = buckets_xcalloc((size_t)argc, sizeof(char *));
   size_t ndrive_args = 0;
   for (int i = 2; i < argc; i++) {
     if (strcmp(argv[i], "--address") == 0 && i + 1 < argc) {
       address = argv[++i];
+    } else if ((strcmp(argv[i], "--certs-dir") == 0 || strcmp(argv[i], "-S") == 0) && i + 1 < argc) {
+      certs_dir = argv[++i];
     } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
       usage(stdout);
       return 0;
@@ -278,6 +283,34 @@ int main(int argc, char **argv) {
   buckets_pool *api_pool = napi > 0 ? buckets_pool_new((int)BUCKETS_MIN(napi, 4096L)) : NULL;
   hcfg.workers = api_pool;
 
+  /* HTTPS when the certs directory holds a key pair, as in MinIO. */
+  char certs_buf[4096];
+  if (!certs_dir) {
+    const char *home = getenv("HOME");
+    const char *cands[] = {".buckets/certs", ".minio/certs"};
+    for (size_t i = 0; home && i < 2 && !certs_dir; i++) {
+      snprintf(certs_buf, sizeof(certs_buf), "%s/%s", home, cands[i]);
+      char crt[4200];
+      snprintf(crt, sizeof(crt), "%s/public.crt", certs_buf);
+      if (access(crt, R_OK) == 0) certs_dir = certs_buf;
+    }
+  }
+  buckets_tls *tls = NULL;
+  if (certs_dir) {
+    char crt[4200];
+    snprintf(crt, sizeof(crt), "%s/public.crt", certs_dir);
+    if (access(crt, F_OK) == 0) {
+      char terr[512];
+      if (!(tls = buckets_tls_server_new(certs_dir, terr, sizeof(terr)))) {
+        buckets_log_error("TLS: %s", terr);
+        return 1;
+      }
+      buckets_log_info("TLS enabled with %zu certificate%s from %s", buckets_tls_cert_count(tls),
+                       buckets_tls_cert_count(tls) == 1 ? "" : "s", certs_dir);
+    }
+  }
+  hcfg.tls = tls;
+
   app_state app = {0};
   app.http = buckets_http_server_start(g_loop, &hcfg, buckets_s3_handle, &s3);
   if (!app.http) return 1;
@@ -292,12 +325,13 @@ int main(int argc, char **argv) {
   sigaction(SIGINT, &sa, NULL);
   signal(SIGPIPE, SIG_IGN);
 
-  buckets_log_info("bucketsd %s listening on %s:%d", BUCKETS_VERSION, *host ? host : "*",
+  buckets_log_info("bucketsd %s listening on %s://%s:%d", BUCKETS_VERSION, tls ? "https" : "http", *host ? host : "*",
                    buckets_http_server_port(app.http));
   int rc = buckets_loop_run(g_loop);
 
   buckets_pool_free(api_pool); /* finishes in-flight handlers before their connections go */
   buckets_http_server_free(app.http);
+  buckets_tls_free(tls);
   buckets_healer_stop(healer);
   buckets_loop_free(g_loop);
   buckets_objlayer_free(layer);

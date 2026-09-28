@@ -693,6 +693,14 @@ void buckets_s3_post_policy(s3_ctx *c) {
     } else if (have_policy && policy.range_valid && size > policy.range_max) {
       err = BUCKETS_ERR_ENTITY_TOO_LARGE;
     }
+    /* SSE form fields: refused until server-side encryption lands (see objects.c). */
+    for (size_t i = 0; i < fs.n && !err; i++) {
+      if (strncasecmp(fs.items[i].name, "X-Amz-Server-Side-Encryption", 28) != 0) continue;
+      bool ssec = strncasecmp(fs.items[i].name, "X-Amz-Server-Side-Encryption-Customer", 37) == 0;
+      err = ssec && !c->req->secure ? BUCKETS_ERR_INSECURE_SSE_CUSTOMER_REQUEST
+            : ssec                  ? BUCKETS_ERR_NOT_IMPLEMENTED
+                                    : BUCKETS_ERR_KMS_NOT_CONFIGURED;
+    }
     /* x-amz-checksum-* can arrive as form fields (minio-go PostPolicy.SetChecksum). */
     buckets_checksum want = {0};
     if (!err) {
@@ -733,7 +741,7 @@ void buckets_s3_post_policy(s3_ctx *c) {
       }
       buckets_str host = buckets_http_header_get(req, "Host");
       buckets_buf loc = BUCKETS_BUF_INIT;
-      buckets_buf_appendf(&loc, "http://" BUCKETS_STR_FMT "/%s/%s", BUCKETS_STR_ARG(host), c->bucket, oi.name);
+      buckets_buf_appendf(&loc, "%s://" BUCKETS_STR_FMT "/%s/%s", c->req->secure ? "https" : "http", BUCKETS_STR_ARG(host), c->bucket, oi.name);
       buckets_http_resp_header(c->resp, "Location", loc.data);
       const char *redirect = fields_get(&fs, "success_action_redirect");
       const char *status = fields_get(&fs, "success_action_status");

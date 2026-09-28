@@ -31,11 +31,24 @@ All notable changes to this project are documented here. The format follows
   - new objects go to a pool picked at random, weighted by free space
   - listings merge across pools, deletes reach every pool, and multipart uploads find their pool
   - real MinIO reads an expanded deployment written by Buckets (`tests/integration/pools.sh`)
+- HTTPS (OpenSSL 3), after MinIO's certs directory:
+  - `--certs-dir` holds `public.crt` and `private.key`; the default is `~/.buckets/certs`, then `~/.minio/certs`
+  - certificates in subdirectories are chosen by SNI
+  - certificates reload when their files change, without a restart
+  - TLS 1.2 minimum with MinIO's AEAD cipher suites, and `BUCKETS_CERT_PASSWD` for encrypted keys
+  - certificates with explicit EC parameters are refused at startup, as Go-based MinIO does
+- CMake uses the system OpenSSL 3, or builds a pinned 3.5.4 once into `.deps/`.
+- `tests/integration/tls.sh` covers the above. `TLS=1` runs minio-go conformance over HTTPS: 80 pass, 0 fail.
 - `tests/integration/concurrency.sh`: racing PUTs of one key (every drive must agree), 24 parallel round trips, overwrite during a slow read, CopyObject onto itself, and parallel multipart parts.
 - `tests/integration/erasure.sh`: 4- and 16-drive sets, bitrot, drive loss up to and beyond parity, drive replacement, and MinIO interop. `DRIVES=4` runs the minio-go conformance suite on an erasure set.
 
 ### Changed
 - The single-drive layer is now the erasure layer with one drive (EC 1+0); on-disk output is unchanged.
+- Requests with server-side encryption are refused until SSE lands (Phase 5), instead of being stored unencrypted:
+  - SSE-C over plain HTTP gets `InsecureSSECustomerRequest`
+  - SSE-S3/KMS gets MinIO's no-KMS `NotImplemented`
+  - SSE-C keys on GET or HEAD get `InvalidRequest`
+- `Location` headers use `https` on TLS connections.
 - GetObject loads the first block before sending headers, so an object without enough intact shards gets `503 SlowDownRead` instead of a truncated `200`.
 
 ## [0.2.0] - 2026-09-27

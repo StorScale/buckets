@@ -11,3 +11,4 @@ timeout-*
 .DS_Store
 /.oracles/
 /.conformance/
+/.deps/

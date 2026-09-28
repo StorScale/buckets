@@ -59,6 +59,9 @@ typedef struct conn {
    * alone (unwatched, never closed) until the worker posts back. */
   bool busy;
   long fill_got;
+  buckets_tls_conn *tls;
+  bool write_wants_read; /* TLS: a send is blocked until the socket is readable */
+  bool read_wants_write; /* TLS: a receive is blocked until it is writable */
   time_t last_active;
   char remote[INET6_ADDRSTRLEN + 8];
 } conn;
@@ -74,10 +77,35 @@ struct buckets_http_server {
   conn *conns;
   size_t nconns;
   bool shutting_down;
+  unsigned ticks;
 };
 
 static void conn_io(buckets_loop *loop, int fd, unsigned events, void *ud);
 static bool conn_process(conn *c);
+static void conn_read(conn *c);
+
+/* ---- transport: plain TCP or TLS ------------------------------------------ */
+
+/* >0 bytes, 0 at EOF, or BUCKETS_TLS_ERROR / _WANT_READ / _WANT_WRITE. */
+static long conn_recv(conn *c, void *buf, size_t n) {
+  if (c->tls) return buckets_tls_recv(c->tls, buf, n);
+  for (;;) {
+    ssize_t r = recv(c->fd, buf, n, 0);
+    if (r >= 0) return (long)r;
+    if (errno == EINTR) continue;
+    return errno == EAGAIN || errno == EWOULDBLOCK ? BUCKETS_TLS_WANT_READ : BUCKETS_TLS_ERROR;
+  }
+}
+
+static long conn_send(conn *c, const void *buf, size_t n) {
+  if (c->tls) return buckets_tls_send(c->tls, buf, n);
+  for (;;) {
+    ssize_t r = send(c->fd, buf, n, SEND_FLAGS);
+    if (r > 0) return (long)r;
+    if (r < 0 && errno == EINTR) continue;
+    return r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) ? BUCKETS_TLS_WANT_WRITE : BUCKETS_TLS_ERROR;
+  }
+}
 
 /* ---- response helpers ---------------------------------------------------- */
 
@@ -172,6 +200,7 @@ static void conn_close(conn *c) {
   stream_end(c);
   if (c->body_fd >= 0) close(c->body_fd);
   buckets_loop_unwatch(srv->loop, c->fd);
+  buckets_tls_conn_free(c->tls);
   close(c->fd);
   if (c->prev) c->prev->next = c->next;
   else srv->conns = c->next;
@@ -223,14 +252,14 @@ static bool conn_flush(conn *c) {
       if (r == 0) break;
       continue;
     }
-    ssize_t n = send(c->fd, c->out.data + c->out_off, c->out.len - c->out_off, SEND_FLAGS);
+    long n = conn_send(c, c->out.data + c->out_off, c->out.len - c->out_off);
     if (n > 0) {
       c->out_off += (size_t)n;
       continue;
     }
-    if (n < 0 && errno == EINTR) continue;
-    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-      buckets_loop_watch(c->srv->loop, c->fd, BUCKETS_EV_WRITE, conn_io, c);
+    if (n == BUCKETS_TLS_WANT_WRITE || n == BUCKETS_TLS_WANT_READ) {
+      c->write_wants_read = n == BUCKETS_TLS_WANT_READ;
+      buckets_loop_watch(c->srv->loop, c->fd, c->write_wants_read ? BUCKETS_EV_READ : BUCKETS_EV_WRITE, conn_io, c);
       return true;
     }
     conn_close(c);
@@ -253,14 +282,9 @@ static bool conn_writing(const conn *c) { return c->out_off < c->out.len || c->s
  * callbacks. Whatever is left is sent by the next conn_flush(). */
 static void conn_send_some(conn *c) {
   while (c->out_off < c->out.len) {
-    ssize_t n = send(c->fd, c->out.data + c->out_off, c->out.len - c->out_off, SEND_FLAGS);
-    if (n > 0) {
-      c->out_off += (size_t)n;
-    } else if (n < 0 && errno == EINTR) {
-      continue;
-    } else {
-      return;
-    }
+    long n = conn_send(c, c->out.data + c->out_off, c->out.len - c->out_off);
+    if (n <= 0) return;
+    c->out_off += (size_t)n;
   }
   buckets_buf_reset(&c->out);
   c->out_off = 0;
@@ -313,9 +337,16 @@ static void set_busy(conn *c) {
 
 /* Back on the loop thread after a worker finished: resume sending, then
  * any pipelined requests. */
+/* TLS may hold decrypted input the socket will never signal again. */
+static void drain_pending(conn *c) {
+  if (c->tls && !c->busy && !c->closing && !c->peer_eof && !conn_writing(c) && buckets_tls_pending(c->tls)) {
+    conn_read(c);
+  }
+}
+
 static void resume(conn *c) {
   c->busy = false;
-  if (conn_flush(c)) conn_process(c);
+  if (conn_flush(c) && conn_process(c)) drain_pending(c);
 }
 
 static void fill_done(buckets_loop *loop, void *ud) {
@@ -391,6 +422,7 @@ static void dispatch_request(conn *c) {
   rq->body_len = c->body_fd >= 0 ? c->body_len : (int64_t)c->body.len;
   rq->keep_alive = llhttp_should_keep_alive(&c->parser) && !srv->shutting_down;
   rq->remote_addr = c->remote;
+  rq->secure = c->tls != NULL;
   j->resp = (buckets_http_response){.status = 200, .content_length = -1};
   j->resp.head_only = buckets_str_eq_c(rq->method, "HEAD");
   if (srv->cfg.workers) {
@@ -437,27 +469,27 @@ static bool conn_process(conn *c) {
   return true;
 }
 
-static void conn_io(buckets_loop *loop, int fd, unsigned events, void *ud) {
-  conn *c = ud;
-  c->last_active = time(NULL);
-  if (events & BUCKETS_EV_WRITE) {
-    if (!conn_flush(c)) return;
-    conn_process(c);
-    return;
-  }
-  if (c->peer_eof) return;
-  if (!(events & BUCKETS_EV_READ)) return;
+/* Reads until the transport would block, parsing (and spooling bodies) every
+ * megabyte so a fast client cannot make us buffer without bound. */
+static void conn_read(conn *c) {
   for (;;) {
     buckets_buf_reserve(&c->in, 64 * 1024);
-    ssize_t n = recv(c->fd, c->in.data + c->in.len, c->in.cap - c->in.len - 1, 0);
+    long n = conn_recv(c, c->in.data + c->in.len, c->in.cap - c->in.len - 1);
     if (n > 0) {
       c->in.len += (size_t)n;
       c->in.data[c->in.len] = '\0';
-      if (c->in.len > 1024 * 1024) break; /* parse (and spool) before buffering more */
+      if (c->in.len > 1024 * 1024) {
+        if (!conn_process(c)) return;
+        if (c->busy || conn_writing(c) || c->closing) return; /* resumes from the write or the worker */
+      }
       continue;
     }
-    if (n < 0 && errno == EINTR) continue;
-    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
+    if (n == BUCKETS_TLS_WANT_READ) break;
+    if (n == BUCKETS_TLS_WANT_WRITE) { /* TLS handshake output is blocked */
+      c->read_wants_write = true;
+      buckets_loop_watch(c->srv->loop, c->fd, BUCKETS_EV_READ | BUCKETS_EV_WRITE, conn_io, c);
+      break;
+    }
     if (n < 0) { /* reset or error: nobody is listening for responses */
       conn_close(c);
       return;
@@ -468,6 +500,25 @@ static void conn_io(buckets_loop *loop, int fd, unsigned events, void *ud) {
     break;
   }
   conn_process(c);
+}
+
+static void conn_io(buckets_loop *loop, int fd, unsigned events, void *ud) {
+  conn *c = ud;
+  (void)loop;
+  (void)fd;
+  c->last_active = time(NULL);
+  if (c->busy) return;
+  bool retry_read = c->read_wants_write && (events & BUCKETS_EV_WRITE);
+  if (retry_read) c->read_wants_write = false;
+  if (((events & BUCKETS_EV_WRITE) && !retry_read) || (c->write_wants_read && (events & BUCKETS_EV_READ))) {
+    c->write_wants_read = false;
+    if (!conn_flush(c)) return;
+    if (conn_process(c)) drain_pending(c);
+    return;
+  }
+  if (c->peer_eof) return;
+  if (!(events & BUCKETS_EV_READ) && !retry_read) return;
+  conn_read(c);
 }
 
 /* ---- llhttp callbacks ---------------------------------------------------- */
@@ -599,6 +650,11 @@ static void on_accept(buckets_loop *loop, int fd, unsigned events, void *ud) {
     } else if (ss.ss_family == AF_INET) {
       inet_ntop(AF_INET, &((struct sockaddr_in *)&ss)->sin_addr, c->remote, sizeof(c->remote));
     }
+    if (srv->cfg.tls && !(c->tls = buckets_tls_accept(srv->cfg.tls, cfd))) {
+      close(cfd);
+      free(c);
+      continue;
+    }
     llhttp_init(&c->parser, HTTP_REQUEST, &srv->settings);
     c->parser.data = c;
     c->next = srv->conns;
@@ -661,6 +717,7 @@ static int listen_socket(const char *host, int port, int *bound_port) {
 
 static void on_tick(buckets_http_server *srv) {
   time_t now = time(NULL);
+  if (srv->cfg.tls && ++srv->ticks % 5 == 0) buckets_tls_reload(srv->cfg.tls);
   for (conn *c = srv->conns, *next; c; c = next) {
     next = c->next;
     bool idle = !c->busy && c->in.len == 0 && !conn_writing(c);

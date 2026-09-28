@@ -1,10 +1,11 @@
 # syntax=docker/dockerfile:1
 # Build:  docker build -f docker/Dockerfile.bucketsd -t buckets/bucketsd .
 # Run:    docker run -p 9000:9000 -v /srv/data:/data buckets/bucketsd
+# HTTPS:  mount public.crt + private.key and add --certs-dir (runtime libssl3 is in distroless/cc)
 
 FROM debian:bookworm-slim AS build
 RUN apt-get update \
- && apt-get install -y --no-install-recommends build-essential cmake ninja-build git ca-certificates \
+ && apt-get install -y --no-install-recommends build-essential cmake ninja-build git ca-certificates libssl-dev perl \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .

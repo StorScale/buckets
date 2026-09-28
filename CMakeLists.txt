@@ -20,6 +20,7 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(Warnings)
 include(Sanitizers)
 include(Dependencies)
+include(OpenSSL)
 
 add_subdirectory(src)
 

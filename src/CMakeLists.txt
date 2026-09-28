@@ -21,6 +21,7 @@ add_library(buckets STATIC
   crypto/cksum.c
   crypto/siphash.c
   net/http.c
+  net/tls.c
   s3/errors.c
   s3/errors_gen.c
   s3/xml.c
@@ -48,7 +49,7 @@ target_include_directories(buckets PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_definitions(buckets PUBLIC _GNU_SOURCE _DARWIN_C_SOURCE
   BUCKETS_VERSION="${PROJECT_VERSION}")
 find_package(Threads REQUIRED)
-target_link_libraries(buckets PUBLIC llhttp::llhttp yyjson Threads::Threads)
+target_link_libraries(buckets PUBLIC llhttp::llhttp yyjson OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
 buckets_warnings(buckets)
 
 add_executable(bucketsd cmd/bucketsd/main.c)

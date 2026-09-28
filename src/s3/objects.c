@@ -1097,7 +1097,7 @@ static void mpu_complete(s3_ctx *c, const char *upload_id) {
   buckets_xml_open_ns(b, "CompleteMultipartUploadResult", BUCKETS_S3_XMLNS);
   buckets_buf loc = BUCKETS_BUF_INIT;
   buckets_str host = buckets_http_header_get(c->req, "Host");
-  buckets_buf_appendf(&loc, "http://" BUCKETS_STR_FMT "/%s/%s", BUCKETS_STR_ARG(host), c->bucket, c->object);
+  buckets_buf_appendf(&loc, "%s://" BUCKETS_STR_FMT "/%s/%s", c->req->secure ? "https" : "http", BUCKETS_STR_ARG(host), c->bucket, c->object);
   buckets_xml_elem(b, "Location", loc.data);
   buckets_buf_free(&loc);
   buckets_xml_elem(b, "Bucket", c->bucket);
@@ -1382,7 +1382,31 @@ void buckets_s3_put_acl(s3_ctx *c) {
 
 /* ---- routing -------------------------------------------------------------- */
 
+/* Server-side encryption arrives in Phase 5. Until then no request may leave
+ * data unencrypted that the client asked to encrypt: SSE headers get MinIO's
+ * answers for a server without a KMS, and SSE-C keys never travel in clear. */
+static bool refuse_sse(s3_ctx *c) {
+  bool ssec = buckets_http_header_get(c->req, "X-Amz-Server-Side-Encryption-Customer-Algorithm").p ||
+              buckets_http_header_get(c->req, "X-Amz-Server-Side-Encryption-Customer-Key").p;
+  bool ssec_src = buckets_http_header_get(c->req, "X-Amz-Copy-Source-Server-Side-Encryption-Customer-Algorithm").p ||
+                  buckets_http_header_get(c->req, "X-Amz-Copy-Source-Server-Side-Encryption-Customer-Key").p;
+  bool sse = buckets_http_header_get(c->req, "X-Amz-Server-Side-Encryption").p != NULL;
+  if (!ssec && !ssec_src && !sse) return false;
+  buckets_str m = c->req->method;
+  if ((ssec || ssec_src) && !c->req->secure) {
+    buckets_s3_write_error(c, BUCKETS_ERR_INSECURE_SSE_CUSTOMER_REQUEST);
+  } else if (buckets_str_eq_c(m, "GET") || buckets_str_eq_c(m, "HEAD")) {
+    buckets_s3_write_error(c, BUCKETS_ERR_INVALID_ENCRYPTION_PARAMETERS); /* no object is encrypted yet */
+  } else if (sse) {
+    buckets_s3_write_error(c, BUCKETS_ERR_KMS_NOT_CONFIGURED);
+  } else {
+    buckets_s3_write_error(c, BUCKETS_ERR_NOT_IMPLEMENTED);
+  }
+  return true;
+}
+
 void buckets_s3_route_object(s3_ctx *c) {
+  if (refuse_sse(c)) return;
   buckets_str m = c->req->method;
   const char *upload_id = buckets_query_get(&c->q, "uploadId");
   if (buckets_str_eq_c(m, "POST") && buckets_query_has(&c->q, "uploads")) {

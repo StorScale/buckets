@@ -89,11 +89,12 @@ Single-node S3 is feature-complete for the core API. It is verified three ways:
 - Request handlers run on worker threads, with MinIO-style namespace locks keeping concurrent writers consistent.
 - Object healing, an MRF queue for heal-on-read and partial writes, and background healing of replaced drives.
 - Multiple server pools, with MinIO-compatible placement across pools.
-- Still to come in Phase 2: distributed mode (internode RPC, remote drives, dsync locks), and TLS.
+- HTTPS with SNI and hot certificate reload.
+- Still to come in Phase 2: distributed mode (internode RPC, remote drives, dsync locks).
 
 **Known interim choices, each replaced in a later phase:**
 - One event-loop thread moves bytes for all connections. Handlers and stream pulls run on a worker pool, and each fans out per-drive work to the drive I/O pool. Request bodies are still spooled synchronously on the loop thread. Multiple reactors, then io_uring, follow.
-- Crypto primitives (SHA-256, MD5, SHA-1, HighwayHash, CRCs) are portable C, and all are verified against MinIO's Go libraries. SIMD and OpenSSL come later, with TLS in Phase 2.
+- Crypto primitives (SHA-256, MD5, SHA-1, HighwayHash, CRCs) are portable C, and all are verified against MinIO's Go libraries. OpenSSL is linked for TLS; moving the hashes onto it (and SIMD) comes with performance work.
 - Only the root credential is accepted. IAM comes in Phase 4.
 - Buckets are unversioned. Versioning, object lock, tagging and SSE come in Phase 5.
 

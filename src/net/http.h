@@ -5,6 +5,7 @@
 #include "core/buf.h"
 #include "core/loop.h"
 #include "core/pool.h"
+#include "net/tls.h"
 #include "core/str.h"
 
 #define BUCKETS_HTTP_MAX_HEADERS 128
@@ -31,6 +32,7 @@ typedef struct {
   int body_fd;       /* -1 when the body is in memory */
   int64_t body_len;  /* total body bytes in either representation */
   bool keep_alive;
+  bool secure; /* arrived over TLS */
   const char *remote_addr;
 } buckets_http_request;
 
@@ -82,6 +84,9 @@ typedef struct {
    * bytes. NULL runs them inline on the loop thread. Must outlive the server's
    * connections: free the pool (draining it) before the server. */
   buckets_pool *workers;
+  /* Serve HTTPS with these certificates (reloaded when they change); NULL
+   * serves plain HTTP. Owned by the caller. */
+  buckets_tls *tls;
 } buckets_http_config;
 
 typedef struct buckets_http_server buckets_http_server;

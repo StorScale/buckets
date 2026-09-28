@@ -17,14 +17,28 @@ DRIVE=$(mktemp -d "${TMPDIR:-/tmp}/buckets-conf-XXXXXX")
 # DRIVES=4 runs against a 4-drive erasure set instead of a single drive.
 TARGET="$DRIVE"
 [[ -n "${DRIVES:-}" ]] && TARGET="$DRIVE/d{1...$DRIVES}"
-BUCKETS_ROOT_USER=conformance BUCKETS_ROOT_PASSWORD=conformance123 "$BIN" server --address "127.0.0.1:$PORT" "$TARGET" 2>"$WORK/bucketsd.log" &
+# TLS=1 serves HTTPS with a throwaway certificate.
+TLSARGS=()
+SCHEME=http
+HTTPS=0
+if [[ -n "${TLS:-}" ]]; then
+  mkdir -p "$DRIVE.certs"
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -pkeyopt ec_param_enc:named_curve -nodes -days 1 \
+    -keyout "$DRIVE.certs/private.key" -out "$DRIVE.certs/public.crt" -subj /CN=localhost \
+    -addext "subjectAltName=IP:127.0.0.1" 2>/dev/null
+  TLSARGS=(--certs-dir "$DRIVE.certs")
+  SCHEME=https
+  HTTPS=1
+fi
+BUCKETS_ROOT_USER=conformance BUCKETS_ROOT_PASSWORD=conformance123 "$BIN" server --address "127.0.0.1:$PORT" \
+  ${TLSARGS[@]+"${TLSARGS[@]}"} "$TARGET" 2>"$WORK/bucketsd.log" &
 PID=$!
-trap 'kill $PID 2>/dev/null; rm -rf "$DRIVE"' EXIT
-for _ in $(seq 50); do curl -sf "http://127.0.0.1:$PORT/minio/health/live" >/dev/null && break; sleep 0.1; done
+trap 'kill $PID 2>/dev/null; rm -rf "$DRIVE" "$DRIVE.certs"' EXIT
+for _ in $(seq 50); do curl -sfk "$SCHEME://127.0.0.1:$PORT/minio/health/live" >/dev/null && break; sleep 0.1; done
 
 # The suite drops scratch files in its working directory.
-(cd "$WORK" && SERVER_ENDPOINT=127.0.0.1:$PORT ACCESS_KEY=conformance SECRET_KEY=conformance123 ENABLE_HTTPS=0 \
-  ENABLE_KMS=0 MINT_MODE=full RUN_ON_FAIL=1 "$WORK/functional-tests") >"$WORK/results.log" 2>&1 || true
+(cd "$WORK" && SERVER_ENDPOINT=127.0.0.1:$PORT ACCESS_KEY=conformance SECRET_KEY=conformance123 \
+  ENABLE_KMS=0 ENABLE_HTTPS=$HTTPS SKIP_CERT_VALIDATION=$HTTPS MINT_MODE=full RUN_ON_FAIL=1 "$WORK/functional-tests") >"$WORK/results.log" 2>&1 || true
 
 python3 - "$WORK/results.log" <<'PY'
 import collections, json, sys
