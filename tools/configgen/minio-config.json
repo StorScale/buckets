@@ -1,0 +1,2808 @@
+[
+ {
+  "Name": "subnet",
+  "Description": "register Enterprise license for the cluster",
+  "MultipleTargets": false,
+  "Dynamic": true,
+  "SingleTarget": true,
+  "Keys": [
+   {
+    "Key": "license",
+    "Default": "",
+    "Type": "string",
+    "Description": "Enterprise license for the cluster",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": true,
+    "Secret": false
+   },
+   {
+    "Key": "api_key",
+    "Default": "",
+    "Type": "string",
+    "Description": "Enterprise license API key for the cluster",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": true,
+    "Secret": false
+   },
+   {
+    "Key": "proxy",
+    "Default": "",
+    "Type": "string",
+    "Description": "HTTP(s) proxy URL to use for connecting to SUBNET",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": true,
+    "Secret": false
+   }
+  ]
+ },
+ {
+  "Name": "callhome",
+  "Description": "enable callhome to MinIO SUBNET",
+  "MultipleTargets": false,
+  "Dynamic": true,
+  "SingleTarget": true,
+  "Keys": [
+   {
+    "Key": "enable",
+    "Default": "off",
+    "Type": "on|off",
+    "Description": "set to enable callhome (default: 'off')",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "frequency",
+    "Default": "24h",
+    "Type": "duration",
+    "Description": "time duration between callhome cycles e.g. 24h (default: '24h')",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   }
+  ]
+ },
+ {
+  "Name": "drive",
+  "Description": "enable drive specific settings",
+  "MultipleTargets": false,
+  "Dynamic": true,
+  "SingleTarget": true,
+  "Keys": [
+   {
+    "Key": "max_timeout",
+    "Default": "30s",
+    "Type": "string",
+    "Description": "set per call max_timeout for the drive, defaults to 30 seconds",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   }
+  ]
+ },
+ {
+  "Name": "site",
+  "Description": "label the server and its location",
+  "MultipleTargets": false,
+  "Dynamic": false,
+  "SingleTarget": true,
+  "Keys": [
+   {
+    "Key": "name",
+    "Default": "",
+    "Type": "string",
+    "Description": "name for the site e.g. \"cal-rack0\"",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "region",
+    "Default": "",
+    "Type": "string",
+    "Description": "name of the location of the server e.g. \"us-west-1\"",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   }
+  ]
+ },
+ {
+  "Name": "api",
+  "Description": "manage global HTTP API call specific features, such as throttling, authentication types, etc.",
+  "MultipleTargets": false,
+  "Dynamic": true,
+  "SingleTarget": true,
+  "Keys": [
+   {
+    "Key": "requests_max",
+    "Default": "0",
+    "Type": "number",
+    "Description": "set the maximum number of concurrent requests (default: auto)",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "cluster_deadline",
+    "Default": "10s",
+    "Type": "duration",
+    "Description": "set the deadline for cluster readiness check (default: '10s')",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "cors_allow_origin",
+    "Default": "*",
+    "Type": "csv",
+    "Description": "set comma separated list of origins allowed for CORS requests (default: '*')",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "remote_transport_deadline",
+    "Default": "2h",
+    "Type": "duration",
+    "Description": "set the deadline for API requests on remote transports while proxying between federated instances e.g. \"2h\" (default: '2h')",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "list_quorum",
+    "Default": "strict",
+    "Type": "string",
+    "Description": "set the acceptable quorum expected for list operations e.g. \"optimal\", \"reduced\", \"disk\", \"strict\", \"auto\" (default: 'strict')",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "replication_priority",
+    "Default": "auto",
+    "Type": "string",
+    "Description": "set replication priority (default: 'auto')",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "replication_max_workers",
+    "Default": "500",
+    "Type": "number",
+    "Description": "set the maximum number of replication workers (default: '500')",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "replication_max_lrg_workers",
+    "Default": "10",
+    "Type": "",
+    "Description": "",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "transition_workers",
+    "Default": "100",
+    "Type": "number",
+    "Description": "set the number of transition workers (default: '100')",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "stale_uploads_cleanup_interval",
+    "Default": "6h",
+    "Type": "duration",
+    "Description": "set to change intervals when stale multipart uploads are expired (default: '6h')",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "stale_uploads_expiry",
+    "Default": "24h",
+    "Type": "duration",
+    "Description": "set to expire stale multipart uploads older than this values (default: '24h')",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "delete_cleanup_interval",
+    "Default": "5m",
+    "Type": "duration",
+    "Description": "set to change intervals when deleted objects are permanently deleted from \".trash\" folder (default: '5m')",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "disable_odirect",
+    "Default": "",
+    "Type": "",
+    "Description": "",
+    "HiddenIfEmpty": true,
+    "Optional": false,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "odirect",
+    "Default": "on",
+    "Type": "boolean",
+    "Description": "set to enable or disable O_DIRECT for writes under special conditions. NOTE: do not disable O_DIRECT without prior testing (default: 'on')",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "gzip_objects",
+    "Default": "off",
+    "Type": "",
+    "Description": "",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "root_access",
+    "Default": "on",
+    "Type": "boolean",
+    "Description": "turn 'off' root credential access for all API calls including s3, admin operations (default: 'on')",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "sync_events",
+    "Default": "off",
+    "Type": "boolean",
+    "Description": "set to enable synchronous bucket notifications (default: 'off')",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "object_max_versions",
+    "Default": "9223372036854775807",
+    "Type": "number",
+    "Description": "set max allowed number of versions per object (default: '9223372036854775807')",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   }
+  ]
+ },
+ {
+  "Name": "scanner",
+  "Description": "manage namespace scanning for usage calculation, lifecycle, healing and more",
+  "MultipleTargets": false,
+  "Dynamic": true,
+  "SingleTarget": true,
+  "Keys": [
+   {
+    "Key": "speed",
+    "Default": "default",
+    "Type": "string",
+    "Description": "customize scanner speed (default|slowest|slow|fast|fastest) (default: 'default')",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "idle_speed",
+    "Default": "",
+    "Type": "",
+    "Description": "",
+    "HiddenIfEmpty": true,
+    "Optional": false,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "alert_excess_versions",
+    "Default": "100",
+    "Type": "int",
+    "Description": "alert per object beyond this many versions (default: '100')",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "alert_excess_folders",
+    "Default": "50000",
+    "Type": "int",
+    "Description": "alert beyond this many sub-folders per folder in an erasure set (default: '50000')",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "delay",
+    "Default": "",
+    "Type": "",
+    "Description": "",
+    "HiddenIfEmpty": true,
+    "Optional": false,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "max_wait",
+    "Default": "",
+    "Type": "",
+    "Description": "",
+    "HiddenIfEmpty": true,
+    "Optional": false,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "cycle",
+    "Default": "",
+    "Type": "",
+    "Description": "",
+    "HiddenIfEmpty": true,
+    "Optional": false,
+    "Sensitive": false,
+    "Secret": false
+   }
+  ]
+ },
+ {
+  "Name": "batch",
+  "Description": "manage batch job workers and wait times",
+  "MultipleTargets": false,
+  "Dynamic": true,
+  "SingleTarget": true,
+  "Keys": [
+   {
+    "Key": "replication_workers_wait",
+    "Default": "0ms",
+    "Type": "duration",
+    "Description": "maximum sleep duration between objects to slow down batch replication operation (default: '0ms')",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "keyrotation_workers_wait",
+    "Default": "0ms",
+    "Type": "duration",
+    "Description": "maximum sleep duration between objects to slow down batch keyrotation operation (default: '0ms')",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "expiration_workers_wait",
+    "Default": "0ms",
+    "Type": "duration",
+    "Description": "maximum sleep duration between objects to slow down batch expiration operation (default: '0ms')",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   }
+  ]
+ },
+ {
+  "Name": "compression",
+  "Description": "enable server side compression of objects",
+  "MultipleTargets": false,
+  "Dynamic": true,
+  "SingleTarget": true,
+  "Keys": [
+   {
+    "Key": "enable",
+    "Default": "off",
+    "Type": "on|off",
+    "Description": "Enable or disable object compression",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "allow_encryption",
+    "Default": "off",
+    "Type": "on|off",
+    "Description": "enable 'encryption' along with compression",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "extensions",
+    "Default": ".txt,.log,.csv,.json,.tar,.xml,.bin",
+    "Type": "csv",
+    "Description": "comma separated file extensions (default: '.txt,.log,.csv,.json,.tar,.xml,.bin')",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "mime_types",
+    "Default": "text/*,application/json,application/xml,binary/octet-stream",
+    "Type": "csv",
+    "Description": "comma separated wildcard mime-types (default: 'text/*,application/json,application/xml,binary/octet-stream')",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   }
+  ]
+ },
+ {
+  "Name": "identity_openid",
+  "Description": "enable OpenID SSO support",
+  "MultipleTargets": true,
+  "Dynamic": false,
+  "SingleTarget": false,
+  "Keys": [
+   {
+    "Key": "enable",
+    "Default": "",
+    "Type": "",
+    "Description": "",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "display_name",
+    "Default": "",
+    "Type": "string",
+    "Description": "Friendly display name for this Provider/App",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "config_url",
+    "Default": "",
+    "Type": "url",
+    "Description": "openid discovery document e.g. \"https://accounts.google.com/.well-known/openid-configuration\"",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "client_id",
+    "Default": "",
+    "Type": "string",
+    "Description": "unique public identifier for apps e.g. \"292085223830.apps.googleusercontent.com\"",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "client_secret",
+    "Default": "",
+    "Type": "string",
+    "Description": "secret for the unique public identifier for apps",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": true,
+    "Secret": true
+   },
+   {
+    "Key": "claim_name",
+    "Default": "policy",
+    "Type": "string",
+    "Description": "JWT canned policy claim name (default: 'policy')",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "claim_userinfo",
+    "Default": "",
+    "Type": "on|off",
+    "Description": "Enable fetching claims from UserInfo Endpoint for authenticated user",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "role_policy",
+    "Default": "",
+    "Type": "string",
+    "Description": "Set the IAM access policies applicable to this client application and IDP e.g. \"app-bucket-write,app-bucket-list\"",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "claim_prefix",
+    "Default": "",
+    "Type": "string",
+    "Description": "[DEPRECATED use 'claim_name'] JWT claim namespace prefix e.g. \"customer1/\"",
+    "HiddenIfEmpty": true,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "redirect_uri",
+    "Default": "",
+    "Type": "string",
+    "Description": "[DEPRECATED use env 'MINIO_BROWSER_REDIRECT_URL'] Configure custom redirect_uri for OpenID login flow callback",
+    "HiddenIfEmpty": true,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "redirect_uri_dynamic",
+    "Default": "off",
+    "Type": "on|off",
+    "Description": "Enable 'Host' header based dynamic redirect URI (default: 'off')",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "scopes",
+    "Default": "",
+    "Type": "csv",
+    "Description": "Comma separated list of OpenID scopes for server, defaults to advertised scopes from discovery document e.g. \"email,admin\"",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "vendor",
+    "Default": "",
+    "Type": "string",
+    "Description": "Specify vendor type for vendor specific behavior to checking validity of temporary credentials and service accounts on MinIO",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "keycloak_realm",
+    "Default": "",
+    "Type": "string",
+    "Description": "Specify Keycloak 'realm' name, only honored if vendor was set to 'keycloak' as value, if no realm is specified 'master' is default",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "keycloak_admin_url",
+    "Default": "",
+    "Type": "string",
+    "Description": "Specify Keycloak 'admin' REST API endpoint e.g. http://localhost:8080/auth/admin/",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "user_readable_claim",
+    "Default": "",
+    "Type": "",
+    "Description": "",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "user_id_claim",
+    "Default": "",
+    "Type": "",
+    "Description": "",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": false,
+    "Secret": false
+   }
+  ]
+ },
+ {
+  "Name": "identity_ldap",
+  "Description": "enable LDAP SSO support",
+  "MultipleTargets": false,
+  "Dynamic": false,
+  "SingleTarget": true,
+  "Keys": [
+   {
+    "Key": "enable",
+    "Default": "",
+    "Type": "",
+    "Description": "",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "server_addr",
+    "Default": "",
+    "Type": "address",
+    "Description": "AD/LDAP server address e.g. \"myldap.com\" or \"myldapserver.com:636\"",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": true,
+    "Secret": false
+   },
+   {
+    "Key": "srv_record_name",
+    "Default": "",
+    "Type": "string",
+    "Description": "DNS SRV record name for LDAP service, if given, must be one of \"ldap\", \"ldaps\" or \"on\"",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "user_dn_search_base_dn",
+    "Default": "",
+    "Type": "list",
+    "Description": "\";\" separated list of user search base DNs e.g. \"dc=myldapserver,dc=com\"",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "user_dn_search_filter",
+    "Default": "",
+    "Type": "string",
+    "Description": "Search filter to lookup user DN",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "user_dn_attributes",
+    "Default": "",
+    "Type": "list",
+    "Description": "\",\" separated list of user DN attributes e.g. \"uid,cn,mail,sshPublicKey\"",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "group_search_filter",
+    "Default": "",
+    "Type": "string",
+    "Description": "search filter for groups e.g. \"(&(objectclass=groupOfNames)(memberUid=%s))\"",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "group_search_base_dn",
+    "Default": "",
+    "Type": "list",
+    "Description": "\";\" separated list of group search base DNs e.g. \"dc=myldapserver,dc=com\"",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "tls_skip_verify",
+    "Default": "off",
+    "Type": "on|off",
+    "Description": "trust server TLS without verification (default: 'off')",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "server_insecure",
+    "Default": "off",
+    "Type": "on|off",
+    "Description": "allow plain text connection to AD/LDAP server (default: 'off')",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "server_starttls",
+    "Default": "off",
+    "Type": "on|off",
+    "Description": "use StartTLS connection to AD/LDAP server (default: 'off')",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "lookup_bind_dn",
+    "Default": "",
+    "Type": "string",
+    "Description": "DN for LDAP read-only service account used to perform DN and group lookups",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": true,
+    "Secret": false
+   },
+   {
+    "Key": "lookup_bind_password",
+    "Default": "",
+    "Type": "string",
+    "Description": "Password for LDAP read-only service account used to perform DN and group lookups",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": true,
+    "Secret": true
+   }
+  ]
+ },
+ {
+  "Name": "identity_tls",
+  "Description": "enable X.509 TLS certificate SSO support",
+  "MultipleTargets": false,
+  "Dynamic": false,
+  "SingleTarget": true,
+  "Keys": [
+   {
+    "Key": "skip_verify",
+    "Default": "off",
+    "Type": "on|off",
+    "Description": "trust client certificates without verification (default: 'off')",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   }
+  ]
+ },
+ {
+  "Name": "identity_plugin",
+  "Description": "enable Identity Plugin via external hook",
+  "MultipleTargets": false,
+  "Dynamic": false,
+  "SingleTarget": true,
+  "Keys": [
+   {
+    "Key": "url",
+    "Default": "",
+    "Type": "url",
+    "Description": "plugin hook endpoint (HTTP(S)) e.g. \"http://localhost:8181/path/to/endpoint\"",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "auth_token",
+    "Default": "",
+    "Type": "string",
+    "Description": "authorization token for plugin hook endpoint",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": true,
+    "Secret": true
+   },
+   {
+    "Key": "role_policy",
+    "Default": "",
+    "Type": "string",
+    "Description": "policies to apply for plugin authorized users",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "role_id",
+    "Default": "",
+    "Type": "string",
+    "Description": "unique ID to generate the ARN",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   }
+  ]
+ },
+ {
+  "Name": "policy_plugin",
+  "Description": "enable Access Management Plugin for policy enforcement",
+  "MultipleTargets": false,
+  "Dynamic": false,
+  "SingleTarget": true,
+  "Keys": [
+   {
+    "Key": "url",
+    "Default": "",
+    "Type": "url",
+    "Description": "plugin hook endpoint (HTTP(S)) e.g. \"http://localhost:8181/v1/data/httpapi/authz/allow\"",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": true,
+    "Secret": false
+   },
+   {
+    "Key": "auth_token",
+    "Default": "",
+    "Type": "string",
+    "Description": "authorization header for plugin hook endpoint",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": true,
+    "Secret": true
+   },
+   {
+    "Key": "enable_http2",
+    "Default": "off",
+    "Type": "bool",
+    "Description": "Enable experimental HTTP2 support to connect to plugin service (default: 'off')",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   }
+  ]
+ },
+ {
+  "Name": "logger_webhook",
+  "Description": "send server logs to webhook endpoints",
+  "MultipleTargets": true,
+  "Dynamic": true,
+  "SingleTarget": false,
+  "Keys": [
+   {
+    "Key": "enable",
+    "Default": "off",
+    "Type": "",
+    "Description": "",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "endpoint",
+    "Default": "",
+    "Type": "url",
+    "Description": "HTTP(s) endpoint e.g. \"http://localhost:8080/minio/logs/server\"",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": true,
+    "Secret": false
+   },
+   {
+    "Key": "auth_token",
+    "Default": "",
+    "Type": "string",
+    "Description": "opaque string or JWT authorization token",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": true,
+    "Secret": true
+   },
+   {
+    "Key": "client_cert",
+    "Default": "",
+    "Type": "string",
+    "Description": "mTLS certificate for webhook authentication",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": true,
+    "Secret": false
+   },
+   {
+    "Key": "client_key",
+    "Default": "",
+    "Type": "string",
+    "Description": "mTLS certificate key for webhook authentication",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": true,
+    "Secret": false
+   },
+   {
+    "Key": "proxy",
+    "Default": "",
+    "Type": "string",
+    "Description": "proxy url endpoint e.g. http(s)://proxy",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "batch_size",
+    "Default": "1",
+    "Type": "number",
+    "Description": "Number of events per HTTP send to webhook target",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "queue_size",
+    "Default": "100000",
+    "Type": "number",
+    "Description": "configure channel queue size for webhook targets",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "queue_dir",
+    "Default": "",
+    "Type": "string",
+    "Description": "staging dir for undelivered logger messages e.g. '/home/logger-events'",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "max_retry",
+    "Default": "0",
+    "Type": "number",
+    "Description": "maximum retry count before we start dropping logged event(s)",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "retry_interval",
+    "Default": "3s",
+    "Type": "duration",
+    "Description": "sleep between each retries, allowed maximum value is '1m' e.g. '10s'",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "http_timeout",
+    "Default": "5s",
+    "Type": "duration",
+    "Description": "defines the maximum duration for each http request",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   }
+  ]
+ },
+ {
+  "Name": "audit_webhook",
+  "Description": "send audit logs to webhook endpoints",
+  "MultipleTargets": true,
+  "Dynamic": true,
+  "SingleTarget": false,
+  "Keys": [
+   {
+    "Key": "enable",
+    "Default": "off",
+    "Type": "",
+    "Description": "",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "endpoint",
+    "Default": "",
+    "Type": "url",
+    "Description": "HTTP(s) endpoint e.g. \"http://localhost:8080/minio/logs/audit\"",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": true,
+    "Secret": false
+   },
+   {
+    "Key": "auth_token",
+    "Default": "",
+    "Type": "string",
+    "Description": "opaque string or JWT authorization token",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": true,
+    "Secret": true
+   },
+   {
+    "Key": "client_cert",
+    "Default": "",
+    "Type": "string",
+    "Description": "mTLS certificate for webhook authentication",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": true,
+    "Secret": false
+   },
+   {
+    "Key": "client_key",
+    "Default": "",
+    "Type": "string",
+    "Description": "mTLS certificate key for webhook authentication",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": true,
+    "Secret": false
+   },
+   {
+    "Key": "batch_size",
+    "Default": "1",
+    "Type": "number",
+    "Description": "Number of events per HTTP send to webhook target",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "queue_size",
+    "Default": "100000",
+    "Type": "number",
+    "Description": "configure channel queue size for webhook targets",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "queue_dir",
+    "Default": "",
+    "Type": "string",
+    "Description": "staging dir for undelivered audit messages e.g. '/home/audit-events'",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "max_retry",
+    "Default": "0",
+    "Type": "number",
+    "Description": "maximum retry count before we start dropping audit event(s)",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "retry_interval",
+    "Default": "3s",
+    "Type": "duration",
+    "Description": "sleep between each retries, allowed maximum value is '1m' e.g. '10s'",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "http_timeout",
+    "Default": "5s",
+    "Type": "duration",
+    "Description": "defines the maximum duration for each http request",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   }
+  ]
+ },
+ {
+  "Name": "audit_kafka",
+  "Description": "send audit logs to kafka endpoints",
+  "MultipleTargets": true,
+  "Dynamic": true,
+  "SingleTarget": false,
+  "Keys": [
+   {
+    "Key": "enable",
+    "Default": "off",
+    "Type": "",
+    "Description": "",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "topic",
+    "Default": "",
+    "Type": "string",
+    "Description": "Kafka topic used for bucket notifications",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "brokers",
+    "Default": "",
+    "Type": "csv",
+    "Description": "comma separated list of Kafka broker addresses",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "sasl_username",
+    "Default": "",
+    "Type": "string",
+    "Description": "username for SASL/PLAIN or SASL/SCRAM authentication",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": true,
+    "Secret": false
+   },
+   {
+    "Key": "sasl_password",
+    "Default": "",
+    "Type": "string",
+    "Description": "password for SASL/PLAIN or SASL/SCRAM authentication",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": true,
+    "Secret": true
+   },
+   {
+    "Key": "sasl_mechanism",
+    "Default": "plain",
+    "Type": "string",
+    "Description": "sasl authentication mechanism, default 'plain'",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "client_tls_cert",
+    "Default": "",
+    "Type": "path",
+    "Description": "path to client certificate for mTLS auth",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": true,
+    "Secret": false
+   },
+   {
+    "Key": "client_tls_key",
+    "Default": "",
+    "Type": "path",
+    "Description": "path to client key for mTLS auth",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": true,
+    "Secret": false
+   },
+   {
+    "Key": "tls_client_auth",
+    "Default": "0",
+    "Type": "string",
+    "Description": "clientAuth determines the Kafka server's policy for TLS client auth",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "sasl",
+    "Default": "off",
+    "Type": "on|off",
+    "Description": "set to 'on' to enable SASL authentication",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "tls",
+    "Default": "off",
+    "Type": "on|off",
+    "Description": "set to 'on' to enable TLS",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "tls_skip_verify",
+    "Default": "off",
+    "Type": "on|off",
+    "Description": "trust server TLS without verification, defaults to \"on\" (verify)",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "version",
+    "Default": "",
+    "Type": "string",
+    "Description": "specify the version of the Kafka cluster",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "queue_size",
+    "Default": "100000",
+    "Type": "number",
+    "Description": "configure channel queue size for Kafka targets",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "queue_dir",
+    "Default": "",
+    "Type": "string",
+    "Description": "staging dir for undelivered audit messages to Kafka e.g. '/home/audit-events'",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   }
+  ]
+ },
+ {
+  "Name": "notify_webhook",
+  "Description": "publish bucket notifications to webhook endpoints",
+  "MultipleTargets": true,
+  "Dynamic": false,
+  "SingleTarget": false,
+  "Keys": [
+   {
+    "Key": "enable",
+    "Default": "off",
+    "Type": "",
+    "Description": "",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "endpoint",
+    "Default": "",
+    "Type": "url",
+    "Description": "webhook server endpoint e.g. http://localhost:8080/minio/events",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": true,
+    "Secret": false
+   },
+   {
+    "Key": "auth_token",
+    "Default": "",
+    "Type": "string",
+    "Description": "opaque string or JWT authorization token",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": true,
+    "Secret": true
+   },
+   {
+    "Key": "queue_limit",
+    "Default": "0",
+    "Type": "number",
+    "Description": "maximum limit for undelivered messages, defaults to '100000'",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "queue_dir",
+    "Default": "",
+    "Type": "path",
+    "Description": "staging dir for undelivered messages e.g. '/home/events'",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "client_cert",
+    "Default": "",
+    "Type": "string",
+    "Description": "client cert for Webhook mTLS auth",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": true,
+    "Secret": false
+   },
+   {
+    "Key": "client_key",
+    "Default": "",
+    "Type": "string",
+    "Description": "client cert key for Webhook mTLS auth",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": true,
+    "Secret": false
+   }
+  ]
+ },
+ {
+  "Name": "notify_amqp",
+  "Description": "publish bucket notifications to AMQP endpoints",
+  "MultipleTargets": true,
+  "Dynamic": false,
+  "SingleTarget": false,
+  "Keys": [
+   {
+    "Key": "enable",
+    "Default": "off",
+    "Type": "",
+    "Description": "",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "url",
+    "Default": "",
+    "Type": "url",
+    "Description": "AMQP server endpoint e.g. `amqp://myuser:mypassword@localhost:5672`",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": true,
+    "Secret": false
+   },
+   {
+    "Key": "exchange",
+    "Default": "",
+    "Type": "string",
+    "Description": "name of the AMQP exchange",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "exchange_type",
+    "Default": "",
+    "Type": "string",
+    "Description": "AMQP exchange type",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "routing_key",
+    "Default": "",
+    "Type": "string",
+    "Description": "routing key for publishing",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": true,
+    "Secret": false
+   },
+   {
+    "Key": "mandatory",
+    "Default": "off",
+    "Type": "on|off",
+    "Description": "quietly ignore undelivered messages when set to 'off', default is 'on'",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "durable",
+    "Default": "off",
+    "Type": "on|off",
+    "Description": "persist queue across broker restarts when set to 'on', default is 'off'",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "no_wait",
+    "Default": "off",
+    "Type": "on|off",
+    "Description": "non-blocking message delivery when set to 'on', default is 'off'",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "internal",
+    "Default": "off",
+    "Type": "on|off",
+    "Description": "set to 'on' for exchange to be not used directly by publishers, but only when bound to other exchanges",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "auto_deleted",
+    "Default": "off",
+    "Type": "on|off",
+    "Description": "auto delete queue when set to 'on', when there are no consumers",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "delivery_mode",
+    "Default": "0",
+    "Type": "number",
+    "Description": "set to '1' for non-persistent or '2' for persistent queue",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "publisher_confirms",
+    "Default": "off",
+    "Type": "on|off",
+    "Description": "enable consumer acknowledgement and publisher confirms, use this along with queue_dir for guaranteed delivery of all events",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "queue_limit",
+    "Default": "0",
+    "Type": "number",
+    "Description": "maximum limit for undelivered messages, defaults to '100000'",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "queue_dir",
+    "Default": "",
+    "Type": "path",
+    "Description": "staging dir for undelivered messages e.g. '/home/events'",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   }
+  ]
+ },
+ {
+  "Name": "notify_kafka",
+  "Description": "publish bucket notifications to Kafka endpoints",
+  "MultipleTargets": true,
+  "Dynamic": false,
+  "SingleTarget": false,
+  "Keys": [
+   {
+    "Key": "enable",
+    "Default": "off",
+    "Type": "",
+    "Description": "",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "topic",
+    "Default": "",
+    "Type": "string",
+    "Description": "Kafka topic used for bucket notifications",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "brokers",
+    "Default": "",
+    "Type": "csv",
+    "Description": "comma separated list of Kafka broker addresses",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "sasl_username",
+    "Default": "",
+    "Type": "string",
+    "Description": "username for SASL/PLAIN or SASL/SCRAM authentication",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": true,
+    "Secret": false
+   },
+   {
+    "Key": "sasl_password",
+    "Default": "",
+    "Type": "string",
+    "Description": "password for SASL/PLAIN or SASL/SCRAM authentication",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": true,
+    "Secret": true
+   },
+   {
+    "Key": "sasl_mechanism",
+    "Default": "plain",
+    "Type": "string",
+    "Description": "sasl authentication mechanism, default 'plain'",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "client_tls_cert",
+    "Default": "",
+    "Type": "path",
+    "Description": "path to client certificate for mTLS auth",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": true,
+    "Secret": false
+   },
+   {
+    "Key": "client_tls_key",
+    "Default": "",
+    "Type": "path",
+    "Description": "path to client key for mTLS auth",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": true,
+    "Secret": false
+   },
+   {
+    "Key": "tls_client_auth",
+    "Default": "0",
+    "Type": "string",
+    "Description": "clientAuth determines the Kafka server's policy for TLS client auth",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "sasl",
+    "Default": "off",
+    "Type": "on|off",
+    "Description": "set to 'on' to enable SASL authentication",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "tls",
+    "Default": "off",
+    "Type": "on|off",
+    "Description": "set to 'on' to enable TLS",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "tls_skip_verify",
+    "Default": "off",
+    "Type": "on|off",
+    "Description": "trust server TLS without verification, defaults to \"on\" (verify)",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "queue_limit",
+    "Default": "0",
+    "Type": "number",
+    "Description": "maximum limit for undelivered messages, defaults to '100000'",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "queue_dir",
+    "Default": "",
+    "Type": "path",
+    "Description": "staging dir for undelivered messages e.g. '/home/events'",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "version",
+    "Default": "",
+    "Type": "string",
+    "Description": "specify the version of the Kafka cluster",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "batch_size",
+    "Default": "0",
+    "Type": "number",
+    "Description": "batch size of the events; used only when queue_dir is set",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "batch_commit_timeout",
+    "Default": "0s",
+    "Type": "duration",
+    "Description": "commit timeout set for the batch; used only when batch_size > 1",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "compression_codec",
+    "Default": "",
+    "Type": "none|snappy|gzip|lz4|zstd",
+    "Description": "specify compression_codec of the Kafka cluster",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "compression_level",
+    "Default": "",
+    "Type": "number",
+    "Description": "specify compression level of the Kafka cluster",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   }
+  ]
+ },
+ {
+  "Name": "notify_mqtt",
+  "Description": "publish bucket notifications to MQTT endpoints",
+  "MultipleTargets": true,
+  "Dynamic": false,
+  "SingleTarget": false,
+  "Keys": [
+   {
+    "Key": "enable",
+    "Default": "off",
+    "Type": "",
+    "Description": "",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "broker",
+    "Default": "",
+    "Type": "uri",
+    "Description": "MQTT server endpoint e.g. `tcp://localhost:1883`",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": true,
+    "Secret": false
+   },
+   {
+    "Key": "topic",
+    "Default": "",
+    "Type": "string",
+    "Description": "name of the MQTT topic to publish",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "password",
+    "Default": "",
+    "Type": "string",
+    "Description": "MQTT password",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": true,
+    "Secret": true
+   },
+   {
+    "Key": "username",
+    "Default": "",
+    "Type": "string",
+    "Description": "MQTT username",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": true,
+    "Secret": false
+   },
+   {
+    "Key": "qos",
+    "Default": "0",
+    "Type": "number",
+    "Description": "set the quality of service priority, defaults to '0'",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "keep_alive_interval",
+    "Default": "0s",
+    "Type": "duration",
+    "Description": "keep-alive interval for MQTT connections in s,m,h,d",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "reconnect_interval",
+    "Default": "0s",
+    "Type": "duration",
+    "Description": "reconnect interval for MQTT connections in s,m,h,d",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "queue_dir",
+    "Default": "",
+    "Type": "path",
+    "Description": "staging dir for undelivered messages e.g. '/home/events'",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "queue_limit",
+    "Default": "0",
+    "Type": "number",
+    "Description": "maximum limit for undelivered messages, defaults to '100000'",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   }
+  ]
+ },
+ {
+  "Name": "notify_nats",
+  "Description": "publish bucket notifications to NATS endpoints",
+  "MultipleTargets": true,
+  "Dynamic": false,
+  "SingleTarget": false,
+  "Keys": [
+   {
+    "Key": "enable",
+    "Default": "off",
+    "Type": "",
+    "Description": "",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "address",
+    "Default": "",
+    "Type": "address",
+    "Description": "NATS server address e.g. '0.0.0.0:4222'",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": true,
+    "Secret": false
+   },
+   {
+    "Key": "subject",
+    "Default": "",
+    "Type": "string",
+    "Description": "NATS subscription subject",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "username",
+    "Default": "",
+    "Type": "string",
+    "Description": "NATS username",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": true,
+    "Secret": false
+   },
+   {
+    "Key": "password",
+    "Default": "",
+    "Type": "string",
+    "Description": "NATS password",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": true,
+    "Secret": true
+   },
+   {
+    "Key": "token",
+    "Default": "",
+    "Type": "string",
+    "Description": "NATS token",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": true,
+    "Secret": true
+   },
+   {
+    "Key": "tls",
+    "Default": "off",
+    "Type": "on|off",
+    "Description": "set to 'on' to enable TLS",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "tls_skip_verify",
+    "Default": "off",
+    "Type": "on|off",
+    "Description": "trust server TLS without verification, defaults to \"on\" (verify)",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "cert_authority",
+    "Default": "",
+    "Type": "string",
+    "Description": "path to certificate chain of the target NATS server",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": true,
+    "Secret": false
+   },
+   {
+    "Key": "client_cert",
+    "Default": "",
+    "Type": "string",
+    "Description": "client cert for NATS mTLS auth",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": true,
+    "Secret": false
+   },
+   {
+    "Key": "client_key",
+    "Default": "",
+    "Type": "string",
+    "Description": "client cert key for NATS mTLS auth",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": true,
+    "Secret": false
+   },
+   {
+    "Key": "ping_interval",
+    "Default": "0",
+    "Type": "duration",
+    "Description": "client ping commands interval in s,m,h,d. Disabled by default",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "jetstream",
+    "Default": "off",
+    "Type": "on|off",
+    "Description": "enable JetStream support",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "streaming",
+    "Default": "off",
+    "Type": "on|off",
+    "Description": "[DEPRECATED] set to 'on', to use streaming NATS server",
+    "HiddenIfEmpty": true,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "streaming_async",
+    "Default": "off",
+    "Type": "on|off",
+    "Description": "[DEPRECATED] set to 'on', to enable asynchronous publish",
+    "HiddenIfEmpty": true,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "streaming_max_pub_acks_in_flight",
+    "Default": "0",
+    "Type": "number",
+    "Description": "[DEPRECATED] number of messages to publish without waiting for ACKs",
+    "HiddenIfEmpty": true,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "streaming_cluster_id",
+    "Default": "",
+    "Type": "string",
+    "Description": "[DEPRECATED] unique ID for NATS streaming cluster",
+    "HiddenIfEmpty": true,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "queue_dir",
+    "Default": "",
+    "Type": "path",
+    "Description": "staging dir for undelivered messages e.g. '/home/events'",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "queue_limit",
+    "Default": "0",
+    "Type": "number",
+    "Description": "maximum limit for undelivered messages, defaults to '100000'",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   }
+  ]
+ },
+ {
+  "Name": "notify_nsq",
+  "Description": "publish bucket notifications to NSQ endpoints",
+  "MultipleTargets": true,
+  "Dynamic": false,
+  "SingleTarget": false,
+  "Keys": [
+   {
+    "Key": "enable",
+    "Default": "off",
+    "Type": "",
+    "Description": "",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "nsqd_address",
+    "Default": "",
+    "Type": "address",
+    "Description": "NSQ server address e.g. '127.0.0.1:4150'",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": true,
+    "Secret": false
+   },
+   {
+    "Key": "topic",
+    "Default": "",
+    "Type": "string",
+    "Description": "NSQ topic",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "tls",
+    "Default": "off",
+    "Type": "on|off",
+    "Description": "set to 'on' to enable TLS",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "tls_skip_verify",
+    "Default": "off",
+    "Type": "on|off",
+    "Description": "trust server TLS without verification, defaults to \"on\" (verify)",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "queue_dir",
+    "Default": "",
+    "Type": "path",
+    "Description": "staging dir for undelivered messages e.g. '/home/events'",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "queue_limit",
+    "Default": "0",
+    "Type": "number",
+    "Description": "maximum limit for undelivered messages, defaults to '100000'",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   }
+  ]
+ },
+ {
+  "Name": "notify_mysql",
+  "Description": "publish bucket notifications to MySQL databases",
+  "MultipleTargets": true,
+  "Dynamic": false,
+  "SingleTarget": false,
+  "Keys": [
+   {
+    "Key": "enable",
+    "Default": "off",
+    "Type": "",
+    "Description": "",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "format",
+    "Default": "namespace",
+    "Type": "namespace*|access",
+    "Description": "'namespace' reflects current bucket/object list and 'access' reflects a journal of object operations, defaults to 'namespace'",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "dsn_string",
+    "Default": "",
+    "Type": "string",
+    "Description": "MySQL data-source-name connection string e.g. \"<user>:<password>@tcp(<host>:<port>)/<database>\"",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": true,
+    "Secret": false
+   },
+   {
+    "Key": "table",
+    "Default": "",
+    "Type": "string",
+    "Description": "DB table name to store/update events, table is auto-created",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "queue_dir",
+    "Default": "",
+    "Type": "path",
+    "Description": "staging dir for undelivered messages e.g. '/home/events'",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "queue_limit",
+    "Default": "0",
+    "Type": "number",
+    "Description": "maximum limit for undelivered messages, defaults to '100000'",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "max_open_connections",
+    "Default": "2",
+    "Type": "number",
+    "Description": "To set the maximum number of open connections to the database. The value is set to `2` by default.",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   }
+  ]
+ },
+ {
+  "Name": "notify_postgres",
+  "Description": "publish bucket notifications to Postgres databases",
+  "MultipleTargets": true,
+  "Dynamic": false,
+  "SingleTarget": false,
+  "Keys": [
+   {
+    "Key": "enable",
+    "Default": "off",
+    "Type": "",
+    "Description": "",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "format",
+    "Default": "namespace",
+    "Type": "namespace*|access",
+    "Description": "'namespace' reflects current bucket/object list and 'access' reflects a journal of object operations, defaults to 'namespace'",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "connection_string",
+    "Default": "",
+    "Type": "string",
+    "Description": "Postgres server connection-string e.g. \"host=localhost port=5432 dbname=minio_events user=postgres password=password sslmode=disable\"",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": true,
+    "Secret": false
+   },
+   {
+    "Key": "table",
+    "Default": "",
+    "Type": "string",
+    "Description": "DB table name to store/update events, table is auto-created",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "queue_dir",
+    "Default": "",
+    "Type": "path",
+    "Description": "staging dir for undelivered messages e.g. '/home/events'",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "queue_limit",
+    "Default": "0",
+    "Type": "number",
+    "Description": "maximum limit for undelivered messages, defaults to '100000'",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "max_open_connections",
+    "Default": "2",
+    "Type": "number",
+    "Description": "To set the maximum number of open connections to the database. The value is set to `2` by default.",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   }
+  ]
+ },
+ {
+  "Name": "notify_elasticsearch",
+  "Description": "publish bucket notifications to Elasticsearch endpoints",
+  "MultipleTargets": true,
+  "Dynamic": false,
+  "SingleTarget": false,
+  "Keys": [
+   {
+    "Key": "enable",
+    "Default": "off",
+    "Type": "",
+    "Description": "",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "url",
+    "Default": "",
+    "Type": "url",
+    "Description": "Elasticsearch server's address, with optional authentication info",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": true,
+    "Secret": false
+   },
+   {
+    "Key": "format",
+    "Default": "namespace",
+    "Type": "namespace*|access",
+    "Description": "'namespace' reflects current bucket/object list and 'access' reflects a journal of object operations, defaults to 'namespace'",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "index",
+    "Default": "",
+    "Type": "string",
+    "Description": "Elasticsearch index to store/update events, index is auto-created",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "queue_dir",
+    "Default": "",
+    "Type": "path",
+    "Description": "staging dir for undelivered messages e.g. '/home/events'",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "queue_limit",
+    "Default": "0",
+    "Type": "number",
+    "Description": "maximum limit for undelivered messages, defaults to '100000'",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "username",
+    "Default": "",
+    "Type": "string",
+    "Description": "username for Elasticsearch basic-auth",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": true,
+    "Secret": false
+   },
+   {
+    "Key": "password",
+    "Default": "",
+    "Type": "string",
+    "Description": "password for Elasticsearch basic-auth",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": true,
+    "Secret": true
+   }
+  ]
+ },
+ {
+  "Name": "notify_redis",
+  "Description": "publish bucket notifications to Redis datastores",
+  "MultipleTargets": true,
+  "Dynamic": false,
+  "SingleTarget": false,
+  "Keys": [
+   {
+    "Key": "enable",
+    "Default": "off",
+    "Type": "",
+    "Description": "",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "format",
+    "Default": "namespace",
+    "Type": "namespace*|access",
+    "Description": "'namespace' reflects current bucket/object list and 'access' reflects a journal of object operations, defaults to 'namespace'",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "address",
+    "Default": "",
+    "Type": "address",
+    "Description": "Redis server's address. For example: `localhost:6379`",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": true,
+    "Secret": false
+   },
+   {
+    "Key": "key",
+    "Default": "",
+    "Type": "string",
+    "Description": "Redis key to store/update events, key is auto-created",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": true,
+    "Secret": false
+   },
+   {
+    "Key": "password",
+    "Default": "",
+    "Type": "string",
+    "Description": "Redis server password",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": true,
+    "Secret": true
+   },
+   {
+    "Key": "user",
+    "Default": "",
+    "Type": "string",
+    "Description": "Redis server user for the auth",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "queue_dir",
+    "Default": "",
+    "Type": "path",
+    "Description": "staging dir for undelivered messages e.g. '/home/events'",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "queue_limit",
+    "Default": "0",
+    "Type": "number",
+    "Description": "maximum limit for undelivered messages, defaults to '100000'",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   }
+  ]
+ },
+ {
+  "Name": "lambda_webhook",
+  "Description": "manage remote lambda functions",
+  "MultipleTargets": true,
+  "Dynamic": false,
+  "SingleTarget": false,
+  "Keys": [
+   {
+    "Key": "enable",
+    "Default": "off",
+    "Type": "",
+    "Description": "",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "endpoint",
+    "Default": "",
+    "Type": "url",
+    "Description": "webhook server endpoint e.g. http://localhost:8080/minio/lambda",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": true,
+    "Secret": false
+   },
+   {
+    "Key": "auth_token",
+    "Default": "",
+    "Type": "string",
+    "Description": "opaque string or JWT authorization token",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": true,
+    "Secret": true
+   },
+   {
+    "Key": "client_cert",
+    "Default": "",
+    "Type": "string",
+    "Description": "client cert for Webhook mTLS auth",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": true,
+    "Secret": false
+   },
+   {
+    "Key": "client_key",
+    "Default": "",
+    "Type": "string",
+    "Description": "client cert key for Webhook mTLS auth",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": true,
+    "Secret": false
+   }
+  ]
+ },
+ {
+  "Name": "etcd",
+  "Description": "persist IAM assets externally to etcd",
+  "MultipleTargets": false,
+  "Dynamic": false,
+  "SingleTarget": true,
+  "Keys": [
+   {
+    "Key": "endpoints",
+    "Default": "",
+    "Type": "csv",
+    "Description": "comma separated list of etcd endpoints",
+    "HiddenIfEmpty": false,
+    "Optional": false,
+    "Sensitive": true,
+    "Secret": false
+   },
+   {
+    "Key": "path_prefix",
+    "Default": "",
+    "Type": "path",
+    "Description": "namespace prefix to isolate tenants",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "coredns_path",
+    "Default": "/skydns",
+    "Type": "path",
+    "Description": "shared bucket DNS records (default: '/skydns')",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "client_cert",
+    "Default": "",
+    "Type": "path",
+    "Description": "client cert for mTLS authentication",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": true,
+    "Secret": false
+   },
+   {
+    "Key": "client_cert_key",
+    "Default": "",
+    "Type": "path",
+    "Description": "client cert key for mTLS authentication",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": true,
+    "Secret": false
+   }
+  ]
+ },
+ {
+  "Name": "browser",
+  "Description": "manage Browser HTTP specific features, such as Security headers, etc.",
+  "MultipleTargets": false,
+  "Dynamic": true,
+  "SingleTarget": true,
+  "Keys": [
+   {
+    "Key": "csp_policy",
+    "Default": "default-src 'self' 'unsafe-eval' 'unsafe-inline'; script-src 'self' https://unpkg.com;  connect-src 'self' https://unpkg.com;",
+    "Type": "string",
+    "Description": "set Content-Security-Policy response header value (default: 'default-src 'self' 'unsafe-eval' 'unsafe-inline'; script-src 'self' https://unpkg.com;  connect-src 'self' https://unpkg.com;')",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "hsts_seconds",
+    "Default": "0",
+    "Type": "number",
+    "Description": "set Strict-Transport-Security 'max-age' amount of seconds value (default: '0')",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "hsts_include_subdomains",
+    "Default": "off",
+    "Type": "boolean",
+    "Description": "turn 'on' to set Strict-Transport-Security 'includeSubDomains' directive (default: 'off')",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "hsts_preload",
+    "Default": "off",
+    "Type": "boolean",
+    "Description": "turn 'on' to set Strict-Transport-Security 'preload' directive (default: 'off')",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "referrer_policy",
+    "Default": "strict-origin-when-cross-origin",
+    "Type": "string",
+    "Description": "set Referrer-Policy response header value (default: 'strict-origin-when-cross-origin')",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   }
+  ]
+ },
+ {
+  "Name": "ilm",
+  "Description": "manage ILM settings for expiration and transition workers",
+  "MultipleTargets": false,
+  "Dynamic": true,
+  "SingleTarget": true,
+  "Keys": [
+   {
+    "Key": "transition_workers",
+    "Default": "100",
+    "Type": "number",
+    "Description": "set the number of transition workers (default: '100')",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "expiration_workers",
+    "Default": "100",
+    "Type": "number",
+    "Description": "set the number of expiration workers (default: '100')",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   }
+  ]
+ },
+ {
+  "Name": "storage_class",
+  "Description": "define object level redundancy",
+  "MultipleTargets": false,
+  "Dynamic": true,
+  "SingleTarget": true,
+  "Keys": [
+   {
+    "Key": "standard",
+    "Default": "",
+    "Type": "string",
+    "Description": "set the parity count for default standard storage class",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "rrs",
+    "Default": "EC:1",
+    "Type": "string",
+    "Description": "set the parity count for reduced redundancy storage class (default: 'EC:1')",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "optimize",
+    "Default": "availability",
+    "Type": "string",
+    "Description": "optimize parity calculation for standard storage class, set 'capacity' for capacity optimized (no additional parity) (default: 'availability')",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "inline_block",
+    "Default": "",
+    "Type": "",
+    "Description": "",
+    "HiddenIfEmpty": true,
+    "Optional": false,
+    "Sensitive": false,
+    "Secret": false
+   }
+  ]
+ },
+ {
+  "Name": "heal",
+  "Description": "manage object healing frequency and bitrot verification checks",
+  "MultipleTargets": false,
+  "Dynamic": true,
+  "SingleTarget": true,
+  "Keys": [
+   {
+    "Key": "bitrotscan",
+    "Default": "off",
+    "Type": "on|off",
+    "Description": "perform bitrot scan on drives when checking objects during scanner (default: 'off')",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "max_sleep",
+    "Default": "250ms",
+    "Type": "duration",
+    "Description": "maximum sleep duration between objects to slow down heal operation (default: '250ms')",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "max_io",
+    "Default": "100",
+    "Type": "int",
+    "Description": "maximum IO requests allowed between objects to slow down heal operation (default: '100')",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   },
+   {
+    "Key": "drive_workers",
+    "Default": "",
+    "Type": "int",
+    "Description": "the number of workers per drive to heal a new disk replacement",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   }
+  ]
+ },
+ {
+  "Name": "policy_opa",
+  "Description": "",
+  "MultipleTargets": false,
+  "Dynamic": false,
+  "SingleTarget": true,
+  "Keys": [
+   {
+    "Key": "url",
+    "Default": "",
+    "Type": "url",
+    "Description": "[DEPRECATED] OPA HTTP(s) endpoint e.g. \"http://localhost:8181/v1/data/httpapi/authz/allow\"",
+    "HiddenIfEmpty": true,
+    "Optional": false,
+    "Sensitive": true,
+    "Secret": false
+   },
+   {
+    "Key": "auth_token",
+    "Default": "",
+    "Type": "string",
+    "Description": "[DEPRECATED] authorization token for OPA endpoint",
+    "HiddenIfEmpty": true,
+    "Optional": true,
+    "Sensitive": true,
+    "Secret": true
+   }
+  ]
+ },
+ {
+  "Name": "region",
+  "Description": "",
+  "MultipleTargets": false,
+  "Dynamic": false,
+  "SingleTarget": true,
+  "Keys": [
+   {
+    "Key": "name",
+    "Default": "",
+    "Type": "string",
+    "Description": "[DEPRECATED] name of the location of the server e.g. \"us-west-rack2\"",
+    "HiddenIfEmpty": false,
+    "Optional": true,
+    "Sensitive": false,
+    "Secret": false
+   }
+  ]
+ }
+]

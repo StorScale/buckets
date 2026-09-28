@@ -13,6 +13,17 @@ void buckets_admin_handle(s3_ctx *c);
 /* ServerInfo (info.c). */
 void buckets_admin_server_info(s3_ctx *c);
 
+/* mc admin config (config.c). */
+void buckets_admin_config_get_kv(s3_ctx *c);
+void buckets_admin_config_set_kv(s3_ctx *c);
+void buckets_admin_config_del_kv(s3_ctx *c);
+void buckets_admin_config_help(s3_ctx *c);
+void buckets_admin_config_history_list(s3_ctx *c);
+void buckets_admin_config_history_clear(s3_ctx *c);
+void buckets_admin_config_history_restore(s3_ctx *c);
+void buckets_admin_config_export(s3_ctx *c);
+void buckets_admin_config_import(s3_ctx *c);
+
 /* A JSON error body (writeErrorResponseJSON). */
 void buckets_admin_error(s3_ctx *c, buckets_s3_error e);
 void buckets_admin_error_msg(s3_ctx *c, buckets_s3_error e, const char *message);

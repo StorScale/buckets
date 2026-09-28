@@ -55,7 +55,12 @@ All notable changes to this project are documented here. The format follows
     - a finalizer removes users and policies from the cluster when their objects are deleted; deleting a `Bucket` leaves the bucket and its data
     - `buckets.io/endpoint` overrides the service address
     - envtest now checks all of this against a real bucketsd (45 checks)
+  - The server configuration (`src/config`), a port of MinIO's `internal/config`:
+    - all 34 sub-systems, with their keys, defaults and help, generated from MinIO's own registry (`tools/configgen`)
+    - set/reset validation, `MINIO_*` (and `BUCKETS_*`) environment overrides and env-defined targets, and `config.json` and history in `.minio.sys` (MinIO-compatible in both directions)
+    - admin `mc admin config get|set|reset|export|import|history|restore`, and changes pushed to peers
   - Tests:
+    - `tests/integration/config.sh`: `mc admin config`, with MinIO interop
     - `tests/integration/iam.sh`: the `mc admin` suite, including a restart
     - `tests/integration/iam-interop.sh`: IAM state written by real MinIO is honoured by bucketsd, and the reverse
   - S3 requests authenticate against IAM, covering users, service accounts and STS with session-token checks. Each route is authorized with MinIO's policy action, using MinIO's condition values (`getConditionValues`), including copy sources, DeleteObjects keys and POST policy uploads. Keys that are disabled or unknown before IAM loads get MinIO's error codes.

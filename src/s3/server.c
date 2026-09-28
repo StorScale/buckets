@@ -18,6 +18,7 @@
 #include "crypto/sha256.h"
 #include "admin/admin.h"
 #include "admin/info.h"
+#include "config/sys.h"
 #include "bucket/metadata.h"
 #include "bucket/metasys.h"
 #include "dist/peer.h"
@@ -43,7 +44,16 @@ static void notify_bucket(void *ud, const char *bucket) {
 
 void buckets_s3_peer_iam(void *server, const char *kind, const char *name) {
   buckets_s3_server *s = server;
+  if (strcmp(kind, "config") == 0) {
+    if (s->config) buckets_config_sys_reload(s->config);
+    return;
+  }
   buckets_iam_on_notify(s->iam, kind, name);
+}
+
+static void config_changed(void *ud, const char *subsys, bool local) {
+  buckets_s3_server *s = ud;
+  if (local && s->peers) buckets_peer_notify_iam(s->peers, "config", *subsys ? subsys : "all");
 }
 
 void buckets_s3_peer_bucket(void *server, const char *bucket) {
@@ -61,6 +71,8 @@ void buckets_s3_server_init(buckets_s3_server *s, buckets_objlayer *layer, const
   s->region = region ? region : "";
   s->iam = buckets_iam_new(root_user, root_password);
   buckets_iam_set_notify(s->iam, notify_iam, s);
+  s->config = buckets_config_sys_new(root_user, root_password);
+  buckets_config_sys_set_hook(s->config, config_changed, s);
   if (layer) buckets_s3_server_set_layer(s, layer);
 }
 
@@ -69,6 +81,15 @@ void buckets_s3_server_init(buckets_s3_server *s, buckets_objlayer *layer, const
 static void *iam_start_main(void *arg) {
   buckets_s3_server *s = arg;
   int delay_ms = 250;
+  /* The configuration first: identity providers come from it. */
+  char err[512];
+  while (!buckets_config_sys_load(s->config, s->layer, err, sizeof(err))) {
+    buckets_log_warn("config: %s; retrying", err);
+    struct timespec ts = {delay_ms / 1000, (delay_ms % 1000) * 1000000L};
+    nanosleep(&ts, NULL);
+    if (delay_ms < 5000) delay_ms *= 2;
+  }
+  delay_ms = 250;
   while (!buckets_iam_start(s->iam, s->layer)) {
     buckets_log_warn("iam: unable to load IAM data yet, retrying");
     struct timespec ts = {delay_ms / 1000, (delay_ms % 1000) * 1000000L};

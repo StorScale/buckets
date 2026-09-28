@@ -1218,6 +1218,15 @@ static void h_detach(s3_ctx *c) { h_attach_detach(c, false); }
 
 static const route k_routes[] = {
     {"GET", "/info", h_server_info},
+    {"GET", "/get-config-kv", buckets_admin_config_get_kv},
+    {"PUT", "/set-config-kv", buckets_admin_config_set_kv},
+    {"DELETE", "/del-config-kv", buckets_admin_config_del_kv},
+    {"GET", "/help-config-kv", buckets_admin_config_help},
+    {"GET", "/list-config-history-kv", buckets_admin_config_history_list},
+    {"DELETE", "/clear-config-history-kv", buckets_admin_config_history_clear},
+    {"PUT", "/restore-config-history-kv", buckets_admin_config_history_restore},
+    {"GET", "/config", buckets_admin_config_export},
+    {"PUT", "/config", buckets_admin_config_import},
     {"PUT", "/add-user", h_add_user},
     {"DELETE", "/remove-user", h_remove_user},
     {"GET", "/list-users", h_list_users},

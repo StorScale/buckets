@@ -20,6 +20,7 @@ typedef struct buckets_s3_server {
   int meta_ttl_ms;              /* its snapshot lifetime (0: until invalidated) */
   struct buckets_peer_sys *peers; /* other servers, told about IAM and bucket changes */
   struct buckets_cluster_info *cluster; /* nodes and drive endpoints, for the admin API */
+  struct buckets_config_sys *config;    /* the server configuration, once loaded */
   char host_id[65];   /* x-amz-id-2 */
   _Atomic uint64_t request_seq;
 } buckets_s3_server;
