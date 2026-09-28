@@ -20,6 +20,7 @@ add_library(buckets STATIC
   crypto/sha1.c
   crypto/cksum.c
   crypto/siphash.c
+  crypto/madmin.c
   net/http.c
   net/tls.c
   net/client.c
