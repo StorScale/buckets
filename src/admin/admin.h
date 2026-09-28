@@ -27,6 +27,17 @@ void buckets_admin_config_import(s3_ctx *c);
 bool buckets_admin_is_idp_config(buckets_str path);
 void buckets_admin_idp_config(s3_ctx *c);
 
+/* mc admin cluster iam export|import (iamxfer.c). */
+void buckets_admin_export_iam(s3_ctx *c);
+void buckets_admin_import_iam(s3_ctx *c);
+void buckets_admin_import_iam_v2(s3_ctx *c);
+
+/* Shared helpers (admin.c): validateAdminReq for one action (answers the
+ * request itself when it fails), custom-coded errors, IAM store errors. */
+bool buckets_admin_authorize(s3_ctx *c, const char *action);
+void buckets_admin_custom_error(s3_ctx *c, int status, const char *code, const char *message);
+void buckets_admin_iam_error(s3_ctx *c, buckets_iam_err e, const char *detail);
+
 /* A JSON error body (writeErrorResponseJSON). */
 void buckets_admin_error(s3_ctx *c, buckets_s3_error e);
 void buckets_admin_error_msg(s3_ctx *c, buckets_s3_error e, const char *message);

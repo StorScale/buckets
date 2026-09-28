@@ -2617,3 +2617,26 @@ size_t buckets_iam_sts_user_mappings(buckets_iam *iam, buckets_iam_name_pred pre
   pthread_rwlock_unlock(&iam->lock);
   return n;
 }
+
+size_t buckets_iam_list_mappings(buckets_iam *iam, buckets_iam_utype t, bool group, buckets_iam_mapping **out) {
+  pthread_rwlock_rdlock(&iam->lock);
+  const buckets_strmap *m = group ? &iam->c.group_pol : &iam->c.pol[t];
+  *out = buckets_xcalloc(m->n ? m->n : 1, sizeof(**out));
+  size_t n = 0, it = 0;
+  const char *name;
+  void *v;
+  while (buckets_strmap_next(m, &it, &name, &v)) {
+    const mapped_policy *mp = v;
+    (*out)[n++] = (buckets_iam_mapping){buckets_xstrdup(name), buckets_xstrdup(mp->policies), mp->updated};
+  }
+  pthread_rwlock_unlock(&iam->lock);
+  return n;
+}
+
+void buckets_iam_mappings_free(buckets_iam_mapping *m, size_t n) {
+  for (size_t i = 0; i < n; i++) {
+    free(m[i].name);
+    free(m[i].policies);
+  }
+  free(m);
+}

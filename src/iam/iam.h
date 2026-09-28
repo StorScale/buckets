@@ -279,6 +279,14 @@ char *buckets_iam_ldap_policy_entities_json(buckets_iam *iam, const buckets_iam_
 size_t buckets_iam_sts_user_mappings(buckets_iam *iam, buckets_iam_name_pred pred, void *ud, char ***names,
                                      char ***policies);
 
+/* The stored policy mappings of one kind (policydb/users, sts-users, ... or groups). */
+typedef struct {
+  char *name, *policies;
+  buckets_iam_time updated;
+} buckets_iam_mapping;
+size_t buckets_iam_list_mappings(buckets_iam *iam, buckets_iam_utype t, bool group, buckets_iam_mapping **out);
+void buckets_iam_mappings_free(buckets_iam_mapping *m, size_t n);
+
 /* ---- service accounts ---------------------------------------------------------- */
 
 typedef struct {

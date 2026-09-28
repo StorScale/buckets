@@ -125,5 +125,43 @@ mc admin group info root devs | grep "dana" >/dev/null || fail "MinIO sees dana 
 [[ $(curl -s -o /dev/null -w '%{http_code}' -X PUT --data z "$EP/photos/anon.txt") == 200 ]] ||
   fail "MinIO honours bucketsd's bucket policy"
 ok mc cat alice/photos/b.txt
+
+# mc admin cluster iam export|import, both ways, onto fresh drives.
+check_imported() { # $1: server name
+  ok mc mb root/photos
+  ok mc mb root/logs
+  ok mc cp "$WORK/f.txt" root/photos/a.txt
+  ok mc cp "$WORK/f.txt" root/logs/f.txt
+  ok mc alias set alice "$EP" alice alicesecret123
+  ok mc cat alice/photos/a.txt
+  denied mc cat alice/logs/f.txt
+  ok mc alias set dana "$EP" dana danasecret123
+  ok mc cat dana/logs/f.txt
+  ok mc alias set asvc2 "$EP" alicesvc02 alicesvcsecret2
+  ok mc cat asvc2/photos/a.txt
+  denied mc cp "$WORK/f.txt" asvc2/photos/d.txt
+  ok mc alias set dsvc "$EP" danasvc001 danasvcsecret1
+  ok mc cat dsvc/logs/f.txt
+  ok mc alias set bob "$EP" bob bobsecret123
+  ok mc cat bob/logs/f.txt
+  mc admin group info root devs | grep "dana" >/dev/null || fail "$1: devs members"
+  mc admin user ls root | grep "enabled.*carl" >/dev/null || fail "$1: carl status"
+}
+echo "== MinIO's IAM export imported into bucketsd"
+ok mc admin cluster iam export root -o "$WORK/minio-iam.zip"
+stop
+D="$WORK/drives2"
+mkdir -p "$D"/d{1..4}
+start buckets
+out=$(mc admin cluster iam import root "$WORK/minio-iam.zip" 2>&1) || fail "import into bucketsd: $out"
+check_imported bucketsd
+echo "== bucketsd's IAM export imported into MinIO"
+ok mc admin cluster iam export root -o "$WORK/buckets-iam.zip"
+stop
+D="$WORK/drives3"
+mkdir -p "$D"/d{1..4}
+start minio
+out=$(mc admin cluster iam import root "$WORK/buckets-iam.zip" 2>&1) || fail "import into MinIO: $out"
+check_imported MinIO
 stop
 echo "PASS"

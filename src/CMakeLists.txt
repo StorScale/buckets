@@ -5,6 +5,7 @@ add_library(buckets STATIC
   core/buf.c
   core/log.c
   core/timefmt.c
+  core/zip.c
   core/query.c
   core/uuid.c
   core/loop.c
@@ -68,6 +69,7 @@ add_library(buckets STATIC
   admin/admin.c
   admin/info.c
   admin/config.c
+  admin/iamxfer.c
   config/config.c
   config/sys.c
 )
@@ -80,7 +82,7 @@ find_library(RESOLV_LIB resolv)
 if(RESOLV_LIB)
   target_link_libraries(buckets PUBLIC ${RESOLV_LIB})
 endif()
-target_link_libraries(buckets PUBLIC llhttp::llhttp yyjson OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
+target_link_libraries(buckets PUBLIC llhttp::llhttp yyjson libdeflate::libdeflate_static OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
 buckets_warnings(buckets)
 
 add_executable(bucketsd cmd/bucketsd/main.c)

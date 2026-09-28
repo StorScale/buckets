@@ -2060,6 +2060,9 @@ static const route k_routes[] = {
     {"DELETE", "/delete-service-account", h_delete_svc},
     {"GET", "/list-access-keys-bulk", h_list_access_keys_bulk},
     {"POST", "/revoke-tokens/*", h_revoke_tokens},
+    {"GET", "/export-iam", buckets_admin_export_iam},
+    {"PUT", "/import-iam", buckets_admin_import_iam},
+    {"PUT", "/import-iam-v2", buckets_admin_import_iam_v2},
     {"GET", "/accountinfo", h_account_info},
     {"GET", "/idp/openid/list-access-keys-bulk", h_openid_list_access_keys_bulk},
     {"GET", "/idp/ldap/policy-entities", h_ldap_policy_entities},
@@ -2107,3 +2110,13 @@ void buckets_admin_handle(s3_ctx *c) {
   /* Not (yet) implemented admin APIs answer like an unknown route. */
   buckets_admin_error_msg(c, BUCKETS_ERR_NOT_IMPLEMENTED, "This admin API is not implemented");
 }
+
+/* ---- shared with the other admin handler files -------------------------------------------- */
+
+bool buckets_admin_authorize(s3_ctx *c, const char *action) { return admin_req1(c, action); }
+
+void buckets_admin_custom_error(s3_ctx *c, int status, const char *code, const char *message) {
+  custom_error(c, status, code, message);
+}
+
+void buckets_admin_iam_error(s3_ctx *c, buckets_iam_err e, const char *detail) { iam_error(c, e, detail); }

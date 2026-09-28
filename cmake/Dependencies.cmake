@@ -19,6 +19,16 @@ FetchContent_Declare(yyjson
 set(YYJSON_BUILD_TESTS OFF CACHE INTERNAL "")
 FetchContent_MakeAvailable(yyjson)
 
+# libdeflate: raw DEFLATE, zlib and gzip (zip archives, compression, S3 Select input).
+FetchContent_Declare(libdeflate
+  URL https://github.com/ebiggers/libdeflate/archive/refs/tags/v1.24.tar.gz
+  DOWNLOAD_EXTRACT_TIMESTAMP ON)
+set(LIBDEFLATE_BUILD_SHARED_LIB OFF CACHE INTERNAL "")
+set(LIBDEFLATE_BUILD_STATIC_LIB ON CACHE INTERNAL "")
+set(LIBDEFLATE_BUILD_GZIP OFF CACHE INTERNAL "")
+set(LIBDEFLATE_BUILD_TESTS OFF CACHE INTERNAL "")
+FetchContent_MakeAvailable(libdeflate)
+
 if(BUCKETS_BUILD_TESTS)
   # cmocka: unit test framework.
   FetchContent_Declare(cmocka
