@@ -71,12 +71,17 @@ wait_ready "$BK_PORT"
 "$MC_BIN" cp -q --attr 'X-Amz-Meta-Origin=buckets' "$WORK/small.txt" bk/interop/docs/small.txt >/dev/null
 "$MC_BIN" cp -q "$WORK/mid.bin" bk/interop/mid.bin >/dev/null
 "$MC_BIN" cp -q "$WORK/large.bin" bk/interop/deep/path/large.bin >/dev/null
+"$MC_BIN" cp -q --checksum CRC64NVME "$WORK/large.bin" bk/interop/cks/large-crc64.bin >/dev/null
+"$MC_BIN" cp -q --checksum SHA256 "$WORK/large.bin" bk/interop/cks/large-sha256.bin >/dev/null
 "$MC_BIN" cp -q "$WORK/small.txt" bk/interop/delete-me.txt >/dev/null
 "$MC_BIN" rm -q bk/interop/delete-me.txt >/dev/null
 expect_eq "bucketsd small" "$("$MC_BIN" cat bk/interop/docs/small.txt | md5of)" "$SMALL"
 expect_eq "bucketsd streaming put" "$("$MC_BIN" cat bk/interop/mid.bin | md5of)" "$MID"
 expect_eq "bucketsd multipart" "$("$MC_BIN" cat bk/interop/deep/path/large.bin | md5of)" "$LARGE"
-expect_eq "bucketsd listing" "$("$MC_BIN" ls -r --json bk/interop | grep -c '"key"')" "3"
+expect_eq "bucketsd listing" "$("$MC_BIN" ls -r --json bk/interop | grep -c '"key"')" "5"
+cks_of() { curl -s --aws-sigv4 "aws:amz:us-east-1:s3" --user "$AK:$SK" -I -H 'x-amz-checksum-mode: ENABLED' "$1" | grep -i '^x-amz-checksum' | tr -d '\r' | sort | tr '\n' ' '; }
+BK_CK1=$(cks_of "http://127.0.0.1:$BK_PORT/interop/cks/large-crc64.bin")
+BK_CK2=$(cks_of "http://127.0.0.1:$BK_PORT/interop/cks/large-sha256.bin")
 BK_ETAG=$("$MC_BIN" stat --json bk/interop/deep/path/large.bin | sed -n 's/.*"etag":"\([^"]*\)".*/\1/p')
 kill "${pids[0]}"
 wait "${pids[0]}" 2>/dev/null || true
@@ -96,7 +101,9 @@ expect_eq "same multipart etag" "$MN_ETAG" "$BK_ETAG"
 expect_eq "minio sees user metadata" \
   "$("$MC_BIN" stat --json mn/interop/docs/small.txt | grep -o '"X-Amz-Meta-Origin":"buckets"' | head -1)" \
   '"X-Amz-Meta-Origin":"buckets"'
-expect_eq "minio listing" "$("$MC_BIN" ls -r --json mn/interop | grep -c '"key"')" "3"
+expect_eq "minio listing" "$("$MC_BIN" ls -r --json mn/interop | grep -c '"key"')" "5"
+expect_eq "same full-object crc64nvme" "$(cks_of "http://127.0.0.1:$MN_PORT/interop/cks/large-crc64.bin")" "$BK_CK1"
+expect_eq "same composite sha256" "$(cks_of "http://127.0.0.1:$MN_PORT/interop/cks/large-sha256.bin")" "$BK_CK2"
 "$MC_BIN" cp -q "$WORK/large.bin" mn/interop/from-minio/large.bin >/dev/null
 "$MC_BIN" cp -q "$WORK/small.txt" mn/interop/from-minio/small.txt >/dev/null
 kill "${pids[0]}"
@@ -109,7 +116,7 @@ pids+=($!)
 wait_ready "$BK_PORT"
 expect_eq "bucketsd reads minio multipart" "$("$MC_BIN" cat bk/interop/from-minio/large.bin | md5of)" "$LARGE"
 expect_eq "bucketsd reads minio small" "$("$MC_BIN" cat bk/interop/from-minio/small.txt | md5of)" "$SMALL"
-expect_eq "bucketsd lists all" "$("$MC_BIN" ls -r --json bk/interop | grep -c '"key"')" "5"
+expect_eq "bucketsd lists all" "$("$MC_BIN" ls -r --json bk/interop | grep -c '"key"')" "7"
 
 echo "interop: $pass passed, $fail failed"
 if ((fail)); then

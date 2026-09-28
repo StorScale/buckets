@@ -84,7 +84,7 @@ static buckets_obj_err load_upload(const char *dir, buckets_xl_object *o) {
 /* ---- part.N.meta (ObjectPartInfo msgpack) --------------------------------- */
 
 static void encode_part_meta(buckets_buf *b, const buckets_part_info *p) {
-  buckets_mp_map(b, 5);
+  buckets_mp_map(b, p->cksum.type ? 6 : 5);
   buckets_mp_cstr(b, "e");
   buckets_mp_cstr(b, p->etag);
   buckets_mp_cstr(b, "n");
@@ -95,6 +95,14 @@ static void encode_part_meta(buckets_buf *b, const buckets_part_info *p) {
   buckets_mp_int(b, p->actual_size);
   buckets_mp_cstr(b, "mt");
   buckets_mp_time(b, p->mod_time_ns);
+  if (p->cksum.type) {
+    char enc[64];
+    buckets_checksum_encode(&p->cksum, enc);
+    buckets_mp_cstr(b, "crc");
+    buckets_mp_map(b, 1);
+    buckets_mp_cstr(b, buckets_cksum_type_name(p->cksum.type));
+    buckets_mp_cstr(b, enc);
+  }
 }
 
 static bool decode_part_meta(const char *path, buckets_part_info *p) {
@@ -125,6 +133,18 @@ static bool decode_part_meta(const char *path, buckets_part_info *p) {
       if (!buckets_mp_read_int(&r, &p->actual_size)) return false;
     } else if (buckets_str_eq_c(k, "mt")) {
       if (!buckets_mp_read_time(&r, &p->mod_time_ns)) return false;
+    } else if (buckets_str_eq_c(k, "crc") && !buckets_mp_read_nil(&r)) {
+      uint32_t cnt;
+      if (!buckets_mp_read_map(&r, &cnt)) return false;
+      for (uint32_t j = 0; j < cnt; j++) {
+        buckets_str name, val;
+        if (!buckets_mp_read_str(&r, &name) || !buckets_mp_read_str(&r, &val)) return false;
+        char *nm = buckets_str_dup(name), *vv = buckets_str_dup(val);
+        uint32_t t = buckets_cksum_type_parse(nm, NULL);
+        if (!p->cksum.type && t && t != BUCKETS_CKSUM_INVALID) buckets_checksum_parse_value(t, vv, &p->cksum);
+        free(nm);
+        free(vv);
+      }
     } else if (!buckets_mp_skip(&r)) {
       return false;
     }
@@ -206,18 +226,29 @@ buckets_obj_err buckets_obj_mpu_put_part(buckets_drive *d, const char *bucket, c
   }
   char data_dir[37];
   buckets_xl_version_id_string(up.data_dir, data_dir);
+  /* Parts of an upload created with a checksum algorithm always get one. */
+  buckets_put_opts popts = opts ? *opts : (buckets_put_opts){0};
+  if (!popts.checksum_type) {
+    const buckets_xl_kv *alg = buckets_xl_kv_get(up.meta_user, up.nmeta_user, BUCKETS_MPU_CKSUM_META);
+    if (alg) {
+      uint32_t t = buckets_cksum_type_parse((const char *)alg->value, NULL);
+      if (t != BUCKETS_CKSUM_INVALID) popts.checksum_type = t;
+    }
+  }
   buckets_xl_object_free(&up);
 
   char *tmp = buckets_objx_tmp_path(d);
   uint8_t md5[16];
-  err = buckets_objx_write_data(d, rd, rd_ud, size, opts, false, tmp, data_dir, part_number, NULL, md5);
+  buckets_checksum cks;
+  err = buckets_objx_write_data(d, rd, rd_ud, size, &popts, false, tmp, data_dir, part_number, NULL, md5, &cks);
+  if (!err && popts.pre_commit) err = popts.pre_commit(popts.pre_commit_ud, &cks, NULL);
   if (!err) {
     buckets_buf from = BUCKETS_BUF_INIT, to_dir = BUCKETS_BUF_INIT, to = BUCKETS_BUF_INIT, meta = BUCKETS_BUF_INIT;
     buckets_buf_appendf(&from, "%s/%s/part.%d", tmp, data_dir, part_number);
     buckets_buf_appendf(&to_dir, "%s/%s", dir, data_dir);
     buckets_buf_appendf(&to, "%s/part.%d", to_dir.data, part_number);
     buckets_part_info pi = {.number = part_number, .size = size, .actual_size = size,
-                            .mod_time_ns = buckets_objx_now_ns()};
+                            .mod_time_ns = buckets_objx_now_ns(), .cksum = cks};
     buckets_hex_encode(md5, 16, pi.etag);
     if (buckets_objx_mkdir_all(to_dir.data) != 0 || rename(from.data, to.data) != 0) {
       err = errno == ENOENT ? BUCKETS_OBJ_ERR_NO_SUCH_UPLOAD : BUCKETS_OBJ_ERR_IO;
@@ -359,7 +390,7 @@ static void canonical_etag(const char *in, char *out, size_t cap) {
 
 buckets_obj_err buckets_obj_mpu_complete(buckets_drive *d, const char *bucket, const char *object,
                                          const char *upload_id, const buckets_complete_part *req, size_t nreq,
-                                         buckets_object_info *out) {
+                                         const buckets_checksum *want, buckets_object_info *out) {
   if (!buckets_objx_bucket_exists(d, bucket)) return BUCKETS_OBJ_ERR_NO_SUCH_BUCKET;
   buckets_obj_err err = buckets_obj_check_name(object);
   if (err) return err;
@@ -381,6 +412,19 @@ buckets_obj_err buckets_obj_mpu_complete(buckets_drive *d, const char *bucket, c
   size_t nhave;
   read_parts(dir, data_dir, &have, &nhave);
 
+  /* Checksum algorithm chosen at CreateMultipartUpload (MinIO stores it in user metadata). */
+  uint32_t ctype = 0;
+  const buckets_xl_kv *alg = buckets_xl_kv_get(up.meta_user, up.nmeta_user, BUCKETS_MPU_CKSUM_META);
+  if (alg) {
+    const buckets_xl_kv *ot = buckets_xl_kv_get(up.meta_user, up.nmeta_user, BUCKETS_MPU_CKSUM_TYPE_META);
+    ctype = buckets_cksum_type_parse((const char *)alg->value, ot ? (const char *)ot->value : NULL);
+    if (ctype == BUCKETS_CKSUM_INVALID) ctype = 0;
+  }
+  bool full = (ctype & (BUCKETS_CKSUM_FULL_OBJECT | BUCKETS_CKSUM_CRC64NVME)) != 0;
+  size_t clen = buckets_cksum_raw_len(ctype);
+  buckets_buf combined = BUCKETS_BUF_INIT; /* raw part checksums, in order */
+  uint8_t merged[32];
+
   buckets_xl_object o;
   buckets_objx_init_version(&o, up.data_dir, 0);
   buckets_md5_ctx etag_md5;
@@ -396,11 +440,27 @@ buckets_obj_err buckets_obj_mpu_complete(buckets_drive *d, const char *bucket, c
     for (size_t j = 0; j < nhave; j++) {
       if (have[j].number == req[i].number) p = &have[j];
     }
-    char want[80];
-    canonical_etag(req[i].etag ? req[i].etag : "", want, sizeof(want));
-    if (!p || strcmp(p->etag, want) != 0) {
+    char want_etag[80];
+    canonical_etag(req[i].etag ? req[i].etag : "", want_etag, sizeof(want_etag));
+    if (!p || strcmp(p->etag, want_etag) != 0) {
       err = BUCKETS_OBJ_ERR_INVALID_PART;
       break;
+    }
+    if (ctype) {
+      /* The client must echo each part's checksum, and it must match. */
+      char have_enc[64];
+      if (p->cksum.type & ctype & BUCKETS_CKSUM_BASE_MASK) buckets_checksum_encode(&p->cksum, have_enc);
+      else have_enc[0] = '\0';
+      if (!have_enc[0] || !req[i].checksum || strcmp(req[i].checksum, have_enc) != 0) {
+        err = BUCKETS_OBJ_ERR_INVALID_PART;
+        break;
+      }
+      if (full && combined.len) {
+        buckets_cksum_combine(ctype, merged, p->cksum.raw, p->actual_size);
+      } else if (full) {
+        memcpy(merged, p->cksum.raw, clen);
+      }
+      buckets_buf_append(&combined, p->cksum.raw, clen);
     }
     if (i + 1 < nreq && p->actual_size < BUCKETS_MIN_PART_SIZE) {
       err = BUCKETS_OBJ_ERR_PART_TOO_SMALL;
@@ -420,9 +480,33 @@ buckets_obj_err buckets_obj_mpu_complete(buckets_drive *d, const char *bucket, c
   if (!err) {
     o.size = total;
     for (size_t i = 0; i < up.nmeta_user; i++) {
-      buckets_xl_kv_set(&o.meta_user, &o.nmeta_user, up.meta_user[i].key, up.meta_user[i].value,
-                        up.meta_user[i].value_len);
+      const char *k = up.meta_user[i].key;
+      if (strcmp(k, BUCKETS_MPU_CKSUM_META) == 0 || strcmp(k, BUCKETS_MPU_CKSUM_TYPE_META) == 0) continue;
+      buckets_xl_kv_set(&o.meta_user, &o.nmeta_user, k, up.meta_user[i].value, up.meta_user[i].value_len);
     }
+    if (ctype) {
+      buckets_checksum final = {.type = ctype | BUCKETS_CKSUM_MULTIPART | BUCKETS_CKSUM_INCLUDES_MULTIPART,
+                                .raw_len = clen, .want_parts = (int)nreq};
+      if (full) {
+        memcpy(final.raw, merged, clen);
+      } else {
+        buckets_cksum_hasher h;
+        buckets_cksum_hasher_init(&h, ctype);
+        buckets_cksum_hasher_update(&h, combined.data, combined.len);
+        buckets_cksum_hasher_final(&h, final.raw);
+      }
+      if (want && want->type) {
+        bool ok = memcmp(want->raw, final.raw, clen) == 0 && want->raw_len == clen &&
+                  (full || want->want_parts == 0 || want->want_parts == (int)nreq);
+        if (!ok) err = BUCKETS_OBJ_ERR_BAD_CHECKSUM;
+      }
+      buckets_buf stored = BUCKETS_BUF_INIT;
+      buckets_checksum_append(&final, (const uint8_t *)combined.data, combined.len, &stored);
+      buckets_xl_kv_set(&o.meta_sys, &o.nmeta_sys, "x-minio-internal-crc", stored.data, stored.len);
+      buckets_buf_free(&stored);
+    }
+  }
+  if (!err) {
     uint8_t sum[16];
     char etag[48];
     buckets_md5_final(&etag_md5, sum);
@@ -458,6 +542,7 @@ buckets_obj_err buckets_obj_mpu_complete(buckets_drive *d, const char *bucket, c
   }
   buckets_xl_object_free(&o);
   buckets_xl_object_free(&up);
+  buckets_buf_free(&combined);
   free(have);
   free(dir);
   return err;

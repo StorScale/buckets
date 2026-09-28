@@ -15,6 +15,9 @@ add_library(buckets STATIC
   crypto/base64.c
   crypto/highwayhash.c
   crypto/xxhash.c
+  crypto/crc.c
+  crypto/sha1.c
+  crypto/cksum.c
   net/http.c
   s3/errors.c
   s3/errors_gen.c
@@ -24,6 +27,7 @@ add_library(buckets STATIC
   s3/server.c
   s3/objects.c
   s3/chunked.c
+  s3/checksum.c
   storage/drive.c
   storage/xlmeta.c
   object/xlsingle.c

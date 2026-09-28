@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 #include "s3/chunked.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -158,10 +159,11 @@ static bool verify_chunk(buckets_chunked *ch, const char *provided) {
 static bool add_trailer(buckets_chunked *ch, const char *line) {
   const char *colon = strchr(line, ':');
   if (!colon || colon == line || ch->ntrailers == MAX_TRAILERS) return fail(ch, BUCKETS_ERR_MALFORMED_CHUNKED_ENCODING);
+  /* strings.TrimSpace: minio-go ends trailer lines with "\n\r\n". */
   const char *v = colon + 1;
-  while (*v == ' ' || *v == '\t') v++;
+  while (*v && isspace((unsigned char)*v)) v++;
   size_t vl = strlen(v);
-  while (vl && (v[vl - 1] == ' ' || v[vl - 1] == '\t')) vl--;
+  while (vl && isspace((unsigned char)v[vl - 1])) vl--;
   ch->tnames[ch->ntrailers] = buckets_xstrndup(line, (size_t)(colon - line));
   ch->tvalues[ch->ntrailers] = buckets_xstrndup(v, vl);
   ch->ntrailers++;

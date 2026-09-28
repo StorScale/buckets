@@ -32,7 +32,7 @@ void buckets_objx_init_version(buckets_xl_object *o, const uint8_t data_dir[16],
 buckets_obj_err buckets_objx_write_data(buckets_drive *d, buckets_read_fn rd, void *rd_ud, int64_t size,
                                        const buckets_put_opts *opts, bool allow_inline, const char *tmp_dir,
                                        const char *data_dir, int part_number, buckets_buf *inline_shard,
-                                       uint8_t md5_out[16]);
+                                       uint8_t md5_out[16], buckets_checksum *cksum_out);
 
 /* Installs version o for bucket/object: moves src_data_dir (if any) into the
  * object directory, writes xl.meta, and removes a replaced version's data. */

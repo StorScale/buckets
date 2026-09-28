@@ -5,7 +5,11 @@
 package main
 
 import (
+	"crypto/sha1"
 	"fmt"
+	"hash/crc32"
+	"hash/crc64"
+	"math/bits"
 	"math"
 	"strings"
 
@@ -39,6 +43,17 @@ func main() {
 		lens = append(lens, i)
 	}
 	lens = append(lens, 511, 512, 513, 1023, 1024, 1025, 2047, 4096, 10000, 1<<20+17)
+
+	// S3 additional checksums, as MinIO computes them (internal/hash/checksum.go).
+	nvme := crc64.MakeTable(bits.Reverse64(0xad93d23594c93659))
+	castagnoli := crc32.MakeTable(crc32.Castagnoli)
+	fmt.Println("static const struct { size_t len; uint32_t crc32, crc32c; uint64_t crc64nvme; const char *sha1; } golden_cks[] = {")
+	for _, n := range lens {
+		p := pattern(n)
+		s1 := sha1.Sum(p)
+		fmt.Printf("  {%d, 0x%08xu, 0x%08xu, 0x%016xull, \"%s\"},\n", n, crc32.ChecksumIEEE(p), crc32.Checksum(p, castagnoli), crc64.Checksum(p, nvme), hexs(s1[:]))
+	}
+	fmt.Println("};")
 
 	fmt.Println("static const struct { size_t len; uint64_t xxh64, xxh3; } golden_xxh[] = {")
 	for _, n := range lens {

@@ -11,7 +11,10 @@
 #include <string.h>
 
 #include "core/msgpack.h"
+#include "crypto/cksum.h"
+#include "crypto/crc.h"
 #include "crypto/hex.h"
+#include "crypto/sha1.h"
 #include "crypto/highwayhash.h"
 #include "crypto/xxhash.h"
 
@@ -30,6 +33,58 @@ static void test_xxhash(void **state) {
     if (buckets_xxh3_64(p, golden_xxh[i].len) != golden_xxh[i].xxh3) fail_msg("xxh3 len %zu", golden_xxh[i].len);
     free(p);
   }
+}
+
+static void test_checksums(void **state) {
+  for (size_t i = 0; i < sizeof(golden_cks) / sizeof(golden_cks[0]); i++) {
+    size_t n = golden_cks[i].len;
+    uint8_t *p = pattern(n);
+    if (buckets_crc32_ieee(0, p, n) != golden_cks[i].crc32) fail_msg("crc32 len %zu", n);
+    if (buckets_crc32c(0, p, n) != golden_cks[i].crc32c) fail_msg("crc32c len %zu", n);
+    if (buckets_crc64_nvme(0, p, n) != golden_cks[i].crc64nvme) fail_msg("crc64nvme len %zu", n);
+    /* Streaming in two pieces gives the same CRC. */
+    size_t half = n / 3;
+    if (buckets_crc64_nvme(buckets_crc64_nvme(0, p, half), p + half, n - half) != golden_cks[i].crc64nvme) {
+      fail_msg("crc64nvme streaming len %zu", n);
+    }
+    if (buckets_crc32c(buckets_crc32c(0, p, half), p + half, n - half) != golden_cks[i].crc32c) {
+      fail_msg("crc32c streaming len %zu", n);
+    }
+    buckets_sha1_ctx ctx;
+    uint8_t d[20];
+    buckets_sha1_init(&ctx);
+    buckets_sha1_update(&ctx, p, half);
+    buckets_sha1_update(&ctx, p + half, n - half);
+    buckets_sha1_final(&ctx, d);
+    if (memcmp(d, golden_cks[i].sha1, 20) != 0) fail_msg("sha1 len %zu", n);
+    free(p);
+  }
+  /* combine(crc(A), crc(B), len(B)) == crc(A||B) for every CRC type. */
+  static const uint32_t types[] = {BUCKETS_CKSUM_CRC32, BUCKETS_CKSUM_CRC32C, BUCKETS_CKSUM_CRC64NVME};
+  uint8_t *p = pattern(10000);
+  for (size_t t = 0; t < 3; t++) {
+    for (size_t split = 0; split <= 10000; split += 1237) {
+      buckets_cksum_hasher h;
+      uint8_t a[8], b[8], whole[8];
+      buckets_cksum_hasher_init(&h, types[t]);
+      buckets_cksum_hasher_update(&h, p, split);
+      size_t n = buckets_cksum_hasher_final(&h, a);
+      buckets_cksum_hasher_init(&h, types[t]);
+      buckets_cksum_hasher_update(&h, p + split, 10000 - split);
+      buckets_cksum_hasher_final(&h, b);
+      buckets_cksum_hasher_init(&h, types[t]);
+      buckets_cksum_hasher_update(&h, p, 10000);
+      buckets_cksum_hasher_final(&h, whole);
+      assert_true(buckets_cksum_combine(types[t], a, b, (int64_t)(10000 - split)));
+      if (memcmp(a, whole, n) != 0) fail_msg("combine type %u split %zu", types[t], split);
+    }
+  }
+  free(p);
+
+  /* Catalogue check values for "123456789". */
+  assert_true(buckets_crc32_ieee(0, "123456789", 9) == 0xcbf43926u);
+  assert_true(buckets_crc32c(0, "123456789", 9) == 0xe3069283u);
+  assert_true(buckets_crc64_nvme(0, "123456789", 9) == 0xae8b14860a799888ull);
 }
 
 static void test_highwayhash(void **state) {
@@ -152,6 +207,7 @@ static void test_msgpack_reader(void **state) {
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_xxhash),
+      cmocka_unit_test(test_checksums),
       cmocka_unit_test(test_highwayhash),
       cmocka_unit_test(test_bitrot_selftest),
       cmocka_unit_test(test_msgpack_encodings),

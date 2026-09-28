@@ -3,6 +3,7 @@
 #define BUCKETS_OBJECT_OBJECT_H
 
 #include "storage/drive.h"
+#include "crypto/cksum.h"
 #include "storage/xlmeta.h"
 
 /* The object layer. This is the single-drive ("xl-single") implementation,
@@ -40,6 +41,7 @@ typedef enum {
   BUCKETS_OBJ_ERR_INVALID_PART,       /* missing part or ETag mismatch */
   BUCKETS_OBJ_ERR_INVALID_PART_ORDER, /* parts not in ascending order */
   BUCKETS_OBJ_ERR_PART_TOO_SMALL,     /* a non-final part below 5 MiB */
+  BUCKETS_OBJ_ERR_BAD_CHECKSUM,       /* x-amz-checksum-* mismatch */
 } buckets_obj_err;
 
 const char *buckets_obj_strerror(buckets_obj_err e);
@@ -57,6 +59,8 @@ typedef struct {
   size_t nmeta;
   size_t nparts;
   bool delete_marker;
+  uint8_t *checksum; /* stored x-minio-internal-crc bytes, or NULL */
+  size_t checksum_len;
 } buckets_object_info;
 
 void buckets_object_info_free(buckets_object_info *oi);
@@ -68,6 +72,12 @@ typedef struct {
   size_t nmeta;
   const uint8_t *want_md5;     /* Content-MD5 to enforce, or NULL */
   const uint8_t *want_sha256;  /* signed payload hash to enforce, or NULL */
+  uint32_t checksum_type;      /* BUCKETS_CKSUM_* to compute while writing, or 0 */
+  /* Runs after the data is fully read and before anything becomes visible.
+   * `computed` holds the checksum_type digest; o is the version about to be
+   * committed (NULL for multipart parts). Returning an error aborts. */
+  buckets_obj_err (*pre_commit)(void *ud, const buckets_checksum *computed, buckets_xl_object *o);
+  void *pre_commit_ud;
 } buckets_put_opts;
 
 buckets_obj_err buckets_obj_check_name(const char *object);
@@ -121,12 +131,17 @@ typedef struct {
   int64_t size;
   int64_t actual_size;
   int64_t mod_time_ns;
+  buckets_checksum cksum; /* type 0 when the part has none */
 } buckets_part_info;
 
 typedef struct {
   int number;
-  const char *etag; /* as sent by the client; quotes are ignored */
+  const char *etag;     /* as sent by the client; quotes are ignored */
+  const char *checksum; /* the part's checksum for the upload's algorithm, or NULL */
 } buckets_complete_part;
+
+#define BUCKETS_MPU_CKSUM_META "x-minio-multipart-checksum"
+#define BUCKETS_MPU_CKSUM_TYPE_META "x-minio-multipart-checksum-type"
 
 typedef struct {
   char *object;
@@ -144,9 +159,10 @@ buckets_obj_err buckets_obj_mpu_list_parts(buckets_drive *d, const char *bucket,
                                            const char *upload_id, int marker, int max, buckets_part_info **parts,
                                            size_t *n, bool *truncated);
 buckets_obj_err buckets_obj_mpu_abort(buckets_drive *d, const char *bucket, const char *object, const char *upload_id);
+/* want: the final checksum from the request's x-amz-checksum-* header, or NULL. */
 buckets_obj_err buckets_obj_mpu_complete(buckets_drive *d, const char *bucket, const char *object,
                                          const char *upload_id, const buckets_complete_part *parts, size_t nparts,
-                                         buckets_object_info *out);
+                                         const buckets_checksum *want, buckets_object_info *out);
 /* Pending uploads for exactly this object (MinIO lists per object). */
 buckets_obj_err buckets_obj_mpu_list_uploads(buckets_drive *d, const char *bucket, const char *object,
                                              buckets_upload_info **uploads, size_t *n);

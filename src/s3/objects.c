@@ -12,6 +12,7 @@
 #include "core/timefmt.h"
 #include "crypto/base64.h"
 #include "crypto/hex.h"
+#include "s3/checksum.h"
 #include "s3/chunked.h"
 #include "s3/internal.h"
 #include "s3/xml.h"
@@ -38,6 +39,7 @@ buckets_s3_error buckets_s3_obj_error(buckets_obj_err e) {
     case BUCKETS_OBJ_ERR_INVALID_PART: return BUCKETS_ERR_INVALID_PART;
     case BUCKETS_OBJ_ERR_INVALID_PART_ORDER: return BUCKETS_ERR_INVALID_PART_ORDER;
     case BUCKETS_OBJ_ERR_PART_TOO_SMALL: return BUCKETS_ERR_ENTITY_TOO_SMALL;
+    case BUCKETS_OBJ_ERR_BAD_CHECKSUM: return BUCKETS_ERR_CONTENT_CHECKSUM_MISMATCH;
   }
   return BUCKETS_ERR_INTERNAL_ERROR;
 }
@@ -247,6 +249,71 @@ static buckets_s3_error body_error(const body_src *b, buckets_obj_err err) {
   return buckets_s3_obj_error(err);
 }
 
+/* x-amz-checksum-* verification, run by the object layer before commit. */
+typedef struct {
+  buckets_checksum want; /* from headers; TRAILING means "read it from the trailer" */
+  bool server_side;      /* algorithm given without a value: compute and store */
+  buckets_chunked *ch;
+  buckets_checksum result; /* what was stored / should be echoed */
+} cks_ctx;
+
+static buckets_s3_error cks_open(s3_ctx *c, body_src *b, cks_ctx *x, buckets_put_opts *opts) {
+  memset(x, 0, sizeof(*x));
+  x->ch = b->ch;
+  buckets_s3_error e = buckets_checksum_from_request(c->req, &x->want);
+  if (e) return e;
+  if (!x->want.type) {
+    buckets_str alg = buckets_http_header_get(c->req, "X-Amz-Checksum-Algorithm");
+    if (alg.p && alg.n) {
+      char *a = buckets_str_dup(alg);
+      uint32_t t = buckets_cksum_type_parse(a, NULL);
+      free(a);
+      if (t == BUCKETS_CKSUM_INVALID) return BUCKETS_ERR_INVALID_CHECKSUM;
+      x->want.type = t;
+      x->server_side = true;
+    }
+  }
+  if ((x->want.type & BUCKETS_CKSUM_TRAILING) && !b->ch) return BUCKETS_ERR_INVALID_CHECKSUM;
+  opts->checksum_type = x->want.type & BUCKETS_CKSUM_BASE_MASK;
+  return BUCKETS_ERR_NONE;
+}
+
+static buckets_obj_err cks_pre_commit(void *ud, const buckets_checksum *computed, buckets_xl_object *o) {
+  cks_ctx *x = ud;
+  if (!x->want.type) return BUCKETS_OBJ_OK;
+  buckets_checksum expect = x->want;
+  if (x->want.type & BUCKETS_CKSUM_TRAILING) {
+    const char *v = buckets_chunked_trailer(x->ch, buckets_cksum_header(x->want.type));
+    buckets_checksum parsed;
+    if (!v || !buckets_checksum_parse_value(x->want.type & ~BUCKETS_CKSUM_TRAILING, v, &parsed)) {
+      return BUCKETS_OBJ_ERR_BAD_CHECKSUM;
+    }
+    memcpy(expect.raw, parsed.raw, parsed.raw_len);
+    expect.raw_len = parsed.raw_len;
+  } else if (x->server_side) {
+    memcpy(expect.raw, computed->raw, computed->raw_len);
+    expect.raw_len = computed->raw_len;
+  }
+  if (expect.raw_len != computed->raw_len || memcmp(expect.raw, computed->raw, computed->raw_len) != 0) {
+    return BUCKETS_OBJ_ERR_BAD_CHECKSUM;
+  }
+  x->result = expect;
+  if (o) {
+    buckets_buf stored = BUCKETS_BUF_INIT;
+    buckets_checksum_append(&expect, NULL, 0, &stored);
+    buckets_xl_kv_set(&o->meta_sys, &o->nmeta_sys, BUCKETS_CKSUM_META, stored.data, stored.len);
+    buckets_buf_free(&stored);
+  }
+  return BUCKETS_OBJ_OK;
+}
+
+static void cks_echo(buckets_http_response *resp, const cks_ctx *x) {
+  if (!x->result.type) return;
+  char enc[64];
+  buckets_checksum_encode(&x->result, enc);
+  buckets_http_resp_header(resp, buckets_cksum_header(x->result.type), enc);
+}
+
 static void put_object(s3_ctx *c) {
   if (buckets_http_header_get(c->req, "X-Amz-Copy-Source").p) {
     copy_object(c);
@@ -269,7 +336,16 @@ static void put_object(s3_ctx *c) {
       .nmeta = nmeta,
       .want_md5 = b.has_md5 ? b.md5 : NULL,
       .want_sha256 = b.want_sha ? b.sha : NULL,
+      .pre_commit = cks_pre_commit,
   };
+  cks_ctx cx;
+  if ((serr = cks_open(c, &b, &cx, &opts)) != BUCKETS_ERR_NONE) {
+    free_kvs(meta, nmeta);
+    body_close(&b);
+    buckets_s3_write_error(c, serr);
+    return;
+  }
+  opts.pre_commit_ud = &cx;
   buckets_object_info oi;
   buckets_obj_err err = buckets_obj_put(c->s->drive, c->bucket, c->object, b.rd, b.rd_ud, b.size, &opts, &oi);
   free_kvs(meta, nmeta);
@@ -277,6 +353,7 @@ static void put_object(s3_ctx *c) {
     buckets_s3_write_error(c, body_error(&b, err));
   } else {
     etag_header(c->resp, oi.etag);
+    cks_echo(c->resp, &cx);
     c->resp->status = 200;
     buckets_object_info_free(&oi);
   }
@@ -490,6 +567,10 @@ static void get_object(s3_ctx *c, bool head) {
     buckets_http_resp_headerf(c->resp, "Content-Range", "bytes %lld-%lld/%lld", (long long)off,
                               (long long)(off + len - 1), (long long)oi.size);
   }
+  buckets_str cm = buckets_http_header_get(c->req, "X-Amz-Checksum-Mode");
+  if (cm.p && buckets_str_eq_c(cm, "ENABLED") && !rs.present && oi.checksum) {
+    buckets_checksum_write_headers(oi.checksum, oi.checksum_len, 0, c->resp);
+  }
   if (!head) response_overrides(c);
   c->resp->status = rs.present ? 206 : 200;
   c->resp->content_length = len;
@@ -631,6 +712,24 @@ static void mpu_create(s3_ctx *c) {
   buckets_xl_kv *meta = NULL;
   size_t nmeta = 0;
   buckets_s3_error serr = extract_metadata(c, &meta, &nmeta);
+  uint32_t ctype = 0;
+  buckets_str alg = buckets_http_header_get(c->req, "X-Amz-Checksum-Algorithm");
+  buckets_str ot = buckets_http_header_get(c->req, "X-Amz-Checksum-Type");
+  if (!serr && ((alg.p && alg.n) || (ot.p && ot.n))) {
+    char *a = alg.p ? buckets_str_dup(alg) : buckets_xstrdup("");
+    char *t = ot.p ? buckets_str_dup(ot) : buckets_xstrdup("");
+    ctype = buckets_cksum_type_parse(a, t);
+    if (ctype == BUCKETS_CKSUM_INVALID) {
+      serr = BUCKETS_ERR_INVALID_CHECKSUM;
+    } else if (ctype) {
+      const char *name = buckets_cksum_type_name(ctype);
+      const char *objtype = (ctype & (BUCKETS_CKSUM_FULL_OBJECT | BUCKETS_CKSUM_CRC64NVME)) ? "FULL_OBJECT" : "COMPOSITE";
+      buckets_xl_kv_set(&meta, &nmeta, BUCKETS_MPU_CKSUM_META, name, strlen(name));
+      buckets_xl_kv_set(&meta, &nmeta, BUCKETS_MPU_CKSUM_TYPE_META, objtype, strlen(objtype));
+    }
+    free(a);
+    free(t);
+  }
   if (serr) {
     free_kvs(meta, nmeta);
     buckets_s3_write_error(c, serr);
@@ -650,6 +749,11 @@ static void mpu_create(s3_ctx *c) {
   buckets_xml_elem(b, "Key", c->object);
   buckets_xml_elem(b, "UploadId", upload_id);
   buckets_xml_close(b, "InitiateMultipartUploadResult");
+  if (ctype) {
+    buckets_http_resp_header(c->resp, "X-Amz-Checksum-Algorithm", buckets_cksum_type_name(ctype));
+    buckets_http_resp_header(c->resp, "X-Amz-Checksum-Type",
+                             (ctype & (BUCKETS_CKSUM_FULL_OBJECT | BUCKETS_CKSUM_CRC64NVME)) ? "FULL_OBJECT" : "COMPOSITE");
+  }
   buckets_s3_write_xml(c, 200);
 }
 
@@ -761,7 +865,16 @@ static void mpu_put_part(s3_ctx *c, const char *upload_id) {
     buckets_s3_write_error(c, serr);
     return;
   }
-  buckets_put_opts opts = {.want_md5 = bsrc.has_md5 ? bsrc.md5 : NULL, .want_sha256 = bsrc.want_sha ? bsrc.sha : NULL};
+  buckets_put_opts opts = {.want_md5 = bsrc.has_md5 ? bsrc.md5 : NULL,
+                           .want_sha256 = bsrc.want_sha ? bsrc.sha : NULL,
+                           .pre_commit = cks_pre_commit};
+  cks_ctx cx;
+  if ((serr = cks_open(c, &bsrc, &cx, &opts)) != BUCKETS_ERR_NONE) {
+    body_close(&bsrc);
+    buckets_s3_write_error(c, serr);
+    return;
+  }
+  opts.pre_commit_ud = &cx;
   buckets_part_info pi;
   buckets_obj_err err = buckets_obj_mpu_put_part(c->s->drive, c->bucket, c->object, upload_id, part, bsrc.rd,
                                                  bsrc.rd_ud, bsrc.size, &opts, &pi);
@@ -769,6 +882,11 @@ static void mpu_put_part(s3_ctx *c, const char *upload_id) {
     buckets_s3_write_error(c, body_error(&bsrc, err));
   } else {
     etag_header(c->resp, pi.etag);
+    if (pi.cksum.type) {
+      char enc[64];
+      buckets_checksum_encode(&pi.cksum, enc);
+      buckets_http_resp_header(c->resp, buckets_cksum_header(pi.cksum.type), enc);
+    }
     c->resp->status = 200;
   }
   body_close(&bsrc);
@@ -828,6 +946,12 @@ static void mpu_list_parts(s3_ctx *c, const char *upload_id) {
     buckets_xml_elem(b, "LastModified", lm);
     buckets_buf_appendf(b, "<ETag>&quot;%s&quot;</ETag>", parts[i].etag);
     buckets_buf_appendf(b, "<Size>%lld</Size>", (long long)parts[i].size);
+    if (parts[i].cksum.type) {
+      char enc[64], tag[32];
+      buckets_checksum_encode(&parts[i].cksum, enc);
+      snprintf(tag, sizeof(tag), "Checksum%s", buckets_cksum_type_name(parts[i].cksum.type));
+      buckets_xml_elem(b, tag, enc);
+    }
     buckets_xml_close(b, "Part");
   }
   buckets_xml_close(b, "ListPartsResult");
@@ -859,7 +983,7 @@ static void mpu_complete(s3_ctx *c, const char *upload_id) {
   }
   size_t cap = 0, n = 0;
   buckets_complete_part *parts = NULL;
-  char **etags = NULL;
+  char **etags = NULL, **cksums = NULL;
   bool bad = false;
   for (size_t i = doc.nodes[0].first_child; i && !bad; i = doc.nodes[i].next_sibling) {
     if (!buckets_str_eq_c(doc.nodes[i].name, "Part")) continue;
@@ -875,31 +999,52 @@ static void mpu_complete(s3_ctx *c, const char *upload_id) {
     free(num);
     buckets_buf etag = BUCKETS_BUF_INIT;
     if (!bad && !buckets_xml_unescape(doc.nodes[en].text, &etag)) bad = true;
+    char *cks = NULL;
+    static const char *const ck_tags[] = {"ChecksumCRC32", "ChecksumCRC32C", "ChecksumSHA1", "ChecksumSHA256",
+                                          "ChecksumCRC64NVME"};
+    for (size_t t = 0; !bad && !cks && t < BUCKETS_ARRAY_LEN(ck_tags); t++) {
+      size_t cn = buckets_xml_child(&doc, i, ck_tags[t]);
+      if (cn) cks = buckets_str_dup(buckets_str_trim(doc.nodes[cn].text));
+    }
     if (!bad) {
       if (n == cap) {
         cap = cap ? cap * 2 : 16;
         parts = buckets_xrealloc(parts, cap * sizeof(*parts));
         etags = buckets_xrealloc(etags, cap * sizeof(*etags));
+        cksums = buckets_xrealloc(cksums, cap * sizeof(*cksums));
       }
       etags[n] = etag.data ? etag.data : buckets_xstrdup("");
-      parts[n] = (buckets_complete_part){(int)v, etags[n]};
+      cksums[n] = cks;
+      parts[n] = (buckets_complete_part){(int)v, etags[n], cks};
       n++;
     } else {
       buckets_buf_free(&etag);
+      free(cks);
     }
   }
   buckets_xml_doc_free(&doc);
-  if (bad || n == 0) {
-    for (size_t i = 0; i < n; i++) free(etags[i]);
+  buckets_checksum want;
+  buckets_s3_error cerr = bad || n == 0 ? BUCKETS_ERR_MALFORMED_XML : buckets_checksum_from_request(c->req, &want);
+  if (cerr) {
+    for (size_t i = 0; i < n; i++) {
+      free(etags[i]);
+      free(cksums[i]);
+    }
     free(etags);
+    free(cksums);
     free(parts);
-    buckets_s3_write_error(c, BUCKETS_ERR_MALFORMED_XML);
+    buckets_s3_write_error(c, cerr);
     return;
   }
   buckets_object_info oi;
-  buckets_obj_err err = buckets_obj_mpu_complete(c->s->drive, c->bucket, c->object, upload_id, parts, n, &oi);
-  for (size_t i = 0; i < n; i++) free(etags[i]);
+  buckets_obj_err err = buckets_obj_mpu_complete(c->s->drive, c->bucket, c->object, upload_id, parts, n,
+                                                 want.type ? &want : NULL, &oi);
+  for (size_t i = 0; i < n; i++) {
+    free(etags[i]);
+    free(cksums[i]);
+  }
   free(etags);
+  free(cksums);
   free(parts);
   if (err) {
     buckets_s3_write_error(c, err == BUCKETS_OBJ_ERR_PART_TOO_SMALL      ? BUCKETS_ERR_ENTITY_TOO_SMALL
@@ -919,6 +1064,30 @@ static void mpu_complete(s3_ctx *c, const char *upload_id) {
   buckets_xml_elem(b, "Bucket", c->bucket);
   buckets_xml_elem(b, "Key", c->object);
   buckets_buf_appendf(b, "<ETag>&quot;%s&quot;</ETag>", oi.etag);
+  if (oi.checksum) {
+    /* Reuse the header writer to decode the stored checksum, then mirror it into XML. */
+    buckets_http_response tmp = {.content_length = -1};
+    buckets_checksum_write_headers(oi.checksum, oi.checksum_len, 0, &tmp);
+    buckets_str rest = buckets_buf_str(&tmp.headers), line;
+    while (rest.n) {
+      buckets_str_cut(rest, '\n', &line, &rest);
+      buckets_str name, value;
+      if (!buckets_str_cut(buckets_str_trim(line), ':', &name, &value)) continue;
+      value = buckets_str_trim(value);
+      if (value.n && value.p[value.n - 1] == '\r') value.n--;
+      if (buckets_str_ieq_c(name, "X-Amz-Checksum-Type")) {
+        buckets_xml_elem_str(b, "ChecksumType", value);
+      } else {
+        char tag[40];
+        snprintf(tag, sizeof(tag), "Checksum%s", buckets_str_ieq_c(name, "X-Amz-Checksum-Crc64nvme") ? "CRC64NVME"
+                 : buckets_str_ieq_c(name, "X-Amz-Checksum-Crc32c") ? "CRC32C"
+                 : buckets_str_ieq_c(name, "X-Amz-Checksum-Crc32") ? "CRC32"
+                 : buckets_str_ieq_c(name, "X-Amz-Checksum-Sha1") ? "SHA1" : "SHA256");
+        buckets_xml_elem_str(b, tag, value);
+      }
+    }
+    buckets_buf_free(&tmp.headers);
+  }
   buckets_xml_close(b, "CompleteMultipartUploadResult");
   buckets_s3_write_xml(c, 200);
   buckets_object_info_free(&oi);

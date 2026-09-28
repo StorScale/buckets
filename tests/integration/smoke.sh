@@ -75,6 +75,10 @@ head -c 3000000 /dev/urandom > "$DIR.big"
 BIG_MD5=$( (md5sum "$DIR.big" 2>/dev/null || md5 -r "$DIR.big") | cut -d' ' -f1)
 check "put small object"           200 ""                          -- "${S3[@]}" -T "$DIR.small" -H 'X-Amz-Meta-Pet: cat' "$EP/photos/cat.txt"
 check "put object with bad md5"    400 "BadDigest"                 -- "${S3[@]}" -T "$DIR.small" -H 'Content-MD5: 1B2M2Y8AsgTpgAmY7PhCfg==' "$EP/photos/x.txt"
+check "put with crc32 checksum"    200 ""                          -- "${S3[@]}" -T "$DIR.small" -H 'x-amz-checksum-crc32: aFjJ4g==' "$EP/photos/crc.txt"
+check "put with wrong checksum"    400 "XAmzContentChecksumMismatch" -- "${S3[@]}" -T "$DIR.small" -H 'x-amz-checksum-crc32: AAAAAA==' "$EP/photos/crc2.txt"
+check "put with two checksums"     400 "InvalidArgument"           -- "${S3[@]}" -T "$DIR.small" -H 'x-amz-checksum-crc32: aFjJ4g==' -H 'x-amz-checksum-sha1: AAAAAAAAAAAAAAAAAAAAAAAAAAA=' "$EP/photos/crc3.txt"
+check "get checksum mode"          200 ""                          -- "${S3[@]}" -I -H 'x-amz-checksum-mode: ENABLED' "$EP/photos/crc.txt"
 check "put large object"           200 ""                          -- "${S3[@]}" -T "$DIR.big" "$EP/photos/2026/big.bin"
 check "get small object"           200 "meow"                      -- "${S3[@]}" "$EP/photos/cat.txt"
 check "head object meta"           200 ""                          -- "${S3[@]}" -I "$EP/photos/cat.txt"
@@ -91,7 +95,7 @@ check "list v2 paged"              200 "<NextContinuationToken>"   -- "${S3[@]}"
 check "parent is an object"        400 "XMinioObjectExistsAsDirectory" -- "${S3[@]}" -T "$DIR.small" "$EP/photos/cat.txt/inner"
 check "delete non-empty bucket"    409 "BucketNotEmpty"            -- "${S3[@]}" -X DELETE "$EP/photos"
 check "delete objects (batch)"     200 "<Deleted><Key>cat-copy.txt</Key>" -- "${S3[@]}" -X POST "$EP/photos?delete" \
-  --data '<Delete><Object><Key>cat-copy.txt</Key></Object><Object><Key>2026/big.bin</Key></Object></Delete>'
+  --data '<Delete><Object><Key>cat-copy.txt</Key></Object><Object><Key>2026/big.bin</Key></Object><Object><Key>crc.txt</Key></Object></Delete>'
 check "delete object"              204 ""                          -- "${S3[@]}" -X DELETE "$EP/photos/cat.txt"
 check "delete missing object"      204 ""                          -- "${S3[@]}" -X DELETE "$EP/photos/cat.txt"
 check "list after deletes"         200 "<KeyCount>0</KeyCount>"    -- "${S3[@]}" "$EP/photos?list-type=2"

@@ -7,6 +7,7 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Changed
+- Object uploads now read the body to EOF after the declared length. Extra bytes are rejected as IncompleteBody, and trailers are always consumed.
 - `ListObjects` now returns real objects instead of the 0.1.0 empty placeholder.
 
 ### Added
@@ -16,6 +17,12 @@ All notable changes to this project are documented here. The format follows
 - Single-drive object layer in MinIO's exact on-disk layout: xl.meta, bitrot-framed `part.N` files, inline data under 128 KiB, and `__XLDIR__` folder objects. Real MinIO reads drives written by Buckets, and Buckets reads MinIO's.
 - S3 object APIs: PutObject, GetObject (ranges, conditional requests, response-* overrides), HeadObject, DeleteObject, DeleteObjects, CopyObject (metadata directives and copy-source conditions), and ListObjects v1/v2 with real results (prefix, delimiter, marker, continuation token, url encoding).
 - Multipart uploads: Create, UploadPart, UploadPartCopy (with ranges), ListParts, Complete (ETag = md5-of-md5s-N), Abort, and ListMultipartUploads, in MinIO's `.minio.sys/multipart` layout.
+- S3 additional checksums (CRC32, CRC32C, CRC64NVME, SHA1, SHA256):
+  - via headers or aws-chunked trailers
+  - verified before commit and stored in MinIO's `x-minio-internal-crc` format
+  - returned with `x-amz-checksum-mode: ENABLED`
+  - multipart composite (`-N`) and full-object checksums, merged with CRC combination
+  - real MinIO reports identical values for objects Buckets wrote
 - `tests/integration/interop.sh`: round trips through `mc` and a real MinIO build in both directions. `tools/build-oracles.sh` builds the oracles.
 - aws-chunked uploads: signed chunks (chained chunk signatures), signed trailers, and unsigned trailers.
 - HTTP request bodies over 1 MiB spool to disk (up to 5 TiB), and responses stream from the object reader.

@@ -44,6 +44,7 @@ const char *buckets_obj_strerror(buckets_obj_err e) {
     case BUCKETS_OBJ_ERR_INVALID_PART: return "invalid part";
     case BUCKETS_OBJ_ERR_INVALID_PART_ORDER: return "parts out of order";
     case BUCKETS_OBJ_ERR_PART_TOO_SMALL: return "part too small";
+    case BUCKETS_OBJ_ERR_BAD_CHECKSUM: return "checksum mismatch";
   }
   return "unknown";
 }
@@ -231,6 +232,7 @@ void buckets_object_info_free(buckets_object_info *oi) {
     free(oi->meta[i].value);
   }
   free(oi->meta);
+  free(oi->checksum);
   memset(oi, 0, sizeof(*oi));
 }
 
@@ -253,6 +255,12 @@ void buckets_objx_fill_info(buckets_object_info *oi, const char *name, const buc
       continue;
     }
     buckets_xl_kv_set(&oi->meta, &oi->nmeta, o->meta_user[i].key, o->meta_user[i].value, o->meta_user[i].value_len);
+  }
+  const buckets_xl_kv *crc = buckets_xl_kv_get(o->meta_sys, o->nmeta_sys, "x-minio-internal-crc");
+  if (crc && crc->value_len) {
+    oi->checksum = buckets_xmalloc(crc->value_len);
+    memcpy(oi->checksum, crc->value, crc->value_len);
+    oi->checksum_len = crc->value_len;
   }
 }
 
@@ -280,6 +288,8 @@ typedef struct {
   buckets_md5_ctx md5;
   buckets_sha256_ctx sha;
   bool want_sha;
+  buckets_cksum_hasher cks;
+  bool want_cks;
   buckets_obj_err err;
 } source;
 
@@ -300,6 +310,7 @@ static size_t source_read(source *s, uint8_t *buf, size_t n) {
   }
   buckets_md5_update(&s->md5, buf, got);
   if (s->want_sha) buckets_sha256_update(&s->sha, buf, got);
+  if (s->want_cks) buckets_cksum_hasher_update(&s->cks, buf, got);
   s->remaining -= (int64_t)got;
   return got;
 }
@@ -356,10 +367,14 @@ buckets_obj_err buckets_objx_check_namespace(buckets_drive *d, const char *bucke
 buckets_obj_err buckets_objx_write_data(buckets_drive *d, buckets_read_fn rd, void *rd_ud, int64_t size,
                                        const buckets_put_opts *opts, bool allow_inline, const char *tmp_dir,
                                        const char *data_dir, int part_number, buckets_buf *inline_shard,
-                                       uint8_t md5_out[16]) {
+                                       uint8_t md5_out[16], buckets_checksum *cksum_out) {
   source src = {.rd = rd, .ud = rd_ud, .remaining = size, .want_sha = opts && opts->want_sha256};
   buckets_md5_init(&src.md5);
   buckets_sha256_init(&src.sha);
+  uint32_t ctype = opts ? opts->checksum_type & BUCKETS_CKSUM_BASE_MASK : 0;
+  src.want_cks = ctype != 0;
+  buckets_cksum_hasher_init(&src.cks, ctype);
+  if (cksum_out) memset(cksum_out, 0, sizeof(*cksum_out));
   uint8_t *block = buckets_xmalloc(BUCKETS_BLOCK_SIZE);
 
   if (allow_inline && size <= BUCKETS_INLINE_THRESHOLD) {
@@ -388,11 +403,22 @@ buckets_obj_err buckets_objx_write_data(buckets_drive *d, buckets_read_fn rd, vo
     buckets_buf_free(&chunk);
     buckets_buf_free(&part);
   }
+  /* The source must end exactly here. Reading to EOF also lets aws-chunked
+   * decoders consume their final chunk and trailers (trailing checksums). */
+  if (!src.err) {
+    long extra = rd(rd_ud, block, 1);
+    if (extra > 0) src.err = BUCKETS_OBJ_ERR_INCOMPLETE_BODY;
+    else if (extra < 0) src.err = BUCKETS_OBJ_ERR_READER;
+  }
   free(block);
 
   uint8_t sha[32];
   buckets_md5_final(&src.md5, md5_out);
   buckets_sha256_final(&src.sha, sha);
+  if (src.want_cks && cksum_out) {
+    cksum_out->type = ctype;
+    cksum_out->raw_len = buckets_cksum_hasher_final(&src.cks, cksum_out->raw);
+  }
   if (src.err) return src.err;
   if (opts && opts->want_md5 && memcmp(md5_out, opts->want_md5, 16) != 0) return BUCKETS_OBJ_ERR_BAD_DIGEST;
   if (opts && opts->want_sha256 && memcmp(sha, opts->want_sha256, 32) != 0) return BUCKETS_OBJ_ERR_SHA256_MISMATCH;
@@ -495,7 +521,8 @@ buckets_obj_err buckets_obj_put(buckets_drive *d, const char *bucket, const char
   char *tmp_dir = inline_data ? NULL : buckets_objx_tmp_path(d);
   buckets_buf framed = BUCKETS_BUF_INIT;
   uint8_t md5[16];
-  err = buckets_objx_write_data(d, rd, rd_ud, size, opts, true, tmp_dir, data_dir_s, 1, &framed, md5);
+  buckets_checksum cks;
+  err = buckets_objx_write_data(d, rd, rd_ud, size, opts, true, tmp_dir, data_dir_s, 1, &framed, md5, &cks);
   if (!err) {
     /* Built exactly as MinIO's putObject would for a 1-drive set. */
     buckets_xl_object o;
@@ -508,10 +535,13 @@ buckets_obj_err buckets_obj_put(buckets_drive *d, const char *bucket, const char
     buckets_hex_encode(md5, 16, etag);
     buckets_xl_kv_set(&o.meta_user, &o.nmeta_user, "etag", etag, 32);
     if (inline_data) buckets_xl_kv_set(&o.meta_sys, &o.nmeta_sys, BUCKETS_XL_META_INLINE, "true", 4);
+    if (opts && opts->pre_commit) err = opts->pre_commit(opts->pre_commit_ud, &cks, &o);
 
     buckets_buf src = BUCKETS_BUF_INIT;
     if (!inline_data) buckets_buf_appendf(&src, "%s/%s", tmp_dir, data_dir_s);
-    err = buckets_objx_commit(d, bucket, object, &o, inline_data ? &framed : NULL, inline_data ? NULL : src.data, out);
+    if (!err) {
+      err = buckets_objx_commit(d, bucket, object, &o, inline_data ? &framed : NULL, inline_data ? NULL : src.data, out);
+    }
     buckets_buf_free(&src);
     buckets_xl_object_free(&o);
   }
@@ -637,7 +667,10 @@ buckets_obj_err buckets_obj_open(buckets_drive *d, const char *bucket, const cha
     r->part++;
   }
   r->part_off = off;
-  r->remaining = length;
+  int64_t total = 0;
+  for (size_t i = 0; i < r->nparts; i++) total += r->parts[i].size;
+  /* Clamp to the object so an open-ended range ends in EOF, not an error. */
+  r->remaining = offset >= total ? 0 : BUCKETS_MIN(length, total - offset);
   r->block = buckets_xmalloc(BUCKETS_BLOCK_SIZE + BITROT_HASH);
   *out = r;
   return BUCKETS_OBJ_OK;
