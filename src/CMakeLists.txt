@@ -53,6 +53,7 @@ add_library(buckets STATIC
   bucket/metadata.c
   bucket/metasys.c
   bucket/versioning.c
+  bucket/tags.c
   bucket/objectlock.c
   erasure/rs.c
   erasure/layout.c
@@ -69,6 +70,7 @@ add_library(buckets STATIC
   s3/auth.c
   s3/sts.c
   s3/objectlock.c
+  s3/tagging.c
   admin/admin.c
   admin/info.c
   admin/config.c

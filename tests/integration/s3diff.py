@@ -11,6 +11,9 @@ A scenario is a JSON list of steps:
    "headers": {...}, "save": {"v1": "x-amz-version-id"}, "show": ["x-amz-delete-marker"]}
 "$name" in path, query or body is replaced by a value saved earlier.
 """
+import datetime
+import hashlib
+import hmac
 import json
 import urllib.parse
 import re
@@ -33,6 +36,36 @@ def norm_id(v):
     if v not in ids:
         ids[v] = "V%d" % (len(ids) + 1)
     return ids[v]
+
+
+def sign(method, path, query, headers, body):
+    """SigV4 headers for the request (curl's --aws-sigv4 orders x-amz-tagging
+    after x-amz-tagging-directive, which no server accepts)."""
+    now = datetime.datetime.utcnow()
+    amzdate, day = now.strftime("%Y%m%dT%H%M%SZ"), now.strftime("%Y%m%d")
+    h = {k.lower(): v.strip() for k, v in headers.items()}
+    h["host"] = urllib.parse.urlparse(ep).netloc
+    h["x-amz-date"] = amzdate
+    h["x-amz-content-sha256"] = hashlib.sha256(body).hexdigest()
+    q = lambda v: urllib.parse.quote(v, safe="-_.~")
+    pairs = []
+    for part in query.split("&") if query else []:
+        k, _, v = part.partition("=")
+        pairs.append((q(urllib.parse.unquote(k)), q(urllib.parse.unquote(v))))
+    cq = "&".join("%s=%s" % kv for kv in sorted(pairs))
+    names = sorted(k for k in h if k in ("host", "content-md5", "content-type") or k.startswith("x-amz-"))
+    creq = "\n".join([method, urllib.parse.quote(urllib.parse.unquote(path), safe="/-_.~"), cq,
+                      "".join("%s:%s\n" % (k, h[k]) for k in names), ";".join(names), h["x-amz-content-sha256"]])
+    scope = "%s/us-east-1/s3/aws4_request" % day
+    sts = "\n".join(["AWS4-HMAC-SHA256", amzdate, scope, hashlib.sha256(creq.encode()).hexdigest()])
+    key = ("AWS4" + sk).encode()
+    for m in (day, "us-east-1", "s3", "aws4_request"):
+        key = hmac.new(key, m.encode(), hashlib.sha256).digest()
+    sig = hmac.new(key, sts.encode(), hashlib.sha256).hexdigest()
+    out = {k: h[k] for k in ("x-amz-date", "x-amz-content-sha256")}
+    out["Authorization"] = "AWS4-HMAC-SHA256 Credential=%s/%s, SignedHeaders=%s, Signature=%s" % (
+        ak, scope, ";".join(names), sig)
+    return out
 
 
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
@@ -58,20 +91,21 @@ for i, st in enumerate(steps):
     url = ep + sub(st["path"]) + ("?" + q if q else "")
     open("/tmp/.s3diff.body", "w").close()
     verb = ["-I"] if st["method"] == "HEAD" else ["-X", st["method"]]  # -X HEAD waits for a body
-    cmd = ["curl", "-s", "-g", "-D", "-", "-o", "/tmp/.s3diff.body"] + verb + [
-           "--aws-sigv4", "aws:amz:us-east-1:s3", "--user", ak + ":" + sk]
-    for k, v in st.get("headers", {}).items():
-        cmd += ["-H", "%s: %s" % (k, sub(v))]
+    hdrs_in = {k: sub(v) for k, v in st.get("headers", {}).items()}
+    body = sub(st["body"]).encode() if "body" in st else b""
     if st.get("md5"):
         import base64
-        import hashlib
-        cmd += ["-H", "Content-MD5: " + base64.b64encode(hashlib.md5(sub(st.get("body", "")).encode()).digest()).decode()]
-    if "body" in st:
-        cmd += ["--data-binary", sub(st["body"])]
-        if not any(k.lower() == "content-type" for k in st.get("headers", {})):
-            cmd += ["-H", "Content-Type: application/octet-stream"]
-    elif st["method"] in ("PUT", "POST"):
-        cmd += ["--data-binary", ""]
+        hdrs_in["Content-MD5"] = base64.b64encode(hashlib.md5(body).digest()).decode()
+    if "body" in st and not any(k.lower() == "content-type" for k in hdrs_in):
+        hdrs_in["Content-Type"] = "application/octet-stream"
+    elif "body" not in st and st["method"] in ("PUT", "POST"):
+        hdrs_in.setdefault("Content-Type", "application/x-www-form-urlencoded")  # what curl sends
+    hdrs_in.update(sign(st["method"], sub(st["path"]), q, hdrs_in, body))
+    cmd = ["curl", "-s", "-g", "-D", "-", "-o", "/tmp/.s3diff.body"] + verb
+    for k, v in hdrs_in.items():
+        cmd += ["-H", "%s: %s" % (k, v)]
+    if "body" in st or st["method"] in ("PUT", "POST"):
+        cmd += ["--data-binary", body.decode()]
     cmd.append(url)
     out = subprocess.run(cmd, capture_output=True, text=True).stdout
     lines = out.replace("\r", "").split("\n")

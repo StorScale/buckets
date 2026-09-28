@@ -1,0 +1,387 @@
+[
+ {
+  "method": "PUT",
+  "path": "/tbkt"
+ },
+ {
+  "method": "PUT",
+  "path": "/tbkt/a.txt",
+  "body": "hello",
+  "headers": {
+   "X-Amz-Tagging": "b=2&a=1&sp+ace=x%2Fy"
+  },
+  "label": "put with tags"
+ },
+ {
+  "method": "HEAD",
+  "path": "/tbkt/a.txt",
+  "label": "head tag count",
+  "show": [
+   "x-amz-tagging-count",
+   "x-amz-tagging"
+  ]
+ },
+ {
+  "method": "HEAD",
+  "path": "/tbkt/a.txt",
+  "label": "head ACCESS directive",
+  "headers": {
+   "X-Amz-Tagging-Directive": "ACCESS"
+  },
+  "show": [
+   "x-amz-tagging-count",
+   "x-amz-tagging"
+  ]
+ },
+ {
+  "method": "GET",
+  "path": "/tbkt/a.txt",
+  "query": "tagging",
+  "label": "get tags"
+ },
+ {
+  "method": "PUT",
+  "path": "/tbkt/b.txt",
+  "body": "x",
+  "headers": {
+   "X-Amz-Tagging": "a=1&a=2"
+  },
+  "label": "put dup tag"
+ },
+ {
+  "method": "PUT",
+  "path": "/tbkt/b.txt",
+  "body": "x",
+  "headers": {
+   "X-Amz-Tagging": "k=%zz"
+  },
+  "label": "put bad escape"
+ },
+ {
+  "method": "PUT",
+  "path": "/tbkt/b.txt",
+  "body": "x",
+  "headers": {
+   "X-Amz-Tagging": "k=a*b"
+  },
+  "label": "put bad value"
+ },
+ {
+  "method": "PUT",
+  "path": "/tbkt/b.txt",
+  "body": "x",
+  "headers": {
+   "X-Amz-Tagging": "1&2&3&4&5&6&7&8&9&10&11"
+  },
+  "label": "put 11 tags"
+ },
+ {
+  "method": "PUT",
+  "path": "/tbkt/b.txt",
+  "body": "x",
+  "label": "put untagged"
+ },
+ {
+  "method": "GET",
+  "path": "/tbkt/b.txt",
+  "query": "tagging",
+  "label": "get no tags"
+ },
+ {
+  "method": "PUT",
+  "path": "/tbkt/b.txt",
+  "query": "tagging",
+  "label": "put tagging",
+  "body": "<Tagging><TagSet><Tag><Key>env</Key><Value>prod</Value></Tag><Tag><Key>team</Key><Value>a b</Value></Tag></TagSet></Tagging>"
+ },
+ {
+  "method": "GET",
+  "path": "/tbkt/b.txt",
+  "query": "tagging",
+  "label": "get after put tagging"
+ },
+ {
+  "method": "HEAD",
+  "path": "/tbkt/b.txt",
+  "label": "head after put tagging",
+  "show": [
+   "x-amz-tagging-count"
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/tbkt/b.txt",
+  "query": "tagging",
+  "label": "put tagging bad key",
+  "body": "<Tagging><TagSet><Tag><Key></Key><Value>v</Value></Tag></TagSet></Tagging>"
+ },
+ {
+  "method": "PUT",
+  "path": "/tbkt/b.txt",
+  "query": "tagging",
+  "label": "put tagging dup",
+  "body": "<Tagging><TagSet><Tag><Key>k</Key></Tag><Tag><Key>k</Key></Tag></TagSet></Tagging>"
+ },
+ {
+  "method": "PUT",
+  "path": "/tbkt/b.txt",
+  "query": "tagging",
+  "label": "put tagging not xml",
+  "body": "nope"
+ },
+ {
+  "method": "PUT",
+  "path": "/tbkt/b.txt",
+  "query": "tagging",
+  "label": "put tagging wrong root",
+  "body": "<Tags/>"
+ },
+ {
+  "method": "PUT",
+  "path": "/tbkt/b.txt",
+  "query": "tagging",
+  "label": "put tagging 11",
+  "body": "<Tagging><TagSet><Tag><Key>k0</Key></Tag><Tag><Key>k1</Key></Tag><Tag><Key>k2</Key></Tag><Tag><Key>k3</Key></Tag><Tag><Key>k4</Key></Tag><Tag><Key>k5</Key></Tag><Tag><Key>k6</Key></Tag><Tag><Key>k7</Key></Tag><Tag><Key>k8</Key></Tag><Tag><Key>k9</Key></Tag><Tag><Key>k10</Key></Tag></TagSet></Tagging>"
+ },
+ {
+  "method": "PUT",
+  "path": "/tbkt/nope.txt",
+  "query": "tagging",
+  "label": "put tagging missing object",
+  "body": "<Tagging><TagSet></TagSet></Tagging>"
+ },
+ {
+  "method": "GET",
+  "path": "/tbkt/nope.txt",
+  "query": "tagging",
+  "label": "get tagging missing object"
+ },
+ {
+  "method": "PUT",
+  "path": "/tbkt/c.txt",
+  "label": "copy keeps tags",
+  "headers": {
+   "X-Amz-Copy-Source": "/tbkt/a.txt"
+  }
+ },
+ {
+  "method": "GET",
+  "path": "/tbkt/c.txt",
+  "query": "tagging",
+  "label": "copied tags"
+ },
+ {
+  "method": "PUT",
+  "path": "/tbkt/d.txt",
+  "label": "copy replace tags",
+  "headers": {
+   "X-Amz-Copy-Source": "/tbkt/a.txt",
+   "X-Amz-Tagging-Directive": "REPLACE",
+   "X-Amz-Tagging": "new=1"
+  }
+ },
+ {
+  "method": "GET",
+  "path": "/tbkt/d.txt",
+  "query": "tagging",
+  "label": "replaced tags"
+ },
+ {
+  "method": "PUT",
+  "path": "/tbkt/e.txt",
+  "label": "copy bad tag directive",
+  "headers": {
+   "X-Amz-Copy-Source": "/tbkt/a.txt",
+   "X-Amz-Tagging-Directive": "MOVE"
+  }
+ },
+ {
+  "method": "PUT",
+  "path": "/tbkt/a.txt",
+  "label": "copy onto itself replacing tags",
+  "headers": {
+   "X-Amz-Copy-Source": "/tbkt/a.txt",
+   "X-Amz-Tagging-Directive": "REPLACE",
+   "X-Amz-Tagging": "self=1"
+  }
+ },
+ {
+  "method": "GET",
+  "path": "/tbkt/a.txt",
+  "query": "tagging",
+  "label": "self-copy tags"
+ },
+ {
+  "method": "GET",
+  "path": "/tbkt",
+  "query": "list-type=2&metadata=true",
+  "label": "list with metadata"
+ },
+ {
+  "method": "DELETE",
+  "path": "/tbkt/b.txt",
+  "query": "tagging",
+  "label": "delete tagging"
+ },
+ {
+  "method": "GET",
+  "path": "/tbkt/b.txt",
+  "query": "tagging",
+  "label": "get after delete tagging"
+ },
+ {
+  "method": "HEAD",
+  "path": "/tbkt/b.txt",
+  "label": "head after delete tagging",
+  "show": [
+   "x-amz-tagging-count"
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/tbkt/m.bin",
+  "query": "uploads",
+  "headers": {
+   "X-Amz-Tagging": "a=%"
+  },
+  "label": "mpu bad tags"
+ },
+ {
+  "method": "GET",
+  "path": "/tbkt",
+  "query": "tagging",
+  "label": "bucket tagging unset"
+ },
+ {
+  "method": "PUT",
+  "path": "/tbkt",
+  "query": "tagging",
+  "label": "put bucket tagging",
+  "body": "<Tagging xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><TagSet><Tag><Key>owner</Key><Value>ops</Value></Tag></TagSet></Tagging>"
+ },
+ {
+  "method": "GET",
+  "path": "/tbkt",
+  "query": "tagging",
+  "label": "get bucket tagging"
+ },
+ {
+  "method": "PUT",
+  "path": "/tbkt",
+  "query": "tagging",
+  "label": "put bucket tagging bad",
+  "body": "<Tagging><TagSet><Tag><Key>a*</Key><Value>v</Value></Tag></TagSet></Tagging>"
+ },
+ {
+  "method": "PUT",
+  "path": "/tbkt",
+  "query": "tagging",
+  "label": "put bucket tagging wrong root",
+  "body": "<Tags/>"
+ },
+ {
+  "method": "DELETE",
+  "path": "/tbkt",
+  "query": "tagging",
+  "label": "delete bucket tagging"
+ },
+ {
+  "method": "GET",
+  "path": "/tbkt",
+  "query": "tagging",
+  "label": "bucket tagging after delete"
+ },
+ {
+  "method": "GET",
+  "path": "/nobkt",
+  "query": "tagging",
+  "label": "tagging on missing bucket"
+ },
+ {
+  "method": "DELETE",
+  "path": "/nobkt",
+  "query": "tagging",
+  "label": "delete tagging on missing bucket"
+ },
+ {
+  "method": "PUT",
+  "path": "/nobkt",
+  "query": "tagging",
+  "label": "put tagging on missing bucket",
+  "body": "<Tagging><TagSet></TagSet></Tagging>"
+ },
+ {
+  "method": "PUT",
+  "path": "/tvbkt"
+ },
+ {
+  "method": "PUT",
+  "path": "/tvbkt",
+  "query": "versioning",
+  "body": "<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>"
+ },
+ {
+  "method": "PUT",
+  "path": "/tvbkt/v.txt",
+  "body": "one",
+  "headers": {
+   "X-Amz-Tagging": "v=1"
+  },
+  "save": {
+   "v1": "x-amz-version-id"
+  }
+ },
+ {
+  "method": "PUT",
+  "path": "/tvbkt/v.txt",
+  "body": "two",
+  "save": {
+   "v2": "x-amz-version-id"
+  }
+ },
+ {
+  "method": "PUT",
+  "path": "/tvbkt/v.txt",
+  "query": "tagging&versionId=$v1",
+  "label": "put tagging on v1",
+  "body": "<Tagging><TagSet><Tag><Key>v</Key><Value>one</Value></Tag></TagSet></Tagging>"
+ },
+ {
+  "method": "GET",
+  "path": "/tvbkt/v.txt",
+  "query": "tagging&versionId=$v1",
+  "label": "get v1 tags"
+ },
+ {
+  "method": "GET",
+  "path": "/tvbkt/v.txt",
+  "query": "tagging",
+  "label": "get latest tags"
+ },
+ {
+  "method": "DELETE",
+  "path": "/tvbkt/v.txt",
+  "save": {
+   "dm": "x-amz-version-id"
+  }
+ },
+ {
+  "method": "GET",
+  "path": "/tvbkt/v.txt",
+  "query": "tagging",
+  "label": "get tags behind marker"
+ },
+ {
+  "method": "PUT",
+  "path": "/tvbkt/v.txt",
+  "query": "tagging&versionId=$dm",
+  "label": "put tags on marker",
+  "body": "<Tagging><TagSet></TagSet></Tagging>"
+ },
+ {
+  "method": "DELETE",
+  "path": "/tvbkt/v.txt",
+  "query": "tagging&versionId=$v1",
+  "label": "delete v1 tags"
+ }
+]

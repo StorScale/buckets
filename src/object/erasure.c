@@ -373,6 +373,8 @@ static void fill_info(buckets_object_info *oi, const char *name, const buckets_x
     }
   }
   oi->delete_marker = o->type == BUCKETS_XL_TYPE_DELETE;
+  oi->data_blocks = o->ec_m;
+  oi->parity_blocks = o->ec_n;
   for (size_t i = 0; i < o->nmeta_user; i++) {
     if (strcmp(o->meta_user[i].key, "etag") == 0) {
       snprintf(oi->etag, sizeof(oi->etag), "%s", (const char *)o->meta_user[i].value);

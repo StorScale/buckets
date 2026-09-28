@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Versioned objects on disk, both ways between MinIO and bucketsd: versions,
 # delete markers and null versions written by one are listed identically and
-# read back byte for byte by the other.
+# read back byte for byte by the other; object and bucket tags carry over.
 #   MINIO_BIN=/path/to/minio tests/integration/versioning-interop.sh [bucketsd]
 # Skips (exit 0) when MINIO_BIN is not set.
 set -euo pipefail
@@ -70,10 +70,16 @@ curl -s -o /dev/null "${S3[@]}" -X DELETE "$EP/vxb/gone.txt"
 versioning Suspended
 put a.txt three >/dev/null
 curl -s -o /dev/null "${S3[@]}" -X DELETE "$EP/vxb/plain.txt"
+tagdoc='<Tagging><TagSet><Tag><Key>team</Key><Value>a b</Value></Tag></TagSet></Tagging>'
+curl -sf "${S3[@]}" -X PUT --data-binary "$tagdoc" "$EP/vxb/big.bin?tagging" >/dev/null || fail "object tagging"
+curl -sf "${S3[@]}" -X PUT --data-binary "$tagdoc" "$EP/vxb?tagging" >/dev/null || fail "bucket tagging"
 listing >"$WORK/l1.buckets"
 contents >"$WORK/c1.buckets"
 stop
 start minio
+for t in "vxb/big.bin?tagging" "vxb?tagging"; do
+  curl -s "${S3[@]}" "$EP/$t" | grep -q '<Key>team</Key><Value>a b</Value>' || fail "MinIO reads bucketsd's tags ($t)"
+done
 listing >"$WORK/l1.minio"
 contents >"$WORK/c1.minio"
 diff "$WORK/l1.buckets" "$WORK/l1.minio" >/dev/null || { diff "$WORK/l1.buckets" "$WORK/l1.minio"; fail "MinIO lists bucketsd's versions differently"; }

@@ -407,8 +407,9 @@ void buckets_s3_write_error_msg(s3_ctx *c, buckets_s3_error e, const char *messa
   c->resp->status = info->status;
   buckets_http_resp_header(c->resp, "Content-Type", "application/xml");
   buckets_buf_reset(&c->resp->body);
-  buckets_s3_error_xml_msg(&c->resp->body, e, message, c->path ? c->path : "/", c->bucket, c->object, c->request_id,
-                           c->s->host_id);
+  buckets_s3_error_xml_msg(&c->resp->body, e, message, c->path ? c->path : "/",
+                           c->err_bucket ? c->err_bucket : c->bucket, c->err_object ? c->err_object : c->object,
+                           c->request_id, c->s->host_id);
 }
 
 void buckets_s3_write_error(s3_ctx *c, buckets_s3_error e) { buckets_s3_write_error_msg(c, e, NULL); }
@@ -422,8 +423,10 @@ void buckets_s3_write_custom_error(s3_ctx *c, int status, const char *code, cons
   buckets_xml_open(b, "Error");
   buckets_xml_elem(b, "Code", code);
   buckets_xml_elem(b, "Message", message);
-  if (c->object) buckets_xml_elem(b, "Key", c->object);
-  if (c->bucket) buckets_xml_elem(b, "BucketName", c->bucket);
+  const char *eo = c->err_object ? c->err_object : c->object;
+  const char *eb = c->err_bucket ? c->err_bucket : c->bucket;
+  if (eo) buckets_xml_elem(b, "Key", eo);
+  if (eb) buckets_xml_elem(b, "BucketName", eb);
   buckets_xml_elem(b, "Resource", c->path ? c->path : "/");
   buckets_xml_elem(b, "RequestId", c->request_id);
   buckets_xml_elem(b, "HostId", c->s->host_id);
@@ -923,17 +926,20 @@ static bool authorize_bucket_request(s3_ctx *c) {
     if (c->q.n == 0) action = "s3:CreateBucket";
     else if (buckets_query_has(&c->q, "versioning")) action = "s3:PutBucketVersioning";
     else if (buckets_query_has(&c->q, "object-lock")) action = "s3:PutBucketObjectLockConfiguration";
+    else if (buckets_query_has(&c->q, "tagging")) action = "s3:PutBucketTagging";
   } else if (buckets_str_eq_c(m, "HEAD")) {
     if (buckets_s3_authorize(c, "s3:HeadBucket", c->bucket, NULL, NULL) == BUCKETS_ERR_NONE) return true;
     action = "s3:ListBucket";
   } else if (buckets_str_eq_c(m, "DELETE")) {
     buckets_str force = buckets_http_header_get(c->req, "X-Minio-Force-Delete");
     if (c->q.n == 0) action = force.p && buckets_str_ieq_c(force, "true") ? "s3:ForceDeleteBucket" : "s3:DeleteBucket";
+    else if (buckets_query_has(&c->q, "tagging")) action = "s3:PutBucketTagging"; /* as MinIO */
   } else if (buckets_str_eq_c(m, "GET")) {
     if (buckets_query_has(&c->q, "location")) action = "s3:GetBucketLocation";
     else if (buckets_query_has(&c->q, "versioning")) action = "s3:GetBucketVersioning";
     else if (buckets_query_has(&c->q, "versions")) action = "s3:ListBucketVersions";
     else if (buckets_query_has(&c->q, "object-lock")) action = "s3:GetBucketObjectLockConfiguration";
+    else if (buckets_query_has(&c->q, "tagging")) action = "s3:GetBucketTagging";
     else if (buckets_query_has(&c->q, "uploads")) action = "s3:ListBucketMultipartUploads";
     else if (!has_unhandled_subresource(&c->q)) action = "s3:ListBucket";
   }
@@ -983,6 +989,11 @@ static void route_bucket(s3_ctx *c) {
       else buckets_s3_put_bucket_object_lock(c);
       return;
     }
+    if (buckets_query_has(&c->q, "tagging")) {
+      if (!bucket_exists(c)) buckets_s3_write_error(c, BUCKETS_ERR_NO_SUCH_BUCKET);
+      else buckets_s3_put_bucket_tagging(c);
+      return;
+    }
     if (c->q.n > 0) {
       buckets_s3_write_error(c, BUCKETS_ERR_NOT_IMPLEMENTED);
       return;
@@ -991,7 +1002,16 @@ static void route_bucket(s3_ctx *c) {
     return;
   }
 
-  if (!bucket_exists(c)) {
+  if (buckets_str_eq_c(m, "GET") && buckets_query_has(&c->q, "tagging")) {
+    buckets_s3_get_bucket_tagging(c); /* NoSuchTagSet even without the bucket, as MinIO */
+    return;
+  }
+  bool exists = bucket_exists(c);
+  if (!exists && buckets_str_eq_c(m, "DELETE") && buckets_query_has(&c->q, "tagging")) {
+    c->resp->status = 204; /* MinIO does not check the bucket here */
+    return;
+  }
+  if (!exists) {
     buckets_s3_write_error(c, BUCKETS_ERR_NO_SUCH_BUCKET);
     return;
   }
@@ -1000,6 +1020,10 @@ static void route_bucket(s3_ctx *c) {
     return;
   }
   if (buckets_str_eq_c(m, "DELETE")) {
+    if (buckets_query_has(&c->q, "tagging")) {
+      buckets_s3_delete_bucket_tagging(c);
+      return;
+    }
     if (c->q.n > 0) {
       buckets_s3_write_error(c, BUCKETS_ERR_NOT_IMPLEMENTED);
       return;
@@ -1016,6 +1040,8 @@ static void route_bucket(s3_ctx *c) {
       buckets_s3_list_object_versions(c);
     } else if (buckets_query_has(&c->q, "object-lock")) {
       buckets_s3_get_bucket_object_lock(c);
+    } else if (buckets_query_has(&c->q, "tagging")) {
+      buckets_s3_get_bucket_tagging(c);
     } else if (buckets_query_has(&c->q, "uploads")) {
       buckets_s3_list_uploads(c);
     } else if (has_unhandled_subresource(&c->q)) {
@@ -1128,6 +1154,8 @@ done:
   buckets_query_free(&c.q);
   free(c.path);
   free(c.bucket);
+  free(c.err_bucket);
+  free(c.err_object);
   free(c.object);
   buckets_buf_free(&c.doc);
   buckets_iam_ident_release(c.ident);

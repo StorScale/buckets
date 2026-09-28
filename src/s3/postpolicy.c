@@ -16,6 +16,7 @@
 #include "crypto/hex.h"
 #include "crypto/sha256.h"
 #include "s3/checksum.h"
+#include "bucket/tags.h"
 #include "s3/internal.h"
 #include "s3/sigv2.h"
 #include "s3/xml.h"
@@ -661,10 +662,25 @@ void buckets_s3_post_policy(s3_ctx *c) {
     buckets_xl_kv *meta = NULL;
     size_t nmeta = 0;
     static const char *const supported[] = {"content-type", "cache-control", "content-language", "content-encoding",
-                                            "content-disposition", "x-amz-storage-class", "X-Amz-Tagging", "expires"};
+                                            "content-disposition", "x-amz-storage-class", "expires"};
     for (size_t s = 0; s < BUCKETS_ARRAY_LEN(supported); s++) {
       const char *v = fields_get(&fs, supported[s]);
       if (v) buckets_xl_kv_set(&meta, &nmeta, supported[s], v, strlen(v));
+    }
+    /* Tags come from the "tagging" field (a Tagging document), never from X-Amz-Tagging. */
+    const char *tagging = fields_get(&fs, "tagging");
+    if (tagging && *tagging) {
+      buckets_tags t;
+      buckets_tags_error te;
+      if (!buckets_tags_parse_xml(tagging, strlen(tagging), true, &t, &te)) {
+        err = BUCKETS_ERR_MALFORMED_POST_REQUEST;
+      } else {
+        buckets_buf ts = BUCKETS_BUF_INIT;
+        buckets_tags_string(&t, &ts);
+        if (ts.len) buckets_xl_kv_set(&meta, &nmeta, "X-Amz-Tagging", ts.data, ts.len);
+        buckets_buf_free(&ts);
+        buckets_tags_free(&t);
+      }
     }
     for (size_t i = 0; i < fs.n; i++) {
       if (strncasecmp(fs.items[i].name, "x-amz-meta-", 11) == 0 || strncasecmp(fs.items[i].name, "x-minio-meta-", 13) == 0) {

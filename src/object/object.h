@@ -143,6 +143,7 @@ typedef struct {
   uint8_t *checksum; /* stored x-minio-internal-crc bytes, or NULL */
   size_t checksum_len;
   buckets_xl_part *parts; /* numbers and sizes, in object order (etags unset) */
+  int data_blocks, parity_blocks; /* the version's erasure coding (EcM, EcN) */
 } buckets_object_info;
 
 void buckets_object_info_free(buckets_object_info *oi);

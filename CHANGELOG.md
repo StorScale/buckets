@@ -19,7 +19,12 @@ All notable changes to this project are documented here. The format follows
   - `?retention` and `?legal-hold` GET/PUT on objects, updating the version's metadata in place, and the `x-amz-object-lock-*` headers on PUT, CopyObject and CreateMultipartUpload
   - locked versions refuse deletion unless governance is bypassed with `x-amz-bypass-governance-retention` and the matching permission; COMPLIANCE can only be extended
   - retention and legal hold are stored under MinIO's metadata keys, so locks carry over between the two servers
-- `tests/integration/s3diff.sh`: runs request scenarios against real MinIO and bucketsd and diffs the normalized responses (`scenarios/{versioning,objectlock,uploads}.json` match line for line).
+- Tagging (Phase 5):
+  - object `?tagging` GET/PUT/DELETE, per version, stored in the version's `X-Amz-Tagging` metadata as MinIO does
+  - bucket `?tagging` GET/PUT/DELETE, stored as the bucket metadata's `TaggingConfigXML`
+  - `X-Amz-Tagging` validated on PutObject and CreateMultipartUpload (minio-go's rules: 10 object / 50 bucket tags, key and value charset and lengths, duplicates), the `tagging` field of POST policy uploads, and `x-amz-tagging-directive` COPY/REPLACE on CopyObject
+  - `x-amz-tagging-count` on GET/HEAD (plus the tags themselves with MinIO's `X-Amz-Tagging-Directive: ACCESS`), and `UserTags` in `metadata=true` listings
+- `tests/integration/s3diff.sh`: runs request scenarios against real MinIO and bucketsd and diffs the normalized responses (`scenarios/{versioning,objectlock,uploads,tagging}.json` match line for line); it signs requests itself, since curl's `--aws-sigv4` misorders `x-amz-tagging` and `x-amz-tagging-directive`.
 
 ### Changed
 - XML escaping follows Go's `xml.EscapeText` (`&#34;`, `&#39;`), and S3 timestamps in XML carry milliseconds, as MinIO's do.
@@ -30,6 +35,8 @@ All notable changes to this project are documented here. The format follows
 - ListMultipartUploads matches MinIO: uploads oldest first, paging by `upload-id-marker` with `NextUploadIdMarker` and `IsTruncated`, the 10000 default, `EncodingType` echoed, and empty Initiator/Owner/StorageClass.
 
 ### Fixed
+- `metadata=true` listings report each object's real erasure data and parity counts in `Internal`, not 1/0.
+- Errors from CopyObject after the source is authorized name the source bucket and key, as MinIO's do.
 - `encoding-type=url` listings encode keys as MinIO does (space as `+`, `*` kept, `~` escaped).
 
 ## [0.4.0] - 2026-09-28

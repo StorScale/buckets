@@ -30,6 +30,9 @@ typedef struct {
   char *path;   /* decoded request path */
   char *bucket; /* decoded, NULL at service level */
   char *object; /* decoded, NULL at bucket level */
+  /* Bucket and key reported in error documents from here on, when set (MinIO's
+   * checkRequestAuthType rewrites them, e.g. to a copy source). Owned. */
+  char *err_bucket, *err_object;
   char access_key[256];
   buckets_auth_type auth;
   buckets_sigv4_result sig; /* valid for SigV4-authenticated requests */
@@ -74,6 +77,20 @@ buckets_s3_error buckets_s3_obj_error(buckets_obj_err e);
 buckets_s3_error buckets_s3_read_doc(s3_ctx *c);
 /* validateLengthAndChecksum + read: Content-MD5 or x-amz-checksum-* required and verified. */
 buckets_s3_error buckets_s3_read_checked_doc(s3_ctx *c);
+
+/* ---- tagging (tagging.c) ---- */
+/* Writes the S3 error for a tags parse error (buckets_tags_error). */
+void buckets_s3_write_tags_error(s3_ctx *c, const void *tags_error);
+/* Validates X-Amz-Tagging when present; writes the error and returns false. */
+bool buckets_s3_check_tagging_header(s3_ctx *c);
+/* Number of tags in a stored X-Amz-Tagging value (0 when unparsable). */
+int buckets_s3_tag_count(const char *user_tags);
+void buckets_s3_get_object_tagging(s3_ctx *c);
+void buckets_s3_put_object_tagging(s3_ctx *c);
+void buckets_s3_delete_object_tagging(s3_ctx *c);
+void buckets_s3_get_bucket_tagging(s3_ctx *c);
+void buckets_s3_put_bucket_tagging(s3_ctx *c);
+void buckets_s3_delete_bucket_tagging(s3_ctx *c);
 
 /* ---- object lock (objectlock.c) ---- */
 /* checkPutObjectLockAllowed: the retention and legal hold a write gets (from

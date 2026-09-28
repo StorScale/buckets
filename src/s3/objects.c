@@ -101,6 +101,19 @@ static void add_kv(buckets_xl_kv **kvs, size_t *n, const char *key, buckets_str 
   buckets_xl_kv_set(kvs, n, key, value.p ? value.p : "", value.n);
 }
 
+static void remove_kv(buckets_xl_kv *kvs, size_t *n, const char *key) {
+  for (size_t i = 0; i < *n;) {
+    if (strcasecmp(kvs[i].key, key) != 0) {
+      i++;
+      continue;
+    }
+    free(kvs[i].key);
+    free(kvs[i].value);
+    memmove(&kvs[i], &kvs[i + 1], (*n - i - 1) * sizeof(*kvs));
+    (*n)--;
+  }
+}
+
 static void free_kvs(buckets_xl_kv *kvs, size_t n) {
   for (size_t i = 0; i < n; i++) {
     free(kvs[i].key);
@@ -333,6 +346,11 @@ static void put_object(s3_ctx *c) {
   buckets_xl_kv *meta = NULL;
   size_t nmeta = 0;
   if (!serr) serr = extract_metadata(c, &meta, &nmeta);
+  if (!serr && !buckets_s3_check_tagging_header(c)) {
+    free_kvs(meta, nmeta);
+    body_close(&b);
+    return;
+  }
   if (!serr) serr = buckets_s3_lock_put_meta(c, c->object, &meta, &nmeta);
   if (serr) {
     free_kvs(meta, nmeta);
@@ -496,11 +514,21 @@ static bool check_preconditions(s3_ctx *c, const buckets_object_info *oi) {
 /* setObjectHeaders (user metadata as MinIO emits it). */
 static void write_object_headers(s3_ctx *c, const buckets_object_info *oi) {
   write_object_headers_min(c, oi);
+  const char *user_tags = buckets_object_meta(oi, "X-Amz-Tagging");
+  int ntags = buckets_s3_tag_count(user_tags);
+  if (ntags > 0) {
+    char n[16];
+    snprintf(n, sizeof(n), "%d", ntags);
+    buckets_http_resp_header(c->resp, "x-amz-tagging-count", n);
+    /* MinIO extension: the tags themselves, on request. */
+    buckets_str d = buckets_http_header_get(c->req, "X-Amz-Tagging-Directive");
+    if (d.p && buckets_str_eq_c(d, "ACCESS")) buckets_http_resp_header(c->resp, "X-Amz-Tagging", user_tags);
+  }
   for (size_t i = 0; i < oi->nmeta; i++) {
     const char *k = oi->meta[i].key;
     const char *v = (const char *)oi->meta[i].value;
     if (has_prefix_fold(k, BUCKETS_XL_RESERVED_PREFIX) || strcasecmp(k, "expires") == 0 ||
-        strcasecmp(k, "cache-control") == 0) {
+        strcasecmp(k, "cache-control") == 0 || strcasecmp(k, "X-Amz-Tagging") == 0) {
       continue;
     }
     if (has_prefix_fold(k, "x-amz-meta-") || has_prefix_fold(k, "x-minio-meta-")) {
@@ -704,15 +732,29 @@ static void copy_object(s3_ctx *c) {
     free(decoded);
     return;
   }
+  c->err_bucket = buckets_xstrdup(src_bucket);
+  c->err_object = buckets_xstrdup(src_object);
 
+  /* isDirectiveValid: absent, empty, COPY or REPLACE */
   buckets_str directive = buckets_http_header_get(c->req, "X-Amz-Metadata-Directive");
   bool replace = directive.p && buckets_str_eq_c(directive, "REPLACE");
-  if (directive.p && !replace && !buckets_str_eq_c(directive, "COPY")) {
+  if (directive.n && !replace && !buckets_str_eq_c(directive, "COPY")) {
     free(decoded);
     buckets_s3_write_error(c, BUCKETS_ERR_INVALID_METADATA_DIRECTIVE);
     return;
   }
-  if (strcmp(src_bucket, c->bucket) == 0 && strcmp(src_object, c->object) == 0 && !replace &&
+  buckets_str tag_directive = buckets_http_header_get(c->req, "X-Amz-Tagging-Directive");
+  bool replace_tags = tag_directive.p && buckets_str_eq_c(tag_directive, "REPLACE");
+  if (tag_directive.n && !replace_tags && !buckets_str_eq_c(tag_directive, "COPY")) {
+    free(decoded);
+    buckets_s3_write_error(c, BUCKETS_ERR_INVALID_TAG_DIRECTIVE);
+    return;
+  }
+  if (replace_tags && !buckets_s3_check_tagging_header(c)) {
+    free(decoded);
+    return;
+  }
+  if (strcmp(src_bucket, c->bucket) == 0 && strcmp(src_object, c->object) == 0 && !replace && !replace_tags &&
       !(version && *version)) {
     free(decoded);
     buckets_s3_write_error(c, BUCKETS_ERR_INVALID_COPY_DEST);
@@ -766,6 +808,15 @@ static void copy_object(s3_ctx *c) {
       buckets_xl_kv_set(&meta, &nmeta, k, src.meta[i].value, src.meta[i].value_len);
     }
   }
+  if (!serr) {
+    /* The source's tags, unless x-amz-tagging-directive is REPLACE. */
+    buckets_str th = buckets_http_header_get(c->req, "X-Amz-Tagging");
+    char *tags = replace_tags ? (th.p ? buckets_str_dup(th) : buckets_xstrdup(""))
+                              : buckets_xstrdup(buckets_object_meta(&src, "X-Amz-Tagging") ? buckets_object_meta(&src, "X-Amz-Tagging") : "");
+    remove_kv(meta, &nmeta, "X-Amz-Tagging");
+    if (*tags) buckets_xl_kv_set(&meta, &nmeta, "X-Amz-Tagging", tags, strlen(tags));
+    free(tags);
+  }
   if (!serr) serr = buckets_s3_lock_put_meta(c, c->object, &meta, &nmeta);
   buckets_object_info oi;
   if (!serr) {
@@ -805,6 +856,10 @@ static void mpu_create(s3_ctx *c) {
   buckets_xl_kv *meta = NULL;
   size_t nmeta = 0;
   buckets_s3_error serr = extract_metadata(c, &meta, &nmeta);
+  if (!serr && !buckets_s3_check_tagging_header(c)) {
+    free_kvs(meta, nmeta);
+    return;
+  }
   if (!serr) serr = buckets_s3_lock_put_meta(c, c->object, &meta, &nmeta);
   uint32_t ctype = 0;
   buckets_str alg = buckets_http_header_get(c->req, "X-Amz-Checksum-Algorithm");
@@ -1550,6 +1605,10 @@ static bool authorize_object_request(s3_ctx *c) {
   } else if (buckets_query_has(&c->q, "legal-hold")) {
     if (buckets_str_eq_c(m, "GET")) action = "s3:GetObjectLegalHold";
     else if (buckets_str_eq_c(m, "PUT")) action = "s3:PutObjectLegalHold";
+  } else if (buckets_query_has(&c->q, "tagging")) {
+    if (buckets_str_eq_c(m, "GET")) action = "s3:GetObjectTagging";
+    else if (buckets_str_eq_c(m, "PUT")) action = "s3:PutObjectTagging";
+    else if (buckets_str_eq_c(m, "DELETE")) action = "s3:DeleteObjectTagging";
   } else if (buckets_str_eq_c(m, "PUT")) {
     action = "s3:PutObject"; /* plus s3:GetObject on a copy source, checked by the handler */
   } else if (buckets_str_eq_c(m, "GET") || buckets_str_eq_c(m, "HEAD")) {
@@ -1594,6 +1653,13 @@ void buckets_s3_route_object(s3_ctx *c) {
     else buckets_s3_write_error(c, BUCKETS_ERR_METHOD_NOT_ALLOWED);
     return;
   }
+  if (buckets_query_has(&c->q, "tagging")) {
+    if (buckets_str_eq_c(m, "PUT")) buckets_s3_put_object_tagging(c);
+    else if (buckets_str_eq_c(m, "GET")) buckets_s3_get_object_tagging(c);
+    else if (buckets_str_eq_c(m, "DELETE")) buckets_s3_delete_object_tagging(c);
+    else buckets_s3_write_error(c, BUCKETS_ERR_METHOD_NOT_ALLOWED);
+    return;
+  }
   if (buckets_query_has(&c->q, "legal-hold")) {
     if (buckets_str_eq_c(m, "PUT")) buckets_s3_put_object_legal_hold(c);
     else if (buckets_str_eq_c(m, "GET")) buckets_s3_get_object_legal_hold(c);
@@ -1613,7 +1679,7 @@ void buckets_s3_route_object(s3_ctx *c) {
     else buckets_s3_write_error(c, BUCKETS_ERR_METHOD_NOT_ALLOWED);
     return;
   }
-  static const char *const unsupported[] = {"tagging", "retention", "legal-hold", "select", "restore", "torrent"};
+  static const char *const unsupported[] = {"select", "restore", "torrent"};
   for (size_t i = 0; i < BUCKETS_ARRAY_LEN(unsupported); i++) {
     if (buckets_query_has(&c->q, unsupported[i])) {
       buckets_s3_write_error(c, BUCKETS_ERR_NOT_IMPLEMENTED);
@@ -1882,15 +1948,18 @@ void buckets_s3_list_objects(s3_ctx *c, bool v2) {
     if (with_meta) {
       bool any = false;
       for (size_t k = 0; k < o->nmeta; k++) {
-        if (has_prefix_fold(o->meta[k].key, BUCKETS_XL_RESERVED_PREFIX)) continue;
+        if (has_prefix_fold(o->meta[k].key, BUCKETS_XL_RESERVED_PREFIX) || strcasecmp(o->meta[k].key, "X-Amz-Tagging") == 0)
+          continue;
         if (!any) buckets_xml_open(b, "UserMetadata");
         any = true;
         buckets_xml_elem(b, o->meta[k].key, (const char *)o->meta[k].value);
       }
       if (any) buckets_xml_close(b, "UserMetadata");
+      const char *ut = buckets_object_meta(o, "X-Amz-Tagging");
+      if (ut && *ut && buckets_s3_authorize(c, "s3:GetObjectTagging", c->bucket, o->name, NULL) == BUCKETS_ERR_NONE)
+        buckets_xml_elem(b, "UserTags", ut);
       buckets_xml_open(b, "Internal");
-      buckets_xml_elem(b, "K", "1");
-      buckets_xml_elem(b, "M", "0");
+      buckets_buf_appendf(b, "<K>%d</K><M>%d</M>", o->data_blocks, o->parity_blocks);
       buckets_xml_close(b, "Internal");
     }
     buckets_xml_close(b, "Contents");
@@ -1981,12 +2050,16 @@ void buckets_s3_list_object_versions(s3_ctx *c) {
     if (with_meta && !o->delete_marker) {
       bool any = false;
       for (size_t k = 0; k < o->nmeta; k++) {
-        if (has_prefix_fold(o->meta[k].key, BUCKETS_XL_RESERVED_PREFIX)) continue;
+        if (has_prefix_fold(o->meta[k].key, BUCKETS_XL_RESERVED_PREFIX) || strcasecmp(o->meta[k].key, "X-Amz-Tagging") == 0)
+          continue;
         if (!any) buckets_xml_open(b, "UserMetadata");
         any = true;
         buckets_xml_elem(b, o->meta[k].key, (const char *)o->meta[k].value);
       }
       if (any) buckets_xml_close(b, "UserMetadata");
+      const char *ut = buckets_object_meta(o, "X-Amz-Tagging");
+      if (ut && *ut && buckets_s3_authorize(c, "s3:GetObjectTagging", c->bucket, o->name, NULL) == BUCKETS_ERR_NONE)
+        buckets_xml_elem(b, "UserTags", ut);
     }
     buckets_xml_elem(b, "IsLatest", o->is_latest ? "true" : "false");
     buckets_xml_elem(b, "VersionId", o->version_id);
