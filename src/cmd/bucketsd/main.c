@@ -14,6 +14,7 @@
 #include "net/http.h"
 #include "s3/server.h"
 #include "erasure/layout.h"
+#include "heal/healer.h"
 #include "object/object.h"
 #include "storage/drive.h"
 #include "storage/format.h"
@@ -216,6 +217,8 @@ int main(int argc, char **argv) {
   buckets_format_result_free(&fr);
   buckets_layout_free(&layout);
 
+  buckets_healer *healer = buckets_healer_start(layer);
+
   buckets_s3_server s3;
   buckets_s3_server_init(&s3, layer, root_user, root_password, region);
 
@@ -262,6 +265,7 @@ int main(int argc, char **argv) {
 
   buckets_pool_free(api_pool); /* finishes in-flight handlers before their connections go */
   buckets_http_server_free(app.http);
+  buckets_healer_stop(healer);
   buckets_loop_free(g_loop);
   buckets_objlayer_free(layer);
   buckets_io_pool_set(NULL);

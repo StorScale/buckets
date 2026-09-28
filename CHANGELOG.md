@@ -16,11 +16,20 @@ All notable changes to this project are documented here. The format follows
 - Drive I/O thread pool (`core/pool`): metadata loads, shard hashing and writes, fsyncs, commits, deletes and shard reads now run on all drives of a set at once. `BUCKETS_IO_THREADS` sets its size (default: set size - 1). GETs from a 16-drive set run about 2x faster. The code is clean under ThreadSanitizer.
 - Request handlers and response-stream pulls run on a worker pool (`BUCKETS_API_THREADS`, default 2 x CPUs, minimum 8). The event-loop thread only moves bytes, so a slow drive or request no longer stalls other clients.
 - Namespace locks (`object/nslock`): object writes lock only their commit, as in MinIO. Reads hold a shared lock until EOF, and multipart parts share their upload's lock while complete and abort take it exclusively. A lock not granted in 30 s fails with `RequestTimeout`.
+- Object healing (`buckets_obj_heal`, after MinIO's erasure-healing.go):
+  - finds drives missing a version, or holding missing, truncated or (deep scan) bitrotten shards
+  - rebuilds only those shards from the intact drives and commits them to the outdated drives
+  - purges dangling versions by MinIO's `isObjectDangling` rules: offline or unreadable drives block a verdict, and corrupt shards never count
+- Background healer (`heal/healer`):
+  - an MRF queue fed by reads that hit a missing or rotten shard (bitrot queues a deep scan) and by writes that missed a drive
+  - replaced drives are filled in the background, with a resumable tracker in `.minio.sys/buckets-healing.json`
+- `tests/integration/heal.sh` covers bitrot, missing and inline repairs, an unreadable object that must not be purged, a dangling object that must be, and a replaced drive.
 - `tests/integration/concurrency.sh`: racing PUTs of one key (every drive must agree), 24 parallel round trips, overwrite during a slow read, CopyObject onto itself, and parallel multipart parts.
 - `tests/integration/erasure.sh`: 4- and 16-drive sets, bitrot, drive loss up to and beyond parity, drive replacement, and MinIO interop. `DRIVES=4` runs the minio-go conformance suite on an erasure set.
 
 ### Changed
 - The single-drive layer is now the erasure layer with one drive (EC 1+0); on-disk output is unchanged.
+- GetObject loads the first block before sending headers, so an object without enough intact shards gets `503 SlowDownRead` instead of a truncated `200`.
 
 ## [0.2.0] - 2026-09-27
 

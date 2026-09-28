@@ -237,6 +237,22 @@ static buckets_nslock_entry *lock_ns(buckets_objlayer *L, const char *vol, const
   return e;
 }
 
+/* ---- healing hand-off --------------------------------------------------- */
+
+void buckets_objlayer_set_degraded_hook(buckets_objlayer *L, buckets_degraded_fn fn, void *ud) {
+  L->on_degraded = fn;
+  L->on_degraded_ud = ud;
+}
+
+/* An object that is readable but not whole on every online drive. version_id
+ * is the canonical string ("null" for the null version). */
+static void report_degraded(buckets_objlayer *L, const char *bucket, const char *object, const char *version_id,
+                            bool deep) {
+  if (L->on_degraded) {
+    L->on_degraded(L->on_degraded_ud, bucket, object, version_id, deep);
+  }
+}
+
 /* ---- metadata quorum ------------------------------------------------------- */
 
 typedef struct {
@@ -635,7 +651,7 @@ static void commit_one(void *ctx, size_t i) {
  * directory <.minio.sys>/<src_dir>/<data_dir> into place. */
 static buckets_obj_err commit_version(buckets_eset *s, const char *bucket, const char *object, buckets_xl_object *o,
                                       const int *dist, const bool *alive, const buckets_buf *ibuf,
-                                      const char *src_dir, bool has_data_dir, int quorum) {
+                                      const char *src_dir, bool has_data_dir, int quorum, size_t *committed) {
   char *op = obj_path(object);
   commit_ctx c = {.s = s, .bucket = bucket, .object = object, .op = op, .src_dir = src_dir, .o = o,
                   .dist = dist, .alive = alive, .ibuf = ibuf, .has_data_dir = has_data_dir};
@@ -644,6 +660,7 @@ static buckets_obj_err commit_version(buckets_eset *s, const char *bucket, const
   buckets_io_parallel(s->n, commit_one, &c);
   int ok = 0;
   for (size_t i = 0; i < s->n; i++) ok += c.ok[i];
+  if (committed) *committed = (size_t)ok;
   free(op);
   return ok >= quorum ? BUCKETS_OBJ_OK : BUCKETS_OBJ_ERR_WRITE_QUORUM;
 }
@@ -656,6 +673,17 @@ typedef struct {
 static void cleanup_one(void *ctx, size_t i) {
   cleanup_ctx *c = ctx;
   if (c->s->drives[i]) buckets_drive_delete(c->s->drives[i], BUCKETS_META_BUCKET, c->tmp_dir, true, false);
+}
+
+/* A write that reached quorum but not every online drive goes to the MRF queue. */
+static void report_partial(buckets_objlayer *L, buckets_eset *s, const char *bucket, const char *object,
+                           const buckets_xl_object *o, size_t committed) {
+  size_t online = 0;
+  for (size_t i = 0; i < s->n; i++) online += s->drives[i] != NULL;
+  if (committed >= online) return;
+  char vid[37];
+  buckets_xl_version_id_string(o->version_id, vid);
+  report_degraded(L, bucket, object, vid, false);
 }
 
 static void cleanup_tmp(buckets_eset *s, const char *tmp_dir) {
@@ -746,10 +774,12 @@ buckets_obj_err buckets_obj_put(buckets_objlayer *L, const char *bucket, const c
     if (!err) {
       /* Like MinIO, only the commit is locked: the data is already staged. */
       buckets_nslock_entry *lk = lock_ns(L, bucket, object, true);
+      size_t committed = 0;
       err = lk ? commit_version(s, bucket, object, &o, e.dist, e.alive, e.inline_mode ? e.ibuf : NULL, tmp_dir.data,
-                                !e.inline_mode, write_quorum(e.data, e.parity))
+                                !e.inline_mode, write_quorum(e.data, e.parity), &committed)
                : BUCKETS_OBJ_ERR_TIMEOUT;
       buckets_nslock_unlock(lk);
+      if (!err && committed < s->n) report_partial(L, s, bucket, object, &o, committed);
     }
     if (!err && out) {
       o.ec_index = 1;
@@ -767,9 +797,14 @@ buckets_obj_err buckets_obj_put(buckets_objlayer *L, const char *bucket, const c
 /* ---- read ----------------------------------------------------------------------------- */
 
 struct buckets_obj_reader {
+  buckets_objlayer *L;
   buckets_eset *set;
-  char *bucket, *op;
-  char data_dir[37];
+  char *bucket, *object, *op;
+  char data_dir[37], version_id[37];
+  bool degraded; /* a drive was outdated, unreadable or rotten: report for healing */
+  bool quiet;    /* healing's own reader: never report */
+  bool bitrot;   /* a shard failed its hash check */
+  int64_t total_size;
   int data, parity, total;
   buckets_rs *rs;
   int drive_of_shard[MAX_SET]; /* -1 when no agreeing drive holds it */
@@ -792,6 +827,8 @@ struct buckets_obj_reader {
 void buckets_obj_reader_free(buckets_obj_reader *r) {
   if (!r) return;
   buckets_nslock_unlock(r->lk);
+  for (int i = 0; i < MAX_SET; i++) r->degraded |= r->bad[i];
+  if (r->degraded && !r->quiet) report_degraded(r->L, r->bucket, r->object, r->version_id, r->bitrot);
   for (int i = 0; i < MAX_SET; i++) {
     free(r->inl[i]);
     free(r->frames[i]);
@@ -799,6 +836,7 @@ void buckets_obj_reader_free(buckets_obj_reader *r) {
   free(r->block);
   free(r->parts);
   free(r->bucket);
+  free(r->object);
   free(r->op);
   buckets_rs_free(r->rs);
   free(r);
@@ -832,6 +870,59 @@ static buckets_obj_err obj_stat(buckets_objlayer *L, const char *bucket, const c
   return BUCKETS_OBJ_OK;
 }
 
+/* A reader over version o, from the drives whose metadata agrees (vidx >= 0),
+ * positioned at the start. */
+static buckets_obj_reader *reader_new(buckets_objlayer *L, buckets_eset *s, const char *bucket, const char *object,
+                                     const dmeta *m, const long *vidx, const buckets_xl_object *o) {
+  buckets_obj_reader *r = buckets_xcalloc(1, sizeof(*r));
+  r->L = L;
+  r->set = s;
+  r->bucket = buckets_xstrdup(bucket);
+  r->object = buckets_xstrdup(object);
+  r->op = obj_path(object);
+  buckets_xl_version_id_string(o->data_dir, r->data_dir);
+  buckets_xl_version_id_string(o->version_id, r->version_id);
+  r->data = o->ec_m > 0 ? o->ec_m : 1;
+  r->parity = o->ec_n;
+  r->total = r->data + r->parity;
+  r->rs = buckets_rs_new(r->data, r->parity);
+  r->is_inline = buckets_xl_kv_get(o->meta_sys, o->nmeta_sys, BUCKETS_XL_META_INLINE) != NULL;
+  for (int k = 0; k < MAX_SET; k++) r->drive_of_shard[k] = -1;
+  for (size_t i = 0; i < s->n; i++) {
+    if (vidx[i] < 0) {
+      if (s->drives[i]) r->degraded = true; /* online but outdated: worth a heal */
+      continue;
+    }
+    buckets_xl_object mine;
+    if (buckets_xl_object_decode(&m[i].x.versions[vidx[i]], &mine) != BUCKETS_XL_OK) continue;
+    int shard = mine.ec_index - 1;
+    buckets_xl_object_free(&mine);
+    if (shard < 0 || shard >= r->total || r->drive_of_shard[shard] >= 0) continue;
+    if (r->is_inline) {
+      buckets_str sh;
+      if (!buckets_xlmeta_inline_get(&m[i].x, r->version_id, &sh)) continue;
+      r->inl[i] = buckets_xmalloc(sh.n ? sh.n : 1);
+      memcpy(r->inl[i], sh.p, sh.n);
+      r->inl_len[i] = sh.n;
+    }
+    r->drive_of_shard[shard] = (int)i;
+  }
+  r->parts = buckets_xcalloc(o->nparts ? o->nparts : 1, sizeof(buckets_xl_part));
+  for (size_t i = 0; i < o->nparts; i++) {
+    r->parts[i] = (buckets_xl_part){o->parts[i].number, o->parts[i].size, o->parts[i].actual_size, NULL};
+    r->total_size += o->parts[i].size;
+  }
+  r->nparts = o->nparts;
+  r->shard_cap = (size_t)ceil_div(BUCKETS_BLOCK_SIZE, r->data);
+  for (int k = 0; k < r->total; k++) {
+    r->frames[k] = buckets_xmalloc(r->shard_cap + HASH_LEN);
+    r->shards[k] = r->frames[k] + HASH_LEN;
+  }
+  r->block = buckets_xmalloc(BUCKETS_BLOCK_SIZE);
+  r->block_index = -1;
+  return r;
+}
+
 static buckets_obj_err obj_open(buckets_objlayer *L, const char *bucket, const char *object, const char *version_id,
                                 int64_t offset, int64_t length, buckets_obj_reader **out, buckets_object_info *info) {
   buckets_eset *s;
@@ -845,42 +936,7 @@ static buckets_obj_err obj_open(buckets_objlayer *L, const char *bucket, const c
     free_metas(m, s->n);
     return BUCKETS_OBJ_ERR_NO_SUCH_KEY;
   }
-  buckets_obj_reader *r = buckets_xcalloc(1, sizeof(*r));
-  r->set = s;
-  r->bucket = buckets_xstrdup(bucket);
-  r->op = obj_path(object);
-  buckets_xl_version_id_string(o.data_dir, r->data_dir);
-  r->data = o.ec_m > 0 ? o.ec_m : 1;
-  r->parity = o.ec_n;
-  r->total = r->data + r->parity;
-  r->rs = buckets_rs_new(r->data, r->parity);
-  r->is_inline = buckets_xl_kv_get(o.meta_sys, o.nmeta_sys, BUCKETS_XL_META_INLINE) != NULL;
-  for (int k = 0; k < MAX_SET; k++) r->drive_of_shard[k] = -1;
-  char key[37];
-  buckets_xl_version_id_string(o.version_id, key);
-  for (size_t i = 0; i < s->n; i++) {
-    if (vidx[i] < 0) continue;
-    buckets_xl_object mine;
-    if (buckets_xl_object_decode(&m[i].x.versions[vidx[i]], &mine) != BUCKETS_XL_OK) continue;
-    int shard = mine.ec_index - 1;
-    buckets_xl_object_free(&mine);
-    if (shard < 0 || shard >= r->total || r->drive_of_shard[shard] >= 0) continue;
-    if (r->is_inline) {
-      buckets_str sh;
-      if (!buckets_xlmeta_inline_get(&m[i].x, key, &sh)) continue;
-      r->inl[i] = buckets_xmalloc(sh.n ? sh.n : 1);
-      memcpy(r->inl[i], sh.p, sh.n);
-      r->inl_len[i] = sh.n;
-    }
-    r->drive_of_shard[shard] = (int)i;
-  }
-  r->parts = buckets_xcalloc(o.nparts ? o.nparts : 1, sizeof(buckets_xl_part));
-  int64_t total_size = 0;
-  for (size_t i = 0; i < o.nparts; i++) {
-    r->parts[i] = (buckets_xl_part){o.parts[i].number, o.parts[i].size, o.parts[i].actual_size, NULL};
-    total_size += o.parts[i].size;
-  }
-  r->nparts = o.nparts;
+  buckets_obj_reader *r = reader_new(L, s, bucket, object, m, vidx, &o);
   if (info) fill_info(info, object, &o);
   buckets_xl_object_free(&o);
   free_metas(m, s->n);
@@ -891,14 +947,7 @@ static buckets_obj_err obj_open(buckets_objlayer *L, const char *bucket, const c
     r->part++;
   }
   r->part_off = off;
-  r->remaining = offset >= total_size ? 0 : BUCKETS_MIN(length, total_size - offset);
-  r->shard_cap = (size_t)ceil_div(BUCKETS_BLOCK_SIZE, r->data);
-  for (int k = 0; k < r->total; k++) {
-    r->frames[k] = buckets_xmalloc(r->shard_cap + HASH_LEN);
-    r->shards[k] = r->frames[k] + HASH_LEN;
-  }
-  r->block = buckets_xmalloc(BUCKETS_BLOCK_SIZE);
-  r->block_index = -1;
+  r->remaining = offset >= r->total_size ? 0 : BUCKETS_MIN(length, r->total_size - offset);
   *out = r;
   return BUCKETS_OBJ_OK;
 }
@@ -933,6 +982,7 @@ static bool read_shard(buckets_obj_reader *r, int k, int64_t bi, size_t sl) {
     buckets_log_warn("bitrot detected in %s/%s on %s (shard %d, block %lld)", r->bucket, r->op,
                      r->set->drives[i]->root, k, (long long)bi);
     r->bad[i] = true;
+    r->bitrot = true;
     return false;
   }
   return true;
@@ -1010,6 +1060,21 @@ buckets_obj_err buckets_obj_open(buckets_objlayer *L, const char *bucket, const 
   if (err) {
     buckets_nslock_unlock(lk);
     return err;
+  }
+  /* Load the first block now: an unreadable object fails before any
+   * response headers are committed, as in MinIO. */
+  buckets_obj_reader *r = *out;
+  while (r->part < r->nparts && r->part_off >= r->parts[r->part].size && r->remaining > 0) {
+    r->part++;
+    r->part_off = 0;
+  }
+  if (r->remaining > 0 && (r->part >= r->nparts || !load_block(r, r->part_off / BUCKETS_BLOCK_SIZE))) {
+    buckets_log_error("cannot read %s/%s: fewer than %d intact shards", bucket, object, r->data);
+    r->degraded = true;
+    buckets_obj_reader_free(r);
+    *out = NULL;
+    buckets_nslock_unlock(lk);
+    return BUCKETS_OBJ_ERR_READ_QUORUM;
   }
   /* Released at EOF, so a reader drained before a write (CopyObject onto
    * itself) never blocks that write's commit. */
@@ -1886,10 +1951,12 @@ static buckets_obj_err mpu_complete(buckets_objlayer *L, const char *bucket, con
       }
     }
     buckets_nslock_entry *lk = lock_ns(L, bucket, object, true);
+    size_t committed = 0;
     err = lk ? commit_version(u.set, bucket, object, &o, u.dist, u.has, NULL, dir, true,
-                              write_quorum(u.up.ec_m, u.up.ec_n))
+                              write_quorum(u.up.ec_m, u.up.ec_n), &committed)
              : BUCKETS_OBJ_ERR_TIMEOUT;
     buckets_nslock_unlock(lk);
+    if (!err && committed < u.set->n) report_partial(L, u.set, bucket, object, &o, committed);
     if (!err) {
       for (size_t i = 0; i < u.set->n; i++) {
         if (u.set->drives[i]) buckets_drive_delete(u.set->drives[i], BUCKETS_META_BUCKET, dir, true, true);
@@ -1998,4 +2065,375 @@ buckets_obj_err buckets_obj_mpu_list_uploads(buckets_objlayer *L, const char *bu
 void buckets_upload_info_free(buckets_upload_info *u, size_t n) {
   for (size_t i = 0; i < n; i++) free(u[i].object);
   free(u);
+}
+
+/* ---- healing ------------------------------------------------------------------------ */
+
+typedef struct {
+  buckets_eset *s;
+  const char *bucket, *op, *data_dir, *vkey;
+  const buckets_xl_object *o;
+  const long *vidx;
+  const dmeta *m;
+  bool deep, is_inline;
+  int data;
+  buckets_heal_state st[MAX_SET];
+  int parts_not_found[MAX_SET]; /* part files absent (not merely corrupt) */
+} check_ctx;
+
+static bool verify_frames(const uint8_t *buf, int64_t len, int64_t size, int data) {
+  int64_t shard_cap = ceil_div(BUCKETS_BLOCK_SIZE, data), off = 0;
+  for (int64_t done = 0; done < size; done += BUCKETS_BLOCK_SIZE) {
+    int64_t sl = ceil_div(BUCKETS_MIN((int64_t)BUCKETS_BLOCK_SIZE, size - done), data);
+    if (off + HASH_LEN + sl > len) return false;
+    uint8_t h[HASH_LEN];
+    buckets_hh256(buckets_bitrot_key, buf + off + HASH_LEN, (size_t)sl, h);
+    if (!buckets_ct_equal(h, buf + off, HASH_LEN)) return false;
+    off += HASH_LEN + shard_cap;
+  }
+  return true;
+}
+
+/* xl-storage CheckParts / VerifyFile for one drive. */
+static void check_one(void *ctx, size_t i) {
+  check_ctx *c = ctx;
+  buckets_drive *d = c->s->drives[i];
+  if (!d) {
+    c->st[i] = BUCKETS_HEAL_OFFLINE;
+    return;
+  }
+  if (c->vidx[i] < 0) {
+    c->st[i] = BUCKETS_HEAL_MISSING;
+    return;
+  }
+  c->st[i] = BUCKETS_HEAL_OK;
+  const buckets_xl_object *o = c->o;
+  if (o->type != BUCKETS_XL_TYPE_OBJECT) return;
+  if (c->is_inline) {
+    buckets_str sh;
+    if (!buckets_xlmeta_inline_get(&c->m[i].x, c->vkey, &sh) ||
+        (int64_t)sh.n != shard_file_size(o->size, c->data) + ceil_div(o->size, BUCKETS_BLOCK_SIZE) * HASH_LEN ||
+        (c->deep && !verify_frames((const uint8_t *)sh.p, (int64_t)sh.n, o->size, c->data))) {
+      c->st[i] = BUCKETS_HEAL_CORRUPT;
+    }
+    return;
+  }
+  for (size_t p = 0; p < o->nparts && c->st[i] == BUCKETS_HEAL_OK; p++) {
+    int64_t psize = o->parts[p].size;
+    int64_t want = shard_file_size(psize, c->data) + ceil_div(psize, BUCKETS_BLOCK_SIZE) * HASH_LEN;
+    buckets_buf path = BUCKETS_BUF_INIT;
+    buckets_buf_appendf(&path, "%s/%s/part.%d", c->op, c->data_dir, o->parts[p].number);
+    int64_t have = -1;
+    buckets_drive_err fe = buckets_drive_file_size(d, c->bucket, path.data, &have);
+    if (fe == BUCKETS_DRIVE_ERR_NOT_FOUND) c->parts_not_found[i]++;
+    if (fe != BUCKETS_DRIVE_OK || have != want) {
+      c->st[i] = BUCKETS_HEAL_CORRUPT;
+    } else if (c->deep && want > 0) {
+      uint8_t *buf = buckets_xmalloc((size_t)want);
+      size_t got = 0;
+      if (buckets_drive_read_at(d, c->bucket, path.data, 0, buf, (size_t)want, &got) != BUCKETS_DRIVE_OK ||
+          (int64_t)got != want || !verify_frames(buf, want, psize, c->data)) {
+        c->st[i] = BUCKETS_HEAL_CORRUPT;
+      }
+      free(buf);
+    }
+    buckets_buf_free(&path);
+  }
+}
+
+typedef struct {
+  buckets_eset *s;
+  const char *bucket, *op, *data_dir;
+  const bool *outdated;
+} stale_ctx;
+
+/* rename_data cannot replace a non-empty data dir: clear the old copy first. */
+static void remove_stale(void *ctx, size_t i) {
+  stale_ctx *c = ctx;
+  if (!c->outdated[i]) return;
+  char *p = join(c->op, c->data_dir);
+  buckets_drive_delete(c->s->drives[i], c->bucket, p, true, false);
+  free(p);
+}
+
+/* Rebuilds the shards of version o on the outdated drives and commits them. */
+static buckets_obj_err rebuild(buckets_objlayer *L, buckets_eset *s, const char *bucket, const char *object,
+                               const dmeta *m, const long *vidx_good, const buckets_xl_object *o, bool is_inline,
+                               bool *outdated, size_t *committed) {
+  int dist[MAX_SET];
+  for (size_t i = 0; i < s->n; i++) dist[i] = i < o->ec_dist_n ? o->ec_dist[i] : (int)i + 1;
+  char data_dir[37];
+  buckets_xl_version_id_string(o->data_dir, data_dir);
+  char *op = obj_path(object);
+  char *tmp_id = buckets_drive_tmp_name();
+  buckets_buf tmp_dir = BUCKETS_BUF_INIT;
+  buckets_buf_appendf(&tmp_dir, "tmp/%s", tmp_id);
+  free(tmp_id);
+  bool has_data = o->type == BUCKETS_XL_TYPE_OBJECT && !is_inline && o->nparts > 0;
+  encoder e = {.set = s, .data = o->ec_m > 0 ? o->ec_m : 1, .parity = o->ec_n, .inline_mode = is_inline};
+  memcpy(e.dist, dist, sizeof(dist));
+  buckets_obj_err err = BUCKETS_OBJ_OK;
+  if (o->type == BUCKETS_XL_TYPE_OBJECT) {
+    buckets_obj_reader *r = reader_new(L, s, bucket, object, m, vidx_good, o);
+    r->quiet = true;
+    for (size_t p = 0; p < r->nparts && !err; p++) {
+      buckets_buf file = BUCKETS_BUF_INIT;
+      buckets_buf_appendf(&file, "%s/%s/part.%d", tmp_dir.data, data_dir, r->parts[p].number);
+      /* Open writers (or inline buffers) only on the outdated drives. */
+      e.file = file.data;
+      for (size_t i = 0; i < s->n; i++) {
+        e.alive[i] = false;
+        e.w[i] = NULL;
+        if (p == 0) e.ibuf[i] = BUCKETS_BUF_INIT;
+        if (!outdated[i]) continue;
+        e.alive[i] = is_inline || buckets_drive_create_file(s->drives[i], BUCKETS_META_BUCKET, file.data, &e.w[i]) ==
+                                      BUCKETS_DRIVE_OK;
+        if (!e.alive[i]) outdated[i] = false;
+      }
+      r->part = p;
+      r->block_index = -1;
+      e.shards = r->shards;
+      int64_t ps = r->parts[p].size;
+      for (int64_t bi = 0; bi * BUCKETS_BLOCK_SIZE < ps; bi++) {
+        if (!load_block(r, bi)) {
+          err = BUCKETS_OBJ_ERR_READ_QUORUM;
+          break;
+        }
+        e.sl = (size_t)ceil_div((int64_t)r->block_len, e.data);
+        if (e.parity) buckets_rs_encode(r->rs, r->shards, e.sl); /* regenerate parity from the data */
+        buckets_io_parallel(s->n, enc_write, &e);
+      }
+      e.abort_writes = err != BUCKETS_OBJ_OK;
+      buckets_io_parallel(s->n, enc_close, &e);
+      for (size_t i = 0; i < s->n; i++) outdated[i] &= e.alive[i];
+      buckets_buf_free(&file);
+    }
+    buckets_obj_reader_free(r);
+  }
+  if (!err) {
+    if (has_data) {
+      stale_ctx sc = {s, bucket, op, data_dir, outdated};
+      buckets_io_parallel(s->n, remove_stale, &sc);
+    }
+    buckets_xl_object copy = *o; /* commit_version only reads it */
+    err = commit_version(s, bucket, object, &copy, dist, outdated, is_inline ? e.ibuf : NULL, tmp_dir.data, has_data, 1,
+                         committed);
+  }
+  if (has_data || err) cleanup_tmp(s, tmp_dir.data);
+  encoder_free(&e);
+  buckets_buf_free(&tmp_dir);
+  free(op);
+  return err;
+}
+
+typedef struct {
+  buckets_eset *s;
+  const char *bucket, *op;
+  uint8_t id[16];
+  char key[37];
+  const bool *has;
+} purge_ctx;
+
+static void purge_one(void *ctx, size_t i) {
+  purge_ctx *c = ctx;
+  if (!c->has[i]) return;
+  /* Reuse DeleteObject's per-drive step on a fresh read of this drive. */
+  dmeta m;
+  memset(&m, 0, sizeof(m));
+  char *mp = join(c->op, XL_META);
+  buckets_buf raw = BUCKETS_BUF_INIT;
+  if (buckets_drive_read_all(c->s->drives[i], c->bucket, mp, &raw) == BUCKETS_DRIVE_OK) {
+    m.loaded = buckets_xlmeta_parse(raw.data, raw.len, &m.x) == BUCKETS_XL_OK;
+  }
+  buckets_buf_free(&raw);
+  free(mp);
+  del_ctx d = {.s = c->s, .bucket = c->bucket, .op = c->op};
+  dmeta *arr = buckets_xcalloc(c->s->n, sizeof(dmeta));
+  arr[i] = m;
+  d.m = arr;
+  memcpy(d.id, c->id, 16);
+  memcpy(d.key, c->key, sizeof(d.key));
+  delete_one(&d, i);
+  if (arr[i].loaded) buckets_xlmeta_free(&arr[i].x);
+  free(arr);
+}
+
+static buckets_obj_err heal_version(buckets_objlayer *L, buckets_eset *s, const char *bucket, const char *object,
+                                    const uint8_t id[16], const buckets_heal_opts *opts, buckets_heal_result *res) {
+  char *op = obj_path(object);
+  dmeta m[MAX_SET];
+  load_metas(s, bucket, op, m);
+  char vkey[37];
+  buckets_xl_version_id_string(id, vkey);
+  long vidx[MAX_SET];
+  buckets_xl_object o;
+  buckets_obj_err err = quorum_version(m, s->n, vkey, &o, vidx);
+  res->versions++;
+  res->ndrives = s->n;
+  /* MinIO's isObjectDangling inputs: xl.meta that is definitely absent vs.
+   * unknown (offline drive, unreadable file), from the drives' own copies. */
+  bool has[MAX_SET];
+  size_t nhas = 0, nf_meta = 0, na_meta = 0;
+  const buckets_xl_header *valid = NULL;
+  for (size_t i = 0; i < s->n; i++) {
+    has[i] = false;
+    long k = s->drives[i] && m[i].loaded ? buckets_xlmeta_find(&m[i].x, id) : -1;
+    if (k >= 0) {
+      has[i] = true;
+      nhas++;
+      if (!valid) valid = &m[i].x.versions[k].hdr;
+    } else if (s->drives[i] && (m[i].missing || m[i].loaded)) {
+      nf_meta++;
+    } else {
+      na_meta++;
+    }
+  }
+
+  buckets_heal_state st[MAX_SET];
+  bool dangling = false;
+  size_t nf_parts = 0;
+  if (err == BUCKETS_OBJ_OK) {
+    bool is_inline = buckets_xl_kv_get(o.meta_sys, o.nmeta_sys, BUCKETS_XL_META_INLINE) != NULL;
+    char data_dir[37];
+    buckets_xl_version_id_string(o.data_dir, data_dir);
+    check_ctx c = {.s = s, .bucket = bucket, .op = op, .data_dir = data_dir, .vkey = vkey, .o = &o, .vidx = vidx,
+                   .m = m, .deep = opts && opts->deep, .is_inline = is_inline, .data = o.ec_m > 0 ? o.ec_m : 1};
+    buckets_io_parallel(s->n, check_one, &c);
+    memcpy(st, c.st, sizeof(st));
+    for (size_t i = 0; i < s->n; i++) nf_parts = BUCKETS_MAX(nf_parts, (size_t)c.parts_not_found[i]);
+    res->size = o.size;
+    long good[MAX_SET];
+    bool outdated[MAX_SET];
+    int ngood = 0, nbad = 0;
+    for (size_t i = 0; i < s->n; i++) {
+      good[i] = st[i] == BUCKETS_HEAL_OK ? vidx[i] : -1;
+      ngood += st[i] == BUCKETS_HEAL_OK;
+      nbad += st[i] == BUCKETS_HEAL_MISSING || st[i] == BUCKETS_HEAL_CORRUPT;
+      outdated[i] = st[i] == BUCKETS_HEAL_MISSING || st[i] == BUCKETS_HEAL_CORRUPT;
+    }
+    if (o.type == BUCKETS_XL_TYPE_OBJECT && ngood < c.data) {
+      err = BUCKETS_OBJ_ERR_READ_QUORUM; /* unless it proves dangling below */
+      dangling = true;
+    } else if (nbad && !(opts && opts->dry_run)) {
+      size_t committed = 0;
+      err = rebuild(L, s, bucket, object, m, good, &o, is_inline, outdated, &committed);
+      for (size_t i = 0; i < s->n; i++) {
+        if (outdated[i] && !err) res->healed++;
+      }
+      if (!err) {
+        for (size_t i = 0; i < s->n; i++) {
+          res->after[i] = outdated[i] ? BUCKETS_HEAL_OK : st[i];
+          res->before[i] = st[i];
+        }
+      }
+    }
+    if (err || !nbad || (opts && opts->dry_run)) {
+      for (size_t i = 0; i < s->n; i++) res->before[i] = res->after[i] = st[i];
+    }
+    buckets_xl_object_free(&o);
+  } else if (nhas > 0) {
+    dangling = true; /* some copies, but no quorum on them: maybe dangling */
+    for (size_t i = 0; i < s->n; i++) {
+      st[i] = !s->drives[i] ? BUCKETS_HEAL_OFFLINE : has[i] ? BUCKETS_HEAL_OK : BUCKETS_HEAL_MISSING;
+      res->before[i] = res->after[i] = st[i];
+    }
+  }
+  if (dangling) {
+    /* isObjectDangling: never while any drive's answer is unknown; delete
+     * markers need a majority missing; objects need more than `parity`
+     * drives definitely without the metadata or without a part. Corrupt
+     * shards never count: they prove the object existed. */
+    int parity = valid ? valid->ec_n : 0;
+    if (na_meta > 0) dangling = false;
+    else if (valid && valid->type != BUCKETS_XL_TYPE_OBJECT) dangling = nf_meta > (s->n + 1) / 2;
+    else dangling = nf_meta > (size_t)parity || nf_parts > (size_t)parity;
+  }
+  if (dangling) {
+    if (opts && opts->remove_dangling && !opts->dry_run) {
+      buckets_log_info("removing dangling %s/%s (version %s)", bucket, object, vkey);
+      purge_ctx pc = {.s = s, .bucket = bucket, .op = op, .has = has};
+      memcpy(pc.id, id, 16);
+      memcpy(pc.key, vkey, sizeof(pc.key));
+      buckets_io_parallel(s->n, purge_one, &pc);
+      res->dangling++;
+      for (size_t i = 0; i < s->n; i++) res->after[i] = s->drives[i] ? BUCKETS_HEAL_OK : BUCKETS_HEAL_OFFLINE;
+      err = BUCKETS_OBJ_OK;
+    } else {
+      err = BUCKETS_OBJ_ERR_READ_QUORUM;
+    }
+  }
+  free_metas(m, s->n);
+  free(op);
+  return err;
+}
+
+buckets_obj_err buckets_obj_heal(buckets_objlayer *L, const char *bucket, const char *object, const char *version_id,
+                                 const buckets_heal_opts *opts, buckets_heal_result *res) {
+  buckets_heal_result local;
+  if (!res) res = &local;
+  memset(res, 0, sizeof(*res));
+  buckets_obj_err err = buckets_obj_stat_bucket(L, bucket);
+  if (err) return err;
+  if ((err = buckets_obj_check_name(object)) != BUCKETS_OBJ_OK) return err;
+  buckets_eset *s = set_for(L, object);
+  buckets_nslock_entry *lk = lock_ns(L, bucket, object, true);
+  if (!lk) return BUCKETS_OBJ_ERR_TIMEOUT;
+  /* The versions to visit: one, or the union over every drive. */
+  uint8_t (*ids)[16] = NULL;
+  size_t nids = 0;
+  if (version_id) {
+    ids = buckets_xcalloc(1, 16);
+    if (!buckets_xl_version_id_parse(version_id, ids[0])) err = BUCKETS_OBJ_ERR_NO_SUCH_VERSION;
+    nids = 1;
+  } else {
+    char *op = obj_path(object);
+    dmeta m[MAX_SET];
+    load_metas(s, bucket, op, m);
+    free(op);
+    for (size_t i = 0; i < s->n; i++) {
+      for (size_t k = 0; m[i].loaded && k < m[i].x.n; k++) {
+        bool seen = false;
+        for (size_t j = 0; j < nids && !seen; j++) seen = memcmp(ids[j], m[i].x.versions[k].hdr.version_id, 16) == 0;
+        if (seen) continue;
+        ids = buckets_xrealloc(ids, (nids + 1) * 16);
+        memcpy(ids[nids++], m[i].x.versions[k].hdr.version_id, 16);
+      }
+    }
+    free_metas(m, s->n);
+    if (!nids) err = BUCKETS_OBJ_ERR_NO_SUCH_KEY;
+  }
+  for (size_t j = 0; j < nids && !err; j++) {
+    buckets_heal_result one;
+    memset(&one, 0, sizeof(one));
+    err = heal_version(L, s, bucket, object, ids[j], opts, &one);
+    res->ndrives = one.ndrives;
+    res->versions += one.versions;
+    res->healed += one.healed;
+    res->dangling += one.dangling;
+    if (j == 0) {
+      res->size = one.size;
+      memcpy(res->before, one.before, sizeof(res->before));
+      memcpy(res->after, one.after, sizeof(res->after));
+    } else { /* worst state per drive across versions */
+      for (size_t i = 0; i < one.ndrives; i++) {
+        res->before[i] = BUCKETS_MAX(res->before[i], one.before[i]);
+        res->after[i] = BUCKETS_MAX(res->after[i], one.after[i]);
+      }
+    }
+  }
+  free(ids);
+  buckets_nslock_unlock(lk);
+  return err;
+}
+
+size_t buckets_obj_heal_bucket(buckets_objlayer *L, const char *bucket) {
+  size_t made = 0;
+  for (size_t i = 0; i < L->nall; i++) {
+    if (!L->all[i]) continue;
+    if (buckets_drive_stat_vol(L->all[i], bucket, NULL) == BUCKETS_DRIVE_ERR_NOT_FOUND &&
+        buckets_drive_make_vol(L->all[i], bucket) == BUCKETS_DRIVE_OK) {
+      made++;
+    }
+  }
+  return made;
 }

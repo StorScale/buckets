@@ -87,7 +87,8 @@ Single-node S3 is feature-complete for the core API. It is verified three ways:
 - `tests/integration/erasure.sh`: 4- and 16-drive sets, drive loss up to and beyond parity, and MinIO reading Buckets-written sets. minio-go conformance also passes on a 4-drive set (`DRIVES=4`).
 - A drive I/O thread pool fans each operation out across the drives of a set.
 - Request handlers run on worker threads, with MinIO-style namespace locks keeping concurrent writers consistent.
-- Still to come in Phase 2: object healing and MRF, multiple pools, distributed mode (internode RPC, remote drives, dsync locks), and TLS.
+- Object healing, an MRF queue for heal-on-read and partial writes, and background healing of replaced drives.
+- Still to come in Phase 2: multiple pools, distributed mode (internode RPC, remote drives, dsync locks), and TLS.
 
 **Known interim choices, each replaced in a later phase:**
 - One event-loop thread moves bytes for all connections. Handlers and stream pulls run on a worker pool, and each fans out per-drive work to the drive I/O pool. Request bodies are still spooled synchronously on the loop thread. Multiple reactors, then io_uring, follow.

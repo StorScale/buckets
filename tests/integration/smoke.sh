@@ -102,6 +102,9 @@ check "list after deletes"         200 "<KeyCount>0</KeyCount>"    -- "${S3[@]}"
 check "delete bucket"              204 ""                          -- "${S3[@]}" -X DELETE "$EP/photos"
 check "delete missing bucket"      404 "NoSuchBucket"              -- "${S3[@]}" -X DELETE "$EP/photos"
 
+if grep -q 'Sanitizer\|runtime error' "$LOG"; then
+  fail=$((fail + 1)); echo "  FAIL  sanitizer report in the server log"
+fi
 echo "smoke: $pass passed, $fail failed"
 if ((fail)); then
   echo "--- server log ---"

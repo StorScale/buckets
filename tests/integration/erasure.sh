@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Erasure-coding resilience on one node: 4- and 16-drive sets, bitrot,
 # drive loss up to parity, loss beyond parity, and a replaced (empty) drive.
+# Background healing is covered by heal.sh.
 #   tests/integration/erasure.sh [bucketsd]
 # With MINIO_BIN set, real MinIO must also read the Buckets-written set.
 set -euo pipefail
@@ -61,8 +62,11 @@ for n in 4 16; do
   expect "read large after losing $parity drives" "$(curl -s "${S3[@]}" "$EP/ecbucket/big.bin" | md5of)" "$BIG"
   expect "read small after losing $parity drives" "$(curl -s "${S3[@]}" "$EP/ecbucket/small.bin" | md5of)" "$SMALL"
 
-  # lose one more: reads fail with an error, never wrong data
-  rm -rf "$D/d$((parity + 1))/ecbucket"
+  # lose one more than parity at once: reads fail with an error, never wrong
+  # data. (The reads above queued heals that restore the drives, so let them
+  # settle first.)
+  sleep 1
+  for i in $(seq 1 $((parity + 1))); do rm -rf "$D/d$i/ecbucket/big.bin"; done
   code=$(status "$EP/ecbucket/big.bin")
   expect "read fails beyond parity" "$([[ "$code" != 200 ]] && echo refused || echo "served $code")" refused
   stop
@@ -99,5 +103,8 @@ if [[ -n "${MINIO_BIN:-}" ]]; then
   stop
 fi
 
+if grep -q 'Sanitizer\|runtime error' "$WORK/log"; then
+  fail=$((fail + 1)); echo "  FAIL  sanitizer report:"; grep -A20 'Sanitizer\|runtime error' "$WORK/log" | head -40
+fi
 echo "erasure: $pass passed, $fail failed"
 ((fail == 0)) || { cat "$WORK/log"; exit 1; }

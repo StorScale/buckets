@@ -532,6 +532,16 @@ void buckets_dir_list_free(buckets_dir_list *l) {
   memset(l, 0, sizeof(*l));
 }
 
+buckets_drive_err buckets_drive_file_size(buckets_drive *d, const char *vol, const char *path, int64_t *size) {
+  char *p = vpath(d, vol, path);
+  struct stat st;
+  buckets_drive_err err = stat(p, &st) != 0 ? from_errno(errno) : S_ISREG(st.st_mode) ? BUCKETS_DRIVE_OK
+                                                                                     : BUCKETS_DRIVE_ERR_NOT_FOUND;
+  if (!err) *size = (int64_t)st.st_size;
+  free(p);
+  return err;
+}
+
 int buckets_drive_stat(buckets_drive *d, const char *vol, const char *path) {
   char *p = vpath(d, vol, path);
   struct stat st;

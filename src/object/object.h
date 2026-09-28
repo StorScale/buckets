@@ -70,7 +70,17 @@ typedef struct buckets_objlayer {
   buckets_drive **all; /* every slot, set-major */
   size_t nall;
   struct buckets_nslock *locks;
+  void (*on_degraded)(void *ud, const char *bucket, const char *object, const char *version_id, bool deep);
+  void *on_degraded_ud;
 } buckets_objlayer;
+
+/* Called (from any thread) for objects found or left short of a drive: reads
+ * that met a missing or rotten shard, and writes that missed a drive. The
+ * healer queues them (MinIO's MRF). deep asks for bitrot verification, since a
+ * rotten shard keeps its size. */
+typedef void (*buckets_degraded_fn)(void *ud, const char *bucket, const char *object, const char *version_id,
+                                    bool deep);
+void buckets_objlayer_set_degraded_hook(buckets_objlayer *L, buckets_degraded_fn fn, void *ud);
 
 /* Takes ownership of the drives in f (f->slots is cleared). parity < 0 uses
  * MinIO's default for the set size. */
@@ -160,6 +170,41 @@ typedef struct {
 buckets_obj_err buckets_obj_list(buckets_objlayer *L, const char *bucket, const char *prefix, const char *marker,
                                  const char *delimiter, int max_keys, buckets_obj_listing *out);
 void buckets_obj_list_free(buckets_obj_listing *l);
+
+/* ---- healing ----
+ * Replaces MinIO's cmd/erasure-healing.go. Healing rebuilds every shard an
+ * online drive is missing, from the drives that agree on the version. */
+
+#define BUCKETS_MAX_SET_DRIVES 16
+
+typedef enum {
+  BUCKETS_HEAL_OK = 0,
+  BUCKETS_HEAL_OFFLINE, /* drive unavailable: nothing can be done now */
+  BUCKETS_HEAL_MISSING, /* no (or a different) copy of the version */
+  BUCKETS_HEAL_CORRUPT, /* part files missing, truncated or (deep) bitrotten */
+} buckets_heal_state;
+
+typedef struct {
+  bool deep;            /* verify every shard's bitrot hash, not just sizes */
+  bool dry_run;         /* report only */
+  bool remove_dangling; /* delete versions that can never reach read quorum */
+} buckets_heal_opts;
+
+typedef struct {
+  size_t ndrives;
+  buckets_heal_state before[BUCKETS_MAX_SET_DRIVES], after[BUCKETS_MAX_SET_DRIVES];
+  size_t versions;      /* versions examined */
+  size_t healed;        /* drive copies rewritten */
+  size_t dangling;      /* versions removed as dangling */
+  int64_t size;         /* of the latest version examined */
+} buckets_heal_result;
+
+/* Heals one version, or with version_id NULL every version found on any
+ * drive. Takes the object's write lock. */
+buckets_obj_err buckets_obj_heal(buckets_objlayer *L, const char *bucket, const char *object, const char *version_id,
+                                 const buckets_heal_opts *opts, buckets_heal_result *res);
+/* Creates the bucket's volume on online drives that lack it. Returns the number created. */
+size_t buckets_obj_heal_bucket(buckets_objlayer *L, const char *bucket);
 
 /* ---- multipart uploads ----
  * .minio.sys/multipart/<sha256(bucket/object)>/<upload-uuid>/xl.meta

@@ -102,6 +102,9 @@ typedef struct {
 buckets_drive_err buckets_drive_list_dir(buckets_drive *d, const char *vol, const char *dir, buckets_dir_list *out);
 void buckets_dir_list_free(buckets_dir_list *l);
 
+/* Size of a regular file (StatInfoFile); NOT_FOUND for directories. */
+buckets_drive_err buckets_drive_file_size(buckets_drive *d, const char *vol, const char *path, int64_t *size);
+
 /* 0 = missing, 1 = file, 2 = directory */
 int buckets_drive_stat(buckets_drive *d, const char *vol, const char *path);
 
