@@ -4,13 +4,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 
 #include "core/log.h"
 #include "core/loop.h"
 #include "net/http.h"
 #include "s3/server.h"
+#include "erasure/layout.h"
+#include "object/object.h"
 #include "storage/drive.h"
+#include "storage/format.h"
 
 #ifndef BUCKETS_VERSION
 #define BUCKETS_VERSION "dev"
@@ -67,7 +71,8 @@ static const char *env2(const char *primary, const char *compat) {
 
 static void usage(FILE *f) {
   fprintf(f,
-          "Usage: bucketsd server [--address [HOST]:PORT] DIR\n"
+          "Usage: bucketsd server [--address [HOST]:PORT] DRIVE...\n"
+          "  DRIVE may use MinIO ellipses, e.g. /mnt/disk{1...16}\n"
           "\n"
           "Environment:\n"
           "  BUCKETS_ROOT_USER / MINIO_ROOT_USER          root access key (default minioadmin)\n"
@@ -108,7 +113,8 @@ int main(int argc, char **argv) {
   }
 
   const char *address = ":9000";
-  const char *dir = NULL;
+  char **drive_args = buckets_xcalloc((size_t)argc, sizeof(char *));
+  size_t ndrive_args = 0;
   for (int i = 2; i < argc; i++) {
     if (strcmp(argv[i], "--address") == 0 && i + 1 < argc) {
       address = argv[++i];
@@ -118,14 +124,11 @@ int main(int argc, char **argv) {
     } else if (argv[i][0] == '-') {
       fprintf(stderr, "unknown flag: %s\n", argv[i]);
       return 2;
-    } else if (!dir) {
-      dir = argv[i];
     } else {
-      fprintf(stderr, "multiple drives are not supported yet (erasure coding is a later milestone)\n");
-      return 2;
+      drive_args[ndrive_args++] = argv[i];
     }
   }
-  if (!dir) {
+  if (!ndrive_args) {
     usage(stderr);
     return 2;
   }
@@ -157,17 +160,51 @@ int main(int argc, char **argv) {
   }
   const char *region = env2("BUCKETS_REGION", "MINIO_REGION");
 
-  buckets_drive *drive = NULL;
-  buckets_drive_err derr = buckets_drive_open(dir, &drive);
-  if (derr != BUCKETS_DRIVE_OK) {
-    buckets_log_error("open drive %s: %s", dir, buckets_drive_strerror(derr));
+  /* Drives -> erasure sets (MinIO's ellipses + set sizing), then format.json
+   * negotiation places each drive by its UUID. */
+  const char *sdc = env2("BUCKETS_ERASURE_SET_DRIVE_COUNT", "MINIO_ERASURE_SET_DRIVE_COUNT");
+  char lerr[512];
+  buckets_pool_layout layout;
+  if (!buckets_layout_pool(drive_args, ndrive_args, sdc ? (size_t)strtoul(sdc, NULL, 10) : 0, &layout, lerr,
+                           sizeof(lerr))) {
+    buckets_log_error("invalid drive layout: %s", lerr);
     return 1;
   }
-  buckets_log_info("drive %s %s (deployment %s)", dir, drive->freshly_formatted ? "formatted" : "opened",
-                   drive->deployment_id);
+  free(drive_args);
+  buckets_drive **drives = buckets_xcalloc(layout.ndrives, sizeof(buckets_drive *));
+  for (size_t i = 0; i < layout.ndrives; i++) {
+    if (strstr(layout.drives[i], "://")) {
+      buckets_log_error("remote drives (%s) are not supported yet; distributed mode is in progress", layout.drives[i]);
+      return 1;
+    }
+    if (buckets_drive_open_raw(layout.drives[i], &drives[i]) != BUCKETS_DRIVE_OK) {
+      buckets_log_warn("drive %s is unavailable; continuing without it", layout.drives[i]);
+      drives[i] = NULL;
+    }
+  }
+  buckets_format_result fr;
+  if (!buckets_format_negotiate(drives, layout.ndrives, layout.set_size, &fr, lerr, sizeof(lerr))) {
+    buckets_log_error("%s", lerr);
+    return 1;
+  }
+  free(drives);
+  /* Parity: MINIO_STORAGE_CLASS_STANDARD=EC:N, else MinIO's default for the set size. */
+  int parity = -1;
+  const char *sc = env2("BUCKETS_STORAGE_CLASS_STANDARD", "MINIO_STORAGE_CLASS_STANDARD");
+  if (sc && strncasecmp(sc, "EC:", 3) == 0) parity = atoi(sc + 3);
+  buckets_objlayer *layer = buckets_objlayer_new(&fr, parity);
+  buckets_log_info("%zu drive%s in %zu set%s of %zu (EC %d+%d), deployment %s%s", layout.ndrives,
+                   layout.ndrives == 1 ? "" : "s", layer->nsets, layer->nsets == 1 ? "" : "s", layout.set_size,
+                   (int)layout.set_size - layer->sets[0].parity, layer->sets[0].parity, layer->deployment_id_str,
+                   fr.formatted_fresh ? " (newly formatted)" : "");
+  if (buckets_objlayer_online(layer) < layout.ndrives) {
+    buckets_log_warn("%zu of %zu drives are offline", layout.ndrives - buckets_objlayer_online(layer), layout.ndrives);
+  }
+  buckets_format_result_free(&fr);
+  buckets_layout_free(&layout);
 
   buckets_s3_server s3;
-  buckets_s3_server_init(&s3, drive, root_user, root_password, region);
+  buckets_s3_server_init(&s3, layer, root_user, root_password, region);
 
   g_loop = buckets_loop_new();
   if (!g_loop) {
@@ -175,7 +212,7 @@ int main(int argc, char **argv) {
     return 1;
   }
   char spool[4096];
-  snprintf(spool, sizeof(spool), "%s/" BUCKETS_META_BUCKET "/tmp", drive->root);
+  snprintf(spool, sizeof(spool), "%s/" BUCKETS_META_BUCKET "/tmp", buckets_objlayer_scratch(layer)->root);
   buckets_http_config hcfg = {
       .host = host,
       .port = port,
@@ -205,7 +242,7 @@ int main(int argc, char **argv) {
 
   buckets_http_server_free(app.http);
   buckets_loop_free(g_loop);
-  buckets_drive_close(drive);
+  buckets_objlayer_free(layer);
   free(host);
   buckets_log_info("bucketsd stopped");
   return rc == 0 ? 0 : 1;

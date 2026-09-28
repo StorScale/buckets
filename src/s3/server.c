@@ -26,15 +26,15 @@
 #define DEFAULT_REGION "us-east-1"
 
 
-void buckets_s3_server_init(buckets_s3_server *s, buckets_drive *drive, const char *root_user,
+void buckets_s3_server_init(buckets_s3_server *s, buckets_objlayer *layer, const char *root_user,
                             const char *root_password, const char *region) {
   memset(s, 0, sizeof(*s));
-  s->drive = drive;
+  s->layer = layer;
   s->root_user = root_user;
   s->root_password = root_password;
   s->region = region ? region : "";
   uint8_t h[32];
-  buckets_sha256(drive->drive_id, strlen(drive->drive_id), h);
+  buckets_sha256(layer->deployment_id_str, strlen(layer->deployment_id_str), h);
   buckets_hex_encode(h, 32, s->host_id);
 }
 
@@ -199,10 +199,11 @@ static buckets_s3_error authenticate(s3_ctx *c) {
 /* ---- service-level handlers ---------------------------------------------- */
 
 static void list_buckets(s3_ctx *c) {
-  buckets_vol_info *vols;
+  buckets_bucket_info *vols;
   size_t n;
-  if (buckets_drive_list_vols(c->s->drive, &vols, &n) != BUCKETS_DRIVE_OK) {
-    buckets_s3_write_error(c, BUCKETS_ERR_INTERNAL_ERROR);
+  buckets_obj_err lerr = buckets_obj_list_buckets(c->s->layer, &vols, &n);
+  if (lerr) {
+    buckets_s3_write_error(c, buckets_s3_obj_error(lerr));
     return;
   }
   buckets_buf *b = &c->resp->body;
@@ -218,7 +219,7 @@ static void list_buckets(s3_ctx *c) {
     /* Creation time comes from bucket metadata (as in MinIO), else the directory. */
     time_t created = vols[i].created;
     buckets_bucket_meta bm;
-    if (buckets_bucket_meta_load(c->s->drive, vols[i].name, &bm)) {
+    if (buckets_bucket_meta_load(c->s->layer, vols[i].name, &bm)) {
       int64_t ns = buckets_bucket_meta_created_ns(&bm);
       if (ns) created = (time_t)(ns / 1000000000LL);
       buckets_bucket_meta_free(&bm);
@@ -232,15 +233,13 @@ static void list_buckets(s3_ctx *c) {
   }
   buckets_xml_close(b, "Buckets");
   buckets_xml_close(b, "ListAllMyBucketsResult");
-  buckets_vol_info_free(vols, n);
+  buckets_bucket_info_free(vols, n);
   buckets_s3_write_xml(c, 200);
 }
 
 /* ---- bucket-level handlers ----------------------------------------------- */
 
-static bool bucket_exists(s3_ctx *c) {
-  return buckets_drive_stat_vol(c->s->drive, c->bucket, NULL) == BUCKETS_DRIVE_OK;
-}
+static bool bucket_exists(s3_ctx *c) { return buckets_obj_stat_bucket(c->s->layer, c->bucket) == BUCKETS_OBJ_OK; }
 
 static void create_bucket(s3_ctx *c) {
   if (!buckets_bucket_name_valid_strict(c->bucket)) {
@@ -282,37 +281,35 @@ static void create_bucket(s3_ctx *c) {
     }
   }
 
-  switch (buckets_drive_make_vol(c->s->drive, c->bucket)) {
-    case BUCKETS_DRIVE_OK: {
+  switch (buckets_obj_make_bucket(c->s->layer, c->bucket)) {
+    case BUCKETS_OBJ_OK: {
       struct timespec ts;
       clock_gettime(CLOCK_REALTIME, &ts);
       buckets_bucket_meta bm;
       buckets_bucket_meta_init(&bm, c->bucket, (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec);
-      if (!buckets_bucket_meta_save(c->s->drive, &bm)) buckets_log_warn("could not save metadata for bucket %s", c->bucket);
+      if (!buckets_bucket_meta_save(c->s->layer, &bm)) buckets_log_warn("could not save metadata for bucket %s", c->bucket);
       buckets_bucket_meta_free(&bm);
       buckets_http_resp_headerf(c->resp, "Location", "/%s", c->bucket);
       c->resp->status = 200;
       return;
     }
-    case BUCKETS_DRIVE_ERR_EXISTS:
+    case BUCKETS_OBJ_ERR_BUCKET_EXISTS:
       buckets_s3_write_error(c, BUCKETS_ERR_BUCKET_ALREADY_OWNED_BY_YOU);
       return;
     default:
-      buckets_s3_write_error(c, BUCKETS_ERR_INTERNAL_ERROR);
+      buckets_s3_write_error(c, BUCKETS_ERR_SLOW_DOWN_WRITE);
       return;
   }
 }
 
 static void delete_bucket(s3_ctx *c) {
-  switch (buckets_drive_delete_vol(c->s->drive, c->bucket)) {
-    case BUCKETS_DRIVE_OK:
-      buckets_bucket_meta_delete(c->s->drive, c->bucket);
-      c->resp->status = 204;
-      return;
-    case BUCKETS_DRIVE_ERR_NOT_FOUND: buckets_s3_write_error(c, BUCKETS_ERR_NO_SUCH_BUCKET); return;
-    case BUCKETS_DRIVE_ERR_NOT_EMPTY: buckets_s3_write_error(c, BUCKETS_ERR_BUCKET_NOT_EMPTY); return;
-    default: buckets_s3_write_error(c, BUCKETS_ERR_INTERNAL_ERROR); return;
+  buckets_obj_err err = buckets_obj_delete_bucket(c->s->layer, c->bucket);
+  if (err) {
+    buckets_s3_write_error(c, buckets_s3_obj_error(err));
+    return;
   }
+  buckets_bucket_meta_delete(c->s->layer, c->bucket);
+  c->resp->status = 204;
 }
 
 static void get_bucket_location(s3_ctx *c) {

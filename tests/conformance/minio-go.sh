@@ -14,13 +14,16 @@ WORK=$(cd "$WORK" && pwd)
 [[ -x "$WORK/functional-tests" ]] || (cd "$WORK/minio-go" && CGO_ENABLED=0 go build -o "$WORK/functional-tests" functional_tests.go)
 
 DRIVE=$(mktemp -d "${TMPDIR:-/tmp}/buckets-conf-XXXXXX")
-BUCKETS_ROOT_USER=conformance BUCKETS_ROOT_PASSWORD=conformance123 "$BIN" server --address "127.0.0.1:$PORT" "$DRIVE" 2>"$WORK/bucketsd.log" &
+# DRIVES=4 runs against a 4-drive erasure set instead of a single drive.
+TARGET="$DRIVE"
+[[ -n "${DRIVES:-}" ]] && TARGET="$DRIVE/d{1...$DRIVES}"
+BUCKETS_ROOT_USER=conformance BUCKETS_ROOT_PASSWORD=conformance123 "$BIN" server --address "127.0.0.1:$PORT" "$TARGET" 2>"$WORK/bucketsd.log" &
 PID=$!
 trap 'kill $PID 2>/dev/null; rm -rf "$DRIVE"' EXIT
 for _ in $(seq 50); do curl -sf "http://127.0.0.1:$PORT/minio/health/live" >/dev/null && break; sleep 0.1; done
 
 SERVER_ENDPOINT=127.0.0.1:$PORT ACCESS_KEY=conformance SECRET_KEY=conformance123 ENABLE_HTTPS=0 ENABLE_KMS=0 \
-  MINT_MODE=full RUN_ON_FAIL=1 "$WORK/functional-tests" >"$WORK/results.log" 2>&1 || true
+  (cd "$WORK" && MINT_MODE=full RUN_ON_FAIL=1 "$WORK/functional-tests") >"$WORK/results.log" 2>&1 || true
 
 python3 - "$WORK/results.log" <<'PY'
 import collections, json, sys

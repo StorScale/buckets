@@ -4,7 +4,7 @@
 
 #include "core/buf.h"
 #include "core/msgpack.h"
-#include "storage/drive.h"
+#include "object/object.h"
 
 /* Per-bucket metadata, byte-compatible with MinIO's BucketMetadata
  * (cmd/bucket-metadata.go): a 4-byte header (format=1, version=1, LE) and a
@@ -46,9 +46,9 @@ void buckets_bucket_meta_encode(const buckets_bucket_meta *m, buckets_buf *out);
 bool buckets_bucket_meta_decode(const void *data, size_t n, buckets_bucket_meta *m);
 
 /* Load/save through the object layer. load returns false when absent/unreadable. */
-bool buckets_bucket_meta_load(buckets_drive *d, const char *bucket, buckets_bucket_meta *m);
-bool buckets_bucket_meta_save(buckets_drive *d, const buckets_bucket_meta *m);
-void buckets_bucket_meta_delete(buckets_drive *d, const char *bucket);
+bool buckets_bucket_meta_load(buckets_objlayer *d, const char *bucket, buckets_bucket_meta *m);
+bool buckets_bucket_meta_save(buckets_objlayer *d, const buckets_bucket_meta *m);
+void buckets_bucket_meta_delete(buckets_objlayer *d, const char *bucket);
 /* Creation time in unix nanoseconds, or 0 when unknown. */
 int64_t buckets_bucket_meta_created_ns(const buckets_bucket_meta *m);
 

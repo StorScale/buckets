@@ -143,7 +143,7 @@ static long mem_read(void *ud, void *buf, size_t n) {
   return (long)take;
 }
 
-bool buckets_bucket_meta_load(buckets_drive *d, const char *bucket, buckets_bucket_meta *m) {
+bool buckets_bucket_meta_load(buckets_objlayer *d, const char *bucket, buckets_bucket_meta *m) {
   char *obj = meta_object(bucket);
   buckets_obj_reader *r;
   buckets_object_info oi;
@@ -163,7 +163,7 @@ bool buckets_bucket_meta_load(buckets_drive *d, const char *bucket, buckets_buck
   return ok;
 }
 
-bool buckets_bucket_meta_save(buckets_drive *d, const buckets_bucket_meta *m) {
+bool buckets_bucket_meta_save(buckets_objlayer *d, const buckets_bucket_meta *m) {
   buckets_buf data = BUCKETS_BUF_INIT;
   buckets_bucket_meta_encode(m, &data);
   char *obj = meta_object(m->name);
@@ -178,7 +178,7 @@ bool buckets_bucket_meta_save(buckets_drive *d, const buckets_bucket_meta *m) {
   return ok;
 }
 
-void buckets_bucket_meta_delete(buckets_drive *d, const char *bucket) {
+void buckets_bucket_meta_delete(buckets_objlayer *d, const char *bucket) {
   char *obj = meta_object(bucket);
   buckets_obj_delete(d, BUCKETS_META_BUCKET, obj, NULL);
   free(obj);

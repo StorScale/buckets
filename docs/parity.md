@@ -266,15 +266,15 @@ Source: `cmd/healthcheck-router.go`
 
 | | Handler | Notes |
 |---|---|---|
-| 🟡 | `ClusterCheckHandler` | single drive only |
-| 🟡 | `ClusterReadCheckHandler` | single drive only |
+| 🟡 | `ClusterCheckHandler` | single node only |
+| 🟡 | `ClusterReadCheckHandler` | single node only |
 | ✅ | `LivenessCheckHandler` |  |
 | ✅ | `ReadinessCheckHandler` |  |
 
 ## Beyond the routers
 
 Subsystems with no single handler, tracked by phase in `docs/architecture.md`:
-erasure coding + bitrot, xl.meta v2, distributed locking, healing, scanner,
+erasure coding + bitrot and xl.meta v2 (done, single node), distributed locking, healing, scanner,
 ILM/tiering, bucket + site replication, notifications (10 targets), audit,
 SSE-S3/KMS/C, compression, S3 Select, SFTP/FTP, batch jobs, decommission/rebalance,
 IAM (LDAP/OIDC/plugins/OPA), operator, console.

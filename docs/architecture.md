@@ -80,8 +80,15 @@ Single-node S3 is feature-complete for the core API. It is verified three ways:
   - MinIO's multipart staging layout
   - `.metadata.bin` bucket metadata
 
+**Phase 2 so far (erasure, multi-drive):**
+- Reed-Solomon codec, ellipsis drive syntax and set sizing identical to MinIO, SipHash set selection and `hashOrder` shard placement.
+- `format.json` negotiation across drives, including healing a replaced drive into its slot.
+- Erasure object layer with read/write quorum, bitrot detection and parity reconstruction. It covers puts, gets, listings and multipart across sets.
+- `tests/integration/erasure.sh`: 4- and 16-drive sets, drive loss up to and beyond parity, and MinIO reading Buckets-written sets. minio-go conformance also passes on a 4-drive set (`DRIVES=4`).
+- Still to come in Phase 2: the disk I/O thread pool, object healing and MRF, multiple pools, distributed mode (internode RPC, remote drives, dsync locks), and TLS.
+
 **Known interim choices, each replaced in a later phase:**
-- One event-loop thread handles all requests, with synchronous disk I/O. A disk thread pool, then io_uring, arrives with Phase 2's erasure layer.
+- One event-loop thread handles all requests, with synchronous disk I/O. Erasure-set drives are therefore written one after another. A disk thread pool, then io_uring, replaces this later in Phase 2.
 - Crypto primitives (SHA-256, MD5, SHA-1, HighwayHash, CRCs) are portable C, and all are verified against MinIO's Go libraries. SIMD and OpenSSL come later, with TLS in Phase 2.
 - Only the root credential is accepted. IAM comes in Phase 4.
 - Buckets are unversioned. Versioning, object lock, tagging and SSE come in Phase 5.

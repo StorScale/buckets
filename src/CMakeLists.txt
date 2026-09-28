@@ -33,8 +33,8 @@ add_library(buckets STATIC
   s3/postpolicy.c
   storage/drive.c
   storage/xlmeta.c
-  object/xlsingle.c
-  object/multipart.c
+  storage/format.c
+  object/erasure.c
   bucket/metadata.c
   erasure/rs.c
   erasure/layout.c

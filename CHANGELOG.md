@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- Reed-Solomon erasure codec (GF(2^8), klauspost-compatible matrix), verified against all 60 of MinIO's erasure self-test vectors.
+- MinIO ellipsis drive syntax (`/data{1...16}`, zero-padded and hex ranges), set sizing identical to MinIO's `getSetIndexes`, SipHash set selection, and CRC32 `hashOrder` shard distribution.
+- A StorageAPI on local drives (ReadAll, WriteAll, CreateFile, ReadAt, RenameData, Delete, ListDir) that mirrors MinIO's, ready for remote drives.
+- `format.json` negotiation across drives: fresh deployments, quorum-voted reference layouts, foreign-deployment rejection, and healing of replaced drives into their slot.
+- Multi-drive erasure object layer: per-block encoding with HighwayHash bitrot, read/write quorum, bitrot detection with parity reconstruction, quorum-consistent metadata, merged listings and multipart across erasure sets. Real MinIO reads erasure sets written by Buckets, and Buckets reads MinIO's.
+- `bucketsd server` accepts multiple drives and ellipsis patterns and honors `ERASURE_SET_DRIVE_COUNT` and `STORAGE_CLASS_STANDARD=EC:N` (`BUCKETS_` or `MINIO_` prefixed).
+- `tests/integration/erasure.sh`: 4- and 16-drive sets, bitrot, drive loss up to and beyond parity, drive replacement, and MinIO interop. `DRIVES=4` runs the minio-go conformance suite on an erasure set.
+
+### Changed
+- The single-drive layer is now the erasure layer with one drive (EC 1+0); on-disk output is unchanged.
+
 ## [0.2.0] - 2026-09-27
 
 ### Changed

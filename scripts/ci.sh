@@ -18,9 +18,11 @@ build() {
 
 build build-ci -DCMAKE_BUILD_TYPE=RelWithDebInfo
 run tests/integration/smoke.sh build-ci/src/bucketsd
+run tests/integration/erasure.sh build-ci/src/bucketsd
 
 build build-ci-asan -DCMAKE_BUILD_TYPE=Debug -DBUCKETS_SANITIZE=address,undefined
 run tests/integration/smoke.sh build-ci-asan/src/bucketsd
+run tests/integration/erasure.sh build-ci-asan/src/bucketsd
 
 # MinIO interoperability (skipped unless MC_BIN and MINIO_BIN are set;
 # tools/build-oracles.sh builds both).

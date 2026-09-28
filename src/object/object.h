@@ -2,20 +2,23 @@
 #ifndef BUCKETS_OBJECT_OBJECT_H
 #define BUCKETS_OBJECT_OBJECT_H
 
-#include "storage/drive.h"
 #include "crypto/cksum.h"
+#include "storage/drive.h"
+#include "storage/format.h"
 #include "storage/xlmeta.h"
 
-/* The object layer. This is the single-drive ("xl-single") implementation,
- * laid out exactly like MinIO so either server can read the other's drive:
+/* The object layer: erasure sets over drives, laid out exactly like MinIO so
+ * either server can serve the other's drives. On every drive of the object's
+ * set:
  *
- *   <bucket>/<object>/xl.meta                     metadata (+ inline data < 128 KiB)
- *   <bucket>/<object>/<data-dir-uuid>/part.N      bitrot-framed part data
- *   <bucket>/<dir-object>__XLDIR__/xl.meta        keys ending in '/'
+ *   <bucket>/<object>/xl.meta                  metadata (+ inline shard when small)
+ *   <bucket>/<object>/<data-dir-uuid>/part.N   this drive's bitrot-framed shards
+ *   <bucket>/<dir-object>__XLDIR__/xl.meta     keys ending in '/'
  *
- * Part data is framed in 1 MiB blocks, each preceded by its HighwayHash-256
- * (MinIO's streaming bitrot format, EC 1+0). Replaces the single-set path of
- * MinIO's cmd/erasure-object.go + cmd/xl-storage.go. */
+ * Each 1 MiB block is split into `data` shards plus `parity` Reed-Solomon
+ * shards; shard k goes to the drive whose hashOrder slot is k+1 (EcIndex).
+ * Every shard block is preceded by its HighwayHash-256. A single drive is one
+ * set with EC 1+0 (MinIO's "xl-single"). Replaces MinIO's cmd/erasure-*.go. */
 
 #define BUCKETS_BLOCK_SIZE (1024 * 1024)
 #define BUCKETS_INLINE_THRESHOLD (128 * 1024)
@@ -42,9 +45,51 @@ typedef enum {
   BUCKETS_OBJ_ERR_INVALID_PART_ORDER, /* parts not in ascending order */
   BUCKETS_OBJ_ERR_PART_TOO_SMALL,     /* a non-final part below 5 MiB */
   BUCKETS_OBJ_ERR_BAD_CHECKSUM,       /* x-amz-checksum-* mismatch */
+  BUCKETS_OBJ_ERR_READ_QUORUM,        /* too few drives agree / are readable */
+  BUCKETS_OBJ_ERR_WRITE_QUORUM,       /* too few drives accepted the write */
+  BUCKETS_OBJ_ERR_BUCKET_EXISTS,
+  BUCKETS_OBJ_ERR_BUCKET_NOT_EMPTY,
 } buckets_obj_err;
 
 const char *buckets_obj_strerror(buckets_obj_err e);
+
+/* ---- the layer ---- */
+
+typedef struct {
+  buckets_drive **drives; /* set_size entries; NULL = offline */
+  size_t n;
+  int parity; /* default parity for new objects */
+} buckets_eset;
+
+typedef struct buckets_objlayer {
+  buckets_eset *sets;
+  size_t nsets;
+  uint8_t deployment_id[16];
+  char deployment_id_str[BUCKETS_UUID_STR_LEN + 1];
+  buckets_drive **all; /* every slot, set-major */
+  size_t nall;
+} buckets_objlayer;
+
+/* Takes ownership of the drives in f (f->slots is cleared). parity < 0 uses
+ * MinIO's default for the set size. */
+buckets_objlayer *buckets_objlayer_new(buckets_format_result *f, int parity);
+void buckets_objlayer_free(buckets_objlayer *L);
+/* An online drive to use for local scratch space (spooling). */
+buckets_drive *buckets_objlayer_scratch(const buckets_objlayer *L);
+size_t buckets_objlayer_online(const buckets_objlayer *L);
+
+/* ---- buckets ---- */
+typedef struct {
+  char *name;
+  time_t created;
+} buckets_bucket_info;
+
+buckets_obj_err buckets_obj_make_bucket(buckets_objlayer *L, const char *bucket);
+buckets_obj_err buckets_obj_stat_bucket(buckets_objlayer *L, const char *bucket);
+/* Fails with BUCKET_NOT_EMPTY if objects remain. */
+buckets_obj_err buckets_obj_delete_bucket(buckets_objlayer *L, const char *bucket);
+buckets_obj_err buckets_obj_list_buckets(buckets_objlayer *L, buckets_bucket_info **out, size_t *n);
+void buckets_bucket_info_free(buckets_bucket_info *b, size_t n);
 
 /* Pull-style data source. Returns bytes read, 0 at EOF, -1 on error. */
 typedef long (*buckets_read_fn)(void *ud, void *buf, size_t n);
@@ -83,23 +128,23 @@ typedef struct {
 
 buckets_obj_err buckets_obj_check_name(const char *object);
 
-buckets_obj_err buckets_obj_put(buckets_drive *d, const char *bucket, const char *object, buckets_read_fn rd,
+buckets_obj_err buckets_obj_put(buckets_objlayer *L, const char *bucket, const char *object, buckets_read_fn rd,
                                 void *rd_ud, int64_t size, const buckets_put_opts *opts, buckets_object_info *out);
 
-buckets_obj_err buckets_obj_stat(buckets_drive *d, const char *bucket, const char *object, const char *version_id,
+buckets_obj_err buckets_obj_stat(buckets_objlayer *L, const char *bucket, const char *object, const char *version_id,
                                  buckets_object_info *out);
 
 typedef struct buckets_obj_reader buckets_obj_reader;
 
 /* Opens [offset, offset+length) of an object for reading. */
-buckets_obj_err buckets_obj_open(buckets_drive *d, const char *bucket, const char *object, const char *version_id,
+buckets_obj_err buckets_obj_open(buckets_objlayer *L, const char *bucket, const char *object, const char *version_id,
                                  int64_t offset, int64_t length, buckets_obj_reader **out,
                                  buckets_object_info *info);
 /* Returns bytes read, 0 at the end of the range, -1 on bitrot or I/O error. */
 long buckets_obj_read(buckets_obj_reader *r, void *buf, size_t n);
 void buckets_obj_reader_free(buckets_obj_reader *r);
 
-buckets_obj_err buckets_obj_delete(buckets_drive *d, const char *bucket, const char *object, const char *version_id);
+buckets_obj_err buckets_obj_delete(buckets_objlayer *L, const char *bucket, const char *object, const char *version_id);
 
 typedef struct {
   buckets_object_info *objects;
@@ -110,11 +155,9 @@ typedef struct {
   char *next_marker; /* last key or common prefix returned, when truncated */
 } buckets_obj_listing;
 
-buckets_obj_err buckets_obj_list(buckets_drive *d, const char *bucket, const char *prefix, const char *marker,
+buckets_obj_err buckets_obj_list(buckets_objlayer *L, const char *bucket, const char *prefix, const char *marker,
                                  const char *delimiter, int max_keys, buckets_obj_listing *out);
 void buckets_obj_list_free(buckets_obj_listing *l);
-/* True if the bucket has no objects (used by DeleteBucket). */
-bool buckets_obj_bucket_empty(buckets_drive *d, const char *bucket);
 
 /* ---- multipart uploads ----
  * .minio.sys/multipart/<sha256(bucket/object)>/<upload-uuid>/xl.meta
@@ -150,22 +193,22 @@ typedef struct {
   int64_t initiated_ns;
 } buckets_upload_info;
 
-buckets_obj_err buckets_obj_mpu_new(buckets_drive *d, const char *bucket, const char *object, const buckets_xl_kv *meta,
+buckets_obj_err buckets_obj_mpu_new(buckets_objlayer *L, const char *bucket, const char *object, const buckets_xl_kv *meta,
                                     size_t nmeta, char upload_id[BUCKETS_UPLOAD_ID_MAX]);
-buckets_obj_err buckets_obj_mpu_put_part(buckets_drive *d, const char *bucket, const char *object, const char *upload_id,
+buckets_obj_err buckets_obj_mpu_put_part(buckets_objlayer *L, const char *bucket, const char *object, const char *upload_id,
                                          int part_number, buckets_read_fn rd, void *rd_ud, int64_t size,
                                          const buckets_put_opts *opts, buckets_part_info *out);
 /* Parts numbered > marker, ascending, at most max. */
-buckets_obj_err buckets_obj_mpu_list_parts(buckets_drive *d, const char *bucket, const char *object,
+buckets_obj_err buckets_obj_mpu_list_parts(buckets_objlayer *L, const char *bucket, const char *object,
                                            const char *upload_id, int marker, int max, buckets_part_info **parts,
                                            size_t *n, bool *truncated);
-buckets_obj_err buckets_obj_mpu_abort(buckets_drive *d, const char *bucket, const char *object, const char *upload_id);
+buckets_obj_err buckets_obj_mpu_abort(buckets_objlayer *L, const char *bucket, const char *object, const char *upload_id);
 /* want: the final checksum from the request's x-amz-checksum-* header, or NULL. */
-buckets_obj_err buckets_obj_mpu_complete(buckets_drive *d, const char *bucket, const char *object,
+buckets_obj_err buckets_obj_mpu_complete(buckets_objlayer *L, const char *bucket, const char *object,
                                          const char *upload_id, const buckets_complete_part *parts, size_t nparts,
                                          const buckets_checksum *want, buckets_object_info *out);
 /* Pending uploads for exactly this object (MinIO lists per object). */
-buckets_obj_err buckets_obj_mpu_list_uploads(buckets_drive *d, const char *bucket, const char *object,
+buckets_obj_err buckets_obj_mpu_list_uploads(buckets_objlayer *L, const char *bucket, const char *object,
                                              buckets_upload_info **uploads, size_t *n);
 void buckets_upload_info_free(buckets_upload_info *u, size_t n);
 

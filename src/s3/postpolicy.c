@@ -675,7 +675,7 @@ void buckets_s3_post_policy(s3_ctx *c) {
     int64_t size = 0;
     char chunk[64 * 1024];
     long n;
-    snprintf(chunk, sizeof(chunk), "%s/" BUCKETS_META_BUCKET "/tmp/post-XXXXXX", c->s->drive->root);
+    snprintf(chunk, sizeof(chunk), "%s/" BUCKETS_META_BUCKET "/tmp/post-XXXXXX", buckets_objlayer_scratch(c->s->layer)->root);
     tmpf = buckets_xstrdup(chunk);
     fd = mkstemp(tmpf);
     if (fd >= 0) unlink(tmpf);
@@ -711,7 +711,7 @@ void buckets_s3_post_policy(s3_ctx *c) {
       post_cks_ctx pc = {.want = want};
       buckets_put_opts opts = {.meta = meta, .nmeta = nmeta, .checksum_type = want.type & BUCKETS_CKSUM_BASE_MASK,
                                .pre_commit = post_cks_check, .pre_commit_ud = &pc};
-      buckets_obj_err oe = buckets_obj_put(c->s->drive, c->bucket, object, (buckets_read_fn)buckets_http_body_read, &sc,
+      buckets_obj_err oe = buckets_obj_put(c->s->layer, c->bucket, object, (buckets_read_fn)buckets_http_body_read, &sc,
                                            size, &opts, &oi);
       if (oe) err = buckets_s3_obj_error(oe);
     }

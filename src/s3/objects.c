@@ -40,6 +40,10 @@ buckets_s3_error buckets_s3_obj_error(buckets_obj_err e) {
     case BUCKETS_OBJ_ERR_INVALID_PART_ORDER: return BUCKETS_ERR_INVALID_PART_ORDER;
     case BUCKETS_OBJ_ERR_PART_TOO_SMALL: return BUCKETS_ERR_ENTITY_TOO_SMALL;
     case BUCKETS_OBJ_ERR_BAD_CHECKSUM: return BUCKETS_ERR_CONTENT_CHECKSUM_MISMATCH;
+    case BUCKETS_OBJ_ERR_READ_QUORUM: return BUCKETS_ERR_SLOW_DOWN_READ;
+    case BUCKETS_OBJ_ERR_WRITE_QUORUM: return BUCKETS_ERR_SLOW_DOWN_WRITE;
+    case BUCKETS_OBJ_ERR_BUCKET_EXISTS: return BUCKETS_ERR_BUCKET_ALREADY_OWNED_BY_YOU;
+    case BUCKETS_OBJ_ERR_BUCKET_NOT_EMPTY: return BUCKETS_ERR_BUCKET_NOT_EMPTY;
   }
   return BUCKETS_ERR_INTERNAL_ERROR;
 }
@@ -347,7 +351,7 @@ static void put_object(s3_ctx *c) {
   }
   opts.pre_commit_ud = &cx;
   buckets_object_info oi;
-  buckets_obj_err err = buckets_obj_put(c->s->drive, c->bucket, c->object, b.rd, b.rd_ud, b.size, &opts, &oi);
+  buckets_obj_err err = buckets_obj_put(c->s->layer, c->bucket, c->object, b.rd, b.rd_ud, b.size, &opts, &oi);
   free_kvs(meta, nmeta);
   if (err) {
     buckets_s3_write_error(c, body_error(&b, err));
@@ -547,7 +551,7 @@ static void get_object(s3_ctx *c, bool head) {
     }
   }
   buckets_object_info oi;
-  buckets_obj_err err = buckets_obj_stat(c->s->drive, c->bucket, c->object, version, &oi);
+  buckets_obj_err err = buckets_obj_stat(c->s->layer, c->bucket, c->object, version, &oi);
   if (err) {
     buckets_s3_write_error(c, buckets_s3_obj_error(err));
     return;
@@ -587,7 +591,7 @@ static void get_object(s3_ctx *c, bool head) {
   buckets_obj_reader *r = NULL;
   if (!head) {
     buckets_object_info oi2;
-    err = buckets_obj_open(c->s->drive, c->bucket, c->object, version, off, len, &r, &oi2);
+    err = buckets_obj_open(c->s->layer, c->bucket, c->object, version, off, len, &r, &oi2);
     if (err) {
       buckets_object_info_free(&oi);
       buckets_s3_write_error(c, buckets_s3_obj_error(err));
@@ -620,7 +624,7 @@ static void get_object(s3_ctx *c, bool head) {
 
 static void delete_object(s3_ctx *c) {
   const char *version = buckets_query_get(&c->q, "versionId");
-  buckets_obj_err err = buckets_obj_delete(c->s->drive, c->bucket, c->object, version);
+  buckets_obj_err err = buckets_obj_delete(c->s->layer, c->bucket, c->object, version);
   /* S3 deletes are idempotent: a missing key still succeeds. */
   if (err && err != BUCKETS_OBJ_ERR_NO_SUCH_KEY && err != BUCKETS_OBJ_ERR_NO_SUCH_VERSION) {
     buckets_s3_write_error(c, buckets_s3_obj_error(err));
@@ -674,7 +678,7 @@ static void copy_object(s3_ctx *c) {
 
   buckets_obj_reader *r = NULL;
   buckets_object_info src;
-  buckets_obj_err err = buckets_obj_open(c->s->drive, src_bucket, src_object, version, 0, INT64_MAX, &r, &src);
+  buckets_obj_err err = buckets_obj_open(c->s->layer, src_bucket, src_object, version, 0, INT64_MAX, &r, &src);
   if (err) {
     free(decoded);
     buckets_s3_write_error(c, err == BUCKETS_OBJ_ERR_NO_SUCH_BUCKET ? BUCKETS_ERR_NO_SUCH_BUCKET
@@ -717,7 +721,7 @@ static void copy_object(s3_ctx *c) {
   buckets_object_info oi;
   if (!serr) {
     buckets_put_opts opts = {.meta = meta, .nmeta = nmeta};
-    err = buckets_obj_put(c->s->drive, c->bucket, c->object, reader_source, r, src.size, &opts, &oi);
+    err = buckets_obj_put(c->s->layer, c->bucket, c->object, reader_source, r, src.size, &opts, &oi);
     serr = buckets_s3_obj_error(err);
   }
   free_kvs(meta, nmeta);
@@ -770,7 +774,7 @@ static void mpu_create(s3_ctx *c) {
     return;
   }
   char upload_id[BUCKETS_UPLOAD_ID_MAX];
-  buckets_obj_err err = buckets_obj_mpu_new(c->s->drive, c->bucket, c->object, meta, nmeta, upload_id);
+  buckets_obj_err err = buckets_obj_mpu_new(c->s->layer, c->bucket, c->object, meta, nmeta, upload_id);
   free_kvs(meta, nmeta);
   if (err) {
     buckets_s3_write_error(c, buckets_s3_obj_error(err));
@@ -845,7 +849,7 @@ static void mpu_put_part(s3_ctx *c, const char *upload_id) {
       return;
     }
     buckets_object_info src;
-    buckets_obj_err err = buckets_obj_stat(c->s->drive, sb, so, sv, &src);
+    buckets_obj_err err = buckets_obj_stat(c->s->layer, sb, so, sv, &src);
     if (err) {
       free(decoded);
       buckets_s3_write_error(c, buckets_s3_obj_error(err));
@@ -864,7 +868,7 @@ static void mpu_put_part(s3_ctx *c, const char *upload_id) {
     }
     buckets_obj_reader *r;
     buckets_object_info tmp;
-    err = buckets_obj_open(c->s->drive, sb, so, sv, off, len, &r, &tmp);
+    err = buckets_obj_open(c->s->layer, sb, so, sv, off, len, &r, &tmp);
     buckets_object_info_free(&src);
     free(decoded);
     if (err) {
@@ -873,7 +877,7 @@ static void mpu_put_part(s3_ctx *c, const char *upload_id) {
     }
     buckets_object_info_free(&tmp);
     buckets_part_info pi;
-    err = buckets_obj_mpu_put_part(c->s->drive, c->bucket, c->object, upload_id, part, reader_source, r, len, NULL, &pi);
+    err = buckets_obj_mpu_put_part(c->s->layer, c->bucket, c->object, upload_id, part, reader_source, r, len, NULL, &pi);
     buckets_obj_reader_free(r);
     if (err) {
       buckets_s3_write_error(c, buckets_s3_obj_error(err));
@@ -910,7 +914,7 @@ static void mpu_put_part(s3_ctx *c, const char *upload_id) {
   }
   opts.pre_commit_ud = &cx;
   buckets_part_info pi;
-  buckets_obj_err err = buckets_obj_mpu_put_part(c->s->drive, c->bucket, c->object, upload_id, part, bsrc.rd,
+  buckets_obj_err err = buckets_obj_mpu_put_part(c->s->layer, c->bucket, c->object, upload_id, part, bsrc.rd,
                                                  bsrc.rd_ud, bsrc.size, &opts, &pi);
   if (err) {
     buckets_s3_write_error(c, body_error(&bsrc, err));
@@ -949,7 +953,7 @@ static void mpu_list_parts(s3_ctx *c, const char *upload_id) {
   buckets_part_info *parts;
   size_t n;
   bool truncated;
-  buckets_obj_err err = buckets_obj_mpu_list_parts(c->s->drive, c->bucket, c->object, upload_id, (int)marker,
+  buckets_obj_err err = buckets_obj_mpu_list_parts(c->s->layer, c->bucket, c->object, upload_id, (int)marker,
                                                    (int)max, &parts, &n, &truncated);
   if (err) {
     buckets_s3_write_error(c, buckets_s3_obj_error(err));
@@ -994,7 +998,7 @@ static void mpu_list_parts(s3_ctx *c, const char *upload_id) {
 }
 
 static void mpu_abort(s3_ctx *c, const char *upload_id) {
-  buckets_obj_err err = buckets_obj_mpu_abort(c->s->drive, c->bucket, c->object, upload_id);
+  buckets_obj_err err = buckets_obj_mpu_abort(c->s->layer, c->bucket, c->object, upload_id);
   if (err) {
     buckets_s3_write_error(c, buckets_s3_obj_error(err));
     return;
@@ -1071,7 +1075,7 @@ static void mpu_complete(s3_ctx *c, const char *upload_id) {
     return;
   }
   buckets_object_info oi;
-  buckets_obj_err err = buckets_obj_mpu_complete(c->s->drive, c->bucket, c->object, upload_id, parts, n,
+  buckets_obj_err err = buckets_obj_mpu_complete(c->s->layer, c->bucket, c->object, upload_id, parts, n,
                                                  want.type ? &want : NULL, &oi);
   for (size_t i = 0; i < n; i++) {
     free(etags[i]);
@@ -1141,7 +1145,7 @@ void buckets_s3_list_uploads(s3_ctx *c) {
   }
   buckets_upload_info *ups;
   size_t n;
-  buckets_obj_err err = buckets_obj_mpu_list_uploads(c->s->drive, c->bucket, prefix, &ups, &n);
+  buckets_obj_err err = buckets_obj_mpu_list_uploads(c->s->layer, c->bucket, prefix, &ups, &n);
   if (err) {
     buckets_s3_write_error(c, buckets_s3_obj_error(err));
     return;
@@ -1259,7 +1263,7 @@ static void get_object_attributes(s3_ctx *c) {
   }
   const char *version = buckets_query_get(&c->q, "versionId");
   buckets_object_info oi;
-  buckets_obj_err err = buckets_obj_stat(c->s->drive, c->bucket, c->object, version, &oi);
+  buckets_obj_err err = buckets_obj_stat(c->s->layer, c->bucket, c->object, version, &oi);
   if (err) {
     buckets_s3_write_error(c, buckets_s3_obj_error(err));
     return;
@@ -1398,7 +1402,7 @@ void buckets_s3_route_object(s3_ctx *c) {
   }
   if (buckets_query_has(&c->q, "acl")) {
     buckets_object_info oi;
-    buckets_obj_err err = buckets_obj_stat(c->s->drive, c->bucket, c->object, buckets_query_get(&c->q, "versionId"), &oi);
+    buckets_obj_err err = buckets_obj_stat(c->s->layer, c->bucket, c->object, buckets_query_get(&c->q, "versionId"), &oi);
     if (err) {
       buckets_s3_write_error(c, buckets_s3_obj_error(err));
       return;
@@ -1473,7 +1477,7 @@ void buckets_s3_delete_objects(s3_ctx *c) {
     if (!ok) {
       e = BUCKETS_ERR_INVALID_OBJECT_NAME;
     } else {
-      buckets_obj_err oe = buckets_obj_delete(c->s->drive, c->bucket, key.data, ver.len ? ver.data : NULL);
+      buckets_obj_err oe = buckets_obj_delete(c->s->layer, c->bucket, key.data, ver.len ? ver.data : NULL);
       if (oe && oe != BUCKETS_OBJ_ERR_NO_SUCH_KEY && oe != BUCKETS_OBJ_ERR_NO_SUCH_VERSION) e = buckets_s3_obj_error(oe);
     }
     if (e) {
@@ -1571,7 +1575,7 @@ void buckets_s3_list_objects(s3_ctx *c, bool v2) {
   }
 
   buckets_obj_listing l;
-  buckets_obj_err err = buckets_obj_list(c->s->drive, c->bucket, prefix ? prefix : "", marker, delimiter,
+  buckets_obj_err err = buckets_obj_list(c->s->layer, c->bucket, prefix ? prefix : "", marker, delimiter,
                                          (int)BUCKETS_MIN(max_keys, BUCKETS_MAX_LIST_KEYS), &l);
   if (err) {
     free(marker);

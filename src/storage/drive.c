@@ -2,6 +2,7 @@
 #include "storage/drive.h"
 
 #include <dirent.h>
+#include <ftw.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -162,6 +163,30 @@ static buckets_drive_err read_format(buckets_drive *d, const char *path) {
   return err;
 }
 
+static buckets_drive_err drive_prepare(const char *path, buckets_drive **out);
+
+buckets_drive_err buckets_drive_open_raw(const char *path, buckets_drive **out) { return drive_prepare(path, out); }
+
+static buckets_drive_err drive_prepare(const char *path, buckets_drive **out) {
+  buckets_drive *d = buckets_xcalloc(1, sizeof(*d));
+  d->root = buckets_xstrdup(path);
+  size_t rl = strlen(d->root);
+  while (rl > 1 && d->root[rl - 1] == '/') d->root[--rl] = '\0';
+  static const char *const meta_dirs[] = {"tmp", "buckets", "multipart", "config"};
+  for (size_t i = 0; i < BUCKETS_ARRAY_LEN(meta_dirs); i++) {
+    buckets_buf p = BUCKETS_BUF_INIT;
+    buckets_buf_appendf(&p, "%s/" BUCKETS_META_BUCKET "/%s", d->root, meta_dirs[i]);
+    int rc = mkdir_p(p.data);
+    buckets_buf_free(&p);
+    if (rc != 0) {
+      buckets_drive_close(d);
+      return BUCKETS_DRIVE_ERR_IO;
+    }
+  }
+  *out = d;
+  return BUCKETS_DRIVE_OK;
+}
+
 buckets_drive_err buckets_drive_open(const char *path, buckets_drive **out) {
   buckets_drive *d = buckets_xcalloc(1, sizeof(*d));
   d->root = buckets_xstrdup(path);
@@ -277,4 +302,250 @@ buckets_drive_err buckets_drive_list_vols(buckets_drive *d, buckets_vol_info **v
 void buckets_vol_info_free(buckets_vol_info *vols, size_t n) {
   for (size_t i = 0; i < n; i++) free(vols[i].name);
   free(vols);
+}
+
+/* ---- StorageAPI ------------------------------------------------------------ */
+
+static char *vpath(buckets_drive *d, const char *vol, const char *path) {
+  buckets_buf p = BUCKETS_BUF_INIT;
+  if (path && *path) buckets_buf_appendf(&p, "%s/%s/%s", d->root, vol, path);
+  else buckets_buf_appendf(&p, "%s/%s", d->root, vol);
+  return p.data;
+}
+
+char *buckets_drive_tmp_name(void) {
+  char id[BUCKETS_UUID_STR_LEN + 1];
+  buckets_uuid_v4(id);
+  return buckets_xstrdup(id);
+}
+
+static void parent_mkdir(const char *path) {
+  char *dup = buckets_xstrdup(path);
+  char *slash = strrchr(dup, '/');
+  if (slash && slash != dup) {
+    *slash = '\0';
+    mkdir_p(dup);
+  }
+  free(dup);
+}
+
+buckets_drive_err buckets_drive_read_all(buckets_drive *d, const char *vol, const char *path, buckets_buf *out) {
+  char *p = vpath(d, vol, path);
+  int fd = open(p, O_RDONLY | O_CLOEXEC);
+  free(p);
+  if (fd < 0) return from_errno(errno == ENOTDIR ? ENOENT : errno);
+  char tmp[65536];
+  buckets_drive_err err = BUCKETS_DRIVE_OK;
+  for (;;) {
+    ssize_t r = read(fd, tmp, sizeof(tmp));
+    if (r < 0 && errno == EINTR) continue;
+    if (r < 0) {
+      err = errno == EISDIR ? BUCKETS_DRIVE_ERR_NOT_FOUND : BUCKETS_DRIVE_ERR_IO;
+      break;
+    }
+    if (r == 0) break;
+    buckets_buf_append(out, tmp, (size_t)r);
+  }
+  close(fd);
+  return err;
+}
+
+buckets_drive_err buckets_drive_write_all(buckets_drive *d, const char *vol, const char *path, const void *data,
+                                          size_t n) {
+  char *dst = vpath(d, vol, path);
+  parent_mkdir(dst);
+  char *dir = buckets_xstrdup(dst);
+  char *slash = strrchr(dir, '/');
+  if (slash) *slash = '\0';
+  const char *name = slash ? slash + 1 : dst;
+  buckets_drive_err err = write_atomic(d, dir, name, data, n);
+  free(dir);
+  free(dst);
+  return err;
+}
+
+struct buckets_drive_writer {
+  int fd;
+  char *path;
+};
+
+buckets_drive_err buckets_drive_create_file(buckets_drive *d, const char *vol, const char *path,
+                                            buckets_drive_writer **w) {
+  char *p = vpath(d, vol, path);
+  parent_mkdir(p);
+  int fd = open(p, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+  if (fd < 0) {
+    buckets_drive_err e = from_errno(errno);
+    free(p);
+    return e;
+  }
+  *w = buckets_xcalloc(1, sizeof(**w));
+  (*w)->fd = fd;
+  (*w)->path = p;
+  return BUCKETS_DRIVE_OK;
+}
+
+buckets_drive_err buckets_drive_writer_write(buckets_drive_writer *w, const void *data, size_t n) {
+  const char *c = data;
+  while (n) {
+    ssize_t r = write(w->fd, c, n);
+    if (r < 0 && errno == EINTR) continue;
+    if (r < 0) return BUCKETS_DRIVE_ERR_IO;
+    c += r;
+    n -= (size_t)r;
+  }
+  return BUCKETS_DRIVE_OK;
+}
+
+buckets_drive_err buckets_drive_writer_close(buckets_drive_writer *w) {
+  buckets_drive_err err = fsync(w->fd) == 0 ? BUCKETS_DRIVE_OK : BUCKETS_DRIVE_ERR_IO;
+  close(w->fd);
+  free(w->path);
+  free(w);
+  return err;
+}
+
+void buckets_drive_writer_abort(buckets_drive_writer *w) {
+  if (!w) return;
+  close(w->fd);
+  unlink(w->path);
+  free(w->path);
+  free(w);
+}
+
+buckets_drive_err buckets_drive_read_at(buckets_drive *d, const char *vol, const char *path, int64_t off, void *buf,
+                                        size_t n, size_t *got) {
+  char *p = vpath(d, vol, path);
+  int fd = open(p, O_RDONLY | O_CLOEXEC);
+  free(p);
+  *got = 0;
+  if (fd < 0) return from_errno(errno == ENOTDIR ? ENOENT : errno);
+  buckets_drive_err err = BUCKETS_DRIVE_OK;
+  while (*got < n) {
+    ssize_t r = pread(fd, (char *)buf + *got, n - *got, (off_t)(off + (int64_t)*got));
+    if (r < 0 && errno == EINTR) continue;
+    if (r < 0) {
+      err = BUCKETS_DRIVE_ERR_IO;
+      break;
+    }
+    if (r == 0) break;
+    *got += (size_t)r;
+  }
+  close(fd);
+  return err;
+}
+
+buckets_drive_err buckets_drive_rename_data(buckets_drive *d, const char *src_vol, const char *src_dir,
+                                            const char *data_dir, const char *dst_vol, const char *dst_path,
+                                            const void *xlmeta, size_t xlmeta_len) {
+  char *dst = vpath(d, dst_vol, dst_path);
+  if (mkdir_p(dst) != 0) {
+    free(dst);
+    return BUCKETS_DRIVE_ERR_IO;
+  }
+  buckets_drive_err err = BUCKETS_DRIVE_OK;
+  if (data_dir) {
+    buckets_buf from = BUCKETS_BUF_INIT, to = BUCKETS_BUF_INIT;
+    buckets_buf_appendf(&from, "%s/%s/%s/%s", d->root, src_vol, src_dir, data_dir);
+    buckets_buf_appendf(&to, "%s/%s", dst, data_dir);
+    if (rename(from.data, to.data) != 0) err = from_errno(errno);
+    buckets_buf_free(&from);
+    buckets_buf_free(&to);
+  }
+  if (!err) err = write_atomic(d, dst, "xl.meta", xlmeta, xlmeta_len);
+  free(dst);
+  return err;
+}
+
+static int rm_entry(const char *path, const struct stat *st, int flag, struct FTW *ftw) {
+  return remove(path) == 0 || errno == ENOENT ? 0 : -1;
+}
+
+buckets_drive_err buckets_drive_delete(buckets_drive *d, const char *vol, const char *path, bool recursive,
+                                       bool prune) {
+  char *p = vpath(d, vol, path);
+  buckets_drive_err err = BUCKETS_DRIVE_OK;
+  struct stat st;
+  if (lstat(p, &st) != 0) {
+    err = from_errno(errno);
+  } else if (S_ISDIR(st.st_mode) && recursive) {
+    /* Move aside first so readers never see a half-deleted tree. */
+    char *id = buckets_drive_tmp_name();
+    buckets_buf trash = BUCKETS_BUF_INIT;
+    buckets_buf_appendf(&trash, "%s/" BUCKETS_META_BUCKET "/tmp/%s", d->root, id);
+    free(id);
+    if (rename(p, trash.data) != 0) err = from_errno(errno);
+    else nftw(trash.data, rm_entry, 16, FTW_DEPTH | FTW_PHYS);
+    buckets_buf_free(&trash);
+  } else if (remove(p) != 0) {
+    err = from_errno(errno);
+  }
+  if (!err && prune) {
+    buckets_buf stop = BUCKETS_BUF_INIT;
+    buckets_buf_appendf(&stop, "%s/%s", d->root, vol);
+    for (;;) {
+      char *slash = strrchr(p, '/');
+      if (!slash) break;
+      *slash = '\0';
+      if (strlen(p) <= stop.len || rmdir(p) != 0) break;
+    }
+    buckets_buf_free(&stop);
+  }
+  free(p);
+  return err;
+}
+
+buckets_drive_err buckets_drive_list_dir(buckets_drive *d, const char *vol, const char *dir, buckets_dir_list *out) {
+  memset(out, 0, sizeof(*out));
+  char *p = vpath(d, vol, dir);
+  DIR *dh = opendir(p);
+  if (!dh) {
+    buckets_drive_err e = from_errno(errno == ENOTDIR ? ENOENT : errno);
+    free(p);
+    return e;
+  }
+  size_t cap = 0;
+  struct dirent *e;
+  while ((e = readdir(dh))) {
+    if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
+    buckets_buf child = BUCKETS_BUF_INIT;
+    buckets_buf_appendf(&child, "%s/%s", p, e->d_name);
+    struct stat st;
+    bool isdir = stat(child.data, &st) == 0 && S_ISDIR(st.st_mode);
+    buckets_buf_free(&child);
+    if (out->n == cap) {
+      cap = cap ? cap * 2 : 32;
+      out->names = buckets_xrealloc(out->names, cap * sizeof(char *));
+    }
+    buckets_buf name = BUCKETS_BUF_INIT;
+    buckets_buf_appendf(&name, "%s%s", e->d_name, isdir ? "/" : "");
+    out->names[out->n++] = name.data;
+  }
+  closedir(dh);
+  free(p);
+  return BUCKETS_DRIVE_OK;
+}
+
+void buckets_dir_list_free(buckets_dir_list *l) {
+  for (size_t i = 0; i < l->n; i++) free(l->names[i]);
+  free(l->names);
+  memset(l, 0, sizeof(*l));
+}
+
+int buckets_drive_stat(buckets_drive *d, const char *vol, const char *path) {
+  char *p = vpath(d, vol, path);
+  struct stat st;
+  int r = stat(p, &st) != 0 ? 0 : S_ISDIR(st.st_mode) ? 2 : 1;
+  free(p);
+  return r;
+}
+
+buckets_drive_err buckets_drive_rename_file(buckets_drive *d, const char *src_vol, const char *src,
+                                            const char *dst_vol, const char *dst) {
+  char *from = vpath(d, src_vol, src), *to = vpath(d, dst_vol, dst);
+  parent_mkdir(to);
+  buckets_drive_err err = rename(from, to) == 0 ? BUCKETS_DRIVE_OK : from_errno(errno);
+  free(from);
+  free(to);
+  return err;
 }
