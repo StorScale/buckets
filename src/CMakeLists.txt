@@ -35,6 +35,7 @@ add_library(buckets STATIC
   object/xlsingle.c
   object/multipart.c
   bucket/metadata.c
+  erasure/rs.c
 )
 target_include_directories(buckets PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 # timegm, gmtime_r, arc4random_buf, strncasecmp live outside strict C17.
