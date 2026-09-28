@@ -1552,6 +1552,11 @@ void buckets_s3_handle(const buckets_http_request *req, buckets_http_response *r
     else buckets_admin_handle(&c);
     goto done;
   }
+  if (buckets_admin_is_kms_path(req->path)) {
+    if ((err = authenticate(&c)) != BUCKETS_ERR_NONE) buckets_admin_error(&c, err);
+    else buckets_admin_kms_handle(&c);
+    goto done;
+  }
   c.auth = buckets_auth_classify(req, &c.q);
   if (buckets_sts_matches(&c)) {
     buckets_sts_handle(&c);

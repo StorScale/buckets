@@ -38,6 +38,13 @@ void buckets_admin_get_bucket_quota(s3_ctx *c);
 /* mc admin info's usage: the scanner's stored data usage (bucket.c). */
 void buckets_admin_data_usage_info(s3_ctx *c);
 
+/* KMS APIs (kms.c): /minio/kms/v1/..., and the admin v3 /kms/... routes. */
+bool buckets_admin_is_kms_path(buckets_str path);
+void buckets_admin_kms_handle(s3_ctx *c);
+void buckets_admin_kms_status_v3(s3_ctx *c);
+void buckets_admin_kms_key_status_v3(s3_ctx *c);
+void buckets_admin_kms_create_key_v3(s3_ctx *c);
+
 /* Shared helpers (admin.c): validateAdminReq for one action (answers the
  * request itself when it fails), custom-coded errors, IAM store errors. */
 bool buckets_admin_authorize(s3_ctx *c, const char *action);

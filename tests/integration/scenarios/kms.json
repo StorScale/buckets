@@ -1,0 +1,74 @@
+[
+ {
+  "method": "GET",
+  "path": "/minio/kms/v1/status",
+  "label": "kms status"
+ },
+ {
+  "method": "GET",
+  "path": "/minio/kms/v1/version",
+  "label": "kms version"
+ },
+ {
+  "method": "GET",
+  "path": "/minio/kms/v1/apis",
+  "label": "kms apis"
+ },
+ {
+  "method": "GET",
+  "path": "/minio/kms/v1/key/list",
+  "query": "pattern=*",
+  "label": "list keys"
+ },
+ {
+  "method": "GET",
+  "path": "/minio/kms/v1/key/list",
+  "query": "pattern=zzz",
+  "label": "list keys no match"
+ },
+ {
+  "method": "GET",
+  "path": "/minio/kms/v1/key/status",
+  "label": "key status default"
+ },
+ {
+  "method": "GET",
+  "path": "/minio/kms/v1/key/status",
+  "query": "key-id=missing",
+  "label": "key status missing"
+ },
+ {
+  "method": "POST",
+  "path": "/minio/kms/v1/key/create",
+  "query": "key-id=s3diff-key",
+  "label": "create existing key"
+ },
+ {
+  "method": "POST",
+  "path": "/minio/kms/v1/key/create",
+  "query": "key-id=newkey",
+  "label": "create another key"
+ },
+ {
+  "method": "POST",
+  "path": "/minio/admin/v3/kms/status",
+  "label": "admin kms status"
+ },
+ {
+  "method": "GET",
+  "path": "/minio/admin/v3/kms/key/status",
+  "label": "admin key status"
+ },
+ {
+  "method": "GET",
+  "path": "/minio/admin/v3/kms/key/status",
+  "query": "key-id=nope",
+  "label": "admin key status missing"
+ },
+ {
+  "method": "POST",
+  "path": "/minio/admin/v3/kms/key/create",
+  "query": "key-id=s3diff-key",
+  "label": "admin create existing key"
+ }
+]

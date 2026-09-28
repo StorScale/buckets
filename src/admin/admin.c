@@ -2119,6 +2119,9 @@ static const route k_routes[] = {
     {"GET", "/get-bucket-quota", buckets_admin_get_bucket_quota},
     {"PUT", "/set-bucket-quota", buckets_admin_set_bucket_quota},
     {"GET", "/datausageinfo", buckets_admin_data_usage_info},
+    {"POST", "/kms/status", buckets_admin_kms_status_v3},
+    {"POST", "/kms/key/create", buckets_admin_kms_create_key_v3},
+    {"GET", "/kms/key/status", buckets_admin_kms_key_status_v3},
 };
 
 bool buckets_admin_is_admin_path(buckets_str path) { return buckets_str_has_prefix(path, ADMIN_PREFIX "/"); }

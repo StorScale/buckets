@@ -2,6 +2,8 @@
 #include "kms/kms.h"
 
 #include <openssl/crypto.h>
+#include <stdatomic.h>
+#include <time.h>
 #include <openssl/evp.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,7 +19,36 @@
 struct buckets_kms {
   char *key_id;
   uint8_t key[32];
+  _Atomic uint64_t ok, err, fail;
+  _Atomic uint64_t latency[BUCKETS_KMS_LATENCY_BUCKETS];
 };
+
+const int64_t buckets_kms_latency_ms[BUCKETS_KMS_LATENCY_BUCKETS] = {10, 50, 100, 250, 500, 1000, 1500, 3000, 5000, 10000};
+
+static int64_t mono_ns(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
+
+/* updateMetrics: the first bucket at least as large as the latency and all
+ * after it; not-supported (5xx) failures count as failures, other KMS errors
+ * as errors. */
+static buckets_kms_err metered(buckets_kms *k, int64_t start, buckets_kms_err e) {
+  int64_t ms = (mono_ns() - start) / 1000000LL;
+  int b = 0;
+  while (b < BUCKETS_KMS_LATENCY_BUCKETS - 1 && ms >= buckets_kms_latency_ms[b]) b++;
+  for (int i = b; i < BUCKETS_KMS_LATENCY_BUCKETS; i++) atomic_fetch_add(&k->latency[i], 1);
+  if (e == BUCKETS_KMS_OK) atomic_fetch_add(&k->ok, 1);
+  else if (e == BUCKETS_KMS_ERR_NOT_SUPPORTED || e == BUCKETS_KMS_ERR_UNAVAILABLE) atomic_fetch_add(&k->fail, 1);
+  else atomic_fetch_add(&k->err, 1);
+  return e;
+}
+
+void buckets_kms_metrics_get(buckets_kms *k, buckets_kms_metrics *out) {
+  out->ok = atomic_load(&k->ok), out->err = atomic_load(&k->err), out->fail = atomic_load(&k->fail);
+  for (int i = 0; i < BUCKETS_KMS_LATENCY_BUCKETS; i++) out->latency[i] = atomic_load(&k->latency[i]);
+}
 
 void buckets_kms_free(buckets_kms *k) {
   if (!k) return;
@@ -84,7 +115,7 @@ buckets_kms *buckets_kms_from_env(char *err, size_t errlen) {
 const char *buckets_kms_default_key(const buckets_kms *k) { return k->key_id; }
 const char *buckets_kms_type(const buckets_kms *k) {
   (void)k;
-  return "Builtin";
+  return "MinIO builtin"; /* kms.Type.String() */
 }
 
 /* HMAC-SHA256(key, iv): the per-ciphertext AES-GCM key. */
@@ -92,8 +123,8 @@ static void sealing_key(const buckets_kms *k, const uint8_t iv[16], uint8_t out[
   buckets_hmac_sha256(k->key, 32, iv, 16, out);
 }
 
-buckets_kms_err buckets_kms_generate(buckets_kms *k, const char *name, const char *context, uint8_t plaintext[32],
-                                     buckets_buf *ciphertext, char *key_id, size_t key_id_cap) {
+static buckets_kms_err generate(buckets_kms *k, const char *name, const char *context, uint8_t plaintext[32],
+                                buckets_buf *ciphertext, char *key_id, size_t key_id_cap) {
   if (!name || !*name) name = k->key_id;
   if (strcmp(name, k->key_id) != 0) return BUCKETS_KMS_ERR_KEY_NOT_FOUND;
   uint8_t random[28]; /* iv (16) || nonce (12) */
@@ -158,8 +189,8 @@ static bool hchacha20(const uint8_t key[32], const uint8_t nonce[16], uint8_t ou
   return true;
 }
 
-buckets_kms_err buckets_kms_decrypt(buckets_kms *k, const char *name, const uint8_t *ciphertext, size_t n,
-                                    const char *context, uint8_t plaintext[32]) {
+static buckets_kms_err decrypt(buckets_kms *k, const char *name, const uint8_t *ciphertext, size_t n, const char *context,
+                               uint8_t plaintext[32]) {
   if (!name || strcmp(name, k->key_id) != 0) return BUCKETS_KMS_ERR_KEY_NOT_FOUND;
   buckets_buf raw = BUCKETS_BUF_INIT;
   int alg = BUCKETS_AEAD_AES_256_GCM;
@@ -182,8 +213,21 @@ buckets_kms_err buckets_kms_decrypt(buckets_kms *k, const char *name, const uint
   return e;
 }
 
+buckets_kms_err buckets_kms_generate(buckets_kms *k, const char *name, const char *context, uint8_t plaintext[32],
+                                     buckets_buf *ciphertext, char *key_id, size_t key_id_cap) {
+  int64_t t = mono_ns();
+  return metered(k, t, generate(k, name, context, plaintext, ciphertext, key_id, key_id_cap));
+}
+
+buckets_kms_err buckets_kms_decrypt(buckets_kms *k, const char *name, const uint8_t *ciphertext, size_t n,
+                                    const char *context, uint8_t plaintext[32]) {
+  int64_t t = mono_ns();
+  return metered(k, t, decrypt(k, name, ciphertext, n, context, plaintext));
+}
+
 buckets_kms_err buckets_kms_create_key(buckets_kms *k, const char *name) {
-  return strcmp(name, k->key_id) == 0 ? BUCKETS_KMS_ERR_KEY_EXISTS : BUCKETS_KMS_ERR_NOT_SUPPORTED;
+  int64_t t = mono_ns();
+  return metered(k, t, strcmp(name, k->key_id) == 0 ? BUCKETS_KMS_ERR_KEY_EXISTS : BUCKETS_KMS_ERR_NOT_SUPPORTED);
 }
 
 size_t buckets_kms_list_keys(buckets_kms *k, const char *prefix, char ***names) {

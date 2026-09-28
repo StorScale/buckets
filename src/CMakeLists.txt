@@ -87,6 +87,7 @@ add_library(buckets STATIC
   admin/config.c
   admin/iamxfer.c
   admin/bucket.c
+  admin/kms.c
   config/config.c
   config/sys.c
 )

@@ -148,6 +148,13 @@ STATUS = {
     "PutBucketEncryptionHandler": (DONE, ""),
     "GetBucketEncryptionHandler": (DONE, ""),
     "DeleteBucketEncryptionHandler": (DONE, ""),
+    "KMSStatusHandler": (DONE, "builtin KMS"),
+    "KMSKeyStatusHandler": (DONE, "builtin KMS"),
+    "KMSCreateKeyHandler": (DONE, "builtin KMS"),
+    "KMSMetricsHandler": (DONE, "builtin KMS"),
+    "KMSAPIsHandler": (DONE, "builtin KMS"),
+    "KMSVersionHandler": (DONE, "builtin KMS"),
+    "KMSListKeysHandler": (DONE, "builtin KMS"),
 }
 
 SOURCES = [

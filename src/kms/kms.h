@@ -46,6 +46,16 @@ buckets_kms_err buckets_kms_create_key(buckets_kms *k, const char *name);
 /* The key names starting with prefix (ListKeys). Caller frees each and the array. */
 size_t buckets_kms_list_keys(buckets_kms *k, const char *prefix, char ***names);
 
+/* KMS.Metrics: request counters and a cumulative latency histogram over
+ * MinIO's buckets (10ms ... 10s). */
+#define BUCKETS_KMS_LATENCY_BUCKETS 10
+typedef struct {
+  uint64_t ok, err, fail;
+  uint64_t latency[BUCKETS_KMS_LATENCY_BUCKETS];
+} buckets_kms_metrics;
+extern const int64_t buckets_kms_latency_ms[BUCKETS_KMS_LATENCY_BUCKETS];
+void buckets_kms_metrics_get(buckets_kms *k, buckets_kms_metrics *out);
+
 /* kms.Context.MarshalText: a JSON object with sorted keys and Go's
  * HTML-safe escaping ("{}" when empty). */
 void buckets_kms_context_text(const char *const *keys, const char *const *values, size_t n, buckets_buf *out);

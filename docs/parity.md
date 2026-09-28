@@ -5,7 +5,7 @@ registers is listed; statuses live in the script's `STATUS` table.
 
 ✅ done · 🟡 partial · ⬜ not started
 
-**Overall:** 121 done, 6 partial, 95 not started (222 handlers).
+**Overall:** 131 done, 6 partial, 85 not started (222 handlers).
 
 ## S3 API (57/76)
 
@@ -90,7 +90,7 @@ Source: `cmd/api-router.go`
 | ⬜ | `SelectObjectContentHandler` |  |
 | ⬜ | `ValidateBucketReplicationCredsHandler` |  |
 
-## Admin API (madmin / mc admin) (53/123)
+## Admin API (madmin / mc admin) (56/123)
 
 Source: `cmd/admin-router.go`
 
@@ -140,9 +140,9 @@ Source: `cmd/admin-router.go`
 | ✅ | `InfoCannedPolicy` |  |
 | ✅ | `InfoServiceAccount` |  |
 | ⬜ | `InspectDataHandler` |  |
-| ⬜ | `KMSCreateKeyHandler` |  |
-| ⬜ | `KMSKeyStatusHandler` |  |
-| ⬜ | `KMSStatusHandler` |  |
+| ✅ | `KMSCreateKeyHandler` | builtin KMS |
+| ✅ | `KMSKeyStatusHandler` | builtin KMS |
+| ✅ | `KMSStatusHandler` | builtin KMS |
 | ✅ | `ListAccessKeysBulk` |  |
 | ✅ | `ListAccessKeysLDAP` |  |
 | ✅ | `ListAccessKeysLDAPBulk` |  |
@@ -234,19 +234,19 @@ Source: `cmd/sts-handlers.go`
 | ✅ | `AssumeRoleWithSSO` | WebIdentity and ClientGrants from a form body |
 | ✅ | `AssumeRoleWithWebIdentity` |  |
 
-## KMS API (0/7)
+## KMS API (7/7)
 
 Source: `cmd/kms-router.go`
 
 | | Handler | Notes |
 |---|---|---|
-| ⬜ | `KMSAPIsHandler` |  |
-| ⬜ | `KMSCreateKeyHandler` |  |
-| ⬜ | `KMSKeyStatusHandler` |  |
-| ⬜ | `KMSListKeysHandler` |  |
-| ⬜ | `KMSMetricsHandler` |  |
-| ⬜ | `KMSStatusHandler` |  |
-| ⬜ | `KMSVersionHandler` |  |
+| ✅ | `KMSAPIsHandler` | builtin KMS |
+| ✅ | `KMSCreateKeyHandler` | builtin KMS |
+| ✅ | `KMSKeyStatusHandler` | builtin KMS |
+| ✅ | `KMSListKeysHandler` | builtin KMS |
+| ✅ | `KMSMetricsHandler` | builtin KMS |
+| ✅ | `KMSStatusHandler` | builtin KMS |
+| ✅ | `KMSVersionHandler` | builtin KMS |
 
 ## Metrics (0/5)
 
