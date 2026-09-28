@@ -125,6 +125,11 @@ r=$(sts alice alicesecret123 --data-urlencode \
 tak=$(xml AccessKeyId <<<"$r"); tsk=$(xml SecretAccessKey <<<"$r"); ttok=$(xml SessionToken <<<"$r")
 ok s3tmp -H "X-Amz-Security-Token: $ttok" "$EP/photos/a.txt"
 denied s3tmp -H "X-Amz-Security-Token: $ttok" -X PUT --data x "$EP/photos/q.txt"
+mc admin accesskey ls root --all | grep "$tak" >/dev/null || fail "accesskey ls lists the STS key"
+mc admin user sts info root "$tak" | grep "ParentUser: alice" >/dev/null || fail "user sts info"
+mc admin accesskey info root alicesvc01 | grep "Parent User: alice" >/dev/null || fail "accesskey info"
+mc admin policy entities root --policy photos-rw | grep alice >/dev/null || fail "policy entities by policy"
+mc admin policy entities root --user bob | grep -A3 "Group Memberships" | grep devs >/dev/null || fail "policy entities by user"
 # Service accounts cannot assume roles.
 sts alicesvc01 alicesvcsecret1 | grep AccessDenied >/dev/null || fail "svcacct AssumeRole should be denied"
 

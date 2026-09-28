@@ -219,6 +219,11 @@ buckets_iam_err buckets_iam_policy_update(buckets_iam *iam, const char *name, bo
 /* The mapped policies of a user (with its groups) or a group, comma-separated. */
 char *buckets_iam_mapped_policies(buckets_iam *iam, const char *name, bool is_group);
 
+/* QueryPolicyEntities: madmin.PolicyEntitiesResult as JSON. With no users, groups or policies it
+ * lists every policy's users and groups. */
+char *buckets_iam_policy_entities_json(buckets_iam *iam, const char *const *users, size_t nu,
+                                       const char *const *groups, size_t ng, const char *const *policies, size_t np);
+
 /* ---- service accounts ---------------------------------------------------------- */
 
 typedef struct {

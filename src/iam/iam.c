@@ -2101,3 +2101,152 @@ buckets_iam_err buckets_iam_set_temp_user(buckets_iam *iam, const char *access_k
   else *out = id;
   return e;
 }
+
+/* ---- policy entities ------------------------------------------------------------------ */
+
+static void add_sorted(yyjson_mut_doc *d, yyjson_mut_val *o, const char *key, strset *s) {
+  if (s->n) qsort(s->v, s->n, sizeof(char *), cmp_str);
+  yyjson_mut_val *a = yyjson_mut_obj_add_arr(d, o, key);
+  for (size_t i = 0; i < s->n; i++) yyjson_mut_arr_add_strcpy(d, a, s->v[i]);
+}
+
+static yyjson_mut_val *group_mappings(yyjson_mut_doc *d, const cache *c, const strset *only) {
+  strset names = {0};
+  size_t it = 0;
+  const char *g;
+  while (buckets_strmap_next(&c->group_pol, &it, &g, NULL)) {
+    if (only && only->n && !strv_has(only->v, only->n, g)) continue;
+    set_add(&names, g);
+  }
+  if (names.n) qsort(names.v, names.n, sizeof(char *), cmp_str);
+  yyjson_mut_val *arr = yyjson_mut_arr(d);
+  for (size_t i = 0; i < names.n; i++) {
+    const mapped_policy *m = buckets_strmap_get(&c->group_pol, names.v[i]);
+    yyjson_mut_val *o = yyjson_mut_arr_add_obj(d, arr);
+    yyjson_mut_obj_add_strcpy(d, o, "group", names.v[i]);
+    strset ps = {0};
+    set_add_csv(&ps, m->policies);
+    add_sorted(d, o, "policies", &ps);
+    set_free(&ps);
+  }
+  set_free(&names);
+  return arr;
+}
+
+char *buckets_iam_policy_entities_json(buckets_iam *iam, const char *const *users, size_t nu,
+                                       const char *const *groups, size_t ng, const char *const *policies, size_t np) {
+  yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
+  yyjson_mut_val *root = yyjson_mut_obj(d);
+  yyjson_mut_doc_set_root(d, root);
+  char ts[BUCKETS_TIME_RFC3339_NANO_LEN + 1];
+  time_fmt(now_time(), ts);
+  yyjson_mut_obj_add_strcpy(d, root, "timestamp", ts);
+  pthread_rwlock_rdlock(&iam->lock);
+  const cache *c = &iam->c;
+  bool all = !nu && !ng && !np;
+
+  if (nu) {
+    /* listUserPolicyMappings: each queried user's own mapping (regular,
+     * else STS) and the mappings of the groups it belongs to. */
+    strset us = {0};
+    for (size_t i = 0; i < nu; i++) set_add(&us, users[i]);
+    qsort(us.v, us.n, sizeof(char *), cmp_str);
+    yyjson_mut_val *arr = yyjson_mut_arr(d);
+    for (size_t i = 0; i < us.n; i++) {
+      const mapped_policy *m = buckets_strmap_get(&c->pol[BUCKETS_IAM_REG], us.v[i]);
+      if (!m) m = buckets_strmap_get(&c->pol[BUCKETS_IAM_STS], us.v[i]);
+      char **mof;
+      size_t nmof;
+      member_of(c, us.v[i], &mof, &nmof);
+      strset gset = {mof, nmof, nmof};
+      if (!m && !nmof) {
+        set_free(&gset);
+        continue;
+      }
+      yyjson_mut_val *o = yyjson_mut_arr_add_obj(d, arr);
+      yyjson_mut_obj_add_strcpy(d, o, "user", us.v[i]);
+      strset ps = {0};
+      if (m) set_add_csv(&ps, m->policies);
+      if (m) add_sorted(d, o, "policies", &ps);
+      else yyjson_mut_obj_add_null(d, o, "policies");
+      set_free(&ps);
+      if (nmof) {
+        yyjson_mut_val *gm = group_mappings(d, c, &gset);
+        if (yyjson_mut_arr_size(gm)) yyjson_mut_obj_add_val(d, o, "memberOfMappings", gm);
+      }
+      set_free(&gset);
+    }
+    if (yyjson_mut_arr_size(arr)) yyjson_mut_obj_add_val(d, root, "userMappings", arr);
+  }
+  if (ng) {
+    strset gs = {0};
+    for (size_t i = 0; i < ng; i++) set_add(&gs, groups[i]);
+    yyjson_mut_val *arr = group_mappings(d, c, &gs);
+    if (yyjson_mut_arr_size(arr)) yyjson_mut_obj_add_val(d, root, "groupMappings", arr);
+    set_free(&gs);
+  }
+  if (np || all) {
+    /* listPolicyMappings: policy -> users (regular and STS parents) and groups. */
+    strset q = {0};
+    for (size_t i = 0; i < np; i++) set_add(&q, policies[i]);
+    buckets_strmap by_user = BUCKETS_STRMAP_INIT, by_group = BUCKETS_STRMAP_INIT;
+    const buckets_strmap *umaps[] = {&c->pol[BUCKETS_IAM_REG], &c->pol[BUCKETS_IAM_STS], &c->group_pol};
+    for (int k = 0; k < 3; k++) {
+      size_t it = 0;
+      const char *who;
+      void *v;
+      while (buckets_strmap_next(umaps[k], &it, &who, &v)) {
+        strset ps = {0};
+        set_add_csv(&ps, ((mapped_policy *)v)->policies);
+        for (size_t i = 0; i < ps.n; i++) {
+          if (q.n && !strv_has(q.v, q.n, ps.v[i])) continue;
+          buckets_strmap *m = k == 2 ? &by_group : &by_user;
+          strset *set = buckets_strmap_get(m, ps.v[i]);
+          if (!set) {
+            set = buckets_xcalloc(1, sizeof(*set));
+            buckets_strmap_put(m, ps.v[i], set);
+          }
+          set_add(set, who);
+        }
+        set_free(&ps);
+      }
+    }
+    strset names = {0};
+    size_t it = 0;
+    const char *pn;
+    while (buckets_strmap_next(&by_user, &it, &pn, NULL)) set_add(&names, pn);
+    it = 0;
+    while (buckets_strmap_next(&by_group, &it, &pn, NULL)) set_add(&names, pn);
+    if (names.n) qsort(names.v, names.n, sizeof(char *), cmp_str);
+    yyjson_mut_val *arr = yyjson_mut_arr(d);
+    for (size_t i = 0; i < names.n; i++) {
+      yyjson_mut_val *o = yyjson_mut_arr_add_obj(d, arr);
+      yyjson_mut_obj_add_strcpy(d, o, "policy", names.v[i]);
+      strset *us = buckets_strmap_get(&by_user, names.v[i]), *gs = buckets_strmap_get(&by_group, names.v[i]);
+      if (us) add_sorted(d, o, "users", us);
+      else yyjson_mut_obj_add_null(d, o, "users");
+      if (gs) add_sorted(d, o, "groups", gs);
+      else yyjson_mut_obj_add_null(d, o, "groups");
+    }
+    if (yyjson_mut_arr_size(arr)) yyjson_mut_obj_add_val(d, root, "policyMappings", arr);
+    set_free(&names);
+    void *v;
+    it = 0;
+    while (buckets_strmap_next(&by_user, &it, NULL, &v)) {
+      set_free(v);
+      free(v);
+    }
+    it = 0;
+    while (buckets_strmap_next(&by_group, &it, NULL, &v)) {
+      set_free(v);
+      free(v);
+    }
+    buckets_strmap_free(&by_user);
+    buckets_strmap_free(&by_group);
+    set_free(&q);
+  }
+  pthread_rwlock_unlock(&iam->lock);
+  char *json = yyjson_mut_write(d, 0, NULL);
+  yyjson_mut_doc_free(d);
+  return json;
+}

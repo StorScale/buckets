@@ -997,6 +997,210 @@ static void h_delete_svc(s3_ctx *c) {
   else c->resp->status = 204;
 }
 
+/* ---- access keys, temporary accounts and policy entities ----------------------------------- */
+
+/* Every value of a repeated query parameter (r.Form["users"]). */
+static size_t qall(s3_ctx *c, const char *key, const char ***out) {
+  *out = buckets_xcalloc(c->q.n ? c->q.n : 1, sizeof(char *));
+  size_t n = 0;
+  for (size_t i = 0; i < c->q.n; i++) {
+    if (strcmp(c->q.items[i].key, key) == 0 && *c->q.items[i].value) (*out)[n++] = c->q.items[i].value;
+  }
+  return n;
+}
+
+static void add_key_infos(yyjson_mut_doc *d, yyjson_mut_val *o, const char *key, buckets_iam_ident **ids, size_t n) {
+  if (!n) {
+    yyjson_mut_obj_add_null(d, o, key);
+    return;
+  }
+  yyjson_mut_val *a = yyjson_mut_obj_add_arr(d, o, key);
+  for (size_t i = 0; i < n; i++) {
+    yyjson_mut_val *e = yyjson_mut_arr_add_obj(d, a);
+    yyjson_mut_obj_add_str(d, e, "parentUser", "");
+    yyjson_mut_obj_add_str(d, e, "accountStatus", "");
+    yyjson_mut_obj_add_bool(d, e, "impliedPolicy", false);
+    yyjson_mut_obj_add_strcpy(d, e, "accessKey", ids[i]->access_key);
+    add_time(d, e, "expiration", ids[i]->expiration);
+  }
+}
+
+static void h_list_access_keys_bulk(s3_ctx *c) {
+  if (!admin_signed(c)) return;
+  const char **users;
+  size_t nu = qall(c, "users", &users);
+  bool all = strcmp(qget(c, "all"), "true") == 0;
+  bool self_only = !all && nu == 0;
+  buckets_iam *iam = c->s->iam;
+  yyjson_mut_doc *d = NULL;
+  if (all && nu) {
+    buckets_admin_error(c, BUCKETS_ERR_INVALID_REQUEST);
+    goto out;
+  }
+  if (all && !allowed(c, "admin:ListUsers", false)) {
+    buckets_admin_error(c, BUCKETS_ERR_ACCESS_DENIED);
+    goto out;
+  }
+  if (nu == 1 && (strcmp(users[0], requestor(c)) == 0 || strcmp(users[0], requestor_parent(c)) == 0)) self_only = true;
+  if (!allowed(c, "admin:ListServiceAccounts", self_only)) {
+    buckets_admin_error(c, BUCKETS_ERR_ACCESS_DENIED);
+    goto out;
+  }
+  const char *lt = qget(c, "listType");
+  bool sts = strcmp(lt, "sts-only") == 0 || strcmp(lt, "all") == 0;
+  bool svc = strcmp(lt, "svcacc-only") == 0 || strcmp(lt, "all") == 0;
+  if (!sts && !svc && strcmp(lt, "users-only") != 0) {
+    buckets_admin_error_msg(c, BUCKETS_ERR_INVALID_REQUEST, "invalid list type");
+    goto out;
+  }
+  /* The users to report: everyone (and root), the given ones that exist, or self. */
+  char **names = NULL;
+  size_t nn = 0;
+  if (all) {
+    buckets_iam_user_info *ui;
+    size_t n;
+    buckets_iam_list_users(iam, &ui, &n);
+    names = buckets_xcalloc(n + 1, sizeof(char *));
+    for (size_t i = 0; i < n; i++) names[nn++] = buckets_xstrdup(ui[i].name);
+    names[nn++] = buckets_xstrdup(buckets_iam_root_access_key(iam));
+    buckets_iam_user_info_free(ui, n);
+    free(ui);
+  } else {
+    names = buckets_xcalloc(nu + 1, sizeof(char *));
+    if (self_only && !nu) {
+      names[nn++] = buckets_xstrdup(requestor_parent(c));
+    } else {
+      for (size_t i = 0; i < nu; i++) {
+        buckets_iam_ident *id;
+        bool exists = buckets_iam_get_key(iam, users[i], &id) == BUCKETS_IAM_KEY_OK;
+        buckets_iam_ident_release(id);
+        if (exists) names[nn++] = buckets_xstrdup(users[i]);
+      }
+    }
+  }
+  d = yyjson_mut_doc_new(NULL);
+  yyjson_mut_val *root = yyjson_mut_obj(d);
+  yyjson_mut_doc_set_root(d, root);
+  for (size_t i = 0; i < nn; i++) {
+    buckets_iam_ident **sk = NULL, **vk = NULL;
+    size_t ns = 0, nv = 0;
+    if (sts) buckets_iam_list_derived(iam, names[i], BUCKETS_IAM_STS, &sk, &ns);
+    if (svc) buckets_iam_list_derived(iam, names[i], BUCKETS_IAM_SVC, &vk, &nv);
+    bool skip = (sts && !svc && !ns) || (svc && !sts && !nv);
+    if (!skip) {
+      yyjson_mut_val *o = yyjson_mut_obj(d);
+      add_key_infos(d, o, "serviceAccounts", vk, nv);
+      add_key_infos(d, o, "stsKeys", sk, ns);
+      yyjson_mut_obj_add(root, yyjson_mut_strcpy(d, names[i]), o);
+    }
+    for (size_t k = 0; k < ns; k++) buckets_iam_ident_release(sk[k]);
+    for (size_t k = 0; k < nv; k++) buckets_iam_ident_release(vk[k]);
+    free(sk);
+    free(vk);
+    free(names[i]);
+  }
+  free(names);
+  write_json(c, d, true);
+out:
+  yyjson_mut_doc_free(d);
+  free(users);
+}
+
+/* InfoAccessKey / TemporaryAccountInfo share this shape. */
+static void write_key_info(s3_ctx *c, buckets_iam_ident *id, bool access_key_form) {
+  bool implied;
+  char *policy;
+  if (buckets_iam_ident_is_svc(id)) {
+    policy = svc_policy_json(c->s->iam, id, &implied);
+  } else {
+    /* STS: the session policy, else the parent's. */
+    implied = !id->has_session_policy;
+    policy = implied || !id->session_policy_json ? NULL : buckets_xstrdup(id->session_policy_json);
+    if (!policy) {
+      buckets_iam_ident tmp = *id;
+      tmp.has_session_policy = false;
+      policy = svc_policy_json(c->s->iam, &tmp, &implied);
+      implied = !id->has_session_policy;
+    }
+  }
+  yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
+  yyjson_mut_val *root = yyjson_mut_obj(d);
+  yyjson_mut_doc_set_root(d, root);
+  if (access_key_form) yyjson_mut_obj_add_strcpy(d, root, "AccessKey", id->access_key);
+  yyjson_mut_obj_add_strcpy(d, root, "parentUser", id->parent ? id->parent : "");
+  yyjson_mut_obj_add_strcpy(d, root, "accountStatus", id->status);
+  yyjson_mut_obj_add_bool(d, root, "impliedPolicy", implied);
+  yyjson_mut_obj_add_strcpy(d, root, "policy", policy);
+  if (id->name) yyjson_mut_obj_add_strcpy(d, root, "name", id->name);
+  if (id->description) yyjson_mut_obj_add_strcpy(d, root, "description", id->description);
+  if (buckets_iam_time_is_set(id->expiration)) add_time(d, root, "expiration", id->expiration);
+  if (access_key_form) {
+    yyjson_mut_obj_add_str(d, root, "userType", buckets_iam_ident_is_temp(id) ? "STS" : "Service Account");
+    yyjson_mut_obj_add_str(d, root, "userProvider", "builtin");
+    yyjson_mut_val *ldap = yyjson_mut_obj_add_obj(d, root, "ldapSpecificInfo");
+    yyjson_mut_obj_add_str(d, ldap, "username", "");
+    yyjson_mut_val *oidc = yyjson_mut_obj_add_obj(d, root, "openIDSpecificInfo");
+    yyjson_mut_obj_add_str(d, oidc, "configName", "");
+    yyjson_mut_obj_add_str(d, oidc, "userID", "");
+    yyjson_mut_obj_add_str(d, oidc, "userIDClaim", "");
+  }
+  write_json(c, d, true);
+  yyjson_mut_doc_free(d);
+  free(policy);
+}
+
+static void h_info_access_key(s3_ctx *c) {
+  if (!admin_signed(c)) return;
+  const char *ak = qget(c, "accessKey");
+  if (!*ak) ak = requestor(c);
+  buckets_iam_ident *id = buckets_iam_get_ident(c->s->iam, ak);
+  if (!allowed(c, "admin:ListServiceAccounts", false) &&
+      (!id || !id->parent || strcmp(requestor_parent(c), id->parent) != 0)) {
+    buckets_iam_ident_release(id);
+    buckets_admin_error(c, BUCKETS_ERR_ACCESS_DENIED);
+    return;
+  }
+  if (!id || !(buckets_iam_ident_is_temp(id) || buckets_iam_ident_is_svc(id))) {
+    buckets_iam_ident_release(id);
+    buckets_admin_error(c, BUCKETS_ERR_ADMIN_NO_SUCH_ACCESS_KEY);
+    return;
+  }
+  write_key_info(c, id, true);
+  buckets_iam_ident_release(id);
+}
+
+static void h_temp_account_info(s3_ctx *c) {
+  if (!admin_req1(c, "admin:ListTemporaryAccounts")) return;
+  buckets_iam_ident *id = buckets_iam_get_ident(c->s->iam, qget(c, "accessKey"));
+  if (!id || id->type != BUCKETS_IAM_STS) {
+    buckets_iam_ident_release(id);
+    custom_error(c, 404, "XMinioAdminNoSuchTempAccount", "The specified temporary account does not exist");
+    return;
+  }
+  write_key_info(c, id, false);
+  buckets_iam_ident_release(id);
+}
+
+static void h_policy_entities(s3_ctx *c) {
+  static const char *const actions[] = {"admin:ListGroups", "admin:ListUsers", "admin:ListUserPolicies"};
+  if (!admin_req(c, actions, 3)) return;
+  const char **u, **g, **p;
+  size_t nu = qall(c, "user", &u), ng = qall(c, "group", &g), np = qall(c, "policy", &p);
+  char *json = buckets_iam_policy_entities_json(c->s->iam, u, nu, g, ng, p, np);
+  free(u);
+  free(g);
+  free(p);
+  buckets_buf_reset(&c->resp->body);
+  if (!buckets_madmin_encrypt(c->ident->secret_key, json, strlen(json), &c->resp->body)) {
+    free(json);
+    buckets_admin_error(c, BUCKETS_ERR_INTERNAL_ERROR);
+    return;
+  }
+  free(json);
+  c->resp->status = 200;
+  buckets_http_resp_header(c->resp, "Content-Type", "application/json");
+}
+
 /* ---- routing ------------------------------------------------------------------------------- */
 
 typedef struct {
@@ -1035,6 +1239,10 @@ static const route k_routes[] = {
     {"GET", "/info-service-account", h_info_svc},
     {"GET", "/list-service-accounts", h_list_svc},
     {"DELETE", "/delete-service-account", h_delete_svc},
+    {"GET", "/list-access-keys-bulk", h_list_access_keys_bulk},
+    {"GET", "/info-access-key", h_info_access_key},
+    {"GET", "/temporary-account-info", h_temp_account_info},
+    {"GET", "/idp/builtin/policy-entities", h_policy_entities},
 };
 
 bool buckets_admin_is_admin_path(buckets_str path) { return buckets_str_has_prefix(path, ADMIN_PREFIX "/"); }

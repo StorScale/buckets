@@ -37,6 +37,7 @@ All notable changes to this project are documented here. The format follows
     - update-group-members, group, groups, set-group-status
     - list-, info-, add- and remove-canned-policy, set-user-or-group-policy, and `idp/builtin/policy/attach|detach`
     - add-, update-, info-, list- and delete-service-account
+    - list-access-keys-bulk, info-access-key, temporary-account-info, and `idp/builtin/policy-entities`
     - madmin encryption where MinIO uses it, and JSON errors
   - Bucket policies (`policy.BucketPolicy`):
     - parsing and evaluation, checked against 5,323 golden vectors from the Go package (`policygen bpvectors`)
