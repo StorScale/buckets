@@ -71,6 +71,7 @@ All notable changes to this project are documented here. The format follows
     - IAM's LDAP mode: policies mapped on user and group DNs (`policydb/sts-users`, `policydb/groups`), and built-in user/group changes refused as in MinIO
     - admin `idp/ldap/policy/attach|detach`, `policy-entities`, `add-service-account`, `list-access-keys` and `list-access-keys-bulk`, and LDAP handling in `set-user-or-group-policy`
     - `tests/integration/ldap.sh` runs `mc idp ldap` against a mock directory (`ldapmock.py`), over plain LDAP, LDAPS and StartTLS
+  - `mc admin accesskey sts-revoke` (`revoke-tokens`, by token type or all), `mc idp openid accesskey ls` (`idp/openid/list-access-keys-bulk`), and the provider details (`userProvider`, LDAP user, OpenID config and claims) in `info-access-key`
   - `mc idp openid|ldap add|update|info|ls|rm` (the `idp-config` admin API): configuration shown without defaults or secrets, with its environment overrides, role ARNs and live state, and LDAP validation errors in MinIO's format
   - The server configuration (`src/config`), a port of MinIO's `internal/config`:
     - all 34 sub-systems, with their keys, defaults and help, generated from MinIO's own registry (`tools/configgen`)

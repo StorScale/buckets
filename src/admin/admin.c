@@ -11,8 +11,10 @@
 
 #include "core/log.h"
 #include "core/timefmt.h"
+#include "config/sys.h"
 #include "crypto/madmin.h"
 #include "iam/ldapidp.h"
+#include "iam/openid.h"
 
 #define ADMIN_PREFIX "/minio/admin/v3"
 #define MAX_ECONFIG_JSON (262272) /* maxEConfigJSONSize */
@@ -1283,6 +1285,20 @@ out:
 }
 
 /* InfoAccessKey / TemporaryAccountInfo share this shape. */
+/* guessUserProvider */
+static void guess_user_provider(const buckets_iam_ident *id, char *out, size_t cap) {
+  snprintf(out, cap, "builtin");
+  if (!buckets_iam_ident_is_svc(id) && !buckets_iam_ident_is_temp(id)) return;
+  if (buckets_iam_ident_claim(id, "ldapUser")) {
+    snprintf(out, cap, "ldap");
+  } else if (buckets_iam_ident_claim(id, "sub")) {
+    const char *p = id->parent ? id->parent : "";
+    const char *sep = strchr(p, '/');
+    if (sep) snprintf(out, cap, "%.*s", (int)(sep - p), p);
+    else snprintf(out, cap, "openid");
+  }
+}
+
 static void write_key_info(s3_ctx *c, buckets_iam_ident *id, bool access_key_form) {
   bool implied;
   char *policy;
@@ -1312,13 +1328,29 @@ static void write_key_info(s3_ctx *c, buckets_iam_ident *id, bool access_key_for
   if (buckets_iam_time_is_set(id->expiration)) add_time(d, root, "expiration", id->expiration);
   if (access_key_form) {
     yyjson_mut_obj_add_str(d, root, "userType", buckets_iam_ident_is_temp(id) ? "STS" : "Service Account");
-    yyjson_mut_obj_add_str(d, root, "userProvider", "builtin");
+    char provider[128];
+    guess_user_provider(id, provider, sizeof(provider));
+    yyjson_mut_obj_add_strcpy(d, root, "userProvider", provider);
+    const char *ldap_user = strcmp(provider, "ldap") == 0 ? buckets_iam_ident_claim(id, "ldapUser") : NULL;
     yyjson_mut_val *ldap = yyjson_mut_obj_add_obj(d, root, "ldapSpecificInfo");
-    yyjson_mut_obj_add_str(d, ldap, "username", "");
+    yyjson_mut_obj_add_strcpy(d, ldap, "username", ldap_user ? ldap_user : "");
+    /* getOpenIDInfoFromClaims */
+    const char *cfg_name = "", *readable = "", *id_claim = "";
+    buckets_openid *o = strcmp(provider, "openid") == 0 ? buckets_s3_openid(c->s) : NULL;
+    if (o && !buckets_openid_by_arn(o, buckets_iam_ident_claim(id, "roleArn"), &cfg_name, &readable, &id_claim)) {
+      cfg_name = readable = id_claim = "";
+    }
     yyjson_mut_val *oidc = yyjson_mut_obj_add_obj(d, root, "openIDSpecificInfo");
-    yyjson_mut_obj_add_str(d, oidc, "configName", "");
-    yyjson_mut_obj_add_str(d, oidc, "userID", "");
-    yyjson_mut_obj_add_str(d, oidc, "userIDClaim", "");
+    yyjson_mut_obj_add_strcpy(d, oidc, "configName", cfg_name);
+    const char *uid = *id_claim ? buckets_iam_ident_claim(id, id_claim) : NULL;
+    yyjson_mut_obj_add_strcpy(d, oidc, "userID", uid ? uid : "");
+    yyjson_mut_obj_add_strcpy(d, oidc, "userIDClaim", id_claim);
+    if (*readable) {
+      const char *dn = buckets_iam_ident_claim(id, readable);
+      if (dn && *dn) yyjson_mut_obj_add_strcpy(d, oidc, "displayName", dn);
+      yyjson_mut_obj_add_strcpy(d, oidc, "displayNameClaim", readable);
+    }
+    buckets_openid_release(o);
   }
   write_json(c, d, true);
   yyjson_mut_doc_free(d);
@@ -1617,6 +1649,244 @@ out:
   free(dns);
 }
 
+/* ListAccessKeysOpenIDBulk */
+typedef struct {
+  char *parent, *id, *readable;
+  buckets_iam_ident **svc, **sts;
+  size_t nsvc, nsts;
+} oidc_user;
+
+static int cmp_oidc_user(const void *a, const void *b) {
+  return strcmp(((const oidc_user *)a)->parent, ((const oidc_user *)b)->parent);
+}
+
+static void h_openid_list_access_keys_bulk(s3_ctx *c) {
+  if (!admin_signed(c)) return;
+  buckets_openid *o = buckets_s3_openid(c->s);
+  const char **users = NULL;
+  size_t nu = 0;
+  buckets_config *cfg = NULL;
+  char **targets = NULL;
+  size_t nt = 0;
+  if (!buckets_openid_enabled(o)) {
+    custom_error(c, 400, "OpenIDNotEnabled", "No enabled OpenID Connect identity providers");
+    goto out;
+  }
+  nu = qall(c, "users", &users);
+  bool all = strcmp(qget(c, "all"), "true") == 0;
+  bool self_only = !all && nu == 0;
+  const char *cfg_name = qget(c, "configName");
+  bool all_configs = strcmp(qget(c, "allConfigs"), "true") == 0;
+  if (!*cfg_name && !all_configs) cfg_name = BUCKETS_CONFIG_DEFAULT_TARGET;
+  if (all && nu) {
+    buckets_admin_error(c, BUCKETS_ERR_INVALID_REQUEST);
+    goto out;
+  }
+  if (all) {
+    if (!allowed(c, "admin:ListUsers", false)) {
+      buckets_admin_error(c, BUCKETS_ERR_ACCESS_DENIED);
+      goto out;
+    }
+  } else if (nu == 1 && c->ident->parent && strcmp(users[0], c->ident->parent) == 0) {
+    self_only = true;
+  }
+  if (!allowed(c, "admin:ListServiceAccounts", self_only)) {
+    buckets_admin_error(c, BUCKETS_ERR_ACCESS_DENIED);
+    goto out;
+  }
+  const char *self = requestor_parent(c);
+  if (self_only && !nu) {
+    users[0] = self;
+    nu = 1;
+  }
+  const char *lt = qget(c, "listType");
+  bool list_sts = strcmp(lt, "sts-only") == 0 || strcmp(lt, "all") == 0;
+  bool list_svc = strcmp(lt, "svcacc-only") == 0 || strcmp(lt, "all") == 0;
+  if (!list_sts && !list_svc && strcmp(lt, "users-only") != 0) {
+    buckets_admin_error_msg(c, BUCKETS_ERR_INVALID_REQUEST, "invalid list type");
+    goto out;
+  }
+  /* GetConfigList: the configurations (the default one always) and their role ARNs. */
+  cfg = buckets_config_sys_snapshot(c->s->config);
+  nt = buckets_config_targets(cfg, "identity_openid", &targets);
+  bool has_default = false;
+  for (size_t i = 0; i < nt; i++) has_default |= strcmp(targets[i], BUCKETS_CONFIG_DEFAULT_TARGET) == 0;
+  if (!has_default) {
+    targets = buckets_xrealloc(targets, (nt + 1) * sizeof(char *));
+    targets[nt++] = buckets_xstrdup(BUCKETS_CONFIG_DEFAULT_TARGET);
+  }
+  typedef struct {
+    const char *name, *arn, *id_claim, *readable_claim;
+    oidc_user *u;
+    size_t nu;
+  } cfg_ent;
+  cfg_ent *ce = buckets_xcalloc(nt, sizeof(*ce));
+  size_t nce = 0;
+  for (size_t i = 0; i < nt; i++) {
+    if (!all_configs && strcmp(cfg_name, targets[i]) != 0) continue;
+    const char *arn = NULL, *n2, *rc = "", *ic = "";
+    bool live = buckets_openid_target(o, targets[i], &arn);
+    if (arn) buckets_openid_by_arn(o, arn, &n2, &rc, &ic);
+    else if (live) ic = "sub";
+    ce[nce++] = (cfg_ent){targets[i], arn ? arn : "arn:minio:iam:::role/dummy-internal", ic, rc, NULL, 0};
+  }
+  if (!nce) {
+    buckets_admin_error(c, BUCKETS_ERR_ADMIN_NO_SUCH_CONFIG_TARGET);
+    free(ce);
+    goto out;
+  }
+  const char *policy_claim = buckets_openid_claim_name(o);
+  for (int pass = 0; pass < 2; pass++) {
+    bool svc_pass = pass == 0;
+    if (svc_pass ? !list_svc : !list_sts) continue;
+    buckets_iam_ident **list;
+    size_t n;
+    buckets_iam_list_derived(c->s->iam, NULL, svc_pass ? BUCKETS_IAM_SVC : BUCKETS_IAM_STS, &list, &n);
+    for (size_t i = 0; i < n; i++) {
+      buckets_iam_ident *k = list[i];
+      bool keep = false;
+      const char *arn = buckets_iam_ident_claim(k, "sub") ? buckets_iam_ident_claim(k, "roleArn") : NULL;
+      if (buckets_iam_ident_claim(k, "sub") && !arn && *policy_claim && buckets_iam_ident_claim(k, policy_claim))
+        arn = "arn:minio:iam:::role/dummy-internal";
+      cfg_ent *e = NULL;
+      for (size_t j = 0; arn && j < nce && !e; j++)
+        if (strcmp(ce[j].arn, arn) == 0) e = &ce[j];
+      const char *id = e && *e->id_claim ? buckets_iam_ident_claim(k, e->id_claim) : NULL;
+      if (e) {
+        keep = !nu;
+        for (size_t j = 0; j < nu && !keep; j++)
+          keep = strcmp(users[j], k->parent) == 0 || (id && strcmp(users[j], id) == 0);
+      }
+      if (!keep) {
+        buckets_iam_ident_release(k);
+        continue;
+      }
+      oidc_user *u = NULL;
+      for (size_t j = 0; j < e->nu && !u; j++)
+        if (strcmp(e->u[j].parent, k->parent) == 0) u = &e->u[j];
+      if (!u) {
+        e->u = buckets_xrealloc(e->u, (e->nu + 1) * sizeof(oidc_user));
+        u = &e->u[e->nu++];
+        memset(u, 0, sizeof(*u));
+        u->parent = buckets_xstrdup(k->parent);
+        u->id = buckets_xstrdup(id ? id : "");
+        const char *rn = *e->readable_claim ? buckets_iam_ident_claim(k, e->readable_claim) : NULL;
+        u->readable = buckets_xstrdup(rn ? rn : "");
+      }
+      buckets_iam_ident ***arr = svc_pass ? &u->svc : &u->sts;
+      size_t *cnt = svc_pass ? &u->nsvc : &u->nsts;
+      *arr = buckets_xrealloc(*arr, (*cnt + 1) * sizeof(buckets_iam_ident *));
+      (*arr)[(*cnt)++] = k;
+    }
+    free(list);
+  }
+  yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
+  yyjson_mut_val *root = yyjson_mut_arr(d);
+  yyjson_mut_doc_set_root(d, root);
+  /* sorted by configuration name, users by parent */
+  for (size_t a = 0; a < nce; a++)
+    for (size_t b = a + 1; b < nce; b++)
+      if (strcmp(ce[b].name, ce[a].name) < 0) {
+        cfg_ent t = ce[a];
+        ce[a] = ce[b];
+        ce[b] = t;
+      }
+  for (size_t i = 0; i < nce; i++) {
+    yyjson_mut_val *e = yyjson_mut_arr_add_obj(d, root);
+    yyjson_mut_obj_add_strcpy(d, e, "configName", ce[i].name);
+    yyjson_mut_val *ua = yyjson_mut_obj_add_arr(d, e, "users");
+    if (ce[i].nu) qsort(ce[i].u, ce[i].nu, sizeof(oidc_user), cmp_oidc_user);
+    for (size_t j = 0; j < ce[i].nu; j++) {
+      oidc_user *u = &ce[i].u[j];
+      yyjson_mut_val *uo = yyjson_mut_arr_add_obj(d, ua);
+      yyjson_mut_obj_add_strcpy(d, uo, "minioAccessKey", u->parent);
+      yyjson_mut_obj_add_strcpy(d, uo, "ID", u->id);
+      yyjson_mut_obj_add_strcpy(d, uo, "readableName", u->readable);
+      add_key_infos(d, uo, "serviceAccounts", u->svc, u->nsvc);
+      add_key_infos(d, uo, "stsKeys", u->sts, u->nsts);
+      release_idents(u->svc, u->nsvc);
+      release_idents(u->sts, u->nsts);
+      free(u->parent);
+      free(u->id);
+      free(u->readable);
+    }
+    free(ce[i].u);
+  }
+  write_json(c, d, true);
+  yyjson_mut_doc_free(d);
+  free(ce);
+out:
+  for (size_t i = 0; i < nt; i++) free(targets[i]);
+  free(targets);
+  buckets_config_free(cfg);
+  free(users);
+  buckets_openid_release(o);
+}
+
+/* RevokeTokens: /revoke-tokens/{userProvider} */
+static void h_revoke_tokens(s3_ctx *c) {
+  if (!admin_signed(c)) return;
+  buckets_str path = c->req->path;
+  const char *pfx = ADMIN_PREFIX "/revoke-tokens/";
+  char provider[64];
+  snprintf(provider, sizeof(provider), "%.*s", (int)(path.n - strlen(pfx)), path.p + strlen(pfx));
+  char *user = buckets_xstrdup(qget(c, "user"));
+  const char *type = qget(c, "tokenRevokeType");
+  bool full = strcmp(qget(c, "fullRevoke"), "true") == 0;
+  bool self = !*user;
+  buckets_iam *iam = c->s->iam;
+  if (!self) {
+    /* getUserWithProvider(validate false) */
+    if (strcmp(provider, "ldap") == 0) {
+      if (!buckets_iam_ldap_mode(iam)) {
+        iam_error(c, BUCKETS_IAM_ERR_NOT_ALLOWED, NULL);
+        goto out;
+      }
+      buckets_ldapidp *lp = buckets_s3_ldap(c->s);
+      buckets_ldap_dnres res;
+      char err[1024];
+      int r = buckets_ldapidp_validated_user(lp, user, &res, err, sizeof(err));
+      buckets_ldapidp_release(lp);
+      if (r <= 0) {
+        iam_error(c, BUCKETS_IAM_ERR_NO_SUCH_USER, NULL);
+        goto out;
+      }
+      free(user);
+      user = buckets_xstrdup(res.norm_dn);
+      buckets_ldap_dnres_free(&res);
+    } else if (strcmp(provider, "builtin") != 0) {
+      iam_error(c, BUCKETS_IAM_ERR_NOT_ALLOWED, NULL);
+      goto out;
+    }
+  }
+  if ((*user && !*type && !full) || (*type && full)) {
+    buckets_admin_error(c, BUCKETS_ERR_INVALID_REQUEST);
+    goto out;
+  }
+  if (!allowed(c, "admin:RemoveServiceAccount", false) || self) {
+    const char *parent = requestor_parent(c);
+    if (!self && strcmp(user, parent) != 0) {
+      buckets_admin_error(c, BUCKETS_ERR_ACCESS_DENIED);
+      goto out;
+    }
+    free(user);
+    user = buckets_xstrdup(parent);
+  }
+  if (self && !*type && !full) {
+    const char *t = buckets_iam_ident_is_temp(c->ident) ? buckets_iam_ident_claim(c->ident, "tokenRevokeType") : NULL;
+    if (!t || !*t) {
+      buckets_admin_error(c, BUCKETS_ERR_NO_TOKEN_REVOKE_TYPE);
+      goto out;
+    }
+    type = t;
+  }
+  buckets_iam_err e = buckets_iam_revoke_tokens(iam, user, type);
+  if (e) iam_error(c, e, NULL);
+  else c->resp->status = 204;
+out:
+  free(user);
+}
+
 /* ---- routing ------------------------------------------------------------------------------- */
 
 typedef struct {
@@ -1667,6 +1937,8 @@ static const route k_routes[] = {
     {"GET", "/list-service-accounts", h_list_svc},
     {"DELETE", "/delete-service-account", h_delete_svc},
     {"GET", "/list-access-keys-bulk", h_list_access_keys_bulk},
+    {"POST", "/revoke-tokens/*", h_revoke_tokens},
+    {"GET", "/idp/openid/list-access-keys-bulk", h_openid_list_access_keys_bulk},
     {"GET", "/idp/ldap/policy-entities", h_ldap_policy_entities},
     {"POST", "/idp/ldap/policy/attach", h_ldap_attach},
     {"POST", "/idp/ldap/policy/detach", h_ldap_detach},
@@ -1690,7 +1962,12 @@ void buckets_admin_handle(s3_ctx *c) {
     return;
   }
   for (size_t i = 0; i < BUCKETS_ARRAY_LEN(k_routes); i++) {
-    if (!buckets_str_eq_c(rest, k_routes[i].path)) continue;
+    const char *rp = k_routes[i].path;
+    size_t rl = strlen(rp);
+    bool match = rl && rp[rl - 1] == '*' ? rest.n >= rl && memcmp(rest.p, rp, rl - 1) == 0 &&
+                                               !memchr(rest.p + rl - 1, '/', rest.n - (rl - 1))
+                                         : buckets_str_eq_c(rest, rp);
+    if (!match) continue;
     path_known = true;
     if (!buckets_str_eq_c(c->req->method, k_routes[i].method)) continue;
     if (!c->s->layer) {

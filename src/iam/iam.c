@@ -2158,6 +2158,25 @@ buckets_iam_err buckets_iam_delete_svc(buckets_iam *iam, const char *access_key)
   return e;
 }
 
+buckets_iam_err buckets_iam_revoke_tokens(buckets_iam *iam, const char *parent, const char *type) {
+  if (need_ready(iam)) return BUCKETS_IAM_ERR_NOT_INITIALIZED;
+  if (!parent || !*parent) return BUCKETS_IAM_ERR_INVALID_ARGUMENT;
+  pthread_mutex_lock(&iam->write_mu);
+  buckets_iam_ident **list;
+  size_t n;
+  buckets_iam_list_derived(iam, parent, BUCKETS_IAM_STS, &list, &n);
+  for (size_t i = 0; i < n; i++) {
+    const char *t = buckets_iam_ident_claim(list[i], "tokenRevokeType");
+    /* A token that does not verify is skipped when a type is given. */
+    if (type && *type && (!list[i]->claims || !t || strcmp(t, type) != 0)) continue;
+    delete_identity(iam, list[i]->access_key, BUCKETS_IAM_STS);
+  }
+  for (size_t i = 0; i < n; i++) buckets_iam_ident_release(list[i]);
+  free(list);
+  pthread_mutex_unlock(&iam->write_mu);
+  return BUCKETS_IAM_OK;
+}
+
 void buckets_iam_list_derived(buckets_iam *iam, const char *parent, buckets_iam_utype type, buckets_iam_ident ***out,
                               size_t *n) {
   pthread_rwlock_rdlock(&iam->lock);

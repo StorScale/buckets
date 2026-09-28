@@ -29,6 +29,11 @@ const char *buckets_openid_role_policy(const buckets_openid *o, const char *arn)
  * its role ARN when it has a role policy (else NULL). */
 bool buckets_openid_target(const buckets_openid *o, const char *name, const char **role_arn);
 
+/* The role-policy provider with this role ARN: its target name, user
+ * readable claim ("" if unset) and user ID claim ("sub" if unset). */
+bool buckets_openid_by_arn(const buckets_openid *o, const char *arn, const char **name, const char **readable_claim,
+                           const char **id_claim);
+
 typedef enum {
   BUCKETS_OIDC_OK = 0,
   BUCKETS_OIDC_EXPIRED,

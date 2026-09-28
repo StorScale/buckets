@@ -25,6 +25,7 @@ typedef struct {
   char *client_id, *client_secret, *claim_name, *claim_prefix, *role_policy;
   bool claim_userinfo;
   char *jwks_uri, *userinfo_endpoint;
+  char *user_readable_claim, *user_id_claim;
 } provider;
 
 struct buckets_openid {
@@ -46,6 +47,8 @@ static void provider_free(provider *p) {
   free(p->role_policy);
   free(p->jwks_uri);
   free(p->userinfo_endpoint);
+  free(p->user_readable_claim);
+  free(p->user_id_claim);
 }
 
 buckets_openid *buckets_openid_ref(buckets_openid *o) {
@@ -65,6 +68,18 @@ void buckets_openid_release(buckets_openid *o) {
 
 bool buckets_openid_enabled(const buckets_openid *o) { return o && o->n > 0; }
 const char *buckets_openid_claim_name(const buckets_openid *o) { return o && o->claim_name ? o->claim_name : ""; }
+
+bool buckets_openid_by_arn(const buckets_openid *o, const char *arn, const char **name, const char **readable_claim,
+                           const char **id_claim) {
+  for (size_t i = 0; o && arn && i < o->n; i++) {
+    if (!o->p[i].role_policy || !*o->p[i].role_policy || strcmp(o->p[i].arn, arn) != 0) continue;
+    *name = o->p[i].name;
+    *readable_claim = o->p[i].user_readable_claim ? o->p[i].user_readable_claim : "";
+    *id_claim = o->p[i].user_id_claim ? o->p[i].user_id_claim : "sub";
+    return true;
+  }
+  return false;
+}
 
 bool buckets_openid_target(const buckets_openid *o, const char *name, const char **role_arn) {
   *role_arn = NULL;
@@ -156,6 +171,8 @@ buckets_openid *buckets_openid_build(const buckets_config *cfg, const char *regi
     p.claim_name = GET("claim_name");
     p.claim_prefix = GET("claim_prefix");
     p.role_policy = dupnz(GET("role_policy"));
+    p.user_readable_claim = dupnz(GET("user_readable_claim"));
+    p.user_id_claim = dupnz(GET("user_id_claim"));
     char *userinfo = GET("claim_userinfo");
     p.claim_userinfo = userinfo && strcmp(userinfo, "on") == 0;
     free(userinfo);

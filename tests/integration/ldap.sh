@@ -149,6 +149,20 @@ AK=bobkey1 SK=bobsecret1234 TK=
 [[ $(code "$EP/docs/a.txt") == 200 ]] || fail "bob's key reads"
 [[ $(code -X PUT --data x "$EP/docs/b2.txt") == 403 ]] || fail "bob's key cannot write"
 
+echo "== STS revocation"
+as_creds "$(sts alice alice123 --data-urlencode TokenRevokeType=t1)"
+A1=($AK $SK $TK)
+as_creds "$(sts alice alice123 --data-urlencode TokenRevokeType=t2)"
+A2=($AK $SK $TK)
+# (mc sends these with the builtin provider, so the user is given as its DN)
+out=$(mc idp ldap accesskey sts-revoke root "uid=alice,ou=People,$BASE" --token-type t1 2>&1) || fail "sts-revoke type: $out"
+AK=${A1[0]} SK=${A1[1]} TK=${A1[2]}
+[[ $(code "$EP/docs/a.txt") == 403 ]] || fail "t1 token revoked"
+AK=${A2[0]} SK=${A2[1]} TK=${A2[2]}
+[[ $(code "$EP/docs/a.txt") == 200 ]] || fail "t2 token kept"
+out=$(mc idp ldap accesskey sts-revoke root "uid=alice,ou=People,$BASE" --all 2>&1) || fail "sts-revoke all: $out"
+[[ $(code "$EP/docs/a.txt") == 403 ]] || fail "all tokens revoked"
+
 echo "== detach"
 out=$(mc idp ldap policy detach root readwrite --group "cn=devs,ou=groups,$BASE" 2>&1) || fail "detach: $out"
 has "$(sts alice alice123)" "expecting a policy" "detached"

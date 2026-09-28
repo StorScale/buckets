@@ -321,6 +321,10 @@ buckets_iam_err buckets_iam_set_temp_user(buckets_iam *iam, const char *access_k
                                           buckets_iam_time expiration, const char *claims_json,
                                           const char *policy, buckets_iam_ident **out);
 
+/* RevokeTokens: deletes the STS credentials of parent, only those whose
+ * tokenRevokeType claim is type when type is set. */
+buckets_iam_err buckets_iam_revoke_tokens(buckets_iam *iam, const char *parent, const char *type);
+
 /* Random credentials as auth.GenerateCredentials: a 20-character access
  * key (A-Z0-9) and a 40-character secret. */
 void buckets_iam_generate_credentials(char ak[21], char sk[41]);

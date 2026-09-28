@@ -182,6 +182,9 @@ if [[ -n "${MC_BIN:-}" ]]; then
   tok=$(mint '{"sub":"u10","iss":"'"$ISS"'","aud":"dex-app","exp":"+600"}')
   as_creds "$(sts AssumeRoleWithWebIdentity "$tok" --data-urlencode "RoleArn=$arn")"
   [[ $(code "$EP/docs/a.txt") == 200 ]] || fail "provider added by mc idp openid"
+  out=$(mc --json idp openid accesskey ls root --all-configs 2>&1) || fail "openid accesskey ls: $out"
+  grep -F "$AK" >/dev/null <<<"$out" || fail "openid accesskey ls has the STS key: $out"
+  grep '"configName":"dex"' >/dev/null <<<"$out" || fail "openid accesskey ls config: $out"
   out=$(mc idp openid rm root ROLES 2>&1 || true)
   grep "overridden\|environment" >/dev/null <<<"$out" || fail "rm env-defined: $out"
   out=$(mc idp openid rm root dex 2>&1) || fail "idp openid rm: $out"
