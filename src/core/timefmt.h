@@ -16,6 +16,8 @@
 /* Output buffers must hold LEN + 1 bytes. All times are UTC. */
 void buckets_time_amz(time_t t, char *out);
 void buckets_time_iso8601(time_t t, char *out);
+/* amztime.ISO8601Format: milliseconds from a unix-nanosecond time. */
+void buckets_time_iso8601_ns(int64_t ns, char *out);
 void buckets_time_http(time_t t, char *out);
 
 bool buckets_time_parse_amz(buckets_str s, time_t *out);

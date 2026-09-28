@@ -413,6 +413,37 @@ void buckets_s3_write_error_msg(s3_ctx *c, buckets_s3_error e, const char *messa
 
 void buckets_s3_write_error(s3_ctx *c, buckets_s3_error e) { buckets_s3_write_error_msg(c, e, NULL); }
 
+void buckets_s3_write_custom_error(s3_ctx *c, int status, const char *code, const char *message) {
+  c->resp->status = status;
+  buckets_http_resp_header(c->resp, "Content-Type", "application/xml");
+  buckets_buf *b = &c->resp->body;
+  buckets_buf_reset(b);
+  buckets_xml_header(b);
+  buckets_xml_open(b, "Error");
+  buckets_xml_elem(b, "Code", code);
+  buckets_xml_elem(b, "Message", message);
+  if (c->object) buckets_xml_elem(b, "Key", c->object);
+  if (c->bucket) buckets_xml_elem(b, "BucketName", c->bucket);
+  buckets_xml_elem(b, "Resource", c->path ? c->path : "/");
+  buckets_xml_elem(b, "RequestId", c->request_id);
+  buckets_xml_elem(b, "HostId", c->s->host_id);
+  buckets_xml_close(b, "Error");
+}
+
+void buckets_s3_versioning(s3_ctx *c, const char *object, bool *enabled, bool *suspended) {
+  *enabled = *suspended = false;
+  if (!c->s->meta || !c->bucket) return;
+  buckets_bucket_state *st = buckets_metasys_get(c->s->meta, c->bucket);
+  *enabled = buckets_versioning_enabled_for(&st->versioning, object ? object : "");
+  *suspended = buckets_versioning_suspended_for(&st->versioning, object ? object : "");
+  buckets_bucket_state_release(st);
+}
+
+void buckets_s3_version_header(s3_ctx *c, const char *version_id) {
+  if (version_id && *version_id && strcmp(version_id, "null") != 0)
+    buckets_http_resp_header(c->resp, "X-Amz-Version-Id", version_id);
+}
+
 void buckets_s3_write_xml(s3_ctx *c, int status) {
   c->resp->status = status;
   buckets_http_resp_header(c->resp, "Content-Type", "application/xml");
@@ -708,6 +739,15 @@ static void create_bucket(s3_ctx *c) {
 
 static void delete_bucket(s3_ctx *c) {
   buckets_obj_err err = buckets_obj_delete_bucket(c->s->layer, c->bucket);
+  if (err == BUCKETS_OBJ_ERR_BUCKET_NOT_EMPTY) {
+    bool enabled, suspended;
+    buckets_s3_versioning(c, NULL, &enabled, &suspended);
+    buckets_s3_write_error_msg(c, BUCKETS_ERR_BUCKET_NOT_EMPTY,
+                               enabled || suspended
+                                   ? "The bucket you tried to delete is not empty. You must delete all versions in the bucket."
+                                   : NULL);
+    return;
+  }
   if (err) {
     buckets_s3_write_error(c, buckets_s3_obj_error(err));
     return;
@@ -728,12 +768,55 @@ static void get_bucket_location(s3_ctx *c) {
 }
 
 static void get_bucket_versioning(s3_ctx *c) {
-  /* Versioning is not implemented yet, so every bucket is unversioned: S3
-   * represents that as an empty configuration. */
+  /* An unversioned bucket has an empty configuration. */
+  buckets_bucket_state *st = buckets_metasys_get(c->s->meta, c->bucket);
   buckets_buf *b = &c->resp->body;
   buckets_xml_header(b);
-  buckets_buf_appendf(b, "<VersioningConfiguration xmlns=\"%s\"></VersioningConfiguration>", BUCKETS_S3_XMLNS);
+  buckets_versioning_xml(&st->versioning, b);
+  buckets_bucket_state_release(st);
   buckets_s3_write_xml(c, 200);
+}
+
+#define MAX_BUCKET_VERSIONING_SIZE (1 << 20)
+
+static void put_bucket_versioning(s3_ctx *c) {
+  if (c->req->body_len > MAX_BUCKET_VERSIONING_SIZE) {
+    buckets_s3_write_error(c, BUCKETS_ERR_ENTITY_TOO_LARGE);
+    return;
+  }
+  buckets_s3_error derr = buckets_s3_read_doc(c);
+  if (derr) {
+    buckets_s3_write_error(c, derr);
+    return;
+  }
+  buckets_versioning v;
+  char err[256] = "";
+  if (!buckets_versioning_parse(c->doc.data ? c->doc.data : "", c->doc.len, &v, err, sizeof(err))) {
+    if (strcmp(err, "malformed XML") == 0) {
+      buckets_s3_write_error(c, BUCKETS_ERR_MALFORMED_XML);
+    } else {
+      char msg[400];
+      snprintf(msg, sizeof(msg), "Versioning configuration specified in the request is invalid. (%s)", err);
+      buckets_s3_write_custom_error(c, 400, "IllegalVersioningConfigurationException", msg);
+    }
+    return;
+  }
+  buckets_bucket_state *st = buckets_metasys_get(c->s->meta, c->bucket);
+  bool locked = st->meta.lock_enabled || st->meta.config[BUCKETS_BCFG_OBJECT_LOCK].len > 0;
+  buckets_bucket_state_release(st);
+  if (locked && (v.status == BUCKETS_VERSIONING_SUSPENDED || v.nexcluded || v.exclude_folders)) {
+    buckets_versioning_free(&v);
+    buckets_s3_write_custom_error(c, 400, "InvalidBucketState",
+                                  "An Object Lock configuration is present on this bucket, versioning cannot be suspended.");
+    return;
+  }
+  buckets_buf x = BUCKETS_BUF_INIT;
+  buckets_versioning_xml(&v, &x);
+  buckets_versioning_free(&v);
+  bool ok = buckets_metasys_update(c->s->meta, c->bucket, BUCKETS_BCFG_VERSIONING, x.data, x.len);
+  buckets_buf_free(&x);
+  if (!ok) buckets_s3_write_error(c, BUCKETS_ERR_INTERNAL_ERROR);
+  else c->resp->status = 200;
 }
 
 /* ---- bucket policy (?policy) -------------------------------------------------- */
@@ -757,20 +840,7 @@ static void put_bucket_policy(s3_ctx *c) {
   buckets_policy *p;
   char err[512];
   if (!buckets_bucket_policy_parse(c->doc.data, c->doc.len, c->bucket, &p, err, sizeof(err))) {
-    /* APIError{Code: "MalformedPolicy", 400, err.Error()} */
-    c->resp->status = 400;
-    buckets_http_resp_header(c->resp, "Content-Type", "application/xml");
-    buckets_buf *b = &c->resp->body;
-    buckets_buf_reset(b);
-    buckets_xml_header(b);
-    buckets_xml_open(b, "Error");
-    buckets_xml_elem(b, "Code", "MalformedPolicy");
-    buckets_xml_elem(b, "Message", err);
-    buckets_xml_elem(b, "BucketName", c->bucket);
-    buckets_xml_elem(b, "Resource", c->path);
-    buckets_xml_elem(b, "RequestId", c->request_id);
-    buckets_xml_elem(b, "HostId", c->s->host_id);
-    buckets_xml_close(b, "Error");
+    buckets_s3_write_custom_error(c, 400, "MalformedPolicy", err);
     return;
   }
   bool no_version = !*buckets_policy_version(p);
@@ -837,6 +907,7 @@ static bool authorize_bucket_request(s3_ctx *c) {
     else if (buckets_str_eq_c(m, "DELETE")) action = "s3:DeleteBucketPolicy";
   } else if (buckets_str_eq_c(m, "PUT")) {
     if (c->q.n == 0) action = "s3:CreateBucket";
+    else if (buckets_query_has(&c->q, "versioning")) action = "s3:PutBucketVersioning";
   } else if (buckets_str_eq_c(m, "HEAD")) {
     if (buckets_s3_authorize(c, "s3:HeadBucket", c->bucket, NULL, NULL) == BUCKETS_ERR_NONE) return true;
     action = "s3:ListBucket";
@@ -846,6 +917,7 @@ static bool authorize_bucket_request(s3_ctx *c) {
   } else if (buckets_str_eq_c(m, "GET")) {
     if (buckets_query_has(&c->q, "location")) action = "s3:GetBucketLocation";
     else if (buckets_query_has(&c->q, "versioning")) action = "s3:GetBucketVersioning";
+    else if (buckets_query_has(&c->q, "versions")) action = "s3:ListBucketVersions";
     else if (buckets_query_has(&c->q, "uploads")) action = "s3:ListBucketMultipartUploads";
     else if (!has_unhandled_subresource(&c->q)) action = "s3:ListBucket";
   }
@@ -885,6 +957,11 @@ static void route_bucket(s3_ctx *c) {
     return;
   }
   if (buckets_str_eq_c(m, "PUT")) {
+    if (buckets_query_has(&c->q, "versioning")) {
+      if (!bucket_exists(c)) buckets_s3_write_error(c, BUCKETS_ERR_NO_SUCH_BUCKET);
+      else put_bucket_versioning(c);
+      return;
+    }
     if (c->q.n > 0) {
       buckets_s3_write_error(c, BUCKETS_ERR_NOT_IMPLEMENTED);
       return;
@@ -914,6 +991,8 @@ static void route_bucket(s3_ctx *c) {
       get_bucket_location(c);
     } else if (buckets_query_has(&c->q, "versioning")) {
       get_bucket_versioning(c);
+    } else if (buckets_query_has(&c->q, "versions")) {
+      buckets_s3_list_object_versions(c);
     } else if (buckets_query_has(&c->q, "uploads")) {
       buckets_s3_list_uploads(c);
     } else if (has_unhandled_subresource(&c->q)) {
@@ -1020,6 +1099,8 @@ void buckets_s3_handle(const buckets_http_request *req, buckets_http_response *r
 fail:
   buckets_s3_write_error(&c, err);
 done:
+  /* writeErrorResponseHeadersOnly: a HEAD error carries no body (nor its length). */
+  if (resp->status >= 400 && buckets_str_eq_c(req->method, "HEAD") && !resp->stream) buckets_buf_reset(&resp->body);
   buckets_log_debug("%.*s %.*s -> %d", BUCKETS_STR_ARG(req->method), BUCKETS_STR_ARG(req->target), resp->status);
   buckets_query_free(&c.q);
   free(c.path);

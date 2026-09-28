@@ -29,6 +29,7 @@ void buckets_bucket_state_release(buckets_bucket_state *st) {
   if (!st || atomic_fetch_sub(&st->refs, 1) != 1) return;
   buckets_bucket_meta_free(&st->meta);
   buckets_policy_free(st->policy);
+  buckets_versioning_free(&st->versioning);
   free(st);
 }
 
@@ -65,6 +66,12 @@ static buckets_bucket_state *build(const char *bucket, buckets_bucket_meta *meta
       buckets_log_warn("bucket %s: stored policy does not parse: %s", bucket, err);
       st->policy = NULL;
     }
+  }
+  const buckets_buf *ver = &st->meta.config[BUCKETS_BCFG_VERSIONING];
+  if (ver->len) {
+    char err[256];
+    if (!buckets_versioning_parse(ver->data, ver->len, &st->versioning, err, sizeof(err)))
+      buckets_log_warn("bucket %s: stored versioning configuration does not parse: %s", bucket, err);
   }
   return st;
 }

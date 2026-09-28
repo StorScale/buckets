@@ -36,6 +36,11 @@ buckets_obj_err buckets_ep_stat(buckets_epool *P, const char *bucket, const char
 buckets_obj_err buckets_ep_open(buckets_epool *P, const char *bucket, const char *object, const char *version_id,
                                 int64_t offset, int64_t length, buckets_obj_reader **out, buckets_object_info *info);
 buckets_obj_err buckets_ep_delete(buckets_epool *P, const char *bucket, const char *object, const char *version_id);
+buckets_obj_err buckets_ep_delete_ex(buckets_epool *P, const char *bucket, const char *object,
+                                     const buckets_delete_opts *opts, buckets_delete_result *res);
+buckets_obj_err buckets_ep_list_versions(buckets_epool *P, const char *bucket, const char *prefix,
+                                         const char *key_marker, const char *version_marker, const char *delimiter,
+                                         int max_keys, buckets_obj_listing *out);
 buckets_obj_err buckets_ep_list(buckets_epool *P, const char *bucket, const char *prefix, const char *marker,
                                 const char *delimiter, int max_keys, buckets_obj_listing *out);
 buckets_obj_err buckets_ep_heal(buckets_epool *P, const char *bucket, const char *object, const char *version_id,
@@ -53,7 +58,7 @@ buckets_obj_err buckets_ep_mpu_list_parts(buckets_epool *P, const char *bucket, 
 buckets_obj_err buckets_ep_mpu_abort(buckets_epool *P, const char *bucket, const char *object, const char *upload_id);
 buckets_obj_err buckets_ep_mpu_complete(buckets_epool *P, const char *bucket, const char *object,
                                         const char *upload_id, const buckets_complete_part *parts, size_t nparts,
-                                        const buckets_checksum *want, buckets_object_info *out);
+                                        const buckets_checksum *want, bool versioned, buckets_object_info *out);
 buckets_obj_err buckets_ep_mpu_list_uploads(buckets_epool *P, const char *bucket, const char *object,
                                             buckets_upload_info **uploads, size_t *n);
 

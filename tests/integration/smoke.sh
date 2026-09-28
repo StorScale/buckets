@@ -94,8 +94,10 @@ check "list with delimiter"        200 "<Prefix>2026/</Prefix>"    -- "${S3[@]}"
 check "list v2 paged"              200 "<NextContinuationToken>"   -- "${S3[@]}" "$EP/photos?list-type=2&max-keys=1"
 check "parent is an object"        400 "XMinioObjectExistsAsDirectory" -- "${S3[@]}" -T "$DIR.small" "$EP/photos/cat.txt/inner"
 check "delete non-empty bucket"    409 "BucketNotEmpty"            -- "${S3[@]}" -X DELETE "$EP/photos"
+DEL='<Delete><Object><Key>cat-copy.txt</Key></Object><Object><Key>2026/big.bin</Key></Object><Object><Key>crc.txt</Key></Object></Delete>'
+check "delete objects needs md5"   400 "MissingContentMD5"         -- "${S3[@]}" -X POST "$EP/photos?delete" --data "$DEL"
 check "delete objects (batch)"     200 "<Deleted><Key>cat-copy.txt</Key>" -- "${S3[@]}" -X POST "$EP/photos?delete" \
-  --data '<Delete><Object><Key>cat-copy.txt</Key></Object><Object><Key>2026/big.bin</Key></Object><Object><Key>crc.txt</Key></Object></Delete>'
+  -H "Content-MD5: $(printf '%s' "$DEL" | openssl dgst -md5 -binary | base64)" --data "$DEL"
 check "delete object"              204 ""                          -- "${S3[@]}" -X DELETE "$EP/photos/cat.txt"
 check "delete missing object"      204 ""                          -- "${S3[@]}" -X DELETE "$EP/photos/cat.txt"
 check "list after deletes"         200 "<KeyCount>0</KeyCount>"    -- "${S3[@]}" "$EP/photos?list-type=2"

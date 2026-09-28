@@ -6,6 +6,22 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- Bucket versioning (Phase 5):
+  - `?versioning` GET/PUT with MinIO's excluded-prefix and exclude-folders extensions; object lock prevents suspending
+  - versioned PUT, CopyObject and CompleteMultipartUpload create new versions; suspended buckets replace the "null" version
+  - DeleteObject and DeleteObjects create delete markers (with a new version ID, or "null" when suspended), or remove a version for good by `versionId`, with MinIO's response headers and `DeleteMarker`/`DeleteMarkerVersionId` results
+  - GET/HEAD/GetObjectAttributes of a delete marker: NoSuchKey (or MethodNotAllowed by version ID) with the marker's headers
+  - `ListObjectVersions` (`?versions`), with key and version-id markers, delimiters and `metadata=true`
+  - delete markers on disk are byte-compatible with MinIO's `xlMetaV2DeleteMarker`; `tests/integration/versioning-interop.sh` moves versioned buckets between MinIO and bucketsd both ways
+- `tests/integration/s3diff.sh`: runs request scenarios against real MinIO and bucketsd and diffs the normalized responses (`scenarios/versioning.json` matches line for line).
+
+### Changed
+- XML escaping follows Go's `xml.EscapeText` (`&#34;`, `&#39;`), and S3 timestamps in XML carry milliseconds, as MinIO's do.
+- DeleteObjects requires Content-MD5 or an `x-amz-checksum-*` header and verifies it (`MissingContentMD5`, `BadDigest`), as MinIO does.
+- HEAD error responses have no body.
+- Emptiness checks for bucket deletion count every version and delete marker.
+
 ## [0.4.0] - 2026-09-28
 
 ### Added

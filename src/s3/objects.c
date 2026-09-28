@@ -15,6 +15,7 @@
 #include "s3/checksum.h"
 #include "s3/chunked.h"
 #include "s3/internal.h"
+#include "crypto/md5.h"
 #include "s3/xml.h"
 
 /* ---- error mapping -------------------------------------------------------- */
@@ -343,6 +344,8 @@ static void put_object(s3_ctx *c) {
       .want_sha256 = b.want_sha ? b.sha : NULL,
       .pre_commit = cks_pre_commit,
   };
+  bool suspended;
+  buckets_s3_versioning(c, c->object, &opts.versioned, &suspended);
   cks_ctx cx;
   if ((serr = cks_open(c, &b, &cx, &opts)) != BUCKETS_ERR_NONE) {
     free_kvs(meta, nmeta);
@@ -358,6 +361,7 @@ static void put_object(s3_ctx *c) {
     buckets_s3_write_error(c, body_error(&b, err));
   } else {
     etag_header(c->resp, oi.etag);
+    buckets_s3_version_header(c, oi.version_id);
     cks_echo(c->resp, &cx);
     c->resp->status = 200;
     buckets_object_info_free(&oi);
@@ -557,6 +561,15 @@ static void get_object(s3_ctx *c, bool head) {
     buckets_s3_write_error(c, buckets_s3_obj_error(err));
     return;
   }
+  if (oi.delete_marker) {
+    /* getObjectInfo: a delete marker is not found, or, asked for by its
+     * version ID, not a method that applies; its headers say which. */
+    buckets_http_resp_header(c->resp, "X-Amz-Version-Id", oi.version_id);
+    buckets_http_resp_header(c->resp, "X-Amz-Delete-Marker", "true");
+    buckets_s3_write_error(c, version && *version ? BUCKETS_ERR_METHOD_NOT_ALLOWED : BUCKETS_ERR_NO_SUCH_KEY);
+    buckets_object_info_free(&oi);
+    return;
+  }
   if (part_number > 1) {
     bool found = false;
     for (size_t i = 0; i < oi.nparts; i++) found |= oi.parts[i].number == part_number;
@@ -601,6 +614,7 @@ static void get_object(s3_ctx *c, bool head) {
     buckets_object_info_free(&oi2);
   }
   write_object_headers(c, &oi);
+  buckets_s3_version_header(c, oi.version_id);
   if (rs.present) {
     buckets_http_resp_headerf(c->resp, "Content-Range", "bytes %lld-%lld/%lld", (long long)off,
                               (long long)(off + len - 1), (long long)oi.size);
@@ -625,11 +639,26 @@ static void get_object(s3_ctx *c, bool head) {
 
 static void delete_object(s3_ctx *c) {
   const char *version = buckets_query_get(&c->q, "versionId");
-  buckets_obj_err err = buckets_obj_delete(c->s->layer, c->bucket, c->object, version);
+  if (version && *version && strcmp(version, "null") != 0) {
+    uint8_t id[16];
+    if (!buckets_xl_version_id_parse(version, id)) {
+      buckets_s3_write_error(c, BUCKETS_ERR_INVALID_VERSION_ID);
+      return;
+    }
+  }
+  buckets_delete_opts o = {.version_id = version};
+  buckets_s3_versioning(c, c->object, &o.versioned, &o.suspended);
+  buckets_delete_result res;
+  buckets_obj_err err = buckets_obj_delete_ex(c->s->layer, c->bucket, c->object, &o, &res);
   /* S3 deletes are idempotent: a missing key still succeeds. */
   if (err && err != BUCKETS_OBJ_ERR_NO_SUCH_KEY && err != BUCKETS_OBJ_ERR_NO_SUCH_VERSION) {
     buckets_s3_write_error(c, buckets_s3_obj_error(err));
     return;
+  }
+  /* setPutObjHeaders(del): the version, and whether it is a delete marker, unless "null" */
+  if (!err && strcmp(res.version_id, "null") != 0) {
+    buckets_http_resp_header(c->resp, "X-Amz-Version-Id", res.version_id);
+    if (res.delete_marker) buckets_http_resp_header(c->resp, "X-Amz-Delete-Marker", "true");
   }
   c->resp->status = 204;
 }
@@ -738,12 +767,12 @@ static void copy_object(s3_ctx *c) {
     return;
   }
   char lm[BUCKETS_TIME_ISO8601_LEN + 1];
-  buckets_time_iso8601((time_t)(oi.mod_time_ns / 1000000000LL), lm);
+  buckets_time_iso8601_ns(oi.mod_time_ns, lm);
   buckets_buf *b = &c->resp->body;
   buckets_xml_header(b);
   buckets_xml_open_ns(b, "CopyObjectResult", BUCKETS_S3_XMLNS);
   buckets_xml_elem(b, "LastModified", lm);
-  buckets_buf_appendf(b, "<ETag>&quot;%s&quot;</ETag>", oi.etag);
+  buckets_buf_appendf(b, "<ETag>&#34;%s&#34;</ETag>", oi.etag);
   buckets_xml_close(b, "CopyObjectResult");
   buckets_s3_write_xml(c, 200);
   buckets_object_info_free(&oi);
@@ -893,12 +922,12 @@ static void mpu_put_part(s3_ctx *c, const char *upload_id) {
       return;
     }
     char lm[BUCKETS_TIME_ISO8601_LEN + 1];
-    buckets_time_iso8601((time_t)(pi.mod_time_ns / 1000000000LL), lm);
+    buckets_time_iso8601_ns(pi.mod_time_ns, lm);
     buckets_buf *b = &c->resp->body;
     buckets_xml_header(b);
     buckets_xml_open_ns(b, "CopyPartResult", BUCKETS_S3_XMLNS);
     buckets_xml_elem(b, "LastModified", lm);
-    buckets_buf_appendf(b, "<ETag>&quot;%s&quot;</ETag>", pi.etag);
+    buckets_buf_appendf(b, "<ETag>&#34;%s&#34;</ETag>", pi.etag);
     buckets_xml_close(b, "CopyPartResult");
     buckets_s3_write_xml(c, 200);
     return;
@@ -987,11 +1016,11 @@ static void mpu_list_parts(s3_ctx *c, const char *upload_id) {
   buckets_xml_elem(b, "IsTruncated", truncated ? "true" : "false");
   for (size_t i = 0; i < n; i++) {
     char lm[BUCKETS_TIME_ISO8601_LEN + 1];
-    buckets_time_iso8601((time_t)(parts[i].mod_time_ns / 1000000000LL), lm);
+    buckets_time_iso8601_ns(parts[i].mod_time_ns, lm);
     buckets_xml_open(b, "Part");
     buckets_buf_appendf(b, "<PartNumber>%d</PartNumber>", parts[i].number);
     buckets_xml_elem(b, "LastModified", lm);
-    buckets_buf_appendf(b, "<ETag>&quot;%s&quot;</ETag>", parts[i].etag);
+    buckets_buf_appendf(b, "<ETag>&#34;%s&#34;</ETag>", parts[i].etag);
     buckets_buf_appendf(b, "<Size>%lld</Size>", (long long)parts[i].size);
     if (parts[i].cksum.type) {
       char enc[64], tag[32];
@@ -1084,8 +1113,10 @@ static void mpu_complete(s3_ctx *c, const char *upload_id) {
     return;
   }
   buckets_object_info oi;
+  bool versioned, suspended;
+  buckets_s3_versioning(c, c->object, &versioned, &suspended);
   buckets_obj_err err = buckets_obj_mpu_complete(c->s->layer, c->bucket, c->object, upload_id, parts, n,
-                                                 want.type ? &want : NULL, &oi);
+                                                 want.type ? &want : NULL, versioned, &oi);
   for (size_t i = 0; i < n; i++) {
     free(etags[i]);
     free(cksums[i]);
@@ -1100,6 +1131,7 @@ static void mpu_complete(s3_ctx *c, const char *upload_id) {
                                                                           : buckets_s3_obj_error(err));
     return;
   }
+  buckets_s3_version_header(c, oi.version_id);
   buckets_buf *b = &c->resp->body;
   buckets_xml_header(b);
   buckets_xml_open_ns(b, "CompleteMultipartUploadResult", BUCKETS_S3_XMLNS);
@@ -1110,7 +1142,7 @@ static void mpu_complete(s3_ctx *c, const char *upload_id) {
   buckets_buf_free(&loc);
   buckets_xml_elem(b, "Bucket", c->bucket);
   buckets_xml_elem(b, "Key", c->object);
-  buckets_buf_appendf(b, "<ETag>&quot;%s&quot;</ETag>", oi.etag);
+  buckets_buf_appendf(b, "<ETag>&#34;%s&#34;</ETag>", oi.etag);
   if (oi.checksum) {
     /* Reuse the header writer to decode the stored checksum, then mirror it into XML. */
     buckets_http_response tmp = {.content_length = -1};
@@ -1173,7 +1205,7 @@ void buckets_s3_list_uploads(s3_ctx *c) {
   buckets_xml_elem(b, "IsTruncated", "false");
   for (size_t i = 0; i < n && (long)i < max; i++) {
     char ts[BUCKETS_TIME_ISO8601_LEN + 1];
-    buckets_time_iso8601((time_t)(ups[i].initiated_ns / 1000000000LL), ts);
+    buckets_time_iso8601_ns(ups[i].initiated_ns, ts);
     buckets_xml_open(b, "Upload");
     buckets_xml_elem(b, "Key", ups[i].object);
     buckets_xml_elem(b, "UploadId", ups[i].upload_id);
@@ -1277,10 +1309,20 @@ static void get_object_attributes(s3_ctx *c) {
     buckets_s3_write_error(c, buckets_s3_obj_error(err));
     return;
   }
+  if (oi.delete_marker) {
+    buckets_http_resp_header(c->resp, "X-Amz-Version-Id", oi.version_id);
+    buckets_http_resp_header(c->resp, "X-Amz-Delete-Marker", "true");
+    buckets_s3_write_error(c, version && *version ? BUCKETS_ERR_METHOD_NOT_ALLOWED : BUCKETS_ERR_NO_SUCH_KEY);
+    buckets_object_info_free(&oi);
+    return;
+  }
   if (check_preconditions(c, &oi)) {
     buckets_object_info_free(&oi);
     return;
   }
+  bool versioned, suspended;
+  buckets_s3_versioning(c, c->object, &versioned, &suspended);
+  if (versioned) buckets_http_resp_header(c->resp, "X-Amz-Version-Id", oi.version_id);
   char lm[BUCKETS_TIME_HTTP_LEN + 1];
   buckets_time_http((time_t)(oi.mod_time_ns / 1000000000LL), lm);
   buckets_http_resp_header(c->resp, "Last-Modified", lm);
@@ -1448,6 +1490,13 @@ static bool authorize_object_request(s3_ctx *c) {
 void buckets_s3_route_object(s3_ctx *c) {
   if (!authorize_object_request(c)) return;
   if (refuse_sse(c)) return;
+  /* getOpts: a versionId must be "null" or a UUID. */
+  const char *vq = buckets_query_get(&c->q, "versionId");
+  uint8_t vq_id[16];
+  if (vq && *vq && !buckets_xl_version_id_parse(vq, vq_id)) {
+    buckets_s3_write_error(c, BUCKETS_ERR_INVALID_VERSION_ID);
+    return;
+  }
   buckets_str m = c->req->method;
   const char *upload_id = buckets_query_get(&c->q, "uploadId");
   if (buckets_str_eq_c(m, "POST") && buckets_query_has(&c->q, "uploads")) {
@@ -1506,10 +1555,39 @@ void buckets_s3_route_object(s3_ctx *c) {
 #define MAX_DELETE_LIST 1000
 
 void buckets_s3_delete_objects(s3_ctx *c) {
+  /* validateLengthAndChecksum: Content-MD5, or a checksum header, is required. */
+  buckets_str md5h = buckets_http_header_get(c->req, "Content-MD5");
+  buckets_checksum want;
+  bool has_cks = buckets_checksum_from_request(c->req, &want) == BUCKETS_ERR_NONE && want.type &&
+                 !(want.type & BUCKETS_CKSUM_TRAILING);
+  uint8_t md5_want[18];
+  long md5_len = md5h.p && md5h.n ? buckets_base64_decode(md5h.p, md5h.n, md5_want) : -1;
+  if (md5h.p && md5h.n ? md5_len != 16 : !has_cks) {
+    buckets_s3_write_error(c, BUCKETS_ERR_MISSING_CONTENT_MD5);
+    return;
+  }
   buckets_s3_error err = buckets_s3_read_doc(c);
   if (err) {
     buckets_s3_write_error(c, err);
     return;
+  }
+  if (md5_len == 16) {
+    uint8_t got[16];
+    buckets_md5(c->doc.data ? c->doc.data : "", c->doc.len, got);
+    if (memcmp(got, md5_want, 16) != 0) {
+      buckets_s3_write_error(c, BUCKETS_ERR_BAD_DIGEST);
+      return;
+    }
+  } else {
+    buckets_cksum_hasher h;
+    buckets_cksum_hasher_init(&h, want.type & BUCKETS_CKSUM_BASE_MASK);
+    buckets_cksum_hasher_update(&h, c->doc.data ? c->doc.data : "", c->doc.len);
+    uint8_t raw[64];
+    size_t rl = buckets_cksum_hasher_final(&h, raw);
+    if (rl != want.raw_len || memcmp(raw, want.raw, rl) != 0) {
+      buckets_s3_write_error(c, BUCKETS_ERR_BAD_DIGEST);
+      return;
+    }
   }
   buckets_xml_doc doc;
   if (!buckets_xml_parse(buckets_buf_str(&c->doc), &doc) || !buckets_str_eq_c(doc.nodes[0].name, "Delete")) {
@@ -1540,24 +1618,43 @@ void buckets_s3_delete_objects(s3_ctx *c) {
     bool ok = kn && buckets_xml_unescape(doc.nodes[kn].text, &key) && key.len > 0 &&
               (!vn || buckets_xml_unescape(doc.nodes[vn].text, &ver));
     buckets_s3_error e = BUCKETS_ERR_NONE;
+    buckets_delete_result res = {0};
+    uint8_t vid_bytes[16];
+    char detail[160] = "";
     if (!ok) {
       e = BUCKETS_ERR_INVALID_OBJECT_NAME;
+    } else if (ver.len && !buckets_xl_version_id_parse(ver.data, vid_bytes)) {
+      e = BUCKETS_ERR_NO_SUCH_VERSION; /* with uuid.Parse's reason, as MinIO */
+      if (ver.len != 36) snprintf(detail, sizeof(detail), " (invalid UUID length: %zu)", ver.len);
+      else snprintf(detail, sizeof(detail), " (invalid UUID format)");
     } else if ((e = buckets_s3_authorize(c, "s3:DeleteObject", c->bucket, key.data, ver.len ? ver.data : NULL))) {
       /* reported for this key */
     } else {
-      buckets_obj_err oe = buckets_obj_delete(c->s->layer, c->bucket, key.data, ver.len ? ver.data : NULL);
+      buckets_delete_opts o = {.version_id = ver.len ? ver.data : NULL};
+      buckets_s3_versioning(c, key.data, &o.versioned, &o.suspended);
+      buckets_obj_err oe = buckets_obj_delete_ex(c->s->layer, c->bucket, key.data, &o, &res);
       if (oe && oe != BUCKETS_OBJ_ERR_NO_SUCH_KEY && oe != BUCKETS_OBJ_ERR_NO_SUCH_VERSION) e = buckets_s3_obj_error(oe);
     }
     if (e) {
+      /* DeleteError: Code, Message, Key, VersionId */
       const buckets_s3_error_info *info = buckets_s3_error_get(e);
+      buckets_buf msg = BUCKETS_BUF_INIT;
+      buckets_buf_appendf(&msg, "%s%s", info->message, detail);
       buckets_xml_open(b, "Error");
+      buckets_xml_elem(b, "Code", info->code);
+      buckets_xml_elem(b, "Message", msg.data);
       buckets_xml_elem(b, "Key", key.data ? key.data : "");
       if (ver.len) buckets_xml_elem(b, "VersionId", ver.data);
-      buckets_xml_elem(b, "Code", info->code);
-      buckets_xml_elem(b, "Message", info->message);
       buckets_xml_close(b, "Error");
+      buckets_buf_free(&msg);
     } else if (!quiet) {
+      /* DeletedObject: DeleteMarker, DeleteMarkerVersionId, Key, VersionId (omitempty) */
       buckets_xml_open(b, "Deleted");
+      if (res.delete_marker) {
+        buckets_xml_elem(b, "DeleteMarker", "true");
+        const char *dmv = ver.len ? ver.data : res.version_id;
+        if (strcmp(dmv, "null") != 0) buckets_xml_elem(b, "DeleteMarkerVersionId", dmv);
+      }
       buckets_xml_elem(b, "Key", key.data);
       if (ver.len) buckets_xml_elem(b, "VersionId", ver.data);
       buckets_xml_close(b, "Deleted");
@@ -1681,11 +1778,11 @@ void buckets_s3_list_objects(s3_ctx *c, bool v2) {
   for (size_t i = 0; i < l.nobjects; i++) {
     const buckets_object_info *o = &l.objects[i];
     char lm[BUCKETS_TIME_ISO8601_LEN + 1];
-    buckets_time_iso8601((time_t)(o->mod_time_ns / 1000000000LL), lm);
+    buckets_time_iso8601_ns(o->mod_time_ns, lm);
     buckets_xml_open(b, "Contents");
     xml_key(b, "Key", o->name, url);
     buckets_xml_elem(b, "LastModified", lm);
-    buckets_buf_appendf(b, "<ETag>&quot;%s&quot;</ETag>", o->etag);
+    buckets_buf_appendf(b, "<ETag>&#34;%s&#34;</ETag>", o->etag);
     buckets_buf_appendf(b, "<Size>%lld</Size>", (long long)o->size);
     if (!v2 || fetch_owner) {
       buckets_xml_open(b, "Owner");
@@ -1719,5 +1816,97 @@ void buckets_s3_list_objects(s3_ctx *c, bool v2) {
   buckets_xml_close(b, "ListBucketResult");
   buckets_obj_list_free(&l);
   free(marker);
+  buckets_s3_write_xml(c, 200);
+}
+
+/* ---- ListObjectVersions --------------------------------------------------- */
+
+void buckets_s3_list_object_versions(s3_ctx *c) {
+  const char *max_keys_s = buckets_query_get(&c->q, "max-keys");
+  long long max_keys = BUCKETS_MAX_LIST_KEYS;
+  if (max_keys_s && *max_keys_s) {
+    char *end = NULL;
+    max_keys = strtoll(max_keys_s, &end, 10);
+    if (*end || max_keys < 0 || max_keys > 2147483647LL) {
+      buckets_s3_write_error(c, BUCKETS_ERR_INVALID_MAX_KEYS);
+      return;
+    }
+  }
+  const char *encoding = buckets_query_get(&c->q, "encoding-type");
+  if (encoding && *encoding && strcasecmp(encoding, "url") != 0) {
+    buckets_s3_write_error(c, BUCKETS_ERR_INVALID_ENCODING_METHOD);
+    return;
+  }
+  bool url = encoding && *encoding;
+  const char *prefix = buckets_query_get(&c->q, "prefix");
+  const char *delimiter = buckets_query_get(&c->q, "delimiter");
+  const char *key_marker = buckets_query_get(&c->q, "key-marker");
+  const char *vid_marker = buckets_query_get(&c->q, "version-id-marker");
+  bool with_meta = buckets_query_get(&c->q, "metadata") && strcmp(buckets_query_get(&c->q, "metadata"), "true") == 0;
+  if (vid_marker && *vid_marker && strcmp(vid_marker, "null") != 0) {
+    uint8_t id[16];
+    if (!buckets_xl_version_id_parse(vid_marker, id)) {
+      buckets_s3_write_error(c, BUCKETS_ERR_INVALID_VERSION_ID);
+      return;
+    }
+  }
+  buckets_obj_listing l;
+  buckets_obj_err err = buckets_obj_list_versions(c->s->layer, c->bucket, prefix ? prefix : "", key_marker, vid_marker,
+                                                  delimiter, (int)BUCKETS_MIN(max_keys, BUCKETS_MAX_LIST_KEYS), &l);
+  if (err) {
+    buckets_s3_write_error(c, buckets_s3_obj_error(err));
+    return;
+  }
+  buckets_buf *b = &c->resp->body;
+  buckets_xml_header(b);
+  buckets_xml_open_ns(b, "ListVersionsResult", BUCKETS_S3_XMLNS);
+  buckets_xml_elem(b, "Name", c->bucket);
+  xml_key(b, "Prefix", prefix ? prefix : "", url);
+  xml_key(b, "KeyMarker", key_marker ? key_marker : "", url);
+  if (l.truncated && l.next_marker) xml_key(b, "NextKeyMarker", l.next_marker, url);
+  buckets_xml_elem(b, "NextVersionIdMarker", l.truncated && l.next_version_marker ? l.next_version_marker : "");
+  buckets_xml_elem(b, "VersionIdMarker", vid_marker ? vid_marker : "");
+  buckets_buf_appendf(b, "<MaxKeys>%lld</MaxKeys>", max_keys);
+  if (delimiter && *delimiter) xml_key(b, "Delimiter", delimiter, url);
+  buckets_xml_elem(b, "IsTruncated", l.truncated ? "true" : "false");
+  for (size_t i = 0; i < l.nprefixes; i++) {
+    buckets_xml_open(b, "CommonPrefixes");
+    xml_key(b, "Prefix", l.prefixes[i], url);
+    buckets_xml_close(b, "CommonPrefixes");
+  }
+  for (size_t i = 0; i < l.nobjects; i++) {
+    const buckets_object_info *o = &l.objects[i];
+    const char *tag = o->delete_marker ? "DeleteMarker" : "Version";
+    char lm[BUCKETS_TIME_ISO8601_LEN + 1];
+    buckets_time_iso8601_ns(o->mod_time_ns, lm);
+    buckets_xml_open(b, tag);
+    xml_key(b, "Key", o->name, url);
+    buckets_xml_elem(b, "LastModified", lm);
+    if (o->etag[0]) buckets_buf_appendf(b, "<ETag>&#34;%s&#34;</ETag>", o->etag);
+    else buckets_xml_elem(b, "ETag", "");
+    buckets_buf_appendf(b, "<Size>%lld</Size>", (long long)o->size);
+    buckets_xml_open(b, "Owner");
+    buckets_xml_elem(b, "ID", BUCKETS_S3_OWNER_ID);
+    buckets_xml_elem(b, "DisplayName", BUCKETS_S3_OWNER_NAME);
+    buckets_xml_close(b, "Owner");
+    const char *sc = buckets_object_meta(o, "x-amz-storage-class");
+    buckets_xml_elem(b, "StorageClass", sc ? sc : "STANDARD");
+    if (with_meta && !o->delete_marker) {
+      bool any = false;
+      for (size_t k = 0; k < o->nmeta; k++) {
+        if (has_prefix_fold(o->meta[k].key, BUCKETS_XL_RESERVED_PREFIX)) continue;
+        if (!any) buckets_xml_open(b, "UserMetadata");
+        any = true;
+        buckets_xml_elem(b, o->meta[k].key, (const char *)o->meta[k].value);
+      }
+      if (any) buckets_xml_close(b, "UserMetadata");
+    }
+    buckets_xml_elem(b, "IsLatest", o->is_latest ? "true" : "false");
+    buckets_xml_elem(b, "VersionId", o->version_id);
+    buckets_xml_close(b, tag);
+  }
+  if (url) buckets_xml_elem(b, "EncodingType", "url");
+  buckets_xml_close(b, "ListVersionsResult");
+  buckets_obj_list_free(&l);
   buckets_s3_write_xml(c, 200);
 }

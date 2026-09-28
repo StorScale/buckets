@@ -46,6 +46,8 @@ done
 # MinIO interoperability (skipped unless MC_BIN and MINIO_BIN are set;
 # tools/build-oracles.sh builds both).
 run tests/integration/interop.sh build-ci/src/bucketsd
+run tests/integration/s3diff.sh build-ci/src/bucketsd
+run tests/integration/versioning-interop.sh build-ci/src/bucketsd
 
 if [[ "$(uname -s)" == Linux ]]; then
   build build-ci-tsan -DCMAKE_BUILD_TYPE=Debug -DBUCKETS_SANITIZE=thread

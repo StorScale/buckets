@@ -5,6 +5,7 @@
 #include <stdatomic.h>
 
 #include "bucket/metadata.h"
+#include "bucket/versioning.h"
 #include "iam/policy.h"
 
 /* The bucket metadata cache (MinIO's BucketMetadataSys): immutable,
@@ -16,6 +17,7 @@ typedef struct {
   bool exists; /* .metadata.bin was found */
   buckets_bucket_meta meta;
   buckets_policy *policy; /* parsed PolicyConfigJSON, or NULL */
+  buckets_versioning versioning; /* parsed VersioningConfigXML (status UNSET when none) */
   long long loaded_ns;
 } buckets_bucket_state;
 

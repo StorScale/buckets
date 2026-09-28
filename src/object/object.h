@@ -138,6 +138,7 @@ typedef struct {
   size_t nmeta;
   size_t nparts;
   bool delete_marker;
+  bool is_latest; /* version listings: the newest version of its key */
   uint8_t *checksum; /* stored x-minio-internal-crc bytes, or NULL */
   size_t checksum_len;
   buckets_xl_part *parts; /* numbers and sizes, in object order (etags unset) */
@@ -158,6 +159,11 @@ typedef struct {
    * committed (NULL for multipart parts). Returning an error aborts. */
   buckets_obj_err (*pre_commit)(void *ud, const buckets_checksum *computed, buckets_xl_object *o);
   void *pre_commit_ud;
+  /* Versioning: a new version ID (bucket versioning enabled), or the given
+   * one (replication, imports); otherwise the "null" version is replaced. */
+  bool versioned;
+  const char *version_id;
+  int64_t mod_time_ns; /* 0: now */
 } buckets_put_opts;
 
 buckets_obj_err buckets_obj_check_name(const char *object);
@@ -180,6 +186,22 @@ void buckets_obj_reader_free(buckets_obj_reader *r);
 
 buckets_obj_err buckets_obj_delete(buckets_objlayer *L, const char *bucket, const char *object, const char *version_id);
 
+/* DeleteObject with the bucket's versioning (MinIO's ObjectOptions):
+ * - with version_id: that version is removed for good;
+ * - otherwise, versioned: a delete marker with a new version ID;
+ *   suspended: a "null" delete marker, replacing any null version;
+ *   neither: the null version is removed. */
+typedef struct {
+  const char *version_id;
+  bool versioned, suspended;
+} buckets_delete_opts;
+typedef struct {
+  bool delete_marker;      /* a marker was created, or the removed version was one */
+  char version_id[37];     /* the marker's or the removed version's ID ("null" for none) */
+} buckets_delete_result;
+buckets_obj_err buckets_obj_delete_ex(buckets_objlayer *L, const char *bucket, const char *object,
+                                      const buckets_delete_opts *opts, buckets_delete_result *res);
+
 typedef struct {
   buckets_object_info *objects;
   size_t nobjects;
@@ -187,11 +209,22 @@ typedef struct {
   size_t nprefixes;
   bool truncated;
   char *next_marker; /* last key or common prefix returned, when truncated */
+  char *next_version_marker; /* version listings: the last version returned */
 } buckets_obj_listing;
 
 buckets_obj_err buckets_obj_list(buckets_objlayer *L, const char *bucket, const char *prefix, const char *marker,
                                  const char *delimiter, int max_keys, buckets_obj_listing *out);
 void buckets_obj_list_free(buckets_obj_listing *l);
+
+/* ListObjectVersions: every version (delete markers included, newest first
+ * within a key), after key_marker (and, within it, version_marker). When
+ * truncated, next_marker / next_version_marker say where to resume. */
+buckets_obj_err buckets_obj_list_versions(buckets_objlayer *L, const char *bucket, const char *prefix,
+                                          const char *key_marker, const char *version_marker, const char *delimiter,
+                                          int max_keys, buckets_obj_listing *out);
+/* Merges per-source version listings (each sorted) into out, keeping the
+ * first max_keys entries; the sources are emptied. */
+void buckets_obj_listing_merge_versions(buckets_obj_listing *src, size_t n, int max_keys, buckets_obj_listing *out);
 
 /* ---- healing ----
  * Replaces MinIO's cmd/erasure-healing.go. Healing rebuilds every shard an
@@ -275,7 +308,7 @@ buckets_obj_err buckets_obj_mpu_abort(buckets_objlayer *L, const char *bucket, c
 /* want: the final checksum from the request's x-amz-checksum-* header, or NULL. */
 buckets_obj_err buckets_obj_mpu_complete(buckets_objlayer *L, const char *bucket, const char *object,
                                          const char *upload_id, const buckets_complete_part *parts, size_t nparts,
-                                         const buckets_checksum *want, buckets_object_info *out);
+                                         const buckets_checksum *want, bool versioned, buckets_object_info *out);
 /* Pending uploads for exactly this object (MinIO lists per object). */
 buckets_obj_err buckets_obj_mpu_list_uploads(buckets_objlayer *L, const char *bucket, const char *object,
                                              buckets_upload_info **uploads, size_t *n);

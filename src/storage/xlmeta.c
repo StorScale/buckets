@@ -440,7 +440,51 @@ static void encode_v2obj(buckets_buf *b, const buckets_xl_object *o, bool for_si
   }
 }
 
+/* xlMetaV2DeleteMarker: ID, MTime and (omitempty) MetaSys. */
+static void encode_delobj(buckets_buf *b, const buckets_xl_object *o, bool with_meta) {
+  bool meta = with_meta && o->nmeta_sys;
+  buckets_mp_map(b, meta ? 3 : 2);
+  buckets_mp_cstr(b, "ID");
+  buckets_mp_bin(b, o->version_id, 16);
+  buckets_mp_cstr(b, "MTime");
+  buckets_mp_int(b, o->mod_time);
+  if (meta) {
+    buckets_mp_cstr(b, "MetaSys");
+    buckets_mp_map(b, (uint32_t)o->nmeta_sys);
+    for (size_t i = 0; i < o->nmeta_sys; i++) {
+      buckets_mp_cstr(b, o->meta_sys[i].key);
+      buckets_mp_bin(b, o->meta_sys[i].value, o->meta_sys[i].value_len);
+    }
+  }
+}
+
+static void encode_delete_marker(const buckets_xl_object *o, buckets_buf *meta, buckets_xl_header *hdr) {
+  buckets_mp_map(meta, 3); /* Type, DelObj, v */
+  buckets_mp_cstr(meta, "Type");
+  buckets_mp_uint(meta, BUCKETS_XL_TYPE_DELETE);
+  buckets_mp_cstr(meta, "DelObj");
+  encode_delobj(meta, o, true);
+  buckets_mp_cstr(meta, "v");
+  buckets_mp_uint(meta, o->written_by ? o->written_by : BUCKETS_XL_WRITTEN_BY);
+  /* xlMetaV2DeleteMarker.Signature */
+  buckets_buf sig = BUCKETS_BUF_INIT;
+  encode_delobj(&sig, o, false);
+  uint64_t crc = hash_det_kv(o->meta_sys, o->nmeta_sys, 0x1bbc7e1dde654743ull);
+  crc ^= buckets_xxh64(sig.data, sig.len);
+  buckets_buf_free(&sig);
+  uint32_t s32 = (uint32_t)(crc ^ (crc >> 32));
+  memset(hdr, 0, sizeof(*hdr));
+  memcpy(hdr->version_id, o->version_id, 16);
+  hdr->mod_time = o->mod_time;
+  for (int i = 0; i < 4; i++) hdr->signature[i] = (uint8_t)(s32 >> (8 * i));
+  hdr->type = BUCKETS_XL_TYPE_DELETE;
+}
+
 void buckets_xl_object_encode(const buckets_xl_object *o, buckets_buf *meta, buckets_xl_header *hdr) {
+  if (o->type == BUCKETS_XL_TYPE_DELETE) {
+    encode_delete_marker(o, meta, hdr);
+    return;
+  }
   buckets_mp_map(meta, 3); /* Type, V2Obj, v */
   buckets_mp_cstr(meta, "Type");
   buckets_mp_uint(meta, BUCKETS_XL_TYPE_OBJECT);

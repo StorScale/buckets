@@ -767,7 +767,7 @@ void buckets_s3_post_policy(s3_ctx *c) {
         buckets_xml_open(b, "PostResponse");
         buckets_xml_elem(b, "Bucket", c->bucket);
         buckets_xml_elem(b, "Key", oi.name);
-        buckets_buf_appendf(b, "<ETag>&quot;%s&quot;</ETag>", oi.etag);
+        buckets_buf_appendf(b, "<ETag>&#34;%s&#34;</ETag>", oi.etag);
         buckets_xml_elem(b, "Location", loc.data);
         buckets_xml_close(b, "PostResponse");
         buckets_s3_write_xml(c, 201);

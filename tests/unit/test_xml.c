@@ -12,7 +12,7 @@
 static void test_writer_escapes(void **state) {
   buckets_buf b = BUCKETS_BUF_INIT;
   buckets_xml_elem(&b, "Key", "a<b>&\"c'\n");
-  assert_string_equal(b.data, "<Key>a&lt;b&gt;&amp;&quot;c&apos;&#xA;</Key>");
+  assert_string_equal(b.data, "<Key>a&lt;b&gt;&amp;&#34;c&#39;&#xA;</Key>");
   buckets_buf_free(&b);
 }
 

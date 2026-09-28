@@ -59,6 +59,12 @@ bool buckets_s3_require(s3_ctx *c, const char *action, const char *bucket, const
 void buckets_s3_cond_override(s3_ctx *c, const char *key, const char *value);
 void buckets_s3_conds_free(s3_conds *cs);
 
+/* The bucket's versioning as it applies to object (PrefixEnabled / PrefixSuspended). */
+void buckets_s3_versioning(s3_ctx *c, const char *object, bool *enabled, bool *suspended);
+/* x-amz-version-id for a version other than "null" (setPutObjHeaders). */
+void buckets_s3_version_header(s3_ctx *c, const char *version_id);
+/* An error with a code outside the generated table (APIError literals). */
+void buckets_s3_write_custom_error(s3_ctx *c, int status, const char *code, const char *message);
 void buckets_s3_write_error(s3_ctx *c, buckets_s3_error e);
 void buckets_s3_write_error_msg(s3_ctx *c, buckets_s3_error e, const char *message);
 void buckets_s3_write_xml(s3_ctx *c, int status);
@@ -70,6 +76,7 @@ buckets_s3_error buckets_s3_read_doc(s3_ctx *c);
 /* Object-level handlers (s3/objects.c). */
 void buckets_s3_route_object(s3_ctx *c);
 void buckets_s3_list_objects(s3_ctx *c, bool v2);
+void buckets_s3_list_object_versions(s3_ctx *c);
 void buckets_s3_delete_objects(s3_ctx *c);
 void buckets_s3_list_uploads(s3_ctx *c);
 void buckets_s3_write_private_acl(s3_ctx *c);

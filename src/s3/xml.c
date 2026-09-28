@@ -26,8 +26,8 @@ void buckets_xml_text(buckets_buf *out, const char *s, size_t n) {
       case '&': rep = "&amp;"; break;
       case '<': rep = "&lt;"; break;
       case '>': rep = "&gt;"; break;
-      case '"': rep = "&quot;"; break;
-      case '\'': rep = "&apos;"; break;
+      case '"': rep = "&#34;"; break; /* as Go's xml.EscapeText */
+      case '\'': rep = "&#39;"; break;
       case '\r': rep = "&#xD;"; break;
       case '\n': rep = "&#xA;"; break;
       case '\t': rep = "&#x9;"; break;

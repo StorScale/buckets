@@ -240,7 +240,7 @@ buckets_obj_err buckets_obj_delete_bucket(buckets_objlayer *L, const char *bucke
   if (L->npools > 1) {
     for (size_t p = 0; p < L->npools; p++) {
       buckets_obj_listing l;
-      if (buckets_ep_list(L->pools[p], bucket, "", NULL, NULL, 1, &l) == BUCKETS_OBJ_OK) {
+      if (buckets_ep_list_versions(L->pools[p], bucket, "", NULL, NULL, NULL, 1, &l) == BUCKETS_OBJ_OK) {
         bool empty = l.nobjects == 0;
         buckets_obj_list_free(&l);
         if (!empty) return BUCKETS_OBJ_ERR_BUCKET_NOT_EMPTY;
@@ -308,6 +308,54 @@ buckets_obj_err buckets_obj_delete(buckets_objlayer *L, const char *bucket, cons
     found = true;
   }
   return result;
+}
+
+/* A delete marker goes to the pool where the object lives (or, for a key
+ * that exists nowhere, where a new object would); explicit versions are
+ * removed from every pool that has them. */
+buckets_obj_err buckets_obj_delete_ex(buckets_objlayer *L, const char *bucket, const char *object,
+                                      const buckets_delete_opts *opts, buckets_delete_result *res) {
+  if (L->npools == 1) return buckets_ep_delete_ex(L->pools[0], bucket, object, opts, res);
+  bool marker = !(opts->version_id && *opts->version_id) && (opts->versioned || opts->suspended);
+  if (marker) {
+    buckets_obj_err err;
+    int p = write_pool(L, bucket, object, 0, &err);
+    if (p < 0) return err;
+    return buckets_ep_delete_ex(L->pools[p], bucket, object, opts, res);
+  }
+  buckets_obj_err result = BUCKETS_OBJ_ERR_NO_SUCH_KEY;
+  bool found = false;
+  for (size_t p = 0; p < L->npools; p++) {
+    buckets_delete_result r;
+    buckets_obj_err err = buckets_ep_delete_ex(L->pools[p], bucket, object, opts, &r);
+    if (err == BUCKETS_OBJ_ERR_NO_SUCH_KEY || err == BUCKETS_OBJ_ERR_NO_SUCH_VERSION) {
+      if (!found) {
+        result = err;
+        *res = r;
+      }
+      continue;
+    }
+    if (!found || err) result = err;
+    if (!found) *res = r;
+    found = true;
+  }
+  return result;
+}
+
+buckets_obj_err buckets_obj_list_versions(buckets_objlayer *L, const char *bucket, const char *prefix,
+                                          const char *key_marker, const char *version_marker, const char *delimiter,
+                                          int max_keys, buckets_obj_listing *out) {
+  if (L->npools == 1)
+    return buckets_ep_list_versions(L->pools[0], bucket, prefix, key_marker, version_marker, delimiter, max_keys, out);
+  memset(out, 0, sizeof(*out));
+  buckets_obj_listing *src = buckets_xcalloc(L->npools, sizeof(*src));
+  buckets_obj_err err = BUCKETS_OBJ_OK;
+  for (size_t p = 0; p < L->npools && !err; p++)
+    err = buckets_ep_list_versions(L->pools[p], bucket, prefix, key_marker, version_marker, delimiter, max_keys, &src[p]);
+  if (!err) buckets_obj_listing_merge_versions(src, L->npools, max_keys > BUCKETS_MAX_LIST_KEYS ? BUCKETS_MAX_LIST_KEYS : max_keys, out);
+  for (size_t p = 0; p < L->npools; p++) buckets_obj_list_free(&src[p]);
+  free(src);
+  return err;
 }
 
 typedef struct {
@@ -463,8 +511,8 @@ buckets_obj_err buckets_obj_mpu_abort(buckets_objlayer *L, const char *bucket, c
 
 buckets_obj_err buckets_obj_mpu_complete(buckets_objlayer *L, const char *bucket, const char *object,
                                          const char *upload_id, const buckets_complete_part *parts, size_t nparts,
-                                         const buckets_checksum *want, buckets_object_info *out) {
-  IN_UPLOAD_POOL(buckets_ep_mpu_complete(P, bucket, object, upload_id, parts, nparts, want, out));
+                                         const buckets_checksum *want, bool versioned, buckets_object_info *out) {
+  IN_UPLOAD_POOL(buckets_ep_mpu_complete(P, bucket, object, upload_id, parts, nparts, want, versioned, out));
 }
 
 static int upload_cmp(const void *a, const void *b) {

@@ -32,6 +32,20 @@ void buckets_time_iso8601(time_t t, char *out) {
   strftime(out, BUCKETS_TIME_ISO8601_LEN + 1, "%Y-%m-%dT%H:%M:%S.000Z", &tm);
 }
 
+void buckets_time_iso8601_ns(int64_t ns, char *out) {
+  time_t t = (time_t)(ns / 1000000000LL);
+  long ms = (long)((ns % 1000000000LL) / 1000000LL);
+  if (ns < 0 && ns % 1000000000LL) {
+    t--;
+    ms = (long)((ns % 1000000000LL + 1000000000LL) / 1000000LL);
+  }
+  struct tm tm;
+  gmtime_r(&t, &tm);
+  char base[24];
+  strftime(base, sizeof(base), "%Y-%m-%dT%H:%M:%S", &tm);
+  snprintf(out, BUCKETS_TIME_ISO8601_LEN + 1, "%s.%03ldZ", base, ms);
+}
+
 void buckets_time_http(time_t t, char *out) {
   struct tm tm;
   gmtime_r(&t, &tm);

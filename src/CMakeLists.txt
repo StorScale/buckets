@@ -52,6 +52,7 @@ add_library(buckets STATIC
   object/pools.c
   bucket/metadata.c
   bucket/metasys.c
+  bucket/versioning.c
   erasure/rs.c
   erasure/layout.c
   heal/healer.c
