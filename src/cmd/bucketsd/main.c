@@ -19,7 +19,9 @@
 #define DEFAULT_ROOT_USER "minioadmin"
 #define DEFAULT_ROOT_PASSWORD "minioadmin"
 #define SHUTDOWN_GRACE_SECONDS 10
-#define MAX_BODY_BYTES (64u * 1024 * 1024)
+/* MinIO's limits: 5 TiB per PUT (globalMaxObjectSize); 1 MiB stays in memory. */
+#define MAX_BODY_BYTES (5LL * 1024 * 1024 * 1024 * 1024)
+#define MEM_BODY_BYTES (1u * 1024 * 1024)
 
 static buckets_loop *g_loop;
 static volatile sig_atomic_t g_signal;
@@ -172,10 +174,14 @@ int main(int argc, char **argv) {
     buckets_log_error("create event loop failed");
     return 1;
   }
+  char spool[4096];
+  snprintf(spool, sizeof(spool), "%s/" BUCKETS_META_BUCKET "/tmp", drive->root);
   buckets_http_config hcfg = {
       .host = host,
       .port = port,
       .max_body = MAX_BODY_BYTES,
+      .mem_body_limit = MEM_BODY_BYTES,
+      .spool_dir = spool,
       .idle_timeout_sec = 30,
       .server_header = "Buckets",
   };

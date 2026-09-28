@@ -16,6 +16,7 @@
 #define BUCKETS_EMPTY_SHA256 "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 #define BUCKETS_MAX_SKEW_SECONDS (15 * 60)
 #define BUCKETS_MAX_PRESIGN_EXPIRES 604800
+#define BUCKETS_SIGV4_AMZ_DATE_LEN 16
 
 typedef enum {
   BUCKETS_AUTH_ANONYMOUS,
@@ -46,6 +47,11 @@ typedef struct {
   char access_key[256];
   /* Hex SHA-256 the body must match, "UNSIGNED-PAYLOAD", or a STREAMING-* marker. */
   char payload_hash[80];
+  /* Needed to verify aws-chunked chunk signatures, which chain from the seed. */
+  char amz_date[BUCKETS_SIGV4_AMZ_DATE_LEN + 1];
+  char scope[128]; /* date/region/service/aws4_request */
+  uint8_t signing_key[32];
+  char seed_signature[65];
 } buckets_sigv4_result;
 
 buckets_s3_error buckets_sigv4_verify_header(const buckets_sigv4_config *cfg, const buckets_http_request *req,

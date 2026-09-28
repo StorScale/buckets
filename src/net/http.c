@@ -41,6 +41,13 @@ typedef struct conn {
   size_t out_off;
   /* request being accumulated */
   buckets_buf method, url, hdr, body;
+  int body_fd;      /* spool file, or -1 */
+  int64_t body_len;
+  /* response body still being streamed */
+  buckets_http_body_fn stream;
+  void *stream_ud;
+  void (*stream_free)(void *);
+  bool stream_close_after; /* close the connection when the stream ends */
   hdr_span spans[BUCKETS_HTTP_MAX_HEADERS];
   size_t nspans;
   int last;
@@ -107,6 +114,24 @@ const char *buckets_http_status_text(int status) {
   }
 }
 
+long buckets_http_body_read(buckets_http_body_cursor *c, void *buf, size_t n) {
+  const buckets_http_request *req = c->req;
+  if (c->off >= req->body_len) return 0;
+  size_t want = (size_t)BUCKETS_MIN((int64_t)n, req->body_len - c->off);
+  if (req->body_fd < 0) {
+    memcpy(buf, req->body.p + c->off, want);
+    c->off += (int64_t)want;
+    return (long)want;
+  }
+  ssize_t r;
+  do {
+    r = pread(req->body_fd, buf, want, (off_t)c->off);
+  } while (r < 0 && errno == EINTR);
+  if (r <= 0) return -1; /* the spool file is shorter than recorded: I/O error */
+  c->off += r;
+  return (long)r;
+}
+
 buckets_str buckets_http_header_get(const buckets_http_request *req, const char *name) {
   for (size_t i = 0; i < req->nheaders; i++) {
     if (buckets_str_ieq_c(req->headers[i].name, name)) return req->headers[i].value;
@@ -117,6 +142,9 @@ buckets_str buckets_http_header_get(const buckets_http_request *req, const char 
 /* ---- connection lifecycle ------------------------------------------------ */
 
 static void request_reset(conn *c) {
+  if (c->body_fd >= 0) close(c->body_fd);
+  c->body_fd = -1;
+  c->body_len = 0;
   buckets_buf_reset(&c->method);
   buckets_buf_reset(&c->url);
   buckets_buf_reset(&c->hdr);
@@ -127,8 +155,17 @@ static void request_reset(conn *c) {
   c->too_large = false;
 }
 
+static void stream_end(conn *c) {
+  if (c->stream_free) c->stream_free(c->stream_ud);
+  c->stream = NULL;
+  c->stream_ud = NULL;
+  c->stream_free = NULL;
+}
+
 static void conn_close(conn *c) {
   buckets_http_server *srv = c->srv;
+  stream_end(c);
+  if (c->body_fd >= 0) close(c->body_fd);
   buckets_loop_unwatch(srv->loop, c->fd);
   close(c->fd);
   if (c->prev) c->prev->next = c->next;
@@ -147,7 +184,26 @@ static void conn_close(conn *c) {
 /* Writes as much of c->out as the socket takes. Returns false if the
  * connection was closed. */
 static bool conn_flush(conn *c) {
-  while (c->out_off < c->out.len) {
+  for (;;) {
+    if (c->out_off >= c->out.len) {
+      if (!c->stream) break;
+      buckets_buf_reset(&c->out);
+      c->out_off = 0;
+      buckets_buf_reserve(&c->out, 256 * 1024);
+      long got = c->stream(c->stream_ud, c->out.data, c->out.cap - 1);
+      if (got < 0) {
+        conn_close(c); /* mid-body failure: the client sees a short response */
+        return false;
+      }
+      if (got == 0) {
+        stream_end(c);
+        if (c->stream_close_after) c->closing = true;
+        break;
+      }
+      c->out.len = (size_t)got;
+      c->out.data[c->out.len] = '\0';
+      continue;
+    }
     ssize_t n = send(c->fd, c->out.data + c->out_off, c->out.len - c->out_off, SEND_FLAGS);
     if (n > 0) {
       c->out_off += (size_t)n;
@@ -172,7 +228,7 @@ static bool conn_flush(conn *c) {
   return true;
 }
 
-static bool conn_writing(const conn *c) { return c->out_off < c->out.len; }
+static bool conn_writing(const conn *c) { return c->out_off < c->out.len || c->stream != NULL; }
 
 /* Best-effort write that never closes the connection; safe inside parser
  * callbacks. Whatever is left is sent by the next conn_flush(). */
@@ -202,6 +258,17 @@ static void write_response(conn *c, buckets_http_response *resp, bool keep_alive
   if (!keep_alive) buckets_buf_append_c(&c->out, "Connection: close\r\n");
   buckets_buf_append(&c->out, resp->headers.data, resp->headers.len);
   buckets_buf_append(&c->out, "\r\n", 2);
+  if (resp->stream) {
+    if (resp->head_only) {
+      if (resp->stream_free) resp->stream_free(resp->stream_ud);
+    } else {
+      c->stream = resp->stream;
+      c->stream_ud = resp->stream_ud;
+      c->stream_free = resp->stream_free;
+    }
+    resp->stream = NULL;
+    return;
+  }
   if (!resp->head_only) buckets_buf_append(&c->out, resp->body.data, resp->body.len);
 }
 
@@ -232,6 +299,8 @@ static void dispatch_request(conn *c) {
   }
   req.nheaders = c->nspans;
   req.body = buckets_buf_str(&c->body);
+  req.body_fd = c->body_fd;
+  req.body_len = c->body_fd >= 0 ? c->body_len : (int64_t)c->body.len;
   req.keep_alive = llhttp_should_keep_alive(&c->parser) && !srv->shutting_down;
   req.remote_addr = c->remote;
 
@@ -241,7 +310,10 @@ static void dispatch_request(conn *c) {
   write_response(c, &resp, req.keep_alive);
   buckets_buf_free(&resp.headers);
   buckets_buf_free(&resp.body);
-  if (!req.keep_alive) c->closing = true;
+  if (!req.keep_alive) {
+    if (c->stream) c->stream_close_after = true;
+    else c->closing = true;
+  }
   request_reset(c);
 }
 
@@ -293,7 +365,7 @@ static void conn_io(buckets_loop *loop, int fd, unsigned events, void *ud) {
     if (n > 0) {
       c->in.len += (size_t)n;
       c->in.data[c->in.len] = '\0';
-      if (c->in.len > c->srv->cfg.max_body + 1024 * 1024) break; /* process before buffering more */
+      if (c->in.len > 1024 * 1024) break; /* parse (and spool) before buffering more */
       continue;
     }
     if (n < 0 && errno == EINTR) continue;
@@ -348,11 +420,30 @@ static int on_header_value(llhttp_t *p, const char *at, size_t n) {
   return 0;
 }
 
+static int open_spool(const char *dir) {
+  char path[4096];
+  snprintf(path, sizeof(path), "%s/body-XXXXXX", dir && *dir ? dir : "/tmp");
+  int fd = mkstemp(path);
+  if (fd < 0) return -1;
+  unlink(path); /* anonymous: disappears with the descriptor */
+  fcntl(fd, F_SETFD, FD_CLOEXEC);
+  return fd;
+}
+
 static int on_headers_complete(llhttp_t *p) {
   conn *c = p->data;
-  if ((p->flags & F_CONTENT_LENGTH) && p->content_length > c->srv->cfg.max_body) {
+  const buckets_http_config *cfg = &c->srv->cfg;
+  bool has_len = (p->flags & F_CONTENT_LENGTH) != 0;
+  if (has_len && p->content_length > (uint64_t)cfg->max_body) {
     c->too_large = true;
     return -1;
+  }
+  if ((p->flags & F_CHUNKED) || (has_len && p->content_length > cfg->mem_body_limit)) {
+    c->body_fd = open_spool(cfg->spool_dir);
+    if (c->body_fd < 0) {
+      buckets_log_error("spool request body in %s: %s", cfg->spool_dir, strerror(errno));
+      return -1;
+    }
   }
   for (size_t i = 0; i < c->nspans; i++) {
     buckets_str name = {c->hdr.data + c->spans[i].name_off, c->spans[i].name_len};
@@ -367,11 +458,24 @@ static int on_headers_complete(llhttp_t *p) {
 
 static int on_body(llhttp_t *p, const char *at, size_t n) {
   conn *c = p->data;
-  if (c->body.len + n > c->srv->cfg.max_body) {
+  int64_t have = c->body_fd >= 0 ? c->body_len : (int64_t)c->body.len;
+  if (have + (int64_t)n > c->srv->cfg.max_body) {
     c->too_large = true;
     return -1;
   }
-  buckets_buf_append(&c->body, at, n);
+  if (c->body_fd < 0) {
+    buckets_buf_append(&c->body, at, n);
+    return 0;
+  }
+  /* Synchronous spool write; moves to the disk thread pool with the object layer. */
+  while (n) {
+    ssize_t w = write(c->body_fd, at, n);
+    if (w < 0 && errno == EINTR) continue;
+    if (w < 0) return -1;
+    at += w;
+    n -= (size_t)w;
+    c->body_len += w;
+  }
   return 0;
 }
 
@@ -400,6 +504,7 @@ static void on_accept(buckets_loop *loop, int fd, unsigned events, void *ud) {
     conn *c = buckets_xcalloc(1, sizeof(*c));
     c->srv = srv;
     c->fd = cfd;
+    c->body_fd = -1;
     c->last_active = time(NULL);
     if (ss.ss_family == AF_INET6) {
       inet_ntop(AF_INET6, &((struct sockaddr_in6 *)&ss)->sin6_addr, c->remote, sizeof(c->remote));
@@ -484,6 +589,7 @@ buckets_http_server *buckets_http_server_start(buckets_loop *loop, const buckets
   srv->cfg = *cfg;
   if (!srv->cfg.server_header) srv->cfg.server_header = "Buckets";
   if (srv->cfg.idle_timeout_sec <= 0) srv->cfg.idle_timeout_sec = 30;
+  if (srv->cfg.mem_body_limit == 0) srv->cfg.mem_body_limit = 1024 * 1024;
   srv->handler = handler;
   srv->ud = ud;
   llhttp_settings_init(&srv->settings);

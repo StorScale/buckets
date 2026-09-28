@@ -42,6 +42,15 @@ def concat_go_strings(expr):
     return None
 
 
+# Errors MinIO builds at runtime rather than listing in errorCodes; the
+# code/message/status here match what MinIO puts on the wire.
+EXTRAS = [
+    ("ErrMalformedChunkedEncoding", "BadRequest", "malformed chunked encoding", 400),
+    ("ErrChunkTooBig", "BadRequest", "chunk too big: choose chunk size <= 16MiB", 400),
+    ("ErrObjectTampered", "XMinioObjectTampered", "The requested object was modified and may be compromised", 206),
+]
+
+
 def c_escape(s):
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
@@ -71,6 +80,11 @@ def main():
             continue
         table[name] = (concat_go_strings(code.group(1)), d, s)
         order.append(name)
+
+    for name, code, desc, status in EXTRAS:
+        if name not in table:
+            table[name] = (code, desc, status)
+            order.append(name)
 
     def cname(go):
         return "BUCKETS_" + re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", go).upper()

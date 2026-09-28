@@ -16,8 +16,9 @@ typedef struct {
 /* A fully received request. All slices point into connection-owned memory and
  * are valid only for the duration of the handler call.
  *
- * Bodies are buffered in memory up to max_body for now. Streaming bodies (needed
- * for large PutObject/UploadPart) replace this before object handlers land. */
+ * Small bodies (<= mem_body_limit) are in memory in `body`. Larger or chunked
+ * bodies are spooled to an unlinked temp file in spool_dir: then body_fd >= 0
+ * and `body` is empty. Use buckets_http_body_read() to consume either kind. */
 typedef struct {
   buckets_str method;
   buckets_str target; /* raw request-target, e.g. "/bucket/key?uploads" */
@@ -26,6 +27,8 @@ typedef struct {
   buckets_http_header headers[BUCKETS_HTTP_MAX_HEADERS];
   size_t nheaders;
   buckets_str body;
+  int body_fd;       /* -1 when the body is in memory */
+  int64_t body_len;  /* total body bytes in either representation */
   bool keep_alive;
   const char *remote_addr;
 } buckets_http_request;
@@ -33,12 +36,29 @@ typedef struct {
 /* Case-insensitive header lookup. Returns a slice with p == NULL when absent. */
 buckets_str buckets_http_header_get(const buckets_http_request *req, const char *name);
 
+/* Sequential reader over a request body, whichever way it is stored. */
+typedef struct {
+  const buckets_http_request *req;
+  int64_t off;
+} buckets_http_body_cursor;
+
+/* Returns bytes read, 0 at end of body, -1 on I/O error. */
+long buckets_http_body_read(buckets_http_body_cursor *c, void *buf, size_t n);
+
+/* Streaming response body: called whenever the socket can take more data.
+ * Returns bytes written into buf, 0 when finished, -1 on error (the
+ * connection is then closed, since headers are already on the wire). */
+typedef long (*buckets_http_body_fn)(void *ud, char *buf, size_t cap);
+
 typedef struct {
   int status;
   buckets_buf headers; /* serialized "Name: value\r\n" lines */
   buckets_buf body;
   bool head_only;          /* HEAD response: send Content-Length, omit body */
-  long long content_length; /* -1: use body.len */
+  long long content_length; /* -1: use body.len; required with a stream */
+  buckets_http_body_fn stream; /* optional; replaces `body` */
+  void *stream_ud;
+  void (*stream_free)(void *ud); /* called once the stream is done or abandoned */
 } buckets_http_response;
 
 void buckets_http_resp_header(buckets_http_response *resp, const char *name, const char *value);
@@ -52,7 +72,9 @@ typedef void (*buckets_http_handler)(const buckets_http_request *req, buckets_ht
 typedef struct {
   const char *host; /* NULL or "" binds all interfaces */
   int port;
-  size_t max_body;
+  int64_t max_body;       /* largest accepted request body */
+  size_t mem_body_limit;  /* bodies up to this size stay in memory */
+  const char *spool_dir;  /* where larger bodies are spooled */
   int idle_timeout_sec;
   const char *server_header; /* value of the Server response header */
 } buckets_http_config;

@@ -331,4 +331,7 @@ const buckets_s3_error_info buckets_s3_errors[BUCKETS_ERR__COUNT] = {
     [BUCKETS_ERR_ADMIN_LDAPEXPECTED_LOGIN_NAME] = {"XMinioLDAPExpectedLoginName", "Expected LDAP short username but was given full DN.", 400},
     [BUCKETS_ERR_ADMIN_INVALID_GROUP_NAME] = {"XMinioInvalidGroupName", "The group name is invalid.", 400},
     [BUCKETS_ERR_ADD_USER_VALID_UTF] = {"XMinioInvalidUTF", "Invalid UTF-8 character detected.", 400},
+    [BUCKETS_ERR_MALFORMED_CHUNKED_ENCODING] = {"BadRequest", "malformed chunked encoding", 400},
+    [BUCKETS_ERR_CHUNK_TOO_BIG] = {"BadRequest", "chunk too big: choose chunk size <= 16MiB", 400},
+    [BUCKETS_ERR_OBJECT_TAMPERED] = {"XMinioObjectTampered", "The requested object was modified and may be compromised", 206},
 };

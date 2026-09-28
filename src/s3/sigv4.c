@@ -259,7 +259,8 @@ static buckets_s3_error parse_credential(buckets_str value, const buckets_sigv4_
 static buckets_s3_error compute_and_compare(const buckets_sigv4_config *cfg, const buckets_http_request *req,
                                             const buckets_query *q, bool presigned, const credential *cred,
                                             const signed_headers *sh, buckets_str amz_date, const char *secret,
-                                            const char *payload_hash, buckets_str provided_sig) {
+                                            const char *payload_hash, buckets_str provided_sig,
+                                            buckets_sigv4_result *out) {
   buckets_buf creq = BUCKETS_BUF_INIT;
   buckets_s3_error err = BUCKETS_ERR_NONE;
 
@@ -300,6 +301,12 @@ static buckets_s3_error compute_and_compare(const buckets_sigv4_config *cfg, con
 
   if (provided_sig.n != 64 || !buckets_ct_equal(sig_hex, provided_sig.p, 64)) {
     err = BUCKETS_ERR_SIGNATURE_DOES_NOT_MATCH;
+  } else {
+    snprintf(out->amz_date, sizeof(out->amz_date), BUCKETS_STR_FMT, BUCKETS_STR_ARG(amz_date));
+    snprintf(out->scope, sizeof(out->scope), BUCKETS_STR_FMT "/" BUCKETS_STR_FMT "/%s/aws4_request",
+             BUCKETS_STR_ARG(cred->date8), BUCKETS_STR_ARG(cred->region), cfg->service);
+    memcpy(out->signing_key, key, 32);
+    memcpy(out->seed_signature, sig_hex, 65);
   }
 
 done:
@@ -401,7 +408,7 @@ buckets_s3_error buckets_sigv4_verify_header(const buckets_sigv4_config *cfg, co
   snprintf(payload, sizeof(payload), BUCKETS_STR_FMT, ph.p ? (int)ph.n : (int)strlen(BUCKETS_EMPTY_SHA256),
            ph.p ? ph.p : BUCKETS_EMPTY_SHA256);
 
-  err = compute_and_compare(cfg, req, q, false, &cred, &sh, date, secret, payload, sig);
+  err = compute_and_compare(cfg, req, q, false, &cred, &sh, date, secret, payload, sig, out);
   if (err == BUCKETS_ERR_NONE) fill_result(out, &cred, payload);
 
 free_sh:
@@ -470,7 +477,7 @@ buckets_s3_error buckets_sigv4_verify_presigned(const buckets_sigv4_config *cfg,
   }
 
   err = compute_and_compare(cfg, req, q, true, &cred, &sh, buckets_str_c(date_s), secret, payload,
-                            buckets_str_c(sig_s));
+                            buckets_str_c(sig_s), out);
   if (err == BUCKETS_ERR_NONE) fill_result(out, &cred, payload);
 
 done:

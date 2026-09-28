@@ -22,8 +22,11 @@ add_library(buckets STATIC
   s3/sigv4.c
   s3/bucketname.c
   s3/server.c
+  s3/objects.c
+  s3/chunked.c
   storage/drive.c
   storage/xlmeta.c
+  object/xlsingle.c
 )
 target_include_directories(buckets PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 # timegm, gmtime_r, arc4random_buf, strncasecmp live outside strict C17.
