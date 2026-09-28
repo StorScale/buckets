@@ -11,6 +11,7 @@
 
 #include "core/timefmt.h"
 #include "iam/openid.h"
+#include "iam/plugins.h"
 #include "crypto/hex.h"
 #include "crypto/sha256.h"
 #include "crypto/base64.h"
@@ -29,6 +30,7 @@ typedef enum {
   STS_NOT_INITIALIZED,
   STS_INTERNAL_ERROR,
   STS_EXPIRED_TOKEN_WEB,
+  STS_UPSTREAM_ERROR,
 } sts_err;
 
 static const struct {
@@ -47,6 +49,9 @@ static const struct {
                                "The web identity token that was passed is expired or is not valid. Get a new identity "
                                "token from the identity provider and then retry the request.",
                                400},
+    [STS_UPSTREAM_ERROR] = {"InternalError", "An upstream service required for this operation failed - please try again "
+                                             "or contact an administrator.",
+                            500},
 };
 
 static void sts_error(s3_ctx *c, sts_err e, const char *message) {
@@ -266,13 +271,18 @@ static void assume_role_sso(s3_ctx *c, const buckets_query *form, const buckets_
     }
     bool present = pv && (yyjson_mut_is_str(pv) || yyjson_mut_is_arr(pv));
     policy_name = buckets_iam_existing_policies(c->s->iam, csv.data ? csv.data : "");
-    if (!present) {
+    buckets_plugins *pl = buckets_s3_plugins(c->s);
+    bool authz = buckets_authz_plugin_enabled(pl);
+    buckets_plugins_release(pl);
+    if (authz) {
+      /* The authorization plugin decides; no policy claim is needed. */
+    } else if (!present) {
       snprintf(err, sizeof(err), "%s claim missing from the JWT token, credentials will not be generated", claim_name);
       sts_error(c, STS_INVALID_PARAMETER_VALUE, err);
       buckets_buf_free(&csv);
       goto out;
     }
-    if (!*policy_name) {
+    else if (!*policy_name) {
       snprintf(err, sizeof(err), "None of the given policies (`%s`) are defined, credentials will not be generated",
                csv.data ? csv.data : "");
       sts_error(c, STS_INVALID_PARAMETER_VALUE, err);
@@ -321,6 +331,101 @@ out:
   yyjson_mut_doc_free(claims);
   free(policy_name);
   buckets_openid_release(o);
+}
+
+/* ---- AssumeRoleWithCustomToken (the identity plugin) ---- */
+
+static void assume_role_custom(s3_ctx *c, const buckets_query *form, const buckets_query *url) {
+  buckets_plugins *pl = buckets_s3_plugins(c->s);
+  yyjson_mut_doc *claims = NULL;
+  buckets_iam_ident *cred = NULL;
+  buckets_idp_result res = {0};
+  char err[512];
+  if (!buckets_iam_ready(c->s->iam)) {
+    sts_error(c, STS_NOT_INITIALIZED, "IAM sub-system not initialized");
+    goto out;
+  }
+  if (!buckets_idp_plugin_enabled(pl)) {
+    sts_error(c, STS_NOT_INITIALIZED, "STS API 'AssumeRoleWithCustomToken' is disabled");
+    goto out;
+  }
+  const char *token = form_get(form, url, "Token");
+  if (!token || !*token) {
+    sts_error(c, STS_INVALID_PARAMETER_VALUE, "Invalid empty `Token` parameter provided");
+    goto out;
+  }
+  const char *dparam = form_get(form, url, "DurationSeconds");
+  long requested = 0;
+  if (dparam && *dparam) {
+    char *end;
+    requested = strtol(dparam, &end, 10);
+    if (*end) {
+      snprintf(err, sizeof(err), "Invalid requested duration: %s", dparam);
+      sts_error(c, STS_INVALID_PARAMETER_VALUE, err);
+      goto out;
+    }
+  }
+  const char *role_arn = form_get(form, url, "RoleArn");
+  const char *policy = role_arn && buckets_idp_plugin_role_arn(pl) && strcmp(role_arn, buckets_idp_plugin_role_arn(pl)) == 0
+                           ? buckets_idp_plugin_role_policy(pl)
+                           : NULL;
+  if (!policy) {
+    snprintf(err, sizeof(err), "Error processing parameter RoleArn: role %s not found", role_arn ? role_arn : "");
+    sts_error(c, STS_INVALID_PARAMETER_VALUE, err);
+    goto out;
+  }
+  if (!buckets_authz_plugin_enabled(pl)) {
+    char *have = buckets_iam_existing_policies(c->s->iam, policy);
+    bool none = !*have;
+    free(have);
+    if (none) {
+      snprintf(err, sizeof(err), "None of the given policies (`%s`) are defined, credentials will not be generated",
+               policy);
+      sts_error(c, STS_INVALID_PARAMETER_VALUE, err);
+      goto out;
+    }
+  }
+  if (!buckets_idp_plugin_authenticate(pl, role_arn, token, &res, err, sizeof(err))) {
+    sts_error(c, STS_INVALID_PARAMETER_VALUE, err);
+    goto out;
+  }
+  if (res.reason) {
+    sts_error(c, STS_UPSTREAM_ERROR, res.reason);
+    goto out;
+  }
+  if (!res.user || !*res.user) {
+    sts_error(c, STS_UPSTREAM_ERROR, "A valid user was not returned by the authenticator.");
+    goto out;
+  }
+  long expiry = res.max_validity;
+  if (dparam && *dparam && requested < expiry) expiry = requested;
+  char parent[512];
+  snprintf(parent, sizeof(parent), "custom/%s", res.user);
+  claims = yyjson_mut_doc_new(NULL);
+  yyjson_mut_val *root = yyjson_mut_obj(claims);
+  yyjson_mut_doc_set_root(claims, root);
+  yyjson_mut_obj_add_int(claims, root, "exp", (long long)time(NULL) + expiry);
+  yyjson_mut_obj_add_strcpy(claims, root, "sub", parent);
+  yyjson_mut_obj_add_strcpy(claims, root, "roleArn", role_arn);
+  yyjson_mut_obj_add_strcpy(claims, root, "parent", parent);
+  const char *revoke = form_get(form, url, "TokenRevokeType");
+  if (revoke && *revoke) yyjson_mut_obj_add_strcpy(claims, root, "tokenRevokeType", revoke);
+  if (res.claims) {
+    size_t i, max;
+    yyjson_val *k, *v;
+    yyjson_obj_foreach(yyjson_doc_get_root(res.claims), i, max, k, v) {
+      if (!yyjson_mut_obj_get(root, yyjson_get_str(k))) {
+        yyjson_mut_obj_add(root, yyjson_mut_strcpy(claims, yyjson_get_str(k)), yyjson_val_mut_copy(claims, v));
+      }
+    }
+  }
+  cred = issue(c, parent, claims, NULL);
+  if (cred) write_credentials(c, "AssumeRoleWithCustomToken", cred, "AssumedUser", parent);
+out:
+  buckets_iam_ident_release(cred);
+  yyjson_mut_doc_free(claims);
+  buckets_idp_result_free(&res);
+  buckets_plugins_release(pl);
 }
 
 void buckets_sts_handle(s3_ctx *c) {
@@ -380,6 +485,8 @@ void buckets_sts_handle(s3_ctx *c) {
   } else if (action && (strcmp(action, "AssumeRoleWithWebIdentity") == 0 ||
                         strcmp(action, "AssumeRoleWithClientGrants") == 0)) {
     assume_role_sso(c, &form, &c->q, action);
+  } else if (action && strcmp(action, "AssumeRoleWithCustomToken") == 0) {
+    assume_role_custom(c, &form, &c->q);
   } else {
     snprintf(msg, sizeof(msg), "Unsupported action %s", action ? action : "");
     sts_error(c, STS_INVALID_PARAMETER_VALUE, msg);

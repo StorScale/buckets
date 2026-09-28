@@ -20,6 +20,7 @@
 #include "admin/info.h"
 #include "config/sys.h"
 #include "iam/openid.h"
+#include "iam/plugins.h"
 #include "bucket/metadata.h"
 #include "bucket/metasys.h"
 #include "dist/peer.h"
@@ -63,6 +64,50 @@ buckets_openid *buckets_s3_openid(buckets_s3_server *s) {
   return o;
 }
 
+buckets_plugins *buckets_s3_plugins(buckets_s3_server *s) {
+  pthread_mutex_lock(&s->oidc_mu);
+  buckets_plugins *p = buckets_plugins_ref(s->plugins);
+  pthread_mutex_unlock(&s->oidc_mu);
+  return p;
+}
+
+static void rebuild_plugins(buckets_s3_server *s) {
+  buckets_config *cfg = buckets_config_sys_snapshot(s->config);
+  char err[512];
+  buckets_plugins *p = buckets_plugins_build(cfg, s->region, false, err, sizeof(err));
+  buckets_config_free(cfg);
+  if (!p) {
+    buckets_log_error("plugins: %s", err);
+    return;
+  }
+  if (buckets_authz_plugin_enabled(p)) buckets_log_info("policy_plugin: authorization is delegated to the plugin");
+  if (buckets_idp_plugin_enabled(p)) buckets_log_info("identity_plugin: AssumeRoleWithCustomToken enabled");
+  pthread_mutex_lock(&s->oidc_mu);
+  buckets_plugins *old = s->plugins;
+  s->plugins = p;
+  pthread_mutex_unlock(&s->oidc_mu);
+  buckets_plugins_release(old);
+}
+
+static bool validate_plugins(const buckets_config *cfg, char *err, size_t errlen) {
+  buckets_plugins *p = buckets_plugins_build(cfg, g_region, true, err, errlen);
+  buckets_plugins_release(p);
+  return p != NULL;
+}
+
+static bool authz_hook(void *ud, const buckets_iam_ident *id, bool owner, const buckets_policy_args *a, bool *allowed) {
+  buckets_plugins *p = buckets_s3_plugins(ud);
+  bool handled = buckets_authz_plugin_enabled(p);
+  if (handled) {
+    char *claims = id && id->claims ? yyjson_write(id->claims, 0, NULL) : NULL;
+    *allowed = buckets_authz_plugin_allowed(p, id ? id->access_key : "", id ? id->groups : NULL,
+                                            id ? id->ngroups : 0, owner, a, claims);
+    free(claims);
+  }
+  buckets_plugins_release(p);
+  return handled;
+}
+
 static void rebuild_openid(buckets_s3_server *s) {
   buckets_config *cfg = buckets_config_sys_snapshot(s->config);
   char err[512];
@@ -99,12 +144,22 @@ static char *oidc_role_policy(void *ud, const char *arn) {
   const char *p = o ? buckets_openid_role_policy(o, arn) : NULL;
   char *r = p ? buckets_xstrdup(p) : NULL;
   buckets_openid_release(o);
+  if (!r) { /* the identity plugin's role */
+    buckets_plugins *pl = buckets_s3_plugins(ud);
+    const char *parn = buckets_idp_plugin_role_arn(pl);
+    if (parn && strcmp(parn, arn) == 0) r = buckets_xstrdup(buckets_idp_plugin_role_policy(pl));
+    buckets_plugins_release(pl);
+  }
   return r;
 }
 
 static void config_changed(void *ud, const char *subsys, bool local) {
   buckets_s3_server *s = ud;
   if (!*subsys || strcmp(subsys, "identity_openid") == 0) rebuild_openid(s);
+  if (!*subsys || strcmp(subsys, "policy_plugin") == 0 || strcmp(subsys, "policy_opa") == 0 ||
+      strcmp(subsys, "identity_plugin") == 0) {
+    rebuild_plugins(s);
+  }
   if (local && s->peers) buckets_peer_notify_iam(s->peers, "config", *subsys ? subsys : "all");
 }
 
@@ -128,6 +183,9 @@ void buckets_s3_server_init(buckets_s3_server *s, buckets_objlayer *layer, const
   pthread_mutex_init(&s->oidc_mu, NULL);
   g_region = s->region;
   buckets_config_register_validator("identity_openid", validate_openid);
+  buckets_config_register_validator("policy_plugin", validate_plugins);
+  buckets_config_register_validator("identity_plugin", validate_plugins);
+  buckets_iam_set_authz(s->iam, authz_hook, s);
   buckets_iam_openid_hooks hooks = {oidc_claim_name, oidc_role_policy, s};
   buckets_iam_set_openid_hooks(s->iam, &hooks);
   if (layer) buckets_s3_server_set_layer(s, layer);
@@ -147,6 +205,7 @@ static void *iam_start_main(void *arg) {
     if (delay_ms < 5000) delay_ms *= 2;
   }
   rebuild_openid(s);
+  rebuild_plugins(s);
   delay_ms = 250;
   while (!buckets_iam_start(s->iam, s->layer)) {
     buckets_log_warn("iam: unable to load IAM data yet, retrying");

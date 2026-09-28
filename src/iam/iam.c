@@ -386,7 +386,14 @@ struct buckets_iam {
   pthread_t refresher;
   bool refresher_started;
   buckets_iam_openid_hooks oidc;
+  buckets_iam_authz_fn authz;
+  void *authz_ud;
 };
+
+void buckets_iam_set_authz(buckets_iam *iam, buckets_iam_authz_fn fn, void *ud) {
+  iam->authz = fn;
+  iam->authz_ud = ud;
+}
 
 void buckets_iam_set_openid_hooks(buckets_iam *iam, const buckets_iam_openid_hooks *hooks) { iam->oidc = *hooks; }
 
@@ -1118,6 +1125,8 @@ static bool allowed_svc(buckets_iam *iam, const buckets_iam_ident *id, const buc
 }
 
 bool buckets_iam_is_allowed(buckets_iam *iam, const buckets_iam_ident *id, bool owner, const buckets_policy_args *args) {
+  bool decided;
+  if (iam->authz && iam->authz(iam->authz_ud, id, owner, args, &decided)) return decided;
   if (owner) return true;
   if (!id || id->type == BUCKETS_IAM_ROOT) return false;
   buckets_policy_args a = *args;

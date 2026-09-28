@@ -60,6 +60,10 @@ All notable changes to this project are documented here. The format follows
     - `identity_openid` providers from config or env: discovery document, JWKS (RSA, EC, Ed25519, and client-secret HMAC; refetched when a key is unknown), claim-based policies with a prefix, or role-policy providers selected by `RoleArn`
     - `aud`/`azp` checks, UserInfo claims, DurationSeconds, session policies, and MinIO's parent-user derivation
     - `tests/integration/openid.sh` runs against a mock identity provider
+  - HTTP plugins:
+    - `policy_plugin` (and the older `policy_opa`), to which every authorization decision is delegated
+    - `identity_plugin`, for `AssumeRoleWithCustomToken`, with its `idmp-` role ARN
+    - Both are probed when set through `mc admin config`; `tests/integration/plugins.sh` covers them.
   - The server configuration (`src/config`), a port of MinIO's `internal/config`:
     - all 34 sub-systems, with their keys, defaults and help, generated from MinIO's own registry (`tools/configgen`)
     - set/reset validation, `MINIO_*` (and `BUCKETS_*`) environment overrides and env-defined targets, and `config.json` and history in `.minio.sys` (MinIO-compatible in both directions)

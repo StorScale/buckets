@@ -24,6 +24,7 @@ typedef struct buckets_s3_server {
   struct buckets_config_sys *config;    /* the server configuration, once loaded */
   pthread_mutex_t oidc_mu;
   struct buckets_openid *openid; /* identity_openid providers (guarded by oidc_mu) */
+  struct buckets_plugins *plugins; /* policy/identity plugins (guarded by oidc_mu) */
   char host_id[65];   /* x-amz-id-2 */
   _Atomic uint64_t request_seq;
 } buckets_s3_server;
@@ -40,5 +41,7 @@ void buckets_s3_peer_bucket(void *server, const char *bucket);
 char *buckets_s3_peer_server_info(void *server);
 /* The current OpenID providers (a reference to release), or NULL. */
 struct buckets_openid *buckets_s3_openid(buckets_s3_server *s);
+/* The current plugins (a reference to release), or NULL. */
+struct buckets_plugins *buckets_s3_plugins(buckets_s3_server *s);
 
 #endif

@@ -56,6 +56,7 @@ add_library(buckets STATIC
   iam/policy.c
   iam/iam.c
   iam/openid.c
+  iam/plugins.c
   crypto/jwt.c
   crypto/jwk.c
   core/strmap.c

@@ -120,6 +120,12 @@ typedef struct {
 } buckets_iam_openid_hooks;
 void buckets_iam_set_openid_hooks(buckets_iam *iam, const buckets_iam_openid_hooks *hooks);
 
+/* An authorization plugin (policy_plugin): when it returns true, *allowed
+ * is the decision and IAM policies are not consulted at all. */
+typedef bool (*buckets_iam_authz_fn)(void *ud, const buckets_iam_ident *id, bool owner,
+                                     const buckets_policy_args *args, bool *allowed);
+void buckets_iam_set_authz(buckets_iam *iam, buckets_iam_authz_fn fn, void *ud);
+
 /* ---- authentication ------------------------------------------------------- */
 
 typedef enum {
