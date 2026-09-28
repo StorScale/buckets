@@ -44,6 +44,15 @@ long buckets_tls_recv(buckets_tls_conn *c, void *buf, size_t n);
 long buckets_tls_send(buckets_tls_conn *c, const void *buf, size_t n);
 /* Decrypted bytes already buffered, which the socket will not signal. */
 bool buckets_tls_pending(const buckets_tls_conn *c);
+/* ---- client side (internode) ---- */
+typedef struct buckets_tls_client buckets_tls_client;
+/* Trusts the system roots plus every PEM file in ca_dir (MinIO's certs/CAs);
+ * ca_dir may be NULL. */
+buckets_tls_client *buckets_tls_client_new(const char *ca_dir, char *err, size_t errlen);
+void buckets_tls_client_free(buckets_tls_client *t);
+/* Handshakes on a connected blocking socket, verifying host; NULL on failure. */
+buckets_tls_conn *buckets_tls_connect(buckets_tls_client *t, int fd, const char *host);
+
 /* Sends close_notify (best effort) and frees. Does not close the fd. */
 void buckets_tls_conn_free(buckets_tls_conn *c);
 

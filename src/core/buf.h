@@ -29,4 +29,8 @@ static inline buckets_str buckets_buf_str(const buckets_buf *b) {
   return (buckets_str){b->data, b->len};
 }
 
+/* Appends s percent-encoded: everything except A-Z a-z 0-9 - . _ ~ (and '/'
+ * when keep_slash). */
+void buckets_url_encode(buckets_buf *out, const char *s, bool keep_slash);
+
 #endif

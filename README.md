@@ -2,11 +2,17 @@
 
 S3-compatible object storage written in C, built to run natively on Kubernetes. It is a rewrite of MinIO's last public release (`RELEASE.2025-10-15T17-29-55Z`; the upstream project was archived in April 2026).
 
-**Status: 0.2.0, single-node S3 core complete.** Objects, multipart uploads, checksums, SigV2/SigV4/POST-policy auth and listing all work on a single drive, in MinIO's exact on-disk format. Real MinIO and Buckets can serve each other's drives. minio-go's functional suite (mint's Go suite) passes with zero failures; its remaining tests need features from later phases. Next up is erasure coding and distribution. See [docs/architecture.md](docs/architecture.md) for the roadmap and [docs/parity.md](docs/parity.md) for per-handler progress.
+**Status: 0.3.0, erasure-coded and distributed.** The S3 core runs in MinIO's exact on-disk format, on anything from one drive to multi-pool clusters of nodes:
+- erasure coding, bitrot protection and healing
+- HTTPS
+- cluster-wide locks
+- survives drive and node loss
+
+Real MinIO and Buckets can serve each other's drives, clusters included. minio-go's functional suite (mint's Go suite) passes with zero failures on one node and on a cluster; its remaining tests need features from later phases. Next up is the Kubernetes operator. See [docs/architecture.md](docs/architecture.md) for the roadmap and [docs/parity.md](docs/parity.md) for per-handler progress.
 
 ## Build
 
-You need a C17 compiler and CMake 3.20+ (Ninja is recommended). Dependencies (llhttp, yyjson, cmocka) are fetched and pinned at configure time.
+You need a C17 compiler and CMake 3.20+ (Ninja is recommended). Dependencies (llhttp, yyjson, cmocka) are fetched and pinned at configure time. OpenSSL 3 is used from the system when present, and otherwise built once from a pinned release into `.deps/` (this needs perl and make).
 
 ```bash
 cmake -S . -B build -G Ninja
@@ -21,6 +27,21 @@ To build with sanitizers, add `-DBUCKETS_SANITIZE=address,undefined` or `-DBUCKE
 ```bash
 BUCKETS_ROOT_USER=admin BUCKETS_ROOT_PASSWORD=change-me-now build/src/bucketsd server --address :9000 /srv/buckets
 ```
+
+Several drives form erasure sets, and each ellipsis argument is a server pool:
+
+```bash
+bucketsd server /mnt/disk{1...8}                            # one pool, one 8-drive set (EC 4+4)
+bucketsd server /mnt/a{1...8} /mnt/b{1...8}                 # two pools
+```
+
+For a cluster, run the same command on every node, giving the drives as URLs. Nodes find their own drives by address and port:
+
+```bash
+bucketsd server http://node{1...4}.example.net:9000/mnt/disk{1...4}
+```
+
+For HTTPS, put `public.crt` and `private.key` in `~/.buckets/certs` or a `--certs-dir`. Certificates in its subdirectories are served by SNI, and nodes trust CAs in its `CAs/` directory.
 
 Any S3 client works:
 
@@ -39,17 +60,21 @@ aws --endpoint-url http://localhost:9000 s3 ls
 | `tests/integration/smoke.sh` | End-to-end against a live `bucketsd`, using curl's independent SigV4 signer |
 | `tests/integration/interop.sh` | Round trips with `mc` and a real MinIO build in both directions (needs `MC_BIN` and `MINIO_BIN`; `tools/build-oracles.sh` builds them) |
 | `tests/conformance/minio-go.sh` | minio-go's functional suite (MinIO mint's Go suite); needs Go |
+| `tests/integration/{erasure,heal,concurrency,pools,tls,cluster}.sh` | Drive loss and bitrot; healing; racing writers; pool expansion; HTTPS; a 4-node cluster losing and regaining nodes (`MINIO_BIN` adds MinIO interop) |
 | `scripts/ci.sh` | The full gate: release, ASan/UBSan and TSan builds, unit, smoke and interop tests |
 
 ## Layout
 
 ```
 src/core     runtime: buffers, strings, time, query, logging, event loop
-src/net      HTTP/1.1 server
+src/net      HTTP/1.1 server and client, TLS
 src/crypto   SHA-256/1, MD5, HMAC, HighwayHash, xxHash, CRC32/32C/64NVME, base64
 src/s3       S3 front end: routing, SigV4/V2, aws-chunked, POST policy, checksums, errors (generated), XML
-src/storage  local drive, xl.meta v2 codec (MinIO-compatible on-disk layout)
-src/object   object layer: put/get/list/delete, multipart, bitrot framing
+src/storage  drives (local and remote), format.json negotiation, xl.meta v2 codec
+src/erasure  Reed-Solomon, drive layout (ellipses, set sizing, placement)
+src/object   object layer: pools, erasure sets, quorum, multipart, healing, namespace locks
+src/dist     internode RPC: remote drives, storage server, dsync locks, endpoints
+src/heal     background healer: MRF queue, replaced drives, scanner
 src/bucket   bucket metadata (.metadata.bin)
 src/cmd      bucketsd entry point
 tests/       unit (cmocka), fuzz (libFuzzer), integration

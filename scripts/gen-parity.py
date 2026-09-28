@@ -49,8 +49,8 @@ STATUS = {
     # health
     "LivenessCheckHandler": (DONE, ""),
     "ReadinessCheckHandler": (DONE, ""),
-    "ClusterCheckHandler": (PARTIAL, "single node only"),
-    "ClusterReadCheckHandler": (PARTIAL, "single node only"),
+    "ClusterCheckHandler": (DONE, "per-set write quorum"),
+    "ClusterReadCheckHandler": (DONE, "per-set read quorum"),
 }
 
 SOURCES = [
@@ -100,7 +100,7 @@ def main():
         "## Beyond the routers",
         "",
         "Subsystems with no single handler, tracked by phase in `docs/architecture.md`:",
-        "erasure coding + bitrot and xl.meta v2 (done, single node), distributed locking, healing, scanner,",
+        "erasure coding + bitrot, xl.meta v2, pools, distributed locking and healing (done), scanner usage/ILM, healing, scanner,",
         "ILM/tiering, bucket + site replication, notifications (10 targets), audit,",
         "SSE-S3/KMS/C, compression, S3 Select, SFTP/FTP, batch jobs, decommission/rebalance,",
         "IAM (LDAP/OIDC/plugins/OPA), operator, console.",

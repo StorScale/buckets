@@ -16,7 +16,7 @@ D="$WORK/drives"
 PID=
 cleanup() {
   [[ -n "$PID" ]] && kill "$PID" 2>/dev/null && wait "$PID" 2>/dev/null || true
-  rm -rf "$WORK"
+  [[ -n "${KEEP:-}" ]] && echo "kept $WORK" || rm -rf "$WORK"
 }
 trap cleanup EXIT
 
@@ -47,11 +47,12 @@ for i in $(seq 1 16); do
   if ((i % 2)); then head -c 2500000 /dev/urandom >"$WORK/v$i"; else head -c 700 /dev/urandom >"$WORK/v$i"; fi
   md5of <"$WORK/v$i" >>"$WORK/versions"
 done
-put_to() { status -T "$1" "$2" >"$3"; }
+put_to() { curl -s -o "$3.body" -w '%{http_code}' "${S3[@]}" -T "$1" "$2" >"$3"; }
 for i in $(seq 1 16); do bg put_to "$WORK/v$i" "$EP/concbucket/hot" "$WORK/put$i"; done
 join
 ok=0; for i in $(seq 1 16); do [[ $(cat "$WORK/put$i") == 200 ]] && ok=$((ok + 1)); done
 expect "all racing PUTs succeed" "$ok" 16
+[[ $ok == 16 ]] || { echo "    statuses: $(cat "$WORK"/put? "$WORK"/put?? | tr '\n' ' ')"; cat "$WORK"/put*.body; grep -h 'WARN\|ERROR' "$WORK/log" | tail -5; }
 # Read from each half of the set on its own: both halves must hold the same version.
 read_half() { # hide drives $1 $2
   mv "$D/d$1/concbucket/hot" "$WORK/hide$1"; mv "$D/d$2/concbucket/hot" "$WORK/hide$2"

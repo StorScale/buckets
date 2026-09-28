@@ -27,10 +27,14 @@ typedef enum {
   BUCKETS_DRIVE_ERR_CORRUPT,  /* format.json present but unreadable */
   BUCKETS_DRIVE_ERR_FOREIGN,  /* format.json from an unsupported layout */
   BUCKETS_DRIVE_ERR_IO,
+  BUCKETS_DRIVE_ERR_OFFLINE, /* remote drive unreachable */
 } buckets_drive_err;
 
+struct buckets_remote;
+
 typedef struct {
-  char *root;
+  char *root; /* local path, or the endpoint URL of a remote drive */
+  struct buckets_remote *remote; /* non-NULL: every call goes over internode RPC */
   char deployment_id[BUCKETS_UUID_STR_LEN + 1];
   char drive_id[BUCKETS_UUID_STR_LEN + 1];
   bool freshly_formatted;
@@ -75,6 +79,13 @@ buckets_drive_err buckets_drive_writer_write(buckets_drive_writer *w, const void
 /* Flushes to stable storage and closes. */
 buckets_drive_err buckets_drive_writer_close(buckets_drive_writer *w);
 void buckets_drive_writer_abort(buckets_drive_writer *w);
+
+/* Writes data at off of an existing file whose size must equal off (so a
+ * retried append can never duplicate or skip bytes). Remote writers use this. */
+buckets_drive_err buckets_drive_append(buckets_drive *d, const char *vol, const char *path, int64_t off,
+                                       const void *data, size_t n);
+/* Flushes a file to stable storage. */
+buckets_drive_err buckets_drive_fsync_file(buckets_drive *d, const char *vol, const char *path);
 
 /* Reads up to n bytes at off; *got < n only at end of file. */
 buckets_drive_err buckets_drive_read_at(buckets_drive *d, const char *vol, const char *path, int64_t off, void *buf,

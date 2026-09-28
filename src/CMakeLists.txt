@@ -22,6 +22,7 @@ add_library(buckets STATIC
   crypto/siphash.c
   net/http.c
   net/tls.c
+  net/client.c
   s3/errors.c
   s3/errors_gen.c
   s3/xml.c
@@ -36,6 +37,11 @@ add_library(buckets STATIC
   storage/drive.c
   storage/xlmeta.c
   storage/format.c
+  storage/remote.c
+  dist/internode.c
+  dist/storage_server.c
+  dist/dsync.c
+  dist/endpoint.c
   object/erasure.c
   object/nslock.c
   object/pools.c

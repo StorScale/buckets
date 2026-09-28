@@ -29,13 +29,17 @@
 void buckets_s3_server_init(buckets_s3_server *s, buckets_objlayer *layer, const char *root_user,
                             const char *root_password, const char *region) {
   memset(s, 0, sizeof(*s));
-  s->layer = layer;
   s->root_user = root_user;
   s->root_password = root_password;
   s->region = region ? region : "";
+  if (layer) buckets_s3_server_set_layer(s, layer);
+}
+
+void buckets_s3_server_set_layer(buckets_s3_server *s, buckets_objlayer *layer) {
   uint8_t h[32];
   buckets_sha256(layer->deployment_id_str, strlen(layer->deployment_id_str), h);
   buckets_hex_encode(h, 32, s->host_id);
+  s->layer = layer; /* atomic store, after host_id */
 }
 
 /* ---- response helpers ---------------------------------------------------- */
@@ -439,9 +443,14 @@ static bool is_health_path(buckets_str path) {
 void buckets_s3_handle(const buckets_http_request *req, buckets_http_response *resp, void *ud) {
   buckets_s3_server *s = ud;
 
+  buckets_objlayer *layer = s->layer;
   if (is_health_path(req->path) && (buckets_str_eq_c(req->method, "GET") || buckets_str_eq_c(req->method, "HEAD"))) {
-    /* Single drive: if we are serving, we have quorum. */
-    resp->status = 200;
+    /* live: the process answers. ready: initialized. cluster: every erasure
+     * set has write (cluster/read: read) quorum of online drives. */
+    bool live = buckets_str_has_suffix(req->path, "/live");
+    bool cluster = buckets_str_has_suffix(req->path, "/cluster") || buckets_str_has_suffix(req->path, "/cluster/read");
+    bool ok = live || (layer && (!cluster || buckets_objlayer_has_quorum(layer, !buckets_str_has_suffix(req->path, "/read"))));
+    resp->status = ok ? 200 : 503;
     return;
   }
 
@@ -455,6 +464,10 @@ void buckets_s3_handle(const buckets_http_request *req, buckets_http_response *r
   buckets_s3_error err;
   if (!buckets_query_parse(req->query, &c.q)) {
     err = BUCKETS_ERR_INVALID_QUERY_PARAMS;
+    goto fail;
+  }
+  if (!layer) {
+    err = BUCKETS_ERR_SERVER_NOT_INITIALIZED;
     goto fail;
   }
   if ((err = parse_path(&c)) != BUCKETS_ERR_NONE) goto fail;

@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 #include "storage/drive.h"
+#include "storage/remote.h"
 
 #include <dirent.h>
 #include <ftw.h>
@@ -32,6 +33,7 @@ const char *buckets_drive_strerror(buckets_drive_err e) {
     case BUCKETS_DRIVE_ERR_CORRUPT: return "format.json is corrupt";
     case BUCKETS_DRIVE_ERR_FOREIGN: return "drive belongs to an unsupported deployment layout";
     case BUCKETS_DRIVE_ERR_IO: return "I/O error";
+    case BUCKETS_DRIVE_ERR_OFFLINE: return "drive offline";
   }
   return "unknown";
 }
@@ -232,11 +234,13 @@ fail:
 
 void buckets_drive_close(buckets_drive *d) {
   if (!d) return;
+  buckets_rdrive_free(d->remote);
   free(d->root);
   free(d);
 }
 
 buckets_drive_err buckets_drive_make_vol(buckets_drive *d, const char *name) {
+  if (d->remote) return buckets_rdrive_make_vol(d, name);
   char *p = path_join(d->root, name);
   buckets_drive_err err = mkdir(p, 0755) == 0 ? BUCKETS_DRIVE_OK : from_errno(errno);
   if (err == BUCKETS_DRIVE_OK) fsync_dir(d->root);
@@ -245,6 +249,7 @@ buckets_drive_err buckets_drive_make_vol(buckets_drive *d, const char *name) {
 }
 
 buckets_drive_err buckets_drive_stat_vol(buckets_drive *d, const char *name, time_t *created) {
+  if (d->remote) return buckets_rdrive_stat_vol(d, name, created);
   char *p = path_join(d->root, name);
   struct stat st;
   buckets_drive_err err = BUCKETS_DRIVE_OK;
@@ -262,6 +267,7 @@ buckets_drive_err buckets_drive_stat_vol(buckets_drive *d, const char *name, tim
 }
 
 buckets_drive_err buckets_drive_delete_vol(buckets_drive *d, const char *name) {
+  if (d->remote) return buckets_rdrive_delete_vol(d, name);
   char *p = path_join(d->root, name);
   buckets_drive_err err = BUCKETS_DRIVE_OK;
   if (rmdir(p) != 0) {
@@ -279,6 +285,7 @@ static int vol_cmp(const void *a, const void *b) {
 }
 
 buckets_drive_err buckets_drive_list_vols(buckets_drive *d, buckets_vol_info **vols, size_t *n) {
+  if (d->remote) return buckets_rdrive_list_vols(d, vols, n);
   *vols = NULL;
   *n = 0;
   DIR *dir = opendir(d->root);
@@ -331,6 +338,7 @@ static void parent_mkdir(const char *path) {
 }
 
 buckets_drive_err buckets_drive_read_all(buckets_drive *d, const char *vol, const char *path, buckets_buf *out) {
+  if (d->remote) return buckets_rdrive_read_all(d, vol, path, out);
   char *p = vpath(d, vol, path);
   int fd = open(p, O_RDONLY | O_CLOEXEC);
   free(p);
@@ -353,6 +361,7 @@ buckets_drive_err buckets_drive_read_all(buckets_drive *d, const char *vol, cons
 
 buckets_drive_err buckets_drive_write_all(buckets_drive *d, const char *vol, const char *path, const void *data,
                                           size_t n) {
+  if (d->remote) return buckets_rdrive_write_all(d, vol, path, data, n);
   char *dst = vpath(d, vol, path);
   parent_mkdir(dst);
   char *dir = buckets_xstrdup(dst);
@@ -368,10 +377,12 @@ buckets_drive_err buckets_drive_write_all(buckets_drive *d, const char *vol, con
 struct buckets_drive_writer {
   int fd;
   char *path;
+  struct buckets_rwriter *remote;
 };
 
 buckets_drive_err buckets_drive_create_file(buckets_drive *d, const char *vol, const char *path,
                                             buckets_drive_writer **w) {
+  if (d->remote) return buckets_rdrive_create_file(d, vol, path, w);
   char *p = vpath(d, vol, path);
   parent_mkdir(p);
   int fd = open(p, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
@@ -386,7 +397,15 @@ buckets_drive_err buckets_drive_create_file(buckets_drive *d, const char *vol, c
   return BUCKETS_DRIVE_OK;
 }
 
+buckets_drive_writer *buckets_drive_writer_wrap_remote(struct buckets_rwriter *rw) {
+  buckets_drive_writer *w = buckets_xcalloc(1, sizeof(*w));
+  w->fd = -1;
+  w->remote = rw;
+  return w;
+}
+
 buckets_drive_err buckets_drive_writer_write(buckets_drive_writer *w, const void *data, size_t n) {
+  if (w->remote) return buckets_rwriter_write(w->remote, data, n);
   const char *c = data;
   while (n) {
     ssize_t r = write(w->fd, c, n);
@@ -399,6 +418,11 @@ buckets_drive_err buckets_drive_writer_write(buckets_drive_writer *w, const void
 }
 
 buckets_drive_err buckets_drive_writer_close(buckets_drive_writer *w) {
+  if (w->remote) {
+    buckets_drive_err e = buckets_rwriter_close(w->remote);
+    free(w);
+    return e;
+  }
   buckets_drive_err err = fsync(w->fd) == 0 ? BUCKETS_DRIVE_OK : BUCKETS_DRIVE_ERR_IO;
   close(w->fd);
   free(w->path);
@@ -408,14 +432,60 @@ buckets_drive_err buckets_drive_writer_close(buckets_drive_writer *w) {
 
 void buckets_drive_writer_abort(buckets_drive_writer *w) {
   if (!w) return;
+  if (w->remote) {
+    buckets_rwriter_abort(w->remote);
+    free(w);
+    return;
+  }
   close(w->fd);
   unlink(w->path);
   free(w->path);
   free(w);
 }
 
+buckets_drive_err buckets_drive_append(buckets_drive *d, const char *vol, const char *path, int64_t off,
+                                       const void *data, size_t n) {
+  if (d->remote) return buckets_rdrive_append(d, vol, path, off, data, n);
+  char *p = vpath(d, vol, path);
+  int fd = open(p, O_WRONLY | O_CLOEXEC);
+  free(p);
+  if (fd < 0) return from_errno(errno);
+  struct stat st;
+  buckets_drive_err err = BUCKETS_DRIVE_OK;
+  if (fstat(fd, &st) != 0 || st.st_size != off) {
+    err = BUCKETS_DRIVE_ERR_IO;
+  } else {
+    const char *c = data;
+    while (n) {
+      ssize_t w = pwrite(fd, c, n, (off_t)off);
+      if (w < 0 && errno == EINTR) continue;
+      if (w < 0) {
+        err = BUCKETS_DRIVE_ERR_IO;
+        break;
+      }
+      c += w;
+      n -= (size_t)w;
+      off += w;
+    }
+  }
+  close(fd);
+  return err;
+}
+
+buckets_drive_err buckets_drive_fsync_file(buckets_drive *d, const char *vol, const char *path) {
+  if (d->remote) return buckets_rdrive_fsync_file(d, vol, path);
+  char *p = vpath(d, vol, path);
+  int fd = open(p, O_RDONLY | O_CLOEXEC);
+  free(p);
+  if (fd < 0) return from_errno(errno);
+  buckets_drive_err err = fsync(fd) == 0 ? BUCKETS_DRIVE_OK : BUCKETS_DRIVE_ERR_IO;
+  close(fd);
+  return err;
+}
+
 buckets_drive_err buckets_drive_read_at(buckets_drive *d, const char *vol, const char *path, int64_t off, void *buf,
                                         size_t n, size_t *got) {
+  if (d->remote) return buckets_rdrive_read_at(d, vol, path, off, buf, n, got);
   char *p = vpath(d, vol, path);
   int fd = open(p, O_RDONLY | O_CLOEXEC);
   free(p);
@@ -439,6 +509,7 @@ buckets_drive_err buckets_drive_read_at(buckets_drive *d, const char *vol, const
 buckets_drive_err buckets_drive_rename_data(buckets_drive *d, const char *src_vol, const char *src_dir,
                                             const char *data_dir, const char *dst_vol, const char *dst_path,
                                             const void *xlmeta, size_t xlmeta_len) {
+  if (d->remote) return buckets_rdrive_rename_data(d, src_vol, src_dir, data_dir, dst_vol, dst_path, xlmeta, xlmeta_len);
   char *dst = vpath(d, dst_vol, dst_path);
   if (mkdir_p(dst) != 0) {
     free(dst);
@@ -464,6 +535,7 @@ static int rm_entry(const char *path, const struct stat *st, int flag, struct FT
 
 buckets_drive_err buckets_drive_delete(buckets_drive *d, const char *vol, const char *path, bool recursive,
                                        bool prune) {
+  if (d->remote) return buckets_rdrive_delete(d, vol, path, recursive, prune);
   char *p = vpath(d, vol, path);
   buckets_drive_err err = BUCKETS_DRIVE_OK;
   struct stat st;
@@ -497,6 +569,7 @@ buckets_drive_err buckets_drive_delete(buckets_drive *d, const char *vol, const 
 }
 
 buckets_drive_err buckets_drive_list_dir(buckets_drive *d, const char *vol, const char *dir, buckets_dir_list *out) {
+  if (d->remote) return buckets_rdrive_list_dir(d, vol, dir, out);
   memset(out, 0, sizeof(*out));
   char *p = vpath(d, vol, dir);
   DIR *dh = opendir(p);
@@ -534,6 +607,7 @@ void buckets_dir_list_free(buckets_dir_list *l) {
 }
 
 buckets_drive_err buckets_drive_disk_info(buckets_drive *d, uint64_t *total, uint64_t *free_bytes) {
+  if (d->remote) return buckets_rdrive_disk_info(d, total, free_bytes);
   struct statvfs sv;
   if (statvfs(d->root, &sv) != 0) return from_errno(errno);
   *total = (uint64_t)sv.f_blocks * sv.f_frsize;
@@ -542,6 +616,7 @@ buckets_drive_err buckets_drive_disk_info(buckets_drive *d, uint64_t *total, uin
 }
 
 buckets_drive_err buckets_drive_file_size(buckets_drive *d, const char *vol, const char *path, int64_t *size) {
+  if (d->remote) return buckets_rdrive_file_size(d, vol, path, size);
   char *p = vpath(d, vol, path);
   struct stat st;
   buckets_drive_err err = stat(p, &st) != 0 ? from_errno(errno) : S_ISREG(st.st_mode) ? BUCKETS_DRIVE_OK
@@ -552,6 +627,7 @@ buckets_drive_err buckets_drive_file_size(buckets_drive *d, const char *vol, con
 }
 
 int buckets_drive_stat(buckets_drive *d, const char *vol, const char *path) {
+  if (d->remote) return buckets_rdrive_stat(d, vol, path);
   char *p = vpath(d, vol, path);
   struct stat st;
   int r = stat(p, &st) != 0 ? 0 : S_ISDIR(st.st_mode) ? 2 : 1;
@@ -561,6 +637,7 @@ int buckets_drive_stat(buckets_drive *d, const char *vol, const char *path) {
 
 buckets_drive_err buckets_drive_rename_file(buckets_drive *d, const char *src_vol, const char *src,
                                             const char *dst_vol, const char *dst) {
+  if (d->remote) return buckets_rdrive_rename_file(d, src_vol, src, dst_vol, dst);
   char *from = vpath(d, src_vol, src), *to = vpath(d, dst_vol, dst);
   parent_mkdir(to);
   buckets_drive_err err = rename(from, to) == 0 ? BUCKETS_DRIVE_OK : from_errno(errno);

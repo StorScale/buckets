@@ -268,6 +268,71 @@ long buckets_tls_send(buckets_tls_conn *c, const void *buf, size_t n) {
   return r == 1 ? (long)put : result(c, r);
 }
 
+/* ---- client ------------------------------------------------------------------ */
+
+struct buckets_tls_client {
+  SSL_CTX *ctx;
+};
+
+buckets_tls_client *buckets_tls_client_new(const char *ca_dir, char *err, size_t errlen) {
+  SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
+  if (!ctx) {
+    ssl_err(err, errlen, "create TLS client context", "");
+    return NULL;
+  }
+  SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
+  SSL_CTX_set_cipher_list(ctx, CIPHERS);
+  SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
+  SSL_CTX_set_default_verify_paths(ctx);
+  X509_STORE *store = SSL_CTX_get_cert_store(ctx);
+  DIR *d = ca_dir ? opendir(ca_dir) : NULL;
+  for (struct dirent *e; d && (e = readdir(d)) != NULL;) {
+    if (e->d_name[0] == '.') continue;
+    buckets_buf p = BUCKETS_BUF_INIT;
+    buckets_buf_appendf(&p, "%s/%s", ca_dir, e->d_name);
+    FILE *f = fopen(p.data, "r");
+    for (X509 *x; f && (x = PEM_read_X509(f, NULL, NULL, NULL)) != NULL;) {
+      X509_STORE_add_cert(store, x);
+      X509_free(x);
+    }
+    if (f) fclose(f);
+    ERR_clear_error();
+    buckets_buf_free(&p);
+  }
+  if (d) closedir(d);
+  buckets_tls_client *t = buckets_xcalloc(1, sizeof(*t));
+  t->ctx = ctx;
+  return t;
+}
+
+void buckets_tls_client_free(buckets_tls_client *t) {
+  if (!t) return;
+  SSL_CTX_free(t->ctx);
+  free(t);
+}
+
+buckets_tls_conn *buckets_tls_connect(buckets_tls_client *t, int fd, const char *host) {
+  SSL *ssl = SSL_new(t->ctx);
+  if (!ssl) return NULL;
+  SSL_set_fd(ssl, fd);
+  SSL_set_tlsext_host_name(ssl, host);
+  /* IP literals verify against IP SANs, names against DNS SANs. */
+  X509_VERIFY_PARAM *vp = SSL_get0_param(ssl);
+  if (X509_VERIFY_PARAM_set1_ip_asc(vp, host) != 1) SSL_set1_host(ssl, host);
+  ERR_clear_error();
+  if (SSL_connect(ssl) != 1) {
+    long vr = SSL_get_verify_result(ssl);
+    buckets_log_warn("TLS handshake with %s failed%s%s", host, vr != X509_V_OK ? ": " : "",
+                     vr != X509_V_OK ? X509_verify_cert_error_string(vr) : "");
+    ERR_clear_error();
+    SSL_free(ssl);
+    return NULL;
+  }
+  buckets_tls_conn *c = buckets_xcalloc(1, sizeof(*c));
+  c->ssl = ssl;
+  return c;
+}
+
 bool buckets_tls_pending(const buckets_tls_conn *c) { return SSL_pending(c->ssl) > 0; }
 
 void buckets_tls_conn_free(buckets_tls_conn *c) {

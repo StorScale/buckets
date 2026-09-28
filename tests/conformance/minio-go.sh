@@ -26,15 +26,29 @@ if [[ -n "${TLS:-}" ]]; then
   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -pkeyopt ec_param_enc:named_curve -nodes -days 1 \
     -keyout "$DRIVE.certs/private.key" -out "$DRIVE.certs/public.crt" -subj /CN=localhost \
     -addext "subjectAltName=IP:127.0.0.1" 2>/dev/null
+  mkdir -p "$DRIVE.certs/CAs" && cp "$DRIVE.certs/public.crt" "$DRIVE.certs/CAs/"
   TLSARGS=(--certs-dir "$DRIVE.certs")
   SCHEME=https
   HTTPS=1
 fi
-BUCKETS_ROOT_USER=conformance BUCKETS_ROOT_PASSWORD=conformance123 "$BIN" server --address "127.0.0.1:$PORT" \
-  ${TLSARGS[@]+"${TLSARGS[@]}"} "$TARGET" 2>"$WORK/bucketsd.log" &
-PID=$!
-trap 'kill $PID 2>/dev/null; rm -rf "$DRIVE" "$DRIVE.certs"' EXIT
-for _ in $(seq 50); do curl -sfk "$SCHEME://127.0.0.1:$PORT/minio/health/live" >/dev/null && break; sleep 0.1; done
+# CLUSTER=1 runs a 4-node cluster (2 drives each) and tests through node 1.
+PIDS=()
+if [[ -n "${CLUSTER:-}" ]]; then
+  EPS=()
+  for n in 1 2 3 4; do for d in 1 2; do EPS+=("$SCHEME://127.0.0.1:$((PORT + n - 1))$DRIVE/n$n/d$d"); done; done
+  for n in 1 2 3 4; do
+    BUCKETS_ROOT_USER=conformance BUCKETS_ROOT_PASSWORD=conformance123 "$BIN" server --address "127.0.0.1:$((PORT + n - 1))" \
+      ${TLSARGS[@]+"${TLSARGS[@]}"} "${EPS[@]}" 2>>"$WORK/bucketsd.log" &
+    PIDS+=($!)
+  done
+  for _ in $(seq 100); do curl -sfk "$SCHEME://127.0.0.1:$PORT/minio/health/cluster" >/dev/null && break; sleep 0.1; done
+else
+  BUCKETS_ROOT_USER=conformance BUCKETS_ROOT_PASSWORD=conformance123 "$BIN" server --address "127.0.0.1:$PORT" \
+    ${TLSARGS[@]+"${TLSARGS[@]}"} "$TARGET" 2>"$WORK/bucketsd.log" &
+  PIDS+=($!)
+fi
+trap 'kill "${PIDS[@]}" 2>/dev/null; rm -rf "$DRIVE" "$DRIVE.certs"' EXIT
+for _ in $(seq 50); do curl -sfk "$SCHEME://127.0.0.1:$PORT/minio/health/ready" >/dev/null && break; sleep 0.1; done
 
 # The suite drops scratch files in its working directory.
 (cd "$WORK" && SERVER_ENDPOINT=127.0.0.1:$PORT ACCESS_KEY=conformance SECRET_KEY=conformance123 \

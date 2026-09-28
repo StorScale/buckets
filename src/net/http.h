@@ -72,6 +72,17 @@ const char *buckets_http_status_text(int status);
 typedef void (*buckets_http_handler)(const buckets_http_request *req, buckets_http_response *resp,
                                      void *ud);
 
+/* Requests whose path starts with prefix go to their own handler and worker
+ * pool (internode RPC must never queue behind client requests). */
+typedef struct {
+  const char *prefix;
+  buckets_http_handler handler;
+  void *ud;
+  buckets_pool *workers; /* NULL: inline on the loop thread */
+} buckets_http_route;
+
+#define BUCKETS_HTTP_MAX_ROUTES 4
+
 typedef struct {
   const char *host; /* NULL or "" binds all interfaces */
   int port;
@@ -87,6 +98,8 @@ typedef struct {
   /* Serve HTTPS with these certificates (reloaded when they change); NULL
    * serves plain HTTP. Owned by the caller. */
   buckets_tls *tls;
+  buckets_http_route routes[BUCKETS_HTTP_MAX_ROUTES];
+  size_t nroutes;
 } buckets_http_config;
 
 typedef struct buckets_http_server buckets_http_server;

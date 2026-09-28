@@ -710,7 +710,6 @@ buckets_obj_err buckets_ep_put(buckets_epool *L, const char *bucket, const char 
   if (err) return err;
   if ((err = buckets_obj_check_name(object)) != BUCKETS_OBJ_OK) return err;
   buckets_eset *s = buckets_ep_set_for(L, object);
-  if ((err = check_namespace(s, bucket, object)) != BUCKETS_OBJ_OK) return err;
   if (size < 0) return BUCKETS_OBJ_ERR_INCOMPLETE_BODY;
 
   encoder e = {.set = s, .parity = s->parity, .data = set_data(s)};
@@ -764,9 +763,13 @@ buckets_obj_err buckets_ep_put(buckets_epool *L, const char *bucket, const char 
       /* Like MinIO, only the commit is locked: the data is already staged. */
       buckets_nslock_entry *lk = lock_ns(L, bucket, object, true);
       size_t committed = 0;
-      err = lk ? commit_version(s, bucket, object, &o, e.dist, e.alive, e.inline_mode ? e.ibuf : NULL, tmp_dir.data,
-                                !e.inline_mode, write_quorum(e.data, e.parity), &committed)
-               : BUCKETS_OBJ_ERR_TIMEOUT;
+      /* The namespace check runs under the lock: a concurrent commit of this
+       * key briefly leaves its directory without xl.meta. */
+      err = !lk ? BUCKETS_OBJ_ERR_TIMEOUT : check_namespace(s, bucket, object);
+      if (!err) {
+        err = commit_version(s, bucket, object, &o, e.dist, e.alive, e.inline_mode ? e.ibuf : NULL, tmp_dir.data,
+                             !e.inline_mode, write_quorum(e.data, e.parity), &committed);
+      }
       buckets_nslock_unlock(lk);
       if (!err && committed < s->n) report_partial(L, s, bucket, object, &o, committed);
     }
@@ -1816,11 +1819,6 @@ static buckets_obj_err mpu_complete(buckets_epool *L, const char *bucket, const 
     free(dir);
     return err;
   }
-  if ((err = check_namespace(u.set, bucket, object)) != BUCKETS_OBJ_OK) {
-    buckets_xl_object_free(&u.up);
-    free(dir);
-    return err;
-  }
   buckets_part_info *have;
   size_t nhave;
   read_parts(&u, dir, &have, &nhave);
@@ -1941,9 +1939,11 @@ static buckets_obj_err mpu_complete(buckets_epool *L, const char *bucket, const 
     }
     buckets_nslock_entry *lk = lock_ns(L, bucket, object, true);
     size_t committed = 0;
-    err = lk ? commit_version(u.set, bucket, object, &o, u.dist, u.has, NULL, dir, true,
-                              write_quorum(u.up.ec_m, u.up.ec_n), &committed)
-             : BUCKETS_OBJ_ERR_TIMEOUT;
+    err = !lk ? BUCKETS_OBJ_ERR_TIMEOUT : check_namespace(u.set, bucket, object);
+    if (!err) {
+      err = commit_version(u.set, bucket, object, &o, u.dist, u.has, NULL, dir, true,
+                           write_quorum(u.up.ec_m, u.up.ec_n), &committed);
+    }
     buckets_nslock_unlock(lk);
     if (!err && committed < u.set->n) report_partial(L, u.set, bucket, object, &o, committed);
     if (!err) {

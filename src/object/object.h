@@ -93,6 +93,11 @@ void buckets_objlayer_free(buckets_objlayer *L);
 /* An online drive to use for local scratch space (spooling). */
 buckets_drive *buckets_objlayer_scratch(const buckets_objlayer *L);
 size_t buckets_objlayer_online(const buckets_objlayer *L);
+/* Distributed mode: namespace locks also take this cluster-wide lock. */
+void buckets_objlayer_set_locker(buckets_objlayer *L, void *(*lock)(void *ud, const char *resource, bool write, int timeout_ms),
+                                 void (*unlock)(void *ud, void *handle), void *ud);
+/* Every erasure set of every pool has write (else read) quorum of online drives. */
+bool buckets_objlayer_has_quorum(buckets_objlayer *L, bool write);
 /* Where drive all[i] sits, and the shape of its pool. */
 typedef struct {
   size_t pool, set;
@@ -101,6 +106,9 @@ typedef struct {
   int parity;
 } buckets_drive_place;
 void buckets_objlayer_place(const buckets_objlayer *L, size_t i, buckets_drive_place *out);
+/* Whether this node leads a set's background work: its lowest-numbered
+ * online drive is local. Exactly one node leads each set. */
+bool buckets_objlayer_set_is_led_here(const buckets_objlayer *L, size_t pool, size_t set);
 /* The erasure set an object hashes to within a pool. */
 size_t buckets_objlayer_object_set(const buckets_objlayer *L, size_t pool, const char *object);
 

@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-28
+
+Phase 2: erasure coding, pools, distributed mode.
+
 ### Added
 - Reed-Solomon erasure codec (GF(2^8), klauspost-compatible matrix), verified against all 60 of MinIO's erasure self-test vectors.
 - MinIO ellipsis drive syntax (`/data{1...16}`, zero-padded and hex ranges), set sizing identical to MinIO's `getSetIndexes`, SipHash set selection, and CRC32 `hashOrder` shard distribution.
@@ -39,6 +43,15 @@ All notable changes to this project are documented here. The format follows
   - certificates with explicit EC parameters are refused at startup, as Go-based MinIO does
 - CMake uses the system OpenSSL 3, or builds a pinned 3.5.4 once into `.deps/`.
 - `tests/integration/tls.sh` covers the above. `TLS=1` runs minio-go conformance over HTTPS: 80 pass, 0 fail.
+- Distributed mode:
+  - drives given as `http(s)://host:port/path` URLs, and a node recognizes its own drives by port and interface address
+  - remote drives work over internode RPC (our own protocol: HTTP/1.1 under `/buckets/internode/v1/`, HMAC-authenticated, pooled, TLS-capable, on a separate worker pool)
+  - dsync locks with quorum, refresh and expiry, failing fast when quorum is unreachable
+  - bootstrap waits for peers, only a pool's first node formats it, and S3 answers `XMinioServerNotInitialized` until ready
+  - `tests/integration/cluster.sh` runs 4 nodes, including node loss, rejoin, and loss beyond quorum; with `MINIO_BIN`, a real MinIO cluster reads the drives
+  - minio-go gives 78/0 with `CLUSTER=1` and 80/0 over HTTPS
+- A background scanner walks the sets each node leads and heals what it finds. `BUCKETS_SCANNER_INTERVAL` sets the cycle.
+- `/minio/health/cluster` and `/cluster/read` report per-set quorum.
 - `tests/integration/concurrency.sh`: racing PUTs of one key (every drive must agree), 24 parallel round trips, overwrite during a slow read, CopyObject onto itself, and parallel multipart parts.
 - `tests/integration/erasure.sh`: 4- and 16-drive sets, bitrot, drive loss up to and beyond parity, drive replacement, and MinIO interop. `DRIVES=4` runs the minio-go conformance suite on an erasure set.
 
@@ -49,6 +62,7 @@ All notable changes to this project are documented here. The format follows
   - SSE-S3/KMS gets MinIO's no-KMS `NotImplemented`
   - SSE-C keys on GET or HEAD get `InvalidRequest`
 - `Location` headers use `https` on TLS connections.
+- The object namespace check (a key vs. an existing prefix) runs under the object lock. Racing writers of one key could briefly see each other's directory and fail with `XMinioObjectExistsAsDirectory`.
 - GetObject loads the first block before sending headers, so an object without enough intact shards gets `503 SlowDownRead` instead of a truncated `200`.
 
 ## [0.2.0] - 2026-09-27

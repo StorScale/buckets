@@ -24,8 +24,13 @@ typedef struct {
  * no quorum, foreign deployment, or layout mismatch. deployment_id, when
  * given (pools after the first), is used for a fresh format and required of
  * an existing one. */
+typedef struct {
+  bool may_format_fresh; /* in: this node formats a fresh pool (it owns its first endpoint) */
+  bool fatal;            /* out: the failure will not go away by waiting */
+} buckets_format_opts;
+/* opts may be NULL (single node: may format, errors are final). */
 bool buckets_format_negotiate(buckets_drive **drives, size_t ndrives, size_t set_size, const char *deployment_id,
-                              buckets_format_result *out, char *err, size_t errlen);
+                              buckets_format_opts *opts, buckets_format_result *out, char *err, size_t errlen);
 void buckets_format_result_free(buckets_format_result *r);
 
 #endif

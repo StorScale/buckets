@@ -13,6 +13,7 @@
 
 typedef struct {
   bool present, valid;
+  bool offline; /* could not be read at all (a remote drive that is down) */
   char id[BUCKETS_UUID_STR_LEN + 1];
   char this_id[BUCKETS_UUID_STR_LEN + 1];
   char format[16];
@@ -29,7 +30,9 @@ static void fmt_free(fmt *f) {
 static void read_fmt(buckets_drive *d, fmt *f) {
   memset(f, 0, sizeof(*f));
   buckets_buf raw = BUCKETS_BUF_INIT;
-  if (buckets_drive_read_all(d, BUCKETS_META_BUCKET, FORMAT_PATH, &raw) != BUCKETS_DRIVE_OK) {
+  buckets_drive_err e = buckets_drive_read_all(d, BUCKETS_META_BUCKET, FORMAT_PATH, &raw);
+  if (e != BUCKETS_DRIVE_OK) {
+    f->offline = e != BUCKETS_DRIVE_ERR_NOT_FOUND;
     buckets_buf_free(&raw);
     return;
   }
@@ -115,8 +118,9 @@ static bool same_layout(const fmt *a, const fmt *b) {
 }
 
 bool buckets_format_negotiate(buckets_drive **drives, size_t n, size_t set_size, const char *deployment_id,
-                              buckets_format_result *out, char *err, size_t errlen) {
+                              buckets_format_opts *opts, buckets_format_result *out, char *err, size_t errlen) {
   memset(out, 0, sizeof(*out));
+  bool may_format = !opts || opts->may_format_fresh;
   if (set_size == 0 || n % set_size) {
     snprintf(err, errlen, "%zu drives cannot form sets of %zu", n, set_size);
     return false;
@@ -126,8 +130,9 @@ bool buckets_format_negotiate(buckets_drive **drives, size_t n, size_t set_size,
   size_t online = 0, unformatted = 0;
   for (size_t i = 0; i < n; i++) {
     if (!drives[i]) continue;
-    online++;
     read_fmt(drives[i], &f[i]);
+    if (f[i].offline) continue;
+    online++;
     if (!f[i].present) unformatted++;
   }
   bool ok = true;
@@ -135,6 +140,9 @@ bool buckets_format_negotiate(buckets_drive **drives, size_t n, size_t set_size,
 
   if (online == 0) {
     snprintf(err, errlen, "no drives are online");
+    ok = false;
+  } else if (unformatted == n && !may_format) {
+    snprintf(err, errlen, "waiting for the first server to format the drives");
     ok = false;
   } else if (unformatted == n) {
     /* Fresh deployment: every drive gets a UUID; sets follow command-line order. */
@@ -177,19 +185,28 @@ bool buckets_format_negotiate(buckets_drive **drives, size_t n, size_t set_size,
     }
     size_t quorum = n / 2; /* MinIO needs read quorum of formats: half the drives */
     if (best == n || best_votes < (quorum ? quorum : 1)) {
-      snprintf(err, errlen, "no quorum of consistent format.json (%zu of %zu drives agree)", best_votes, n);
+      if (unformatted && unformatted + (n - online) == n) {
+        snprintf(err, errlen, "waiting for all servers to come online to format the drives (%zu of %zu online)", online,
+                 n);
+      } else {
+        snprintf(err, errlen, "no quorum of consistent format.json (%zu of %zu drives agree, %zu online)", best_votes,
+                 n, online);
+      }
       ok = false;
     } else if (f[best].nsets != nsets || f[best].set_size != set_size) {
+      if (opts) opts->fatal = true;
       snprintf(err, errlen, "drives are formatted as %zu sets of %zu, but the command line gives %zu sets of %zu",
                f[best].nsets, f[best].set_size, nsets, set_size);
       ok = false;
     }
     if (ok && deployment_id && strcmp(f[best].id, deployment_id) != 0) {
+      if (opts) opts->fatal = true;
       snprintf(err, errlen, "pool drives belong to deployment %s, not %s", f[best].id, deployment_id);
       ok = false;
     }
     for (size_t i = 0; ok && i < n; i++) {
       if (f[i].valid && strcmp(f[i].id, f[best].id) != 0) {
+        if (opts) opts->fatal = true;
         snprintf(err, errlen, "drive %s belongs to another deployment (%s)", drives[i]->root, f[i].id);
         ok = false;
       }
@@ -218,9 +235,10 @@ bool buckets_format_negotiate(buckets_drive **drives, size_t n, size_t set_size,
         }
       }
       /* Heal unformatted (replaced) drives into the empty slot at their
-       * command-line position, like MinIO's format healing. */
+       * command-line position, like MinIO's format healing. Each node heals
+       * only its own drives. */
       for (size_t i = 0; i < n; i++) {
-        if (!drives[i] || f[i].present || out->slots[i]) continue;
+        if (!drives[i] || f[i].present || f[i].offline || drives[i]->remote || out->slots[i]) continue;
         if (write_fmt(drives[i], ref->format, ref->id, ref->sets[i], ref->sets, nsets, set_size)) {
           memcpy(drives[i]->deployment_id, ref->id, 37);
           memcpy(drives[i]->drive_id, ref->sets[i], 37);
@@ -230,6 +248,15 @@ bool buckets_format_negotiate(buckets_drive **drives, size_t n, size_t set_size,
           out->formatted_fresh++;
           buckets_log_info("formatted replacement drive %s as %s", out->slots[i]->root, ref->sets[i]);
         }
+      }
+      /* Remote drives that are down keep their command-line slot, so they
+       * rejoin when their node comes back. */
+      for (size_t i = 0; i < n; i++) {
+        if (!drives[i] || !drives[i]->remote || out->slots[i] || (!f[i].offline && f[i].present)) continue;
+        memcpy(drives[i]->deployment_id, ref->id, 37);
+        memcpy(drives[i]->drive_id, ref->sets[i], 37);
+        out->slots[i] = drives[i];
+        drives[i] = NULL;
       }
     }
   }

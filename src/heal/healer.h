@@ -10,11 +10,17 @@
  *  - drive heals (MinIO cmd/background-newdisks-heal-ops.go): a replaced
  *    drive, formatted into its slot at startup, is filled by healing every
  *    object of its erasure set. Progress lives in a tracker file on the
- *    drive, so an interrupted heal resumes after a restart. */
+ *    drive, so an interrupted heal resumes after a restart.
+ * and a second thread, the scanner (MinIO cmd/data-scanner.go), which walks
+ * every object of the sets this node leads, once per cycle, and heals what
+ * it finds short -- writes made while a node was down, for instance.
+ * BUCKETS_SCANNER_INTERVAL sets the pause between cycles in seconds
+ * (default 60; 0 disables the scanner). */
 typedef struct buckets_healer buckets_healer;
 
 typedef struct {
   uint64_t queued, healed, failed, dropped; /* MRF */
+  uint64_t scan_cycles, scanned;            /* scanner */
   size_t drives_healing;
   uint64_t drive_objects_healed;
 } buckets_healer_stats;

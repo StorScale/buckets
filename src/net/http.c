@@ -371,6 +371,8 @@ static void start_fill(conn *c) {
 
 typedef struct {
   conn *c;
+  buckets_http_handler handler;
+  void *ud;
   buckets_http_request req;
   buckets_http_response resp;
 } job;
@@ -399,7 +401,7 @@ static void job_task(void *ud, size_t i) {
   job *j = ud;
   (void)i;
   buckets_http_server *srv = j->c->srv;
-  srv->handler(&j->req, &j->resp, srv->ud);
+  j->handler(&j->req, &j->resp, j->ud);
   buckets_loop_post(srv->loop, job_done, j);
 }
 
@@ -425,12 +427,25 @@ static void dispatch_request(conn *c) {
   rq->secure = c->tls != NULL;
   j->resp = (buckets_http_response){.status = 200, .content_length = -1};
   j->resp.head_only = buckets_str_eq_c(rq->method, "HEAD");
-  if (srv->cfg.workers) {
+  j->handler = srv->handler;
+  j->ud = srv->ud;
+  buckets_pool *workers = srv->cfg.workers;
+  for (size_t i = 0; i < srv->cfg.nroutes; i++) {
+    const buckets_http_route *r = &srv->cfg.routes[i];
+    size_t pl = strlen(r->prefix);
+    if (rq->path.n >= pl && memcmp(rq->path.p, r->prefix, pl) == 0) {
+      j->handler = r->handler;
+      j->ud = r->ud;
+      workers = r->workers;
+      break;
+    }
+  }
+  if (workers) {
     set_busy(c);
-    buckets_pool_submit(srv->cfg.workers, job_task, j);
+    buckets_pool_submit(workers, job_task, j);
     return;
   }
-  srv->handler(rq, &j->resp, srv->ud);
+  j->handler(rq, &j->resp, j->ud);
   finish_request(c, rq, &j->resp);
   free(j);
 }

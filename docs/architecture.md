@@ -37,7 +37,7 @@ admin/ iam/ ...  admin API, IAM/STS, bucket features, ILM, replication, notify, 
 object/          object layer: server pools → erasure sets → quorum reads/writes, multipart, listing
 erasure/         Reed-Solomon (ISA-L), bitrot (HighwayHash), xl.meta v2, format.json
 storage/         one local drive: volumes, xl.meta + part files, atomic renames, fsync discipline
-dist/            internode RPC (multiplexed msgpack over TLS), dsync locks, peer notifications
+dist/            internode RPC (HTTP/1.1 + HMAC, pooled, TLS), remote drives, dsync locks, endpoints
 net/  core/      HTTP/1.1 server (llhttp), event loop (epoll/kqueue, io_uring planned), buffers, logging
 ```
 
@@ -54,12 +54,13 @@ net/  core/      HTTP/1.1 server (llhttp), event loop (epoll/kqueue, io_uring pl
 | Internode protocol | **no** | mixed MinIO/Buckets clusters are unsupported |
 | SUBNET, callhome, self-update, gateway | dropped | not applicable on Kubernetes |
 
-## Current state (0.2.0)
+## Current state (0.3.0)
 
-Single-node S3 is feature-complete for the core API. It is verified three ways:
+The S3 core runs on one drive, many drives, several pools, or a cluster of nodes, in MinIO's on-disk format. It is verified these ways:
 - **Conformance:** minio-go's functional suite (the Go suite inside MinIO's `mint`) gives 78 pass, 0 fail. The other 24 tests need later-phase features.
 - **On-disk compatibility:** a real MinIO build (`tests/integration/interop.sh`) reads what Buckets wrote, and Buckets reads what MinIO wrote. That covers single PUT, streaming PUT, multipart, checksums, folder objects, metadata and bucket creation times.
 - **Byte-level fixtures:** `tests/data/minio-ref` holds files written by MinIO, and `xl.meta` and `.metadata.bin` round-trip byte for byte.
+- **Clusters:** minio-go gives the same 78/0 against a 4-node cluster (`CLUSTER=1`), and 80/0 over HTTPS. `tests/integration/cluster.sh` covers node loss and rejoin, and a real 4-node MinIO cluster reads the drives a Buckets cluster wrote.
 
 **Implemented:**
 - **Auth:**
@@ -80,23 +81,38 @@ Single-node S3 is feature-complete for the core API. It is verified three ways:
   - MinIO's multipart staging layout
   - `.metadata.bin` bucket metadata
 
-**Phase 2 so far (erasure, multi-drive):**
-- Reed-Solomon codec, ellipsis drive syntax and set sizing identical to MinIO, SipHash set selection and `hashOrder` shard placement.
-- `format.json` negotiation across drives, including healing a replaced drive into its slot.
-- Erasure object layer with read/write quorum, bitrot detection and parity reconstruction. It covers puts, gets, listings and multipart across sets.
-- `tests/integration/erasure.sh`: 4- and 16-drive sets, drive loss up to and beyond parity, and MinIO reading Buckets-written sets. minio-go conformance also passes on a 4-drive set (`DRIVES=4`).
-- A drive I/O thread pool fans each operation out across the drives of a set.
-- Request handlers run on worker threads, with MinIO-style namespace locks keeping concurrent writers consistent.
-- Object healing, an MRF queue for heal-on-read and partial writes, and background healing of replaced drives.
-- Multiple server pools, with MinIO-compatible placement across pools.
-- HTTPS with SNI and hot certificate reload.
-- Still to come in Phase 2: distributed mode (internode RPC, remote drives, dsync locks).
+**Phase 2 (erasure, pools, distribution) ✅:**
+- **Erasure coding:**
+  - a Reed-Solomon codec
+  - ellipsis drive syntax and set sizing identical to MinIO
+  - SipHash set selection and `hashOrder` shard placement
+  - read/write quorum, bitrot detection and parity reconstruction
+- **Format:** `format.json` negotiation across drives, pools and nodes. It heals a replaced drive into its slot.
+- **Server pools:** MinIO-compatible placement across pools.
+- **Distributed mode:**
+  - drives given as `http(s)://host:port/path` URLs, and a node recognizes its own drives by port and interface address
+  - peers' drives are reached over our own internode RPC: HTTP/1.1 with HMAC auth and pooled connections, TLS optional, on a separate worker pool
+  - dsync locks with quorum, refresh and expiry
+  - bootstrap waits for peers, and only a pool's first node formats it
+- **Concurrency:**
+  - a drive I/O thread pool
+  - request handlers on worker threads
+  - namespace locks, cluster-wide in distributed mode
+- **Healing:**
+  - object heal with MinIO's dangling-object rules
+  - an MRF queue for heal-on-read and partial writes
+  - background healing of replaced drives
+  - a scanner that finds objects nobody reads
+- **HTTPS:** SNI and hot certificate reload.
+- **Health:** `/minio/health/cluster` reports per-set write and read quorum.
 
 **Known interim choices, each replaced in a later phase:**
-- One event-loop thread moves bytes for all connections. Handlers and stream pulls run on a worker pool, and each fans out per-drive work to the drive I/O pool. Request bodies are still spooled synchronously on the loop thread. Multiple reactors, then io_uring, follow.
+- One event-loop thread moves bytes for all connections (per node). Handlers and stream pulls run on a worker pool, and each fans out per-drive work to the drive I/O pool. Request bodies are still spooled synchronously on the loop thread. Multiple reactors, then io_uring, follow.
 - Crypto primitives (SHA-256, MD5, SHA-1, HighwayHash, CRCs) are portable C, and all are verified against MinIO's Go libraries. OpenSSL is linked for TLS; moving the hashes onto it (and SIMD) comes with performance work.
 - Only the root credential is accepted. IAM comes in Phase 4.
 - Buckets are unversioned. Versioning, object lock, tagging and SSE come in Phase 5.
+- Remote listings walk peers' directories with one RPC per directory, and remote writes are buffered appends. A streaming walk RPC and streamed uploads come with performance work.
+- Bucket metadata is read from the drives on each use (there is no cache yet), so nodes need no invalidation messages.
 
 ## Build phases
 
@@ -104,7 +120,7 @@ Single-node S3 is feature-complete for the core API. It is verified three ways:
 |---|---|---|
 | 0 ✅ | Repo, build, core runtime, HTTP server, CI script, Dockerfile | `ctest` green, fuzz corpora replay, ASan/UBSan clean |
 | 1 ✅ | Single-node S3 core: streaming bodies, xl.meta v2, objects, multipart, listing, checksums, SigV2, POST policy | minio-go functional suite at 0 failures; MinIO interop both ways |
-| 2 🚧 | Erasure coding, multi-drive, distributed (RPC, dsync, pools, heal, scanner, MRF), TLS | Drive and node loss with no data loss; reads MinIO-written drives |
+| 2 ✅ | Erasure coding, multi-drive, distributed (RPC, dsync, pools, heal, scanner, MRF), TLS | Drive and node loss with no data loss; reads MinIO-written drives |
 | 3 | Operator and CRDs, K8s-aware server, kind e2e | `kubectl apply` gives a healthy 4×4 cluster; pod and PVC loss heals |
 | 4 | IAM, STS, policy, LDAP, OIDC, plugins, admin API core | `mc admin user/policy/svcacct`; mint IAM |
 | 5 | Versioning, object lock, tagging, CORS, quota, lifecycle, SSE-S3/KMS/C, compression | Full mint pass; ceph s3-tests at or above the MinIO baseline |

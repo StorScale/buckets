@@ -14,6 +14,7 @@
 #include "object/epool.h"
 #include "object/nslock.h"
 #include "object/object.h"
+#include "storage/remote.h"
 
 /* ---- layer ------------------------------------------------------------------ */
 
@@ -56,7 +57,7 @@ void buckets_objlayer_set_degraded_hook(buckets_objlayer *L, buckets_degraded_fn
 
 buckets_drive *buckets_objlayer_scratch(const buckets_objlayer *L) {
   for (size_t i = 0; i < L->nall; i++) {
-    if (L->all[i]) return L->all[i];
+    if (L->all[i] && !L->all[i]->remote) return L->all[i];
   }
   return NULL;
 }
@@ -65,6 +66,26 @@ size_t buckets_objlayer_online(const buckets_objlayer *L) {
   size_t c = 0;
   for (size_t i = 0; i < L->nall; i++) c += L->all[i] != NULL;
   return c;
+}
+
+void buckets_objlayer_set_locker(buckets_objlayer *L, void *(*lock)(void *, const char *, bool, int),
+                                 void (*unlock)(void *, void *), void *ud) {
+  buckets_nslock_set_backend(L->locks, lock, unlock, ud);
+}
+
+bool buckets_objlayer_has_quorum(buckets_objlayer *L, bool write) {
+  for (size_t p = 0; p < L->npools; p++) {
+    buckets_epool *P = L->pools[p];
+    for (size_t k = 0; k < P->nsets; k++) {
+      buckets_eset *s = &P->sets[k];
+      size_t online = 0;
+      for (size_t i = 0; i < s->n; i++) online += buckets_drive_is_online(s->drives[i]);
+      int data = (int)s->n - s->parity;
+      int need = write ? data + (data == s->parity) : data;
+      if ((int)online < need) return false;
+    }
+  }
+  return true;
 }
 
 void buckets_objlayer_place(const buckets_objlayer *L, size_t i, buckets_drive_place *out) {
@@ -84,6 +105,14 @@ void buckets_objlayer_place(const buckets_objlayer *L, size_t i, buckets_drive_p
     }
     first += P->nall;
   }
+}
+
+bool buckets_objlayer_set_is_led_here(const buckets_objlayer *L, size_t pool, size_t set) {
+  const buckets_eset *s = &L->pools[pool]->sets[set];
+  for (size_t i = 0; i < s->n; i++) {
+    if (buckets_drive_is_online(s->drives[i])) return !s->drives[i]->remote;
+  }
+  return false;
 }
 
 size_t buckets_objlayer_object_set(const buckets_objlayer *L, size_t pool, const char *object) {

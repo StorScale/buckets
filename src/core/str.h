@@ -20,6 +20,7 @@ bool buckets_str_eq(buckets_str a, buckets_str b);
 bool buckets_str_eq_c(buckets_str a, const char *b);
 bool buckets_str_ieq_c(buckets_str a, const char *b); /* ASCII case-insensitive */
 bool buckets_str_has_prefix(buckets_str s, const char *prefix);
+bool buckets_str_has_suffix(buckets_str s, const char *suffix);
 buckets_str buckets_str_trim(buckets_str s); /* trims ASCII spaces and tabs */
 /* Splits s at the first occurrence of sep. Returns false if sep is absent,
  * in which case *head = s and *tail is empty. */

@@ -18,5 +18,9 @@ void buckets_nslock_free(buckets_nslock *t);
 buckets_nslock_entry *buckets_nslock_lock(buckets_nslock *t, const char *vol, const char *path, bool write,
                                           int timeout_ms);
 void buckets_nslock_unlock(buckets_nslock_entry *e);
+/* Distributed mode: after the local lock, every acquisition must also win
+ * this cluster-wide lock (dist/dsync). */
+void buckets_nslock_set_backend(buckets_nslock *t, void *(*lock)(void *ud, const char *resource, bool write, int timeout_ms),
+                                void (*unlock)(void *ud, void *handle), void *ud);
 
 #endif

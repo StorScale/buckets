@@ -64,3 +64,17 @@ void buckets_buf_consume(buckets_buf *b, size_t n) {
   b->len -= n;
   b->data[b->len] = '\0';
 }
+
+void buckets_url_encode(buckets_buf *out, const char *s, bool keep_slash) {
+  static const char hex[] = "0123456789ABCDEF";
+  for (; *s; s++) {
+    unsigned char c = (unsigned char)*s;
+    if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '.' ||
+        c == '_' || c == '~' || (keep_slash && c == '/')) {
+      buckets_buf_append_char(out, (char)c);
+    } else {
+      char e[3] = {'%', hex[c >> 4], hex[c & 15]};
+      buckets_buf_append(out, e, 3);
+    }
+  }
+}

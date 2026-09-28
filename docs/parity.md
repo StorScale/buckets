@@ -5,7 +5,7 @@ registers is listed; statuses live in the script's `STATUS` table.
 
 ✅ done · 🟡 partial · ⬜ not started
 
-**Overall:** 19 done, 13 partial, 190 not started (222 handlers).
+**Overall:** 21 done, 11 partial, 190 not started (222 handlers).
 
 ## S3 API (17/76)
 
@@ -260,21 +260,21 @@ Source: `cmd/metrics-router.go`
 | ⬜ | `metricsResourceHandler` |  |
 | ⬜ | `metricsServerHandler` |  |
 
-## Health (2/4)
+## Health (4/4)
 
 Source: `cmd/healthcheck-router.go`
 
 | | Handler | Notes |
 |---|---|---|
-| 🟡 | `ClusterCheckHandler` | single node only |
-| 🟡 | `ClusterReadCheckHandler` | single node only |
+| ✅ | `ClusterCheckHandler` | per-set write quorum |
+| ✅ | `ClusterReadCheckHandler` | per-set read quorum |
 | ✅ | `LivenessCheckHandler` |  |
 | ✅ | `ReadinessCheckHandler` |  |
 
 ## Beyond the routers
 
 Subsystems with no single handler, tracked by phase in `docs/architecture.md`:
-erasure coding + bitrot and xl.meta v2 (done, single node), distributed locking, healing, scanner,
+erasure coding + bitrot, xl.meta v2, pools, distributed locking and healing (done), scanner usage/ILM, healing, scanner,
 ILM/tiering, bucket + site replication, notifications (10 targets), audit,
 SSE-S3/KMS/C, compression, S3 Select, SFTP/FTP, batch jobs, decommission/rebalance,
 IAM (LDAP/OIDC/plugins/OPA), operator, console.

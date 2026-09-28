@@ -77,3 +77,8 @@ long buckets_url_decode(buckets_str src, char *dst, bool plus_is_space) {
   }
   return (long)o;
 }
+
+bool buckets_str_has_suffix(buckets_str s, const char *suffix) {
+  size_t n = strlen(suffix);
+  return s.n >= n && memcmp(s.p + s.n - n, suffix, n) == 0;
+}
