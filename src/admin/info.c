@@ -10,14 +10,21 @@
 #include <string.h>
 #include <sys/resource.h>
 #include <sys/statvfs.h>
+#include <ctype.h>
 #include <unistd.h>
 #include <yyjson.h>
 
 #include "admin/admin.h"
 #include "dist/peer.h"
 #include "heal/healer.h"
+#include "iam/ldapidp.h"
+#include "logger/logger.h"
+#include "object/sysconfig.h"
+#include "scanner/usage.h"
 #include "s3/internal.h"
 #include "storage/drivestats.h"
+
+extern char **environ;
 
 void buckets_cluster_info_free(buckets_cluster_info *ci) {
   if (!ci) return;
@@ -194,7 +201,6 @@ static yyjson_mut_val *server_props(yyjson_mut_doc *d, buckets_s3_server *s, con
   yyjson_mut_val *o = yyjson_mut_obj(d);
   yyjson_mut_obj_add_str(d, o, "state", online ? "online" : "offline");
   yyjson_mut_obj_add_strcpy(d, o, "endpoint", node);
-  yyjson_mut_obj_add_str(d, o, "scheme", ci->secure ? "https" : "http");
   if (online) {
     yyjson_mut_obj_add_int(d, o, "uptime", (int64_t)(time(NULL) - ci->started));
     yyjson_mut_obj_add_str(d, o, "version", BUCKETS_VERSION);
@@ -231,8 +237,36 @@ static yyjson_mut_val *server_props(yyjson_mut_doc *d, buckets_s3_server *s, con
   yyjson_mut_obj_add_uint(d, mem, "Mallocs", 0);
   yyjson_mut_obj_add_uint(d, mem, "Frees", 0);
   yyjson_mut_obj_add_uint(d, mem, "HeapAlloc", online ? rss : 0);
-  if (online) yyjson_mut_obj_add_int(d, o, "num_cpu", sysconf(_SC_NPROCESSORS_ONLN));
-  yyjson_mut_obj_add_str(d, o, "edition", "AGPLv3");
+  if (online) {
+    long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+    yyjson_mut_obj_add_int(d, o, "go_max_procs", ncpu); /* the worker threads' scale */
+    yyjson_mut_obj_add_int(d, o, "num_cpu", ncpu);
+#ifdef __VERSION__
+    yyjson_mut_obj_add_str(d, o, "runtime_version", "C17 " __VERSION__);
+#endif
+    /* the MINIO and BUCKETS variables, credentials redacted */
+    yyjson_mut_val *env = yyjson_mut_obj_add_obj(d, o, "minio_env_vars");
+    static const char *const sensitive[] = {"ACCESS_KEY", "SECRET_KEY", "ROOT_USER", "ROOT_PASSWORD", "SUBNET_API_KEY",
+                                            "KMS_SECRET_KEY"};
+    for (char **e = environ; e && *e; e++) {
+      const char *v = *e;
+      const char *name = strncmp(v, "_MINIO", 6) == 0 ? v + 7 : strncmp(v, "MINIO_", 6) == 0 ? v + 6
+                         : strncmp(v, "BUCKETS_", 8) == 0 ? v + 8 : NULL;
+      if (!name) continue;
+      const char *eq = strchr(v, '=');
+      if (!eq) continue;
+      char key[256];
+      snprintf(key, sizeof(key), "%.*s", (int)(eq - v), v);
+      char lower[256];
+      size_t kl = strlen(key);
+      for (size_t i = 0; i <= kl; i++) lower[i] = (char)tolower((unsigned char)key[i]);
+      bool hide = strstr(lower, "password") || (kl >= 3 && strcmp(lower + kl - 3, "key") == 0);
+      for (size_t i = 0; i < BUCKETS_ARRAY_LEN(sensitive) && !hide; i++)
+        hide = strncmp(name, sensitive[i], strlen(sensitive[i])) == 0 && name[strlen(sensitive[i])] == '=';
+      yyjson_mut_obj_add(env, yyjson_mut_strcpy(d, key), yyjson_mut_strcpy(d, hide ? "*** EXISTS, REDACTED ***" : eq + 1));
+    }
+  }
+  yyjson_mut_obj_add_str(d, o, "edition", ""); /* MinIO leaves it empty */
   yyjson_mut_obj_add_bool(d, o, "is_leader", false);
   yyjson_mut_obj_add_bool(d, o, "ilm_expiry_in_progress", false);
   return o;
@@ -293,23 +327,60 @@ void buckets_admin_server_info(s3_ctx *c) {
     }
   }
 
-  /* Buckets (usage and object counts come from the scanner's data usage). */
-  size_t nb = 0;
+  /* Buckets, objects, versions and usage: the scanner's data usage
+   * (loadDataUsageFromBackend; zeros before its first cycle) */
+  buckets_data_usage du;
+  memset(&du, 0, sizeof(du));
+  bool have_du = false;
   if (L) {
-    buckets_bucket_info *vols;
-    size_t n;
-    if (buckets_obj_list_buckets(L, &vols, &n) == BUCKETS_OBJ_OK) {
-      for (size_t i = 0; i < n; i++) nb += *vols[i].name != '.';
-      buckets_bucket_info_free(vols, n);
-    }
+    buckets_buf raw = BUCKETS_BUF_INIT;
+    if (buckets_sysconfig_read(L, BUCKETS_USAGE_PATH, &raw, NULL) == BUCKETS_OBJ_OK ||
+        buckets_sysconfig_read(L, BUCKETS_USAGE_PATH ".bkp", &raw, NULL) == BUCKETS_OBJ_OK)
+      have_du = buckets_data_usage_parse(raw.data, raw.len, &du);
+    buckets_buf_free(&raw);
   }
   yyjson_mut_val *b = yyjson_mut_obj_add_obj(d, root, "buckets");
-  yyjson_mut_obj_add_uint(d, b, "count", nb);
-  yyjson_mut_obj_add_obj(d, root, "objects");
-  yyjson_mut_obj_add_obj(d, root, "versions");
-  yyjson_mut_obj_add_obj(d, root, "deletemarkers");
-  yyjson_mut_obj_add_obj(d, root, "usage");
+  yyjson_mut_obj_add_uint(d, b, "count", have_du ? du.buckets_count : 0);
+  b = yyjson_mut_obj_add_obj(d, root, "objects");
+  yyjson_mut_obj_add_uint(d, b, "count", have_du ? du.objects : 0);
+  b = yyjson_mut_obj_add_obj(d, root, "versions");
+  yyjson_mut_obj_add_uint(d, b, "count", have_du ? du.versions : 0);
+  b = yyjson_mut_obj_add_obj(d, root, "deletemarkers");
+  yyjson_mut_obj_add_uint(d, b, "count", have_du ? du.delete_markers : 0);
+  b = yyjson_mut_obj_add_obj(d, root, "usage");
+  yyjson_mut_obj_add_uint(d, b, "size", have_du ? du.total_size : 0);
   yyjson_mut_val *services = yyjson_mut_obj_add_obj(d, root, "services");
+  yyjson_mut_obj_add_obj(d, services, "kms"); /* the deprecated field, always there */
+  if (s->kms) { /* fetchKMSStatus: the built-in KMS answers here */
+    yyjson_mut_val *ks = yyjson_mut_obj_add_arr(d, services, "kmsStatus");
+    yyjson_mut_val *k1 = yyjson_mut_arr_add_obj(d, ks);
+    char host[256];
+    snprintf(host, sizeof(host), "%s", ci->self);
+    char *colon = strrchr(host, ':');
+    if (colon) *colon = '\0';
+    yyjson_mut_obj_add_str(d, k1, "status", "online");
+    yyjson_mut_obj_add_strcpy(d, k1, "endpoint", host);
+  }
+  yyjson_mut_val *ldap = yyjson_mut_obj_add_obj(d, services, "ldap");
+  buckets_ldapidp *lp = buckets_s3_ldap(s);
+  if (lp) {
+    if (buckets_ldapidp_enabled(lp)) yyjson_mut_obj_add_str(d, ldap, "status", "online");
+    buckets_ldapidp_release(lp);
+  }
+  /* fetchLoggerInfo: the logger targets, then the audit ones */
+  buckets_logger_target_info *lt = NULL;
+  size_t nl = s->logger ? buckets_logger_targets(s->logger, &lt) : 0;
+  for (int audit = 0; audit < 2; audit++) {
+    yyjson_mut_val *arr = NULL;
+    for (size_t i = 0; i < nl; i++) {
+      if (lt[i].audit != (audit == 1) || !*lt[i].endpoint) continue;
+      if (!arr) arr = yyjson_mut_obj_add_arr(d, services, audit ? "audit" : "logger");
+      yyjson_mut_val *st = yyjson_mut_obj(d);
+      yyjson_mut_obj_add_str(d, st, "status", lt[i].st.online ? "online" : "offline");
+      yyjson_mut_obj_add(yyjson_mut_arr_add_obj(d, arr), yyjson_mut_strcpy(d, lt[i].name), st);
+    }
+  }
+  free(lt);
   /* notifications: [{"<type>": [{"<id>": {"status": "online"}}, ...]}, ...] (fetchLambdaInfo) */
   if (ntinfo) {
     yyjson_mut_val *notif = yyjson_mut_obj_add_arr(d, services, "notifications");
@@ -370,10 +441,14 @@ void buckets_admin_server_info(s3_ctx *c) {
         yyjson_mut_obj_add_int(d, sm, "id", set);
         yyjson_mut_obj_add_uint(d, sm, "rawUsage", 0);
         yyjson_mut_obj_add_uint(d, sm, "rawCapacity", 0);
-        yyjson_mut_obj_add_uint(d, sm, "usage", 0);
-        yyjson_mut_obj_add_uint(d, sm, "objectsCount", 0);
-        yyjson_mut_obj_add_uint(d, sm, "versionsCount", 0);
-        yyjson_mut_obj_add_uint(d, sm, "deleteMarkersCount", 0);
+        /* the set's data usage: with one set, the cluster's (no per-set cache is kept) */
+        buckets_drive_place pl0;
+        if (L) buckets_objlayer_place(L, 0, &pl0);
+        bool one_set = L && L->npools == 1 && pl0.nsets == 1 && have_du;
+        yyjson_mut_obj_add_uint(d, sm, "usage", one_set ? du.total_size : 0);
+        yyjson_mut_obj_add_uint(d, sm, "objectsCount", one_set ? du.objects : 0);
+        yyjson_mut_obj_add_uint(d, sm, "versionsCount", one_set ? du.versions : 0);
+        yyjson_mut_obj_add_uint(d, sm, "deleteMarkersCount", one_set ? du.delete_markers : 0);
         yyjson_mut_obj_add_int(d, sm, "healDisks", 0);
       }
       uint64_t used = yyjson_mut_get_uint(yyjson_mut_obj_get(dv, "usedspace"));
@@ -387,19 +462,25 @@ void buckets_admin_server_info(s3_ctx *c) {
   yyjson_mut_obj_add_str(d, be, "backendType", "Erasure");
   yyjson_mut_obj_add_uint(d, be, "onlineDisks", online);
   yyjson_mut_obj_add_uint(d, be, "offlineDisks", offline);
-  yyjson_mut_val *sets = yyjson_mut_obj_add_arr(d, be, "totalSets");
-  yyjson_mut_val *dps = yyjson_mut_obj_add_arr(d, be, "totalDrivesPerSet");
   int parity = 0;
-  for (size_t p = 0, first = 0; L && p < L->npools; p++) {
+  size_t nsets[64], dps[64], npl = 0;
+  for (size_t p = 0, first = 0; L && p < L->npools && npl < 64; p++, npl++) {
     buckets_drive_place pl;
     buckets_objlayer_place(L, first, &pl);
-    yyjson_mut_arr_add_uint(d, sets, pl.nsets);
-    yyjson_mut_arr_add_uint(d, dps, pl.set_size);
+    nsets[npl] = pl.nsets;
+    dps[npl] = pl.set_size;
     if (p == 0) parity = pl.parity;
     first += pl.pool_drives;
   }
+  /* madmin.ErasureBackend's order */
   yyjson_mut_obj_add_int(d, be, "standardSCParity", parity);
   yyjson_mut_obj_add_int(d, be, "rrSCParity", parity > 1 ? 1 : parity);
+  yyjson_mut_val *sets = yyjson_mut_obj_add_arr(d, be, "totalSets");
+  yyjson_mut_val *dpsv = yyjson_mut_obj_add_arr(d, be, "totalDrivesPerSet");
+  for (size_t p = 0; p < npl; p++) {
+    yyjson_mut_arr_add_uint(d, sets, nsets[p]);
+    yyjson_mut_arr_add_uint(d, dpsv, dps[p]);
+  }
   yyjson_mut_obj_add_val(d, root, "servers", servers);
   yyjson_mut_obj_add_val(d, root, "pools", pools);
 
@@ -414,6 +495,7 @@ void buckets_admin_server_info(s3_ctx *c) {
   for (size_t i = 0; i < np; i++) yyjson_doc_free(parsed[i]);
   free(parsed);
   buckets_peer_info_free(peers, np);
+  if (have_du) buckets_data_usage_free(&du);
 }
 
 /* The drives' order within a node: LocalStorageInfo walks pools, sets and

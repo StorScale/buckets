@@ -24,6 +24,8 @@ buckets_config *buckets_config_clone(const buckets_config *c);
  * defaults (Config.Merge). */
 buckets_config *buckets_config_from_json(const char *json, size_t len, char *err, size_t errlen);
 char *buckets_config_to_json(const buckets_config *c);
+/* The same with sensitive values (URLs, credentials) as "*redacted*" (RedactSensitiveInfo). */
+char *buckets_config_to_json_redacted(const buckets_config *c);
 
 /* mc admin config set / import (ReadConfig): one "subsys[:target] k=v ..."
  * per line; '#' lines are ignored. *dynamic_only says whether every line was

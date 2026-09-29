@@ -158,6 +158,7 @@ add_library(buckets STATIC
   admin/admin.c
   admin/bucketmeta.c
   admin/heal.c
+  admin/health.c
   admin/info.c
   admin/inspect.c
   admin/jobstream.c

@@ -235,5 +235,16 @@ for side, root in SIDES:
     res.append((c, started, c2, names))
 compare("profiling across nodes", *res)
 
+# ---- health info across nodes ----------------------------------------------------------------------------
+res = []
+for side, root in SIDES:
+    c, h, b = admin(node(side, 1), "GET", "/healthinfo?syscpu=true&sysmem=true&sysservices=true&minioinfo=true")
+    lines = [json.loads(x) for x in b.decode().split("\n") if x.strip()]
+    last = lines[-1]
+    v = (c, len(lines), [x["addr"] for x in last["sys"]["cpus"]], [x["addr"] for x in last["sys"]["meminfo"]],
+         [x["addr"] for x in last["sys"]["services"]], sorted(x["endpoint"] for x in last["minio"]["info"]["servers"]))
+    res.append(port_view(side, v))
+compare("health info across nodes", *res)
+
 print(f"adminops-dist: {Score.passed} passed, {Score.failed} failed")
 sys.exit(1 if Score.failed else 0)

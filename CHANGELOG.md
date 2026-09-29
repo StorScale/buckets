@@ -26,9 +26,11 @@ All notable changes to this project are documented here. The format follows
 - `mc admin speedtest` / `mc support perf object|drive`: MinIO's object speedtest on every node (autotuning concurrency while GET throughput grows, S3 frozen meanwhile, the perf bucket and objects cleaned up) and dperf's drive test, streamed as madmin results with MinIO's keepalives; peers stream whitespace while they run so internode calls outlive their read timeout.
 - The network speedtests: client perf (`/speedtest/client/devnull` and its extra time), node netperf across a cluster (every node streams to every other's internode devnull; TX/RX per second), and site-replication perf between MinIO and Buckets sites (MinIO's unsigned `/site-replication/devnull` and `/netperf`, the latter answering in gob). Chunked request bodies to the devnull endpoints are streamed rather than spooled, on a worker pool of their own.
 - Profiling (`mc admin profile`, StartProfiling/DownloadProfiling/Profile) across the cluster with MinIO's profile types and zip layout: CPU profiles sampled with SIGPROF at 100 Hz and written in pprof's format (read by `go tool pprof`, symbolized against the binary), the heap in use, threads, and empty block/mutex profiles.
+- `mc support diag` (HealthInfo): madmin.HealthInfo streamed after each section as MinIO does -- every node's CPUs, partitions, network interface, OS, memory, process, system errors, services and system configuration (from /proc and /sys on Linux; MinIO's own errors elsewhere), the redacted server configuration, and the server info with drive metrics.
 - `tests/integration/adminops.sh` (single node) and `adminops-dist.sh` (4 nodes) compare these admin APIs with MinIO.
 
 ### Changed
+- ServerInfo matches MinIO's: object, version and delete-marker counts and usage from the scanner's data usage, `kms`/`kmsStatus`/`ldap`/`logger`/`audit` services, `go_max_procs`, `runtime_version` and the (redacted) MINIO/BUCKETS environment, the backend's fields in MinIO's order, no `scheme`, an empty `edition`.
 - Unknown admin API routes, and known routes with another method, answer 426 XMinioAdminVersionMismatch as MinIO does.
 
 ### Fixed

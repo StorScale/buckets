@@ -547,5 +547,72 @@ for base, root in SERVERS:
     res.append(out)
 compare("profiling", *res)
 
+# ---- health info --------------------------------------------------------------------------------------
+
+def shape(v, path=""):
+    """Keys and types, in order; what differs by nature left out."""
+    if isinstance(v, dict):
+        out = []
+        for k, x in v.items():
+            p = f"{path}.{k}"
+            if p in (".minio.info.metrics", ".minio.info.servers.gc_stats", ".minio.info.servers.minio_env_vars",
+                     ".minio.info.servers.network", ".minio.info.servers.drives.metrics.lastMinute"):
+                continue
+            if path == ".minio.config.config" and k in ("cache", "crawler", "credentials"):
+                continue  # MinIO's legacy subsystems
+            if path == ".minio.config.config":
+                continue  # the subsystems themselves (compared by the config tests)
+            out.append((k, shape(x, p)))
+        return out
+    if isinstance(v, list):
+        return [shape(v[0], path)] if v else []
+    return "num" if isinstance(v, (int, float)) and not isinstance(v, bool) else type(v).__name__
+
+
+HQ = ("syscpu=true&sysdrivehw=true&sysosinfo=true&sysmem=true&sysprocess=true&syserrors=true&sysservices=true"
+      "&sysconfig=true&sysnet=true&minioinfo=true&minioconfig=true")
+for name, q in [("everything", HQ), ("nothing", ""), ("cpu and memory", "syscpu=true&sysmem=true"),
+                ("bad deadline", "deadline=soon")]:
+    res = []
+    for base, root in SERVERS:
+        c, h, b = admin(base, "GET", "/healthinfo?" + q)
+        lines = [json.loads(x) for x in b.decode().split("\n") if x.strip()]
+        v = (c, h.get("content-type"), len(lines), [shape(x) for x in lines])
+        if lines and lines[-1].get("error"):
+            v = v + (re.sub(r"<(RequestId|HostId|Resource)>[^<]*</\1>", "", lines[-1]["error"]),)
+        res.append(v)
+    compare(f"health info, {name}", *res)
+
+# ---- server info (mc admin info) ------------------------------------------------------------------------
+res = []
+for base, root in SERVERS:
+    out = []
+    for q in ("", "?metrics=true"):
+        c, h, b = admin(base, "GET", "/info" + q)
+        j = json.loads(b)
+        for sv in j["servers"]:
+            sv.pop("gc_stats", None)  # Go's collector
+            sv["minio_env_vars"] = {}
+            sv["network"] = {}
+            sv["endpoint"] = "<node>"
+            for dr in sv.get("drives", []):
+                for k in ("endpoint", "path", "uuid", "totalspace", "usedspace", "availspace", "used_inodes",
+                          "free_inodes"):
+                    if k in dr:
+                        dr[k] = "<x>"
+                m = dr.get("metrics")
+                if m:
+                    dr["metrics"] = sorted(k for k in m if k != "lastMinute")
+            for k in ("uptime", "version", "commitID", "mem_stats", "go_max_procs", "num_cpu", "runtime_version"):
+                if k in sv:
+                    sv[k] = "<x>"
+        j.pop("deploymentID", None)
+        for p in j.get("pools", {}).values():
+            for st in p.values():
+                st["rawUsage"] = st["rawCapacity"] = "<x>"
+        out.append((c, shape(j)))
+    res.append(out)
+compare("server info (shape)", *res)
+
 print(f"adminops: {Score.passed} passed, {Score.failed} failed")
 sys.exit(1 if Score.failed else 0)

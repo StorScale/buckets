@@ -267,7 +267,13 @@ buckets_config *buckets_config_from_json(const char *json, size_t len, char *err
   return c;
 }
 
-char *buckets_config_to_json(const buckets_config *c) {
+static bool key_sensitive(const cfg_subsys_def *def, const char *key) {
+  for (size_t i = 0; i < def->nkeys; i++)
+    if (strcmp(def->keys[i].key, key) == 0) return def->keys[i].sensitive;
+  return false;
+}
+
+static char *to_json(const buckets_config *c, bool redact) {
   yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
   yyjson_mut_val *root = yyjson_mut_obj(d);
   yyjson_mut_doc_set_root(d, root);
@@ -278,8 +284,11 @@ char *buckets_config_to_json(const buckets_config *c) {
       yyjson_mut_val *arr = yyjson_mut_arr(d);
       for (size_t x = 0; x < s->t[j].k.n; x++) {
         yyjson_mut_val *e = yyjson_mut_arr_add_obj(d, arr);
-        yyjson_mut_obj_add_strcpy(d, e, "key", s->t[j].k.v[x].key);
-        yyjson_mut_obj_add_strcpy(d, e, "value", s->t[j].k.v[x].value);
+        const kv *v = &s->t[j].k.v[x];
+        yyjson_mut_obj_add_strcpy(d, e, "key", v->key);
+        /* RedactSensitiveInfo */
+        bool hide = redact && *v->value && key_sensitive(s->def, v->key);
+        yyjson_mut_obj_add_strcpy(d, e, "value", hide ? "*redacted*" : v->value);
       }
       yyjson_mut_obj_add(so, yyjson_mut_strcpy(d, s->t[j].name), arr);
     }
@@ -289,6 +298,9 @@ char *buckets_config_to_json(const buckets_config *c) {
   yyjson_mut_doc_free(d);
   return json;
 }
+
+char *buckets_config_to_json(const buckets_config *c) { return to_json(c, false); }
+char *buckets_config_to_json_redacted(const buckets_config *c) { return to_json(c, true); }
 
 /* ---- the environment ------------------------------------------------------------------------------- */
 

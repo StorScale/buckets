@@ -5,7 +5,7 @@ registers is listed; statuses live in the script's `STATUS` table.
 
 ✅ done · 🟡 partial · ⬜ not started · ➖ dropped on purpose
 
-**Overall:** 214 done, 5 partial, 1 not started, 2 dropped (222 handlers).
+**Overall:** 216 done, 4 partial, 0 not started, 2 dropped (222 handlers).
 
 ## S3 API (76/76)
 
@@ -90,7 +90,7 @@ Source: `cmd/api-router.go`
 | ✅ | `SelectObjectContentHandler` | CSV, JSON and Parquet (MINIO_API_SELECT_PARQUET); every input compression |
 | ✅ | `ValidateBucketReplicationCredsHandler` |  |
 
-## Admin API (madmin / mc admin) (117/123)
+## Admin API (madmin / mc admin) (119/123)
 
 Source: `cmd/admin-router.go`
 
@@ -131,7 +131,7 @@ Source: `cmd/admin-router.go`
 | ✅ | `GetIdentityProviderCfg` |  |
 | ✅ | `GetUserInfo` |  |
 | ✅ | `HealHandler` |  |
-| ⬜ | `HealthInfoHandler` |  |
+| ✅ | `HealthInfoHandler` | Linux data from /proc and /sys; elsewhere MinIO's own errors |
 | ✅ | `HelpConfigKVHandler` |  |
 | ✅ | `ImportBucketMetadataHandler` |  |
 | ✅ | `ImportIAM` |  |
@@ -185,7 +185,7 @@ Source: `cmd/admin-router.go`
 | ✅ | `SRPeerReplicateBucketItem` |  |
 | ✅ | `SRPeerReplicateIAMItem` |  |
 | ✅ | `SRStateEdit` |  |
-| 🟡 | `ServerInfoHandler` | usage figures wait for the scanner |
+| ✅ | `ServerInfoHandler` | no gc_stats (Go's); per-set usage is reported for single-set deployments |
 | ➖ | `ServerUpdateHandler` | self-update; the operator rolls images |
 | ➖ | `ServerUpdateV2Handler` | self-update; the operator rolls images |
 | ✅ | `ServiceHandler` |  |

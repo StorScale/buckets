@@ -55,6 +55,10 @@ void buckets_admin_internode_devnull(const buckets_http_request *req, buckets_ht
 /* The site-replication perf endpoints MinIO calls unsigned (served so only
  * while site replication is on). */
 bool buckets_admin_site_perf_unsigned(buckets_s3_server *s, buckets_str path);
+/* mc support diag (health.c); the peer side. */
+void buckets_admin_health_info(s3_ctx *c);
+bool buckets_admin_health_peer(buckets_s3_server *s, const char *op, const buckets_query *q,
+                               buckets_http_response *resp);
 /* Admin work a peer asks of this node (peer/admin?op=...): heal sequence
  * status, speedtests. */
 void buckets_admin_peer(buckets_s3_server *s, const buckets_http_request *req, const buckets_query *q,
