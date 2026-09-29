@@ -77,6 +77,7 @@ typedef struct conn {
   bool write_wants_read; /* TLS: a send is blocked until the socket is readable */
   bool read_wants_write; /* TLS: a receive is blocked until it is writable */
   time_t last_active;
+  time_t last_write; /* the last time response bytes left, or a write began */
   char remote[INET6_ADDRSTRLEN + 8];
 } conn;
 
@@ -397,6 +398,7 @@ static bool conn_flush(conn *c) {
     long n = conn_send(c, c->out.data + c->out_off, c->out.len - c->out_off);
     if (n > 0) {
       c->out_off += (size_t)n;
+      c->last_write = time(NULL);
       continue;
     }
     if (n == BUCKETS_TLS_WANT_WRITE || n == BUCKETS_TLS_WANT_READ) {
@@ -427,6 +429,7 @@ static void conn_send_some(conn *c) {
     long n = conn_send(c, c->out.data + c->out_off, c->out.len - c->out_off);
     if (n <= 0) return;
     c->out_off += (size_t)n;
+    c->last_write = time(NULL);
   }
   buckets_buf_reset(&c->out);
   c->out_off = 0;
@@ -436,6 +439,7 @@ static void write_response(conn *c, buckets_http_response *resp, bool keep_alive
   buckets_http_server *srv = c->srv;
   char date[BUCKETS_TIME_HTTP_LEN + 1];
   buckets_time_http(time(NULL), date);
+  c->last_write = time(NULL); /* the stall clock starts with each response */
   long long clen = resp->content_length >= 0 ? resp->content_length : (long long)resp->body.len;
   buckets_buf_appendf(&c->out, "HTTP/1.1 %d %s\r\nServer: %s\r\nDate: %s\r\nContent-Length: %lld\r\n",
                       resp->status, buckets_http_status_text(resp->status), srv->cfg.server_header,
@@ -992,7 +996,18 @@ static void on_tick(buckets_http_server *srv) {
   for (conn *c = srv->conns, *next; c; c = next) {
     next = c->next;
     bool idle = !c->busy && !c->pipe && !c->read_paused && c->in.len == 0 && !conn_writing(c);
-    if (idle && (srv->shutting_down || now - c->last_active > srv->cfg.idle_timeout_sec)) conn_close(c);
+    if (idle && (srv->shutting_down || now - c->last_active > srv->cfg.idle_timeout_sec)) {
+      conn_close(c);
+      continue;
+    }
+    /* A client that stops reading a response would otherwise hold its
+     * stream (and the object's read lock) forever. Waits for our own data
+     * (a stream fill) do not count. */
+    if (!c->busy && conn_writing(c) && !c->fill_inflight && !c->waiting_fill &&
+        now - (c->last_write ? c->last_write : c->last_active) > srv->cfg.write_timeout_sec) {
+      buckets_log_warn("closing %s: response stalled for %ds", c->remote, srv->cfg.write_timeout_sec);
+      conn_close(c);
+    }
   }
 }
 
@@ -1005,6 +1020,7 @@ buckets_http_server *buckets_http_server_start(buckets_loop *loop, const buckets
   srv->cfg = *cfg;
   if (!srv->cfg.server_header) srv->cfg.server_header = "Buckets";
   if (srv->cfg.idle_timeout_sec <= 0) srv->cfg.idle_timeout_sec = 30;
+  if (srv->cfg.write_timeout_sec <= 0) srv->cfg.write_timeout_sec = 60;
   if (srv->cfg.mem_body_limit == 0) srv->cfg.mem_body_limit = 1024 * 1024;
   srv->handler = handler;
   srv->ud = ud;

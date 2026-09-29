@@ -100,6 +100,7 @@ typedef struct {
   size_t mem_body_limit;  /* bodies up to this size stay in memory */
   const char *spool_dir;  /* where larger bodies are spooled */
   int idle_timeout_sec;
+  int write_timeout_sec; /* close a response that makes no progress this long (default 60) */
   const char *server_header; /* value of the Server response header */
   /* Runs handlers and response-stream pulls, so the loop thread only moves
    * bytes. NULL runs them inline on the loop thread. Must outlive the server's

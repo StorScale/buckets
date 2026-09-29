@@ -50,6 +50,7 @@ All notable changes to this project are documented here. The format follows
 - ListMultipartUploads matches MinIO: uploads oldest first, paging by `upload-id-marker` with `NextUploadIdMarker` and `IsTruncated`, the 10000 default, `EncodingType` echoed, and empty Initiator/Owner/StorageClass.
 
 ### Fixed
+- A client that stops reading a response no longer holds it (and the object's read lock, blocking every writer of that key) forever: a response that makes no progress for 60 seconds is closed (found by ceph s3-tests).
 - An unsatisfiable range answers MinIO's InvalidRange (the range and `ActualObjectSize`/`RangeRequested` in the document, no `Content-Range`), and a malformed one fails before the object is looked up.
 - An `x-amz-checksum-algorithm` header without a checksum value asks for nothing (getContentChecksum); bucketsd computed and stored one.
 - GetObjectAttributes reports the stored size of each part of an encrypted object, as MinIO does (the object size stays the plaintext one).
