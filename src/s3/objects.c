@@ -4325,6 +4325,10 @@ void buckets_s3_route_object(s3_ctx *c) {
       return;
     }
   }
+  if (buckets_str_eq_c(m, "GET") && buckets_query_has(&c->q, "lambdaArn")) {
+    buckets_s3_get_object_lambda(c);
+    return;
+  }
   if ((buckets_str_eq_c(m, "GET") || buckets_str_eq_c(m, "HEAD")) && extract_requested(c) && strstr(c->object, ".zip/")) {
     get_in_archive(c, buckets_str_eq_c(m, "HEAD"));
     return;

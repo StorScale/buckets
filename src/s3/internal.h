@@ -213,6 +213,8 @@ void buckets_s3_list_object_versions(s3_ctx *c);
 void buckets_s3_delete_objects(s3_ctx *c);
 void buckets_s3_list_uploads(s3_ctx *c);
 void buckets_s3_write_private_acl(s3_ctx *c);
+/* GetObject through an object lambda (?lambdaArn=). */
+void buckets_s3_get_object_lambda(s3_ctx *c);
 void buckets_s3_put_acl(s3_ctx *c);
 void buckets_s3_post_policy(s3_ctx *c);
 /* The signature verifiers' key lookup (ud: the s3_ctx): root, IAM users,

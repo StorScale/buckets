@@ -89,6 +89,7 @@ Sign in at http://localhost:9090 with any Buckets credentials: the console excha
 | `tests/e2e-k8s/envtest.sh` | The operator against a real kube-apiserver and etcd (envtest binaries, downloaded on first use), running as its own ServiceAccount |
 | `tests/e2e-k8s/kind.sh` | Full end to end on kind: images, operator, a 4-server cluster, pod and PVC loss, pool expansion, image rollout, the console Deployment and its Playwright suite (needs docker and kind; see `tests/e2e-k8s/README.md`) |
 | `tests/integration/select.sh` | S3 Select against MinIO, case by case (CSV, JSON, Parquet, every compression, errors) |
+| `tests/integration/lambda.sh` | Object lambda: a local lambda function called by MinIO and Buckets alike |
 | `tests/integration/zip.sh` | Files inside zip archives (x-minio-extract) against MinIO, then each server on the other's drives |
 | `tests/integration/snowball.sh` | Snowball archives (plain and compressed) extracted by MinIO and Buckets alike |
 | `tests/e2e-k8s/multisite.sh` | Two Buckets clusters and a MinIO site on kind: Buckets↔MinIO bucket replication, three-site site replication, a forwarded multi-server decommission |

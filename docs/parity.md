@@ -5,9 +5,9 @@ registers is listed; statuses live in the script's `STATUS` table.
 
 ✅ done · 🟡 partial · ⬜ not started · ➖ dropped on purpose
 
-**Overall:** 194 done, 5 partial, 21 not started, 2 dropped (222 handlers).
+**Overall:** 195 done, 5 partial, 20 not started, 2 dropped (222 handlers).
 
-## S3 API (75/76)
+## S3 API (76/76)
 
 Source: `cmd/api-router.go`
 
@@ -49,7 +49,7 @@ Source: `cmd/api-router.go`
 | ✅ | `GetObjectACLHandler` | canned private, as MinIO |
 | ✅ | `GetObjectAttributesHandler` |  |
 | ✅ | `GetObjectHandler` | files inside zip archives with x-minio-extract, as MinIO |
-| ⬜ | `GetObjectLambdaHandler` |  |
+| ✅ | `GetObjectLambdaHandler` | lambda_webhook targets; client certificates not yet |
 | ✅ | `GetObjectLegalHoldHandler` |  |
 | ✅ | `GetObjectRetentionHandler` |  |
 | ✅ | `GetObjectTaggingHandler` |  |

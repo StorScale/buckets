@@ -219,6 +219,7 @@ STATUS = {
     "PutObjectExtractHandler": (DONE, "snowball tar archives: plain, gzip, bzip2, zstd, lz4, s2"),
     "PostRestoreObjectHandler": (DONE, "restores from any tier; SELECT restores answer as MinIO's (an output path, nothing written)"),
     # Phase 9
+    "GetObjectLambdaHandler": (DONE, "lambda_webhook targets; client certificates not yet"),
     "SelectObjectContentHandler": (DONE, "CSV, JSON and Parquet (MINIO_API_SELECT_PARQUET); every input compression"),
     # dropped on purpose (docs/architecture.md): Kubernetes rolls images
     "ServerUpdateHandler": (DROPPED, "self-update; the operator rolls images"),
