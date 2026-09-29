@@ -41,6 +41,11 @@ void buckets_admin_get_bucket_quota(s3_ctx *c);
 /* mc admin info's usage: the scanner's stored data usage (bucket.c). */
 void buckets_admin_data_usage_info(s3_ctx *c);
 
+/* mc admin bucket remote add|ls|rm (replicate.c). */
+void buckets_admin_set_remote_target(s3_ctx *c);
+void buckets_admin_list_remote_targets(s3_ctx *c);
+void buckets_admin_remove_remote_target(s3_ctx *c);
+
 /* KMS APIs (kms.c): /minio/kms/v1/..., and the admin v3 /kms/... routes. */
 bool buckets_admin_is_kms_path(buckets_str path);
 void buckets_admin_kms_handle(s3_ctx *c);

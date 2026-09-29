@@ -130,7 +130,7 @@ void buckets_bucket_info_free(buckets_bucket_info *b, size_t n);
 /* Pull-style data source. Returns bytes read, 0 at EOF, -1 on error. */
 typedef long (*buckets_read_fn)(void *ud, void *buf, size_t n);
 
-typedef struct {
+typedef struct buckets_object_info_s {
   char *name;
   char version_id[37];
   int64_t size;
@@ -179,6 +179,7 @@ typedef struct {
   bool versioned;
   const char *version_id;
   int64_t mod_time_ns; /* 0: now */
+  const char *preserve_etag; /* store this ETag instead of the computed one (replication) */
   /* Puts of unknown size (-1, compressed streams): the plaintext size, which
    * decides inlining. */
   int64_t actual_size;
@@ -212,10 +213,29 @@ buckets_obj_err buckets_obj_delete(buckets_objlayer *L, const char *bucket, cons
 typedef struct {
   const char *version_id;
   bool versioned, suspended;
+  /* Replication (MinIO's ObjectOptions.DeleteMarker, MTime and
+   * DeleteReplication); any of these takes MinIO's full DeleteObject path,
+   * which records replication states in the versions' system metadata. */
+  bool replica_marker;     /* DeleteMarker: a delete marker replicated by its version ID (need not exist here) */
+  bool replica;            /* ReplicaStatus REPLICA: an incoming replicated delete */
+  int64_t mod_time_ns;     /* MTime: the marker's modification time (0: now) */
+  const char *repl_status; /* ReplicationStatusInternal ("arn=PENDING;") of the marker */
+  int64_t repl_ts_ns;      /* ReplicationTimeStamp (0: Go's zero time) */
+  const char *purge_status; /* VersionPurgeStatusInternal of a versioned delete */
+  const char *const *reset_keys, *const *reset_values; /* ResetStatusesMap (full metadata keys) */
+  size_t nreset;
+  /* EvalMetadataFn: sees the version as found (found false: none) and may
+   * return the statuses to record (malloc'd, or NULL). */
+  void (*decide)(void *ud, const struct buckets_object_info_s *goi, bool found, char **repl_status,
+                 char **purge_status);
+  void *decide_ud;
 } buckets_delete_opts;
 typedef struct {
   bool delete_marker;      /* a marker was created, or the removed version was one */
   char version_id[37];     /* the marker's or the removed version's ID ("null" for none) */
+  int64_t mod_time_ns;     /* replication path: the version's modification time */
+  char repl_status[1024];  /* replication path: the ReplicationStatusInternal recorded */
+  char purge_status[1024]; /* replication path: the VersionPurgeStatusInternal recorded */
 } buckets_delete_result;
 buckets_obj_err buckets_obj_delete_ex(buckets_objlayer *L, const char *bucket, const char *object,
                                       const buckets_delete_opts *opts, buckets_delete_result *res);

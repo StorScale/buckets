@@ -9,6 +9,8 @@
 #include "bucket/notification.h"
 #include "bucket/objectlock.h"
 #include "bucket/quota.h"
+#include "bucket/replication.h"
+#include "bucket/targets.h"
 #include "bucket/sseconfig.h"
 #include "bucket/versioning.h"
 #include "iam/policy.h"
@@ -30,6 +32,9 @@ typedef struct {
   buckets_sse_config sse;          /* parsed EncryptionConfigXML, when has_sse */
   buckets_notify_config notify;    /* parsed NotificationConfigXML, when has_notify */
   bool has_notify;
+  buckets_replication replication; /* parsed ReplicationConfigXML, when has_replication */
+  bool has_replication;
+  buckets_bucket_targets targets;  /* decrypted BucketTargetsConfigJSON (empty when none) */
   bool has_sse;
   bool has_lifecycle;
   bool has_quota;
@@ -55,6 +60,12 @@ void buckets_metasys_invalidate(buckets_metasys *m, const char *bucket);
 /* Called after a local change to a bucket's metadata (or the bucket being
  * created or deleted), to tell other servers. */
 void buckets_metasys_set_notify(buckets_metasys *m, void (*fn)(void *ud, const char *bucket), void *ud);
+/* The KMS that seals the bucket targets configuration (NULL: stored plain). */
+struct buckets_kms;
+void buckets_metasys_set_kms(buckets_metasys *m, struct buckets_kms *kms);
+/* Sets (json != NULL) or clears the bucket targets (BucketTargetsConfigJSON
+ * and its encryption metadata), saves and publishes. */
+bool buckets_metasys_update_targets(buckets_metasys *m, const char *bucket, const void *json, size_t len);
 /* Invalidates and notifies: for changes made outside buckets_metasys_update. */
 void buckets_metasys_changed(buckets_metasys *m, const char *bucket);
 

@@ -133,6 +133,12 @@ The S3 core runs on one drive, many drives, several pools, or a cluster of nodes
 
 ## Build phases
 
+Phase 8's gate includes replication between MinIO (RELEASE.2025-10-15) and Buckets, run with a local MinIO binary:
+
+1. Bucket replication MinIO → Buckets and Buckets → MinIO: active-active, deletes and delete markers, existing-object replication, resync, and SSE-C objects.
+2. Three-site replication mixing MinIO and Buckets sites: users, policies and bucket settings created on any site appear on all of them.
+3. Handing a MinIO site's work over to a Buckets site (migration).
+
 | Phase | Deliverable | Exit gate |
 |---|---|---|
 | 0 ✅ | Repo, build, core runtime, HTTP server, CI script, Dockerfile | `ctest` green, fuzz corpora replay, ASan/UBSan clean |
@@ -142,7 +148,7 @@ The S3 core runs on one drive, many drives, several pools, or a cluster of nodes
 | 4 | IAM, STS, policy, LDAP, OIDC, plugins, admin API core | `mc admin user/policy/svcacct`; mint IAM |
 | 5 | Versioning, object lock, tagging, CORS, quota, lifecycle, SSE-S3/KMS/C, compression | Full mint pass; ceph s3-tests at or above the MinIO baseline |
 | 6 | Console (web + consoled) as its own Deployment | Playwright e2e on kind |
-| 7 | Notifications (10 targets), audit, metrics v2/v3 | Zero metric-name diff against MinIO |
-| 8 | Bucket and site replication, tiering, batch jobs, decommission, rebalance | Two-cluster and three-site e2e |
+| 7 ✅ | Notifications (10 targets), audit, metrics v2/v3 | Target integration tests; zero metric-name diff against MinIO |
+| 8 🚧 | Bucket and site replication, tiering, batch jobs, decommission, rebalance | Two-cluster and three-site e2e; mixed MinIO/Buckets replication (see below) |
 | 9 | S3 Select, object lambda, SFTP/FTP, Veeam SOS, remaining admin | `docs/parity.md` at 100% |
 | 10 | Performance parity (warp), fuzz soak, Helm chart | warp within 10% of MinIO or better |

@@ -25,6 +25,7 @@
 #include "crypto/md5.h"
 #include "s3/compress.h"
 #include "s3/sse.h"
+#include "s3/replicate.h"
 #include "s3/xml.h"
 
 /* ---- error mapping -------------------------------------------------------- */
@@ -147,7 +148,20 @@ static void free_kvs(buckets_xl_kv *kvs, size_t n) {
  * metadata under the canonical header name, from query form then headers. */
 static const char *const k_supported[] = {
     "content-type",        "cache-control", "content-language", "content-encoding", "content-disposition",
-    "x-amz-storage-class", "X-Amz-Tagging", "expires",
+    "x-amz-storage-class", "X-Amz-Tagging", "expires", "X-Amz-Replication-Status",
+};
+
+/* replicationToInternalHeaders: what SSE-C replication sends, stored under
+ * the internal names (the checksum keeps its name). */
+static const struct {
+  const char *header, *key;
+} k_repl_headers[] = {
+    {"X-Minio-Replication-Server-Side-Encryption-Sealed-Key", "X-Minio-Internal-Server-Side-Encryption-Sealed-Key"},
+    {"X-Minio-Replication-Server-Side-Encryption-Seal-Algorithm", "X-Minio-Internal-Server-Side-Encryption-Seal-Algorithm"},
+    {"X-Minio-Replication-Server-Side-Encryption-Iv", "X-Minio-Internal-Server-Side-Encryption-Iv"},
+    {"X-Minio-Replication-Encrypted-Multipart", "X-Minio-Internal-Encrypted-Multipart"},
+    {"X-Minio-Replication-Actual-Object-Size", "X-Minio-Internal-Actual-Object-Size"},
+    {"X-Minio-Replication-Ssec-Crc", "X-Minio-Replication-Ssec-Crc"},
 };
 
 static void extract_one(buckets_xl_kv **kvs, size_t *n, buckets_str name, buckets_str value) {
@@ -159,6 +173,8 @@ static void extract_one(buckets_xl_kv **kvs, size_t *n, buckets_str name, bucket
     canonical_key(k_supported[i], want, sizeof(want));
     if (strcmp(want, key) == 0) add_kv(kvs, n, k_supported[i], value);
   }
+  for (size_t i = 0; i < BUCKETS_ARRAY_LEN(k_repl_headers); i++)
+    if (strcmp(key, k_repl_headers[i].header) == 0) add_kv(kvs, n, k_repl_headers[i].key, value);
   if (has_prefix_fold(raw, "x-amz-meta-") || has_prefix_fold(raw, "x-minio-meta-")) add_kv(kvs, n, key, value);
   free(raw);
 }
@@ -215,6 +231,18 @@ static buckets_s3_error extract_metadata(s3_ctx *c, buckets_xl_kv **kvs, size_t 
     }
   }
   return BUCKETS_ERR_NONE;
+}
+
+/* An SSE-C replica's checksum arrives sealed, base64-encoded: stored as
+ * the version's checksum. */
+static void repl_ssec_checksum(buckets_xl_kv **kvs, size_t *n) {
+  const buckets_xl_kv *kv = buckets_xl_kv_get(*kvs, *n, "X-Minio-Replication-Ssec-Crc");
+  if (!kv) return;
+  uint8_t *raw = buckets_xmalloc(kv->value_len + 3);
+  long rn = buckets_base64_decode((const char *)kv->value, kv->value_len, raw);
+  if (rn > 0) buckets_xl_kv_set(kvs, n, BUCKETS_CKSUM_META, raw, (size_t)rn);
+  free(raw);
+  remove_kv(*kvs, n, "X-Minio-Replication-Ssec-Crc");
 }
 
 static bool parse_content_md5(s3_ctx *c, uint8_t out[16], bool *present, buckets_s3_error *err) {
@@ -659,12 +687,24 @@ static void put_object(s3_ctx *c) {
     buckets_s3_write_error(c, serr);
     return;
   }
+  buckets_s3_repl_in ri;
+  if (!buckets_s3_repl_in_parse(c, c->object, true, &ri)) {
+    free_kvs(meta, nmeta);
+    body_close(&b);
+    return;
+  }
+  buckets_s3_repl_in_meta(c, &ri, &meta, &nmeta);
+  repl_ssec_checksum(&meta, &nmeta);
+  buckets_repl_dsc dsc;
+  buckets_s3_repl_out_meta(c, c->object, &meta, &nmeta, ri.request, &dsc);
   buckets_put_opts opts = {
       .meta = meta,
       .nmeta = nmeta,
       .want_md5 = b.has_md5 ? b.md5 : NULL,
       .want_sha256 = b.want_sha ? b.sha : NULL,
       .pre_commit = cks_pre_commit,
+      .version_id = ri.has_vid ? ri.version_id : NULL,
+      .mod_time_ns = ri.mtime_ns,
   };
   bool suspended;
   buckets_s3_versioning(c, c->object, &opts.versioned, &suspended);
@@ -714,11 +754,16 @@ static void put_object(s3_ctx *c) {
     opts.pre_commit_ud = &sp;
     opts.actual_size = b.size;
   }
+  /* PreserveETag: a replica keeps its source's ETag, unless SSE-S3 re-encrypts it */
+  if (ri.etag[0] && !(ri.request && encrypt && buckets_s3_sse_s3_or_kms_requested(c) && sp.nsys &&
+                      buckets_xl_kv_get(sp.sys, sp.nsys, BUCKETS_SSE_META_SEALED_S3)))
+    opts.preserve_etag = ri.etag;
   buckets_object_info oi;
   buckets_obj_err err = buckets_obj_put(c->s->layer, c->bucket, c->object, rd, rd_ud, size, &opts, &oi);
   free_kvs(meta, nmeta);
   if (xform) xform_close(&sp);
   if (err) {
+    buckets_repl_dsc_free(&dsc);
     buckets_s3_write_error(c, body_error(&b, err));
   } else {
     if (encrypt) sse_put_response(c, &oi, sp.key);
@@ -729,6 +774,8 @@ static void put_object(s3_ctx *c) {
     cks_echo(c->resp, &cx);
     c->resp->status = 200;
     buckets_s3_send_event_early(c, BUCKETS_EV_OBJECT_CREATED_PUT, c->bucket, c->object, &oi, NULL);
+    buckets_repl_schedule(c->s, c->bucket, &oi, &dsc, BUCKETS_REPL_OBJECT, "replicate:incoming");
+    buckets_repl_dsc_free(&dsc);
     buckets_object_info_free(&oi);
   }
   free_kvs(sp.sys, sp.nsys);
@@ -929,6 +976,64 @@ static void response_overrides(s3_ctx *c) {
 
 static void reader_free(void *ud) { buckets_obj_reader_free(ud); }
 
+/* ---- active-active proxying (proxyGetToReplicationTarget) ---- */
+
+static long proxy_read(void *ud, void *buf, size_t n) {
+  buckets_repl_proxy *p = ud;
+  return buckets_http_stream_read(p->body, buf, n);
+}
+
+static void proxy_free(void *ud) {
+  buckets_repl_proxy *p = ud;
+  buckets_repl_proxy_close(p);
+  free(p);
+}
+
+/* A version missing here is served from a replication target, when the
+ * request is not itself a proxied one. Returns true when answered. */
+static bool proxy_to_target(s3_ctx *c, const char *version, bool head, buckets_str range) {
+  if (!c->s->repl || buckets_http_header_get(c->req, BUCKETS_H_SRC_PROXY).p) return false;
+  char *rg = range.p ? buckets_str_dup(range) : NULL;
+  buckets_repl_proxy *p = buckets_xcalloc(1, sizeof(*p));
+  bool ok = buckets_repl_proxy_open(c->s->repl, c->bucket, c->object, version, rg, head, p);
+  free(rg);
+  if (!ok) {
+    free(p);
+    return false;
+  }
+  static const char *const skip[] = {"Date", "Server", "Content-Length", "Connection", "Transfer-Encoding", "Keep-Alive",
+                                     "X-Amz-Request-Id", "X-Amz-Id-2", "Vary", "Accept-Ranges",
+                                     "Strict-Transport-Security", "X-Content-Type-Options", "X-Xss-Protection"};
+  buckets_str rest = buckets_buf_str(&p->res.headers), line;
+  while (rest.n) {
+    buckets_str_cut(rest, '\n', &line, &rest);
+    buckets_str name, value;
+    if (!buckets_str_cut(line, ':', &name, &value)) continue;
+    name = buckets_str_trim(name);
+    value = buckets_str_trim(value);
+    if (value.n && value.p[value.n - 1] == '\r') value.n--;
+    bool drop = false;
+    for (size_t i = 0; i < BUCKETS_ARRAY_LEN(skip) && !drop; i++) drop = buckets_str_ieq_c(name, skip[i]);
+    if (drop) continue;
+    char *n = buckets_str_dup(name), *v = buckets_str_dup(value);
+    buckets_http_resp_header(c->resp, n, v);
+    free(n);
+    free(v);
+  }
+  char cl[32];
+  buckets_s3c_header_copy(&p->res, "Content-Length", cl, sizeof(cl));
+  c->resp->status = p->res.status;
+  c->resp->content_length = cl[0] ? strtoll(cl, NULL, 10) : 0;
+  if (head || !p->body) {
+    proxy_free(p);
+  } else {
+    c->resp->stream = (buckets_http_body_fn)proxy_read;
+    c->resp->stream_ud = p;
+    c->resp->stream_free = proxy_free;
+  }
+  return true;
+}
+
 static void get_object(s3_ctx *c, bool head) {
   /* "If SSE-S3 or SSE-KMS present -> AWS fails with undefined error" */
   if (buckets_s3_sse_s3_or_kms_requested(c)) {
@@ -963,6 +1068,10 @@ static void get_object(s3_ctx *c, bool head) {
   }
   buckets_object_info oi;
   buckets_obj_err err = buckets_obj_stat(c->s->layer, c->bucket, c->object, version, &oi);
+  if ((err == BUCKETS_OBJ_ERR_NO_SUCH_KEY || err == BUCKETS_OBJ_ERR_NO_SUCH_VERSION ||
+       err == BUCKETS_OBJ_ERR_READ_QUORUM) &&
+      proxy_to_target(c, version, head, buckets_http_header_get(c->req, "Range")))
+    return;
   if (err) {
     buckets_s3_write_error(c, buckets_s3_obj_error(err));
     return;
@@ -970,11 +1079,36 @@ static void get_object(s3_ctx *c, bool head) {
   if (oi.delete_marker) {
     /* getObjectInfo: a delete marker is not found, or, asked for by its
      * version ID, not a method that applies; its headers say which. */
-    buckets_http_resp_header(c->resp, "x-amz-version-id", oi.version_id);
-    buckets_http_resp_header(c->resp, "x-amz-delete-marker", "true");
+    const buckets_xl_kv *ps = buckets_object_sys(&oi, BUCKETS_META_PURGE_STATUS);
+    char rst[32];
+    if (ps && ps->value_len) {
+      buckets_http_resp_header(c->resp, "X-Minio-Replication-Delete-Status",
+                               buckets_repl_composite_purge((const char *)ps->value));
+    } else if (buckets_repl_version_status(&oi, rst, sizeof(rst))) {
+      buckets_http_resp_header(c->resp, "X-Minio-Replication-DeleteMarker-Status", rst);
+    }
+    if (strcmp(oi.version_id, "null") != 0) {
+      buckets_http_resp_header(c->resp, "x-amz-version-id", oi.version_id);
+      buckets_http_resp_header(c->resp, "x-amz-delete-marker", "true");
+    }
+    buckets_str rr = buckets_http_header_get(c->req, BUCKETS_H_CHECK_REPL_READY);
+    if (rr.p && buckets_str_eq_c(rr, "true")) {
+      /* the replicated marker may follow: the object has a version here */
+      buckets_object_info latest;
+      if (buckets_obj_stat(c->s->layer, c->bucket, c->object, NULL, &latest) == BUCKETS_OBJ_OK) {
+        buckets_http_resp_header(c->resp, BUCKETS_H_REPL_READY, "true");
+        buckets_object_info_free(&latest);
+      }
+    }
     buckets_s3_write_error(c, version && *version ? BUCKETS_ERR_METHOD_NOT_ALLOWED : BUCKETS_ERR_NO_SUCH_KEY);
     buckets_object_info_free(&oi);
     return;
+  }
+  {
+    /* the replication status clients see (FileInfo's composite status) */
+    char rst[32];
+    if (buckets_repl_version_status(&oi, rst, sizeof(rst)))
+      buckets_xl_kv_set(&oi.meta, &oi.nmeta, BUCKETS_H_REPL_STATUS, rst, strlen(rst));
   }
   /* DecryptObjectInfo: request checks, the key, and what clients see */
   buckets_s3_error serr = buckets_s3_sse_check_read(c, &oi, false);
@@ -1117,6 +1251,35 @@ static void get_object(s3_ctx *c, bool head) {
 
 /* ---- DeleteObject --------------------------------------------------------- */
 
+/* EvalMetadataFn for deletes: checkReplicateDelete on the version found. */
+typedef struct {
+  s3_ctx *c;
+  const char *version;
+  bool versioned;
+} del_decide;
+
+static void delete_decide(void *ud, const buckets_object_info *goi, bool found, char **repl_status, char **purge_status) {
+  del_decide *d = ud;
+  (void)purge_status;
+  buckets_repl_dsc dsc;
+  buckets_repl_check_delete(d->c->s, d->c->bucket, d->c->object, d->version, found ? goi : NULL, d->versioned, false, &dsc);
+  if (buckets_repl_dsc_any(&dsc)) {
+    buckets_buf p = BUCKETS_BUF_INIT;
+    buckets_repl_dsc_pending(&dsc, &p);
+    buckets_buf_append_char(&p, '\0');
+    *repl_status = buckets_buf_detach(&p);
+  }
+  buckets_repl_dsc_free(&dsc);
+}
+
+static bool bucket_replicates(s3_ctx *c) {
+  if (!c->s->meta) return false;
+  buckets_bucket_state *st = buckets_metasys_get(c->s->meta, c->bucket);
+  bool r = st->has_replication;
+  buckets_bucket_state_release(st);
+  return r;
+}
+
 static void delete_object(s3_ctx *c) {
   const char *version = buckets_query_get(&c->q, "versionId");
   if (version && *version && strcmp(version, "null") != 0) {
@@ -1126,13 +1289,27 @@ static void delete_object(s3_ctx *c) {
       return;
     }
   }
-  buckets_s3_error lerr = buckets_s3_lock_check_delete(c, c->object, version);
+  buckets_s3_repl_in ri;
+  if (!buckets_s3_repl_in_parse(c, c->object, false, &ri)) return;
+  /* a replicated delete marker is not there yet: no retention to check */
+  buckets_s3_error lerr = ri.replica ? BUCKETS_ERR_NONE : buckets_s3_lock_check_delete(c, c->object, version);
   if (lerr) {
     buckets_s3_write_error(c, lerr);
     return;
   }
-  buckets_delete_opts o = {.version_id = version};
+  buckets_delete_opts o = {.version_id = version, .replica = ri.replica, .replica_marker = ri.delete_marker,
+                           .mod_time_ns = ri.mtime_ns};
   buckets_s3_versioning(c, c->object, &o.versioned, &o.suspended);
+  if (ri.request) { /* delOpts: suspension applies at the bucket level only */
+    buckets_bucket_state *st = buckets_metasys_get(c->s->meta, c->bucket);
+    o.suspended = st->versioning.status == BUCKETS_VERSIONING_SUSPENDED;
+    buckets_bucket_state_release(st);
+  }
+  del_decide dd = {c, version, o.versioned};
+  if (!ri.replica && o.versioned && bucket_replicates(c)) {
+    o.decide = delete_decide;
+    o.decide_ud = &dd;
+  }
   buckets_delete_result res;
   buckets_obj_err err = buckets_obj_delete_ex(c->s->layer, c->bucket, c->object, &o, &res);
   /* S3 deletes are idempotent: a missing key still succeeds. */
@@ -1152,6 +1329,7 @@ static void delete_object(s3_ctx *c) {
     buckets_s3_send_event(c, res.delete_marker ? BUCKETS_EV_OBJECT_REMOVED_DELETE_MARKER_CREATED
                                                : BUCKETS_EV_OBJECT_REMOVED_DELETE,
                           c->bucket, c->object, NULL, res.version_id);
+    if (o.decide) buckets_repl_schedule_delete(c->s, c->bucket, c->object, &res, "replicate:incoming:delete");
   }
 }
 
@@ -1246,6 +1424,133 @@ static buckets_s3_error open_source(s3_ctx *c, const char *b, const char *o, con
 static bool parse_copy_source(buckets_str h, char **decoded, const char **bucket, const char **object,
                               const char **version);
 
+/* ---- metadata replication (CopyObject onto the same version) ---- */
+
+typedef struct {
+  s3_ctx *c;
+  buckets_xl_kv *lock; /* the retention and legal hold the request carries */
+  size_t nlock;
+  const char *tags;    /* X-Amz-Tagging when the tagging directive is REPLACE */
+  bool replace_tags;
+  int64_t tag_ts, ret_ts, lh_ts; /* the source's timestamps (0: none) */
+} repl_copy;
+
+static int64_t parse_ts(const char *v) {
+  long long s;
+  long n;
+  if (!v || !*v || !buckets_time_parse_rfc3339(v, &s, &n)) return 0;
+  return (int64_t)s * 1000000000LL + n;
+}
+
+static int64_t header_ts(s3_ctx *c, const char *name) {
+  buckets_str h = buckets_http_header_get(c->req, name);
+  if (!h.p) return 0;
+  char *v = buckets_str_dup(h);
+  int64_t ns = parse_ts(v);
+  free(v);
+  return ns;
+}
+
+static void set_ts_kv(buckets_xl_kv **kv, size_t *n, const char *key, int64_t ns) {
+  char ts[BUCKETS_TIME_RFC3339_NANO_LEN + 1];
+  buckets_time_rfc3339_nano(ns / 1000000000LL, (long)(ns % 1000000000LL), ts);
+  buckets_xl_kv_set(kv, n, key, ts, strlen(ts));
+}
+
+/* CopyObjectHandler's metadata for a replicated metadata update. */
+static buckets_obj_err repl_copy_edit(void *ud, const buckets_object_info *cur, buckets_xl_kv **user, size_t *nuser,
+                                      buckets_xl_kv **sys, size_t *nsys) {
+  repl_copy *rc = ud;
+  (void)cur;
+  const buckets_xl_kv *sc_h = NULL;
+  (void)sc_h;
+  if (rc->replace_tags && rc->tags && *rc->tags && rc->tag_ts) {
+    const buckets_xl_kv *od = buckets_xl_kv_get(*sys, *nsys, BUCKETS_META_TAGGING_TS);
+    int64_t ondisk = od ? parse_ts((const char *)od->value) : 0;
+    if (!od || !ondisk || ondisk <= rc->tag_ts) {
+      set_ts_kv(sys, nsys, BUCKETS_META_TAGGING_TS, rc->tag_ts);
+      buckets_xl_kv_set(user, nuser, "X-Amz-Tagging", rc->tags, strlen(rc->tags));
+    }
+  }
+  remove_kv(*user, nuser, BUCKETS_H_REPL_STATUS);
+  /* FilterObjectLockMetadata, then what the request (newer) says */
+  remove_kv(*user, nuser, BUCKETS_LOCK_MODE_META);
+  remove_kv(*user, nuser, BUCKETS_LOCK_UNTIL_META);
+  remove_kv(*user, nuser, BUCKETS_LOCK_HOLD_META);
+  const buckets_xl_kv *mode = buckets_xl_kv_get(rc->lock, rc->nlock, BUCKETS_LOCK_MODE_META);
+  const buckets_xl_kv *until = buckets_xl_kv_get(rc->lock, rc->nlock, BUCKETS_LOCK_UNTIL_META);
+  const buckets_xl_kv *hold = buckets_xl_kv_get(rc->lock, rc->nlock, BUCKETS_LOCK_HOLD_META);
+  if (mode && until && rc->ret_ts) {
+    const buckets_xl_kv *od = buckets_xl_kv_get(*sys, *nsys, BUCKETS_META_RETENTION_TS);
+    int64_t ondisk = od ? parse_ts((const char *)od->value) : 0;
+    if (!ondisk || ondisk < rc->ret_ts) {
+      buckets_xl_kv_set(user, nuser, BUCKETS_LOCK_MODE_META, mode->value, mode->value_len);
+      buckets_xl_kv_set(user, nuser, BUCKETS_LOCK_UNTIL_META, until->value, until->value_len);
+      set_ts_kv(sys, nsys, BUCKETS_META_RETENTION_TS, rc->ret_ts);
+    }
+  }
+  if (hold && rc->lh_ts) {
+    const buckets_xl_kv *od = buckets_xl_kv_get(*sys, *nsys, BUCKETS_META_LEGALHOLD_TS);
+    int64_t ondisk = od ? parse_ts((const char *)od->value) : 0;
+    if (!ondisk || ondisk < rc->lh_ts) {
+      buckets_xl_kv_set(user, nuser, BUCKETS_LOCK_HOLD_META, hold->value, hold->value_len);
+      /* MinIO records the legal hold's time under the retention key */
+      set_ts_kv(sys, nsys, BUCKETS_META_RETENTION_TS, rc->lh_ts);
+    }
+  }
+  buckets_str rs = buckets_http_header_get(rc->c->req, BUCKETS_H_REPL_STATUS);
+  if (rs.p && rs.n) {
+    buckets_xl_kv_set(sys, nsys, BUCKETS_META_REPLICA_STATUS, BUCKETS_RS_REPLICA, strlen(BUCKETS_RS_REPLICA));
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    set_ts_kv(sys, nsys, BUCKETS_META_REPLICA_TS, (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec);
+    buckets_xl_kv_set(user, nuser, BUCKETS_H_REPL_STATUS, rs.p, rs.n);
+  }
+  return BUCKETS_OBJ_OK;
+}
+
+static void repl_copy_metadata(s3_ctx *c, const char *version) {
+  buckets_s3_repl_in ri;
+  if (!buckets_s3_repl_in_parse(c, c->object, false, &ri)) return;
+  repl_copy rc = {.c = c};
+  buckets_str td = buckets_http_header_get(c->req, "X-Amz-Tagging-Directive");
+  rc.replace_tags = td.p && buckets_str_eq_c(td, "REPLACE");
+  buckets_str th = buckets_http_header_get(c->req, "X-Amz-Tagging");
+  char *tags = th.p ? buckets_str_dup(th) : buckets_xstrdup("");
+  rc.tags = tags;
+  rc.tag_ts = header_ts(c, BUCKETS_H_SRC_TAG_TS);
+  rc.ret_ts = header_ts(c, BUCKETS_H_SRC_RET_TS);
+  rc.lh_ts = header_ts(c, BUCKETS_H_SRC_LH_TS);
+  buckets_s3_error serr = buckets_s3_lock_put_meta(c, c->object, &rc.lock, &rc.nlock);
+  if (serr) {
+    free(tags);
+    free_kvs(rc.lock, rc.nlock);
+    buckets_s3_write_error(c, serr);
+    return;
+  }
+  buckets_object_info oi;
+  buckets_obj_err err = buckets_obj_update_meta(c->s->layer, c->bucket, c->object, version, repl_copy_edit, &rc, &oi);
+  free(tags);
+  free_kvs(rc.lock, rc.nlock);
+  if (err) {
+    buckets_s3_write_error(c, buckets_s3_obj_error(err));
+    return;
+  }
+  buckets_s3_version_header(c, oi.version_id);
+  char lm[BUCKETS_TIME_ISO8601_LEN + 1];
+  buckets_time_iso8601_ns(oi.mod_time_ns, lm);
+  buckets_buf *b = &c->resp->body;
+  buckets_xml_header(b);
+  buckets_xml_open_ns(b, "CopyObjectResult", BUCKETS_S3_XMLNS);
+  buckets_xml_elem(b, "LastModified", lm);
+  buckets_buf_appendf(b, "<ETag>&#34;%s&#34;</ETag>", oi.etag);
+  buckets_xml_close(b, "CopyObjectResult");
+  buckets_s3_write_xml(c, 200);
+  etag_header(c->resp, oi.etag);
+  if (strcmp(version, "null") != 0) buckets_http_resp_header(c->resp, "x-amz-copy-source-version-id", version);
+  buckets_object_info_free(&oi);
+}
+
 static void copy_object(s3_ctx *c) {
   buckets_str src_h = buckets_http_header_get(c->req, "X-Amz-Copy-Source");
   char *decoded;
@@ -1257,6 +1562,16 @@ static void copy_object(s3_ctx *c) {
   }
   if (!buckets_s3_require(c, "s3:GetObject", src_bucket, src_object, NULL)) {
     free(decoded);
+    return;
+  }
+  const char *dst_vid = buckets_query_get(&c->q, "versionId");
+  if (buckets_s3_repl_request(c) && strcmp(src_bucket, c->bucket) == 0 && strcmp(src_object, c->object) == 0 &&
+      version && *version && dst_vid && strcmp(dst_vid, version) == 0) {
+    /* a metadata update replicated onto the same version (CopyObject metadataOnly) */
+    char *v = buckets_xstrdup(version);
+    free(decoded);
+    repl_copy_metadata(c, v);
+    free(v);
     return;
   }
   c->err_bucket = buckets_xstrdup(src_bucket);
@@ -2684,6 +2999,7 @@ void buckets_s3_delete_objects(s3_ctx *c) {
     }
   }
   c->tags.delete_op = "DeleteObjects";
+  bool replicates = bucket_replicates(c);
   deleted_ev *evs = buckets_xcalloc(count, sizeof(*evs));
   size_t nev = 0;
   buckets_buf *b = &c->resp->body;
@@ -2713,7 +3029,16 @@ void buckets_s3_delete_objects(s3_ctx *c) {
     } else {
       buckets_delete_opts o = {.version_id = ver.len ? ver.data : NULL};
       buckets_s3_versioning(c, key.data, &o.versioned, &o.suspended);
+      char *saved = c->object;
+      c->object = key.data; /* delete_decide checks this key */
+      del_decide dd = {c, o.version_id, o.versioned};
+      if (replicates && o.versioned) {
+        o.decide = delete_decide;
+        o.decide_ud = &dd;
+      }
       buckets_obj_err oe = buckets_obj_delete_ex(c->s->layer, c->bucket, key.data, &o, &res);
+      c->object = saved;
+      if (!oe && o.decide) buckets_repl_schedule_delete(c->s, c->bucket, key.data, &res, "replicate:incoming:delete");
       if (oe && oe != BUCKETS_OBJ_ERR_NO_SUCH_KEY && oe != BUCKETS_OBJ_ERR_NO_SUCH_VERSION) e = buckets_s3_obj_error(oe);
       if (oe == BUCKETS_OBJ_ERR_NO_SUCH_KEY && !ver.len && (o.versioned || o.suspended)) {
         /* MinIO's DeleteObjects reports the marker it would have made for a

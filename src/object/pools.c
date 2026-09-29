@@ -445,6 +445,16 @@ buckets_obj_err buckets_obj_delete_ex(buckets_objlayer *L, const char *bucket, c
     return err;
   }
   audit_op(L, dop, bucket, object, 0);
+  if (opts->replica_marker || opts->replica || opts->decide || (opts->repl_status && *opts->repl_status) ||
+      (opts->purge_status && *opts->purge_status)) {
+    /* replication: the pool holding the object (version), else where it would go */
+    lookup l = find_pool(L, bucket, object, opts->version_id && *opts->version_id ? opts->version_id : NULL);
+    int p = l.pool;
+    buckets_obj_err err = BUCKETS_OBJ_OK;
+    if (p < 0) p = write_pool(L, bucket, object, 0, &err);
+    if (p < 0) return err;
+    return buckets_ep_delete_ex(L->pools[p], bucket, object, opts, res);
+  }
   bool marker = !(opts->version_id && *opts->version_id) && (opts->versioned || opts->suspended);
   if (marker) {
     buckets_obj_err err;

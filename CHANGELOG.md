@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- Bucket replication (Phase 8), interoperable with MinIO in both directions:
+  - remote targets (`mc admin bucket remote add|ls|rm`, `set-remote-target` and friends), stored in the bucket metadata as MinIO does (SSE-S3-sealed when a KMS is configured), with health checks of each endpoint;
+  - `PutBucketReplication` / `GetBucketReplication` / `DeleteBucketReplication` with MinIO's parsing, validation and marshalling;
+  - replication of new versions (single-part and multipart, keeping version IDs, modification times and ETags), metadata changes (tags, retention, legal hold, as in-place metadata copies), delete markers and versioned deletes, recording per-target status in `xl.meta` as MinIO does;
+  - the receiving side: `X-Minio-Source-*` requests keep the source's version ID, mtime and ETag, replicas are marked `REPLICA`, replicated delete markers are created by version ID, and metadata-only copies update the version in place;
+  - active-active proxying of GET/HEAD to a target when a version is missing locally;
+  - an outbound S3 client (`src/net/s3client.c`) for replication and, later, tiering and batch jobs.
+
 ## [0.7.0] - 2026-09-29
 
 Phase 7: notifications (all ten targets), audit (webhook, Kafka, internal events), metrics v2/v3 (metric-name diff vs MinIO: 0), trace and logs.

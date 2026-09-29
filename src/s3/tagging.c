@@ -9,6 +9,9 @@
 #include "bucket/metasys.h"
 #include "bucket/tags.h"
 #include "s3/internal.h"
+#include "s3/replicate.h"
+#include "bucket/replication.h"
+#include "core/timefmt.h"
 #include "s3/xml.h"
 
 #define TAGGING_META "X-Amz-Tagging"
@@ -98,8 +101,10 @@ void buckets_s3_get_object_tagging(s3_ctx *c) {
 }
 
 typedef struct {
+  s3_ctx *c;
   const char *tags; /* the new X-Amz-Tagging value ("" removes them) */
   char *old;        /* the tags it replaces */
+  buckets_repl_dsc dsc;
 } tag_edit;
 
 static buckets_obj_err edit_tags(void *ud, const buckets_object_info *cur, buckets_xl_kv **user, size_t *nuser,
@@ -110,12 +115,21 @@ static buckets_obj_err edit_tags(void *ud, const buckets_object_info *cur, bucke
   free(e->old);
   e->old = old && *old ? buckets_xstrdup(old) : NULL;
   buckets_xl_kv_set(user, nuser, TAGGING_META, e->tags, strlen(e->tags));
+  /* PutObjectTagging decides on the new tags, DeleteObjectTagging on the old */
+  buckets_s3_repl_meta_edit(e->c, user, nuser, sys, nsys, *e->tags ? e->tags : (e->old ? e->old : ""), &e->dsc);
+  if (*e->tags && buckets_repl_dsc_any(&e->dsc)) {
+    char ts[64];
+    struct timespec now;
+    clock_gettime(CLOCK_REALTIME, &now);
+    buckets_time_rfc3339_nano(now.tv_sec, now.tv_nsec, ts);
+    buckets_xl_kv_set(sys, nsys, BUCKETS_META_TAGGING_TS, ts, strlen(ts));
+  }
   return BUCKETS_OBJ_OK;
 }
 
 static void set_object_tags(s3_ctx *c, const char *tags, int status) {
   const char *version = buckets_query_get(&c->q, "versionId");
-  tag_edit e = {.tags = tags};
+  tag_edit e = {.c = c, .tags = tags};
   buckets_object_info oi;
   buckets_obj_err err = buckets_obj_update_meta(c->s->layer, c->bucket, c->object, version, edit_tags, &e, &oi);
   /* MinIO sets the request's X-Amz-Tagging: the new tags on a put, the old ones on a delete */
@@ -125,6 +139,7 @@ static void set_object_tags(s3_ctx *c, const char *tags, int status) {
   }
   free(e.old);
   if (err) {
+    buckets_repl_dsc_free(&e.dsc);
     buckets_s3_write_error(c, buckets_s3_obj_error(err));
     return;
   }
@@ -132,6 +147,8 @@ static void set_object_tags(s3_ctx *c, const char *tags, int status) {
   c->resp->status = status;
   buckets_s3_send_event(c, *tags ? BUCKETS_EV_OBJECT_CREATED_PUT_TAGGING : BUCKETS_EV_OBJECT_CREATED_DELETE_TAGGING, c->bucket,
                         c->object, &oi, NULL);
+  buckets_repl_schedule(c->s, c->bucket, &oi, &e.dsc, BUCKETS_REPL_METADATA, "replicate:incoming");
+  buckets_repl_dsc_free(&e.dsc);
   buckets_object_info_free(&oi);
 }
 

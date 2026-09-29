@@ -18,6 +18,7 @@ struct buckets_metasys {
   buckets_strmap cache;     /* bucket -> buckets_bucket_state */
   void (*notify)(void *ud, const char *bucket);
   void *notify_ud;
+  struct buckets_kms *kms;
 };
 
 static long long now_ns(void) {
@@ -33,6 +34,8 @@ void buckets_bucket_state_release(buckets_bucket_state *st) {
   buckets_versioning_free(&st->versioning);
   if (st->has_lifecycle) buckets_lifecycle_free(&st->lifecycle);
   if (st->has_notify) buckets_notify_config_free(&st->notify);
+  if (st->has_replication) buckets_replication_free(&st->replication);
+  buckets_bucket_targets_free(&st->targets);
   free(st);
 }
 
@@ -56,7 +59,7 @@ void buckets_metasys_free(buckets_metasys *m) {
   free(m);
 }
 
-static buckets_bucket_state *build(const char *bucket, buckets_bucket_meta *meta, bool exists) {
+static buckets_bucket_state *build(buckets_metasys *m, const char *bucket, buckets_bucket_meta *meta, bool exists) {
   buckets_bucket_state *st = buckets_xcalloc(1, sizeof(*st));
   atomic_init(&st->refs, 1);
   st->exists = exists;
@@ -100,6 +103,15 @@ static buckets_bucket_state *build(const char *bucket, buckets_bucket_meta *meta
     st->has_quota = buckets_quota_parse(qt->data, qt->len, &st->quota, err, sizeof(err));
     if (!st->has_quota) buckets_log_warn("bucket %s: stored quota configuration does not parse: %s", bucket, err);
   }
+  const buckets_buf *rx = &st->meta.config[BUCKETS_BCFG_REPLICATION];
+  if (rx->len) {
+    char err[256];
+    st->has_replication = buckets_replication_parse(rx->data, rx->len, &st->replication, err, sizeof(err));
+    if (!st->has_replication) buckets_log_warn("bucket %s: stored replication configuration does not parse: %s", bucket, err);
+  }
+  const buckets_buf *tx = &st->meta.config[BUCKETS_BCFG_TARGETS], *tmx = &st->meta.config[BUCKETS_BCFG_TARGETS_META];
+  if (tx->len && !buckets_bucket_targets_open(m->kms, bucket, tx->data, tx->len, tmx->data, tmx->len, &st->targets))
+    buckets_log_warn("bucket %s: stored bucket targets cannot be read", bucket);
   const buckets_buf *ver = &st->meta.config[BUCKETS_BCFG_VERSIONING];
   if (ver->len) {
     char err[256];
@@ -113,7 +125,7 @@ static buckets_bucket_state *load(buckets_metasys *m, const char *bucket) {
   buckets_bucket_meta meta;
   bool exists = buckets_bucket_meta_load(m->layer, bucket, &meta);
   if (!exists) buckets_bucket_meta_init(&meta, bucket, 0);
-  return build(bucket, &meta, exists);
+  return build(m, bucket, &meta, exists);
 }
 
 static void publish(buckets_metasys *m, const char *bucket, buckets_bucket_state *st) {
@@ -136,7 +148,7 @@ buckets_bucket_state *buckets_metasys_get(buckets_metasys *m, const char *bucket
 }
 
 static bool metasys_update_impl(buckets_metasys *m, const char *bucket, buckets_bucket_cfg cfg, const void *data,
-                                size_t len) {
+                                size_t len, const void *data2, size_t len2) {
   pthread_mutex_lock(&m->write_mu);
   buckets_bucket_meta meta;
   if (!buckets_bucket_meta_load(m->layer, bucket, &meta)) {
@@ -147,9 +159,14 @@ static bool metasys_update_impl(buckets_metasys *m, const char *bucket, buckets_
   if (data && len) buckets_buf_append(&meta.config[cfg], data, len);
   long long ns = now_ns();
   meta.updated[cfg] = (buckets_gotime){ns / 1000000000LL, (int32_t)(ns % 1000000000LL)};
+  if (cfg == BUCKETS_BCFG_TARGETS) { /* the targets' encryption metadata goes along */
+    buckets_buf_reset(&meta.config[BUCKETS_BCFG_TARGETS_META]);
+    if (data2 && len2) buckets_buf_append(&meta.config[BUCKETS_BCFG_TARGETS_META], data2, len2);
+    meta.updated[BUCKETS_BCFG_TARGETS_META] = meta.updated[cfg];
+  }
   bool ok = buckets_bucket_meta_save(m->layer, &meta);
   if (ok) {
-    buckets_bucket_state *st = build(bucket, &meta, true);
+    buckets_bucket_state *st = build(m, bucket, &meta, true);
     publish(m, bucket, st);
     buckets_bucket_state_release(st);
     if (m->notify) m->notify(m->notify_ud, bucket);
@@ -167,8 +184,26 @@ bool buckets_metasys_update(buckets_metasys *m, const char *bucket, buckets_buck
   buckets_audit_tags *at = buckets_audit_tags_current();
   bool was = at && at->sys_ops;
   if (at) at->sys_ops = true;
-  bool ok = metasys_update_impl(m, bucket, cfg, data, len);
+  bool ok = metasys_update_impl(m, bucket, cfg, data, len, NULL, 0);
   if (at) at->sys_ops = was;
+  return ok;
+}
+
+void buckets_metasys_set_kms(buckets_metasys *m, struct buckets_kms *kms) { m->kms = kms; }
+
+bool buckets_metasys_update_targets(buckets_metasys *m, const char *bucket, const void *json, size_t len) {
+  buckets_buf data = BUCKETS_BUF_INIT, meta = BUCKETS_BUF_INIT;
+  bool ok = true;
+  if (json && len) ok = buckets_bucket_targets_seal(m->kms, bucket, json, len, &data, &meta);
+  if (ok) {
+    buckets_audit_tags *at = buckets_audit_tags_current();
+    bool was = at && at->sys_ops;
+    if (at) at->sys_ops = true;
+    ok = metasys_update_impl(m, bucket, BUCKETS_BCFG_TARGETS, data.data, data.len, meta.data, meta.len);
+    if (at) at->sys_ops = was;
+  }
+  buckets_buf_free(&data);
+  buckets_buf_free(&meta);
   return ok;
 }
 

@@ -12,6 +12,7 @@
 #include "bucket/metasys.h"
 #include "core/timefmt.h"
 #include "s3/internal.h"
+#include "s3/replicate.h"
 #include "s3/xml.h"
 
 static int64_t now_ns(void) {
@@ -173,6 +174,7 @@ typedef struct {
   int64_t until;
   bool hold, is_hold;
   buckets_s3_error err;
+  buckets_repl_dsc dsc;
 } lock_edit;
 
 /* isPutRetentionAllowed */
@@ -230,6 +232,7 @@ static buckets_obj_err edit_lock(void *ud, const buckets_object_info *cur, bucke
     const char *v = e->hold ? "ON" : "OFF";
     buckets_xl_kv_set(user, nuser, BUCKETS_LOCK_HOLD_META, v, strlen(v));
     buckets_xl_kv_set(sys, nsys, BUCKETS_LOCK_HOLD_TS_META, ts, strlen(ts));
+    buckets_s3_repl_meta_edit(e->c, user, nuser, sys, nsys, NULL, &e->dsc);
     return BUCKETS_OBJ_OK;
   }
   if ((e->err = enforce_put_retention(e->c, cur, e->mode, e->until)) != BUCKETS_ERR_NONE) return BUCKETS_OBJ_ERR_READER;
@@ -244,6 +247,7 @@ static buckets_obj_err edit_lock(void *ud, const buckets_object_info *cur, bucke
     buckets_xl_kv_set(user, nuser, BUCKETS_LOCK_UNTIL_META, "", 0);
   }
   buckets_xl_kv_set(sys, nsys, BUCKETS_LOCK_RET_TS_META, ts, strlen(ts));
+  buckets_s3_repl_meta_edit(e->c, user, nuser, sys, nsys, NULL, &e->dsc);
   return BUCKETS_OBJ_OK;
 }
 
@@ -270,16 +274,20 @@ static void apply_edit(s3_ctx *c, lock_edit *e) {
   buckets_object_info oi;
   buckets_obj_err err = buckets_obj_update_meta(c->s->layer, c->bucket, c->object, version, edit_lock, e, &oi);
   if (err == BUCKETS_OBJ_ERR_READER && e->err) {
+    buckets_repl_dsc_free(&e->dsc);
     buckets_s3_write_error(c, e->err);
     return;
   }
   if (err) {
+    buckets_repl_dsc_free(&e->dsc);
     buckets_s3_write_error(c, buckets_s3_obj_error(err));
     return;
   }
   c->resp->status = 200;
   buckets_s3_send_event(c, e->is_hold ? BUCKETS_EV_OBJECT_CREATED_PUT_LEGAL_HOLD : BUCKETS_EV_OBJECT_CREATED_PUT_RETENTION,
                         c->bucket, c->object, &oi, NULL);
+  buckets_repl_schedule(c->s, c->bucket, &oi, &e->dsc, BUCKETS_REPL_METADATA, "replicate:incoming");
+  buckets_repl_dsc_free(&e->dsc);
   buckets_object_info_free(&oi);
 }
 

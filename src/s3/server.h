@@ -40,6 +40,7 @@ typedef struct buckets_s3_server {
   void *bucket_usage_ud;
   struct buckets_usage_cache_s *usage; /* the stored data usage (scanner/usage.h), once the layer is up */
   struct buckets_kms *kms;             /* SSE-S3/SSE-KMS keys, or NULL when no KMS is configured */
+  struct buckets_repl *repl;           /* bucket replication (targets and workers), once the layer is up */
   /* Background threads (IAM start and refresh, LDAP sync), stopped and
    * joined by buckets_s3_server_stop before the object layer is freed. */
   pthread_mutex_t bg_mu;

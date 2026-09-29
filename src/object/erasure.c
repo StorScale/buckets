@@ -30,6 +30,8 @@
 #include "object/nslock.h"
 #include "object/epool.h"
 #include "object/object.h"
+#include "bucket/replication.h"
+#include "bucket/targets.h"
 
 #define XL_META "xl.meta"
 #define DIR_SUFFIX "__XLDIR__"
@@ -413,7 +415,10 @@ static void fill_info(buckets_object_info *oi, const char *name, const buckets_x
       buckets_xl_part_set_index(&oi->parts[i], o->parts[i].index, o->parts[i].index_len);
     }
   }
-  oi->delete_marker = o->type == BUCKETS_XL_TYPE_DELETE;
+  /* FileInfo.Deleted: a version pending purge (a replicated versioned
+   * delete not yet done on every target) reads like a delete marker */
+  const buckets_xl_kv *ps = buckets_xl_kv_get(o->meta_sys, o->nmeta_sys, "x-minio-internal-purgestatus");
+  oi->delete_marker = o->type == BUCKETS_XL_TYPE_DELETE || (ps && ps->value_len);
   oi->data_blocks = o->ec_m;
   oi->parity_blocks = o->ec_n;
   for (size_t i = 0; i < o->nmeta_user; i++) {
@@ -953,13 +958,18 @@ buckets_obj_err buckets_ep_put(buckets_epool *L, const char *bucket, const char 
     if (opts && opts->mod_time_ns) o.mod_time = opts->mod_time_ns;
     buckets_xl_part_add(&o, 1, size, size, NULL);
     for (size_t i = 0; opts && i < opts->nmeta; i++) {
-      buckets_xl_kv_set(&o.meta_user, &o.nmeta_user, opts->meta[i].key, opts->meta[i].value, opts->meta[i].value_len);
+      /* AddVersion: reserved keys are system metadata */
+      bool internal = strncasecmp(opts->meta[i].key, BUCKETS_XL_RESERVED_PREFIX, strlen(BUCKETS_XL_RESERVED_PREFIX)) == 0;
+      if (internal) buckets_xl_kv_set(&o.meta_sys, &o.nmeta_sys, opts->meta[i].key, opts->meta[i].value, opts->meta[i].value_len);
+      else buckets_xl_kv_set(&o.meta_user, &o.nmeta_user, opts->meta[i].key, opts->meta[i].value, opts->meta[i].value_len);
     }
     char etag[33];
     buckets_hex_encode(md5, 16, etag);
     buckets_xl_kv_set(&o.meta_user, &o.nmeta_user, "etag", etag, 32);
     if (e.inline_mode) buckets_xl_kv_set(&o.meta_sys, &o.nmeta_sys, BUCKETS_XL_META_INLINE, "true", 4);
     if (!err && opts && opts->pre_commit) err = opts->pre_commit(opts->pre_commit_ud, &cks, &o);
+    if (!err && opts && opts->preserve_etag && *opts->preserve_etag)
+      buckets_xl_kv_set(&o.meta_user, &o.nmeta_user, "etag", opts->preserve_etag, strlen(opts->preserve_etag));
     if (!err) {
       /* Like MinIO, only the commit is locked: the data is already staged. */
       buckets_nslock_entry *lk = lock_ns(L, bucket, object, true);
@@ -1588,6 +1598,9 @@ static buckets_obj_err add_delete_marker(buckets_epool *L, const char *bucket, c
   return BUCKETS_OBJ_OK;
 }
 
+static buckets_obj_err delete_repl(buckets_epool *L, const char *bucket, const char *object,
+                                   const buckets_delete_opts *opts, buckets_delete_result *res);
+
 buckets_obj_err buckets_ep_delete_ex(buckets_epool *L, const char *bucket, const char *object,
                                      const buckets_delete_opts *opts, buckets_delete_result *res) {
   memset(res, 0, sizeof(*res));
@@ -1600,7 +1613,10 @@ buckets_obj_err buckets_ep_delete_ex(buckets_epool *L, const char *bucket, const
   if (vid && !buckets_xl_version_id_parse(vid, id)) return BUCKETS_OBJ_ERR_NO_SUCH_VERSION;
   buckets_nslock_entry *lk = lock_ns(L, bucket, object, true);
   if (!lk) return BUCKETS_OBJ_ERR_TIMEOUT;
-  if (vid || (!opts->versioned && !opts->suspended)) {
+  if (opts->replica_marker || opts->replica || opts->decide || (opts->repl_status && *opts->repl_status) ||
+      (opts->purge_status && *opts->purge_status)) {
+    err = delete_repl(L, bucket, object, opts, res);
+  } else if (vid || (!opts->versioned && !opts->suspended)) {
     /* A version removed for good: say whether it was a delete marker. */
     buckets_object_info oi;
     if (obj_stat(L, bucket, object, vid ? vid : "null", &oi) == BUCKETS_OBJ_OK) {
@@ -1618,6 +1634,332 @@ buckets_obj_err buckets_ep_delete_ex(buckets_epool *L, const char *bucket, const
     if (!err) err = add_delete_marker(L, bucket, object, opts->versioned, res);
   }
   buckets_nslock_unlock(lk);
+  return err;
+}
+
+/* ---- deletes with replication state ------------------------------------------------
+ * MinIO's erasureObjects.DeleteObject and xlMetaV2.DeleteVersion, for
+ * deletes that carry replication state: delete markers and versioned
+ * deletes queued for replication (their status recorded on the version),
+ * their completion, and incoming replicated deletes. */
+
+typedef struct {
+  bool has_id;
+  uint8_t id[16];
+  bool deleted, mark_deleted;
+  int64_t mod_time;
+  const char *repl_internal; /* ReplicationStatusInternal */
+  int64_t repl_ts;           /* 0: Go's zero time */
+  bool replica;              /* ReplicaStatus REPLICA */
+  int64_t replica_ts;
+  const char *purge_internal;
+  const char *const *reset_keys, *const *reset_values;
+  size_t nreset;
+} delfi;
+
+/* ReplicationState.CompositeReplicationStatus (ReplicaTimeStamp aside) */
+static const char *rs_composite(const delfi *f) {
+  if (f->repl_internal && *f->repl_internal) return buckets_repl_composite_status(f->repl_internal);
+  return f->replica ? BUCKETS_RS_REPLICA : "";
+}
+
+static const char *rs_purge(const delfi *f) {
+  return f->purge_internal && *f->purge_internal ? buckets_repl_composite_purge(f->purge_internal) : "";
+}
+
+/* FileInfo.DeleteMarkerReplicationStatus */
+static const char *dm_status(const delfi *f) { return f->deleted ? rs_composite(f) : ""; }
+
+static void set_ts(buckets_xl_kv **kv, size_t *n, const char *key, int64_t ns) {
+  char ts[BUCKETS_TIME_RFC3339_NANO_LEN + 1];
+  if (ns) buckets_time_rfc3339_nano(ns / 1000000000LL, (long)(ns % 1000000000LL), ts);
+  else buckets_time_rfc3339_nano(BUCKETS_GO_ZERO_SEC, 0, ts);
+  buckets_xl_kv_set(kv, n, key, ts, strlen(ts));
+}
+
+static void set_str(buckets_xl_kv **kv, size_t *n, const char *key, const char *v) {
+  buckets_xl_kv_set(kv, n, key, v ? v : "", v ? strlen(v) : 0);
+}
+
+/* The replication keys DeleteVersion puts on a delete marker. */
+static void marker_meta(const delfi *f, buckets_xl_kv **kv, size_t *n) {
+  const char *dm = dm_status(f);
+  if (*dm) {
+    if (strcmp(dm, BUCKETS_RS_REPLICA) == 0) {
+      set_str(kv, n, BUCKETS_META_REPLICA_STATUS, BUCKETS_RS_REPLICA);
+      set_ts(kv, n, BUCKETS_META_REPLICA_TS, f->replica_ts);
+    } else {
+      set_str(kv, n, BUCKETS_META_REPL_STATUS, f->repl_internal);
+      set_ts(kv, n, BUCKETS_META_REPL_TS, f->repl_ts);
+    }
+  }
+  if (*rs_purge(f)) set_str(kv, n, BUCKETS_META_PURGE_STATUS, f->purge_internal);
+  for (size_t i = 0; i < f->nreset; i++) set_str(kv, n, f->reset_keys[i], f->reset_values[i]);
+}
+
+static void put_decoded(buckets_xlmeta *x, const buckets_xl_object *o) {
+  buckets_buf meta = BUCKETS_BUF_INIT;
+  buckets_xl_header hdr;
+  buckets_xl_object_encode(o, &meta, &hdr);
+  buckets_xlmeta_put_version(x, &hdr, (uint8_t *)meta.data, meta.len);
+}
+
+/* Whether another version shares data_dir (SharedDataDirCount > 0). */
+static bool shared_data_dir(const buckets_xlmeta *x, const uint8_t id[16], const uint8_t dd[16]) {
+  for (size_t i = 0; i < x->n; i++) {
+    if (x->versions[i].hdr.type != BUCKETS_XL_TYPE_OBJECT || memcmp(x->versions[i].hdr.version_id, id, 16) == 0)
+      continue;
+    buckets_xl_object o;
+    if (buckets_xl_object_decode(&x->versions[i], &o) != BUCKETS_XL_OK) continue;
+    bool same = memcmp(o.data_dir, dd, 16) == 0 && !buckets_xl_kv_get(o.meta_sys, o.nmeta_sys, BUCKETS_XL_META_INLINE);
+    buckets_xl_object_free(&o);
+    if (same) return true;
+  }
+  return false;
+}
+
+/* xlMetaV2.DeleteVersion. Returns false for errFileVersionNotFound; dd
+ * receives a data directory to remove ("" for none). */
+static bool xl_delete_version(buckets_xlmeta *x, const delfi *f, char dd[37]) {
+  dd[0] = '\0';
+  uint8_t uv[16] = {0};
+  if (f->has_id) memcpy(uv, f->id, 16);
+  buckets_xl_object ventry;
+  memset(&ventry, 0, sizeof(ventry));
+  if (f->deleted) {
+    ventry.type = BUCKETS_XL_TYPE_DELETE;
+    memcpy(ventry.version_id, uv, 16);
+    ventry.mod_time = f->mod_time;
+    marker_meta(f, &ventry.meta_sys, &ventry.nmeta_sys);
+  }
+  const char *dm = dm_status(f), *ps = rs_purge(f);
+  bool update = false;
+  if (!*ps && (strcmp(dm, BUCKETS_RS_REPLICA) == 0 || !*dm)) {
+    update = f->mark_deleted;
+  } else {
+    if (f->deleted && strcmp(ps, BUCKETS_VPS_COMPLETE) != 0 && (*ps || !*dm)) update = true;
+    if (*ps && strcmp(ps, BUCKETS_VPS_COMPLETE) != 0) update = true;
+  }
+  bool ok = true, done = false;
+  for (size_t i = 0; i < x->n && !done; i++) {
+    if (memcmp(x->versions[i].hdr.version_id, uv, 16) != 0) continue;
+    uint8_t type = x->versions[i].hdr.type;
+    if (type == BUCKETS_XL_TYPE_DELETE) {
+      if (update) {
+        buckets_xl_object cur;
+        if (buckets_xl_object_decode(&x->versions[i], &cur) == BUCKETS_XL_OK) {
+          if (*dm) {
+            if (strcmp(dm, BUCKETS_RS_REPLICA) == 0) {
+              set_str(&cur.meta_sys, &cur.nmeta_sys, BUCKETS_META_REPLICA_STATUS, BUCKETS_RS_REPLICA);
+              set_ts(&cur.meta_sys, &cur.nmeta_sys, BUCKETS_META_REPLICA_TS, f->replica_ts);
+            } else {
+              set_str(&cur.meta_sys, &cur.nmeta_sys, BUCKETS_META_REPL_STATUS, f->repl_internal);
+              set_ts(&cur.meta_sys, &cur.nmeta_sys, BUCKETS_META_REPL_TS, f->repl_ts);
+            }
+          }
+          if (*ps) set_str(&cur.meta_sys, &cur.nmeta_sys, BUCKETS_META_PURGE_STATUS, f->purge_internal);
+          for (size_t k = 0; k < f->nreset; k++) set_str(&cur.meta_sys, &cur.nmeta_sys, f->reset_keys[k], f->reset_values[k]);
+          put_decoded(x, &cur);
+          buckets_xl_object_free(&cur);
+        }
+        buckets_xl_object_free(&ventry);
+        return true;
+      }
+      buckets_xlmeta_remove_version(x, uv);
+      bool zero = !f->has_id;
+      if (f->mark_deleted && strcmp(ps, BUCKETS_VPS_COMPLETE) != 0) {
+        if (f->deleted) put_decoded(x, &ventry);
+      } else if (f->deleted && zero) {
+        put_decoded(x, &ventry);
+      }
+      buckets_xl_object_free(&ventry);
+      return true;
+    }
+    if (type == BUCKETS_XL_TYPE_OBJECT && update && !f->deleted) {
+      buckets_xl_object cur;
+      if (buckets_xl_object_decode(&x->versions[i], &cur) == BUCKETS_XL_OK) {
+        set_str(&cur.meta_sys, &cur.nmeta_sys, BUCKETS_META_PURGE_STATUS, f->purge_internal);
+        for (size_t k = 0; k < f->nreset; k++) set_str(&cur.meta_sys, &cur.nmeta_sys, f->reset_keys[k], f->reset_values[k]);
+        put_decoded(x, &cur);
+        buckets_xl_object_free(&cur);
+      }
+      buckets_xl_object_free(&ventry);
+      return true;
+    }
+    done = type == BUCKETS_XL_TYPE_OBJECT;
+    if (done) { /* the second loop: remove the object version */
+      buckets_xl_object cur;
+      bool dec = buckets_xl_object_decode(&x->versions[i], &cur) == BUCKETS_XL_OK;
+      bool inl = dec && buckets_xl_kv_get(cur.meta_sys, cur.nmeta_sys, BUCKETS_XL_META_INLINE);
+      uint8_t ddir[16] = {0};
+      if (dec) memcpy(ddir, cur.data_dir, 16);
+      if (dec) buckets_xl_object_free(&cur);
+      char key[37];
+      buckets_xl_version_id_string(uv, key);
+      buckets_xlmeta_remove_version(x, uv);
+      buckets_xlmeta_inline_remove(x, key);
+      if (f->deleted) put_decoded(x, &ventry);
+      if (dec && !inl && !shared_data_dir(x, uv, ddir)) buckets_xl_version_id_string(ddir, dd);
+      if (strcmp(dd, "null") == 0) dd[0] = '\0';
+      buckets_xl_object_free(&ventry);
+      return true;
+    }
+  }
+  if (f->deleted) {
+    put_decoded(x, &ventry);
+    ok = true;
+  } else {
+    ok = false;
+  }
+  buckets_xl_object_free(&ventry);
+  return ok;
+}
+
+typedef struct {
+  buckets_eset *s;
+  const char *bucket, *op;
+  dmeta *m;
+  const delfi *f;
+  bool force_marker;
+  bool ok[MAX_SET], notfound[MAX_SET];
+} rdel_ctx;
+
+/* xlStorage.DeleteVersion on drive i. */
+static void rdel_one(void *ctx, size_t i) {
+  rdel_ctx *c = ctx;
+  c->ok[i] = c->notfound[i] = false;
+  buckets_drive *d = c->s->drives[i];
+  if (!d) return;
+  dmeta *m = &c->m[i];
+  buckets_xlmeta x;
+  if (m->loaded) {
+    x = m->x;
+    memset(&m->x, 0, sizeof(m->x));
+    m->loaded = false;
+  } else if (m->missing && c->force_marker && c->f->deleted) {
+    memset(&x, 0, sizeof(x)); /* a new xl.meta holding just the marker */
+  } else {
+    c->notfound[i] = m->missing;
+    return;
+  }
+  char dd[37];
+  if (!xl_delete_version(&x, c->f, dd)) {
+    buckets_xlmeta_free(&x);
+    c->notfound[i] = true;
+    return;
+  }
+  buckets_drive_err de;
+  if (x.n == 0) {
+    de = buckets_drive_delete(d, c->bucket, c->op, true, true);
+  } else {
+    buckets_buf bytes = BUCKETS_BUF_INIT;
+    buckets_xlmeta_serialize(&x, &bytes);
+    char *mp = join(c->op, XL_META);
+    de = buckets_drive_write_all(d, c->bucket, mp, bytes.data, bytes.len);
+    free(mp);
+    buckets_buf_free(&bytes);
+    if (!de && dd[0]) {
+      char *dp = join(c->op, dd);
+      buckets_drive_delete(d, c->bucket, dp, true, false);
+      free(dp);
+    }
+  }
+  buckets_xlmeta_free(&x);
+  c->ok[i] = de == BUCKETS_DRIVE_OK || de == BUCKETS_DRIVE_ERR_NOT_FOUND;
+}
+
+static buckets_obj_err delete_repl(buckets_epool *L, const char *bucket, const char *object,
+                                   const buckets_delete_opts *opts, buckets_delete_result *res) {
+  const char *vid = opts->version_id && *opts->version_id ? opts->version_id : NULL;
+  bool null_vid = vid && strcmp(vid, "null") == 0;
+  /* getObjectInfoAndQuorum(opts.VersionID): a delete marker or a version
+   * pending purge is still "found" (MinIO returns its info with the error) */
+  buckets_object_info goi;
+  memset(&goi, 0, sizeof(goi));
+  buckets_obj_err gerr = obj_stat(L, bucket, object, vid ? vid : NULL, &goi);
+  bool found = gerr == BUCKETS_OBJ_OK, version_found = true;
+  if (!found) {
+    if (gerr != BUCKETS_OBJ_ERR_NO_SUCH_KEY && gerr != BUCKETS_OBJ_ERR_NO_SUCH_VERSION) return gerr;
+    if (opts->replica_marker) version_found = false;
+    else return gerr;
+  }
+  char *dec_repl = NULL, *dec_purge = NULL;
+  if (opts->decide) opts->decide(opts->decide_ud, found ? &goi : NULL, found, &dec_repl, &dec_purge);
+  delfi f = {.repl_internal = opts->repl_status, .repl_ts = opts->repl_ts_ns, .replica = opts->replica,
+             .replica_ts = opts->replica ? now_ns() : 0, .purge_internal = opts->purge_status,
+             .reset_keys = opts->reset_keys, .reset_values = opts->reset_values, .nreset = opts->nreset};
+  /* SetDeleteReplicationState */
+  if (dec_repl && *dec_repl) {
+    if (vid) f.purge_internal = dec_repl;
+    else f.repl_internal = dec_repl;
+  }
+  if (dec_purge && *dec_purge) f.purge_internal = dec_purge;
+  bool mark_delete = found && goi.version_id[0];
+  bool delete_marker = opts->versioned;
+  const char *goi_purge = "";
+  const buckets_xl_kv *gps = found ? buckets_object_sys(&goi, BUCKETS_META_PURGE_STATUS) : NULL;
+  if (gps && gps->value_len) goi_purge = (const char *)gps->value;
+  bool goi_is_marker = found && goi.delete_marker && !*goi_purge;
+  if (vid) {
+    const char *dmr = rs_composite(&f), *vps = rs_purge(&f);
+    if (version_found && strcmp(dmr, BUCKETS_RS_REPLICA) == 0) mark_delete = false;
+    if (!*vps && !*dmr) mark_delete = false;
+    if (strcmp(vps, BUCKETS_VPS_COMPLETE) == 0) mark_delete = false;
+    if (version_found && found) {
+      if (*goi_purge) delete_marker = false;
+      else if (!goi_is_marker) delete_marker = false;
+    }
+  }
+  f.mod_time = opts->mod_time_ns ? opts->mod_time_ns : now_ns();
+  if (mark_delete && (opts->versioned || opts->suspended)) {
+    if (!delete_marker) delete_marker = opts->suspended && !vid;
+    f.deleted = delete_marker;
+    f.mark_deleted = true;
+    if (vid && !null_vid) {
+      f.has_id = buckets_xl_version_id_parse(vid, f.id);
+    } else if (!vid && opts->versioned) {
+      char vs[37];
+      new_uuid_bytes(f.id, vs);
+      f.has_id = true;
+    }
+  } else {
+    f.deleted = delete_marker;
+    f.mark_deleted = mark_delete;
+    if (vid && !null_vid) f.has_id = buckets_xl_version_id_parse(vid, f.id);
+  }
+  buckets_eset *s = buckets_ep_set_for(L, object);
+  char *op = obj_path(object);
+  dmeta m[MAX_SET];
+  load_metas(s, bucket, op, m);
+  rdel_ctx c = {.s = s, .bucket = bucket, .op = op, .m = m, .f = &f, .force_marker = opts->replica_marker};
+  buckets_io_parallel(s->n, rdel_one, &c);
+  free_metas(m, s->n);
+  free(op);
+  size_t ok = 0, notfound = 0, online = 0;
+  for (size_t i = 0; i < s->n; i++) {
+    ok += c.ok[i];
+    notfound += c.notfound[i];
+    online += s->drives[i] != NULL;
+  }
+  buckets_obj_err err = BUCKETS_OBJ_OK;
+  int wq = (int)(s->n / 2 + 1);
+  if ((int)ok < wq) {
+    if ((int)notfound >= wq) err = vid ? BUCKETS_OBJ_ERR_NO_SUCH_VERSION : BUCKETS_OBJ_ERR_NO_SUCH_KEY;
+    else err = BUCKETS_OBJ_ERR_WRITE_QUORUM;
+  }
+  if (!err) {
+    char vs[37] = "null";
+    if (f.has_id) buckets_xl_version_id_string(f.id, vs);
+    if (ok < online) report_degraded(L, bucket, object, vs, false);
+    res->delete_marker = f.deleted;
+    snprintf(res->version_id, sizeof(res->version_id), "%s", vs);
+    res->mod_time_ns = f.mod_time;
+    snprintf(res->repl_status, sizeof(res->repl_status), "%s", f.deleted && f.repl_internal ? f.repl_internal : "");
+    snprintf(res->purge_status, sizeof(res->purge_status), "%s", f.purge_internal ? f.purge_internal : "");
+  }
+  free(dec_repl);
+  free(dec_purge);
+  if (found) buckets_object_info_free(&goi);
   return err;
 }
 

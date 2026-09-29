@@ -70,10 +70,13 @@ add_library(buckets STATIC
   net/conn.c
   net/kafka.c
   net/fetch.c
+  net/s3client.c
   net/ldap.c
   s3/errors.c
   s3/errors_gen.c
   s3/xml.c
+  s3/replicate.c
+  s3/replhandlers.c
   s3/sigv4.c
   s3/sign.c
   s3/sigv2.c
@@ -97,6 +100,8 @@ add_library(buckets STATIC
   object/erasure.c
   object/nslock.c
   object/pools.c
+  bucket/replication.c
+  bucket/targets.c
   bucket/metadata.c
   bucket/metasys.c
   bucket/versioning.c
@@ -134,6 +139,7 @@ add_library(buckets STATIC
   admin/config.c
   admin/iamxfer.c
   admin/bucket.c
+  admin/replicate.c
   admin/kms.c
   config/config.c
   config/sys.c

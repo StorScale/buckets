@@ -44,6 +44,7 @@
 #include "s3/errors.h"
 #include "s3/sigv4.h"
 #include "s3/internal.h"
+#include "s3/replicate.h"
 #include "s3/sigv2.h"
 #include "s3/xml.h"
 
@@ -724,6 +725,8 @@ void buckets_s3_server_set_layer(buckets_s3_server *s, buckets_objlayer *layer) 
   s->bucket_usage = usage_of;
   s->bucket_usage_ud = s->usage;
   buckets_metasys_set_notify(s->meta, notify_bucket, s);
+  buckets_metasys_set_kms(s->meta, s->kms);
+  s->repl = buckets_repl_new(s);
   s->layer = layer; /* atomic store, after host_id and meta */
   s->iam_thread_started = pthread_create(&s->iam_thread, NULL, iam_start_main, s) == 0;
   s->metrics_thread_started = pthread_create(&s->metrics_thread, NULL, metrics_main, s) == 0;
@@ -742,6 +745,7 @@ void buckets_s3_server_stop(buckets_s3_server *s) {
   s->ldap_thread_started = false;
   if (s->metrics_thread_started) pthread_join(s->metrics_thread, NULL);
   s->metrics_thread_started = false;
+  buckets_repl_stop(s->repl);
   buckets_iam_stop_refresh(s->iam);
 }
 
@@ -801,10 +805,9 @@ void buckets_s3_write_rejected(s3_ctx *c) {
 /* Real MinIO sub-resources not implemented yet: NotImplemented rather than
  * falling through to the catch-all bucket routes. */
 static bool pending_subresource(const s3_ctx *c, bool put) {
-  static const char *const put_pending[] = {"replication", "replication-reset"};
-  static const char *const del_pending[] = {"replication"};
-  const char *const *list = put ? put_pending : del_pending;
-  size_t n = put ? BUCKETS_ARRAY_LEN(put_pending) : BUCKETS_ARRAY_LEN(del_pending);
+  static const char *const put_pending[] = {"replication-reset"};
+  const char *const *list = put ? put_pending : NULL;
+  size_t n = put ? BUCKETS_ARRAY_LEN(put_pending) : 0;
   for (size_t i = 0; i < n; i++)
     if (buckets_query_has(&c->q, list[i])) return true;
   return false;
@@ -1381,6 +1384,7 @@ static bool authorize_bucket_request(s3_ctx *c) {
     else if (buckets_query_has(&c->q, "lifecycle")) action = "s3:PutLifecycleConfiguration";
     else if (buckets_query_has(&c->q, "encryption")) action = "s3:PutEncryptionConfiguration";
     else if (buckets_query_has(&c->q, "notification")) action = NULL; /* the handler authorizes */
+    else if (buckets_query_has(&c->q, "replication")) action = "s3:PutReplicationConfiguration";
     else if (!pending_subresource(c, true)) action = "s3:CreateBucket"; /* the catch-all PUT route */
   } else if (buckets_str_eq_c(m, "HEAD")) {
     if (buckets_s3_authorize(c, "s3:HeadBucket", c->bucket, NULL, NULL) == BUCKETS_ERR_NONE) return true;
@@ -1390,6 +1394,7 @@ static bool authorize_bucket_request(s3_ctx *c) {
     if (buckets_query_has(&c->q, "tagging")) action = "s3:PutBucketTagging"; /* as MinIO */
     else if (buckets_query_has(&c->q, "lifecycle")) action = "s3:PutLifecycleConfiguration"; /* as MinIO */
     else if (buckets_query_has(&c->q, "encryption")) action = "s3:PutEncryptionConfiguration"; /* as MinIO */
+    else if (buckets_query_has(&c->q, "replication")) action = "s3:PutReplicationConfiguration"; /* as MinIO */
     else if (!pending_subresource(c, false))
       action = force.p && buckets_str_ieq_c(force, "true") ? "s3:ForceDeleteBucket" : "s3:DeleteBucket";
   } else if (buckets_str_eq_c(m, "GET")) {
@@ -1401,6 +1406,7 @@ static bool authorize_bucket_request(s3_ctx *c) {
     else if (buckets_query_has(&c->q, "lifecycle")) action = "s3:GetLifecycleConfiguration";
     else if (buckets_query_has(&c->q, "encryption")) action = "s3:GetEncryptionConfiguration";
     else if (buckets_query_has(&c->q, "uploads")) action = "s3:ListBucketMultipartUploads";
+    else if (buckets_query_has(&c->q, "replication")) action = "s3:GetReplicationConfiguration";
     else if (buckets_query_has(&c->q, "events")) action = NULL; /* the handler authorizes */
     else if (!has_unhandled_subresource(&c->q)) action = "s3:ListBucket";
   }
@@ -1550,6 +1556,11 @@ static void route_bucket(s3_ctx *c) {
       buckets_s3_put_notification(c); /* authorizes, then checks the bucket */
       return;
     }
+    if (buckets_query_has(&c->q, "replication")) {
+      if (!bucket_exists(c)) buckets_s3_write_error(c, BUCKETS_ERR_NO_SUCH_BUCKET);
+      else buckets_s3_put_bucket_replication(c);
+      return;
+    }
     if (pending_subresource(c, true)) {
       buckets_s3_write_error(c, BUCKETS_ERR_NOT_IMPLEMENTED);
       return;
@@ -1597,6 +1608,10 @@ static void route_bucket(s3_ctx *c) {
       else c->resp->status = 204;
       return;
     }
+    if (buckets_query_has(&c->q, "replication")) {
+      buckets_s3_delete_bucket_replication(c);
+      return;
+    }
     if (pending_subresource(c, false)) {
       buckets_s3_write_error(c, BUCKETS_ERR_NOT_IMPLEMENTED);
       return;
@@ -1621,6 +1636,8 @@ static void route_bucket(s3_ctx *c) {
       get_bucket_encryption(c);
     } else if (buckets_query_has(&c->q, "uploads")) {
       buckets_s3_list_uploads(c);
+    } else if (buckets_query_has(&c->q, "replication")) {
+      buckets_s3_get_bucket_replication(c);
 
     } else if (has_unhandled_subresource(&c->q)) {
       buckets_s3_write_error(c, BUCKETS_ERR_NOT_IMPLEMENTED);

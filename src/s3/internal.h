@@ -130,6 +130,38 @@ buckets_s3_error buckets_s3_read_checked_doc(s3_ctx *c);
  * more bytes to bucket would exceed its hard quota. */
 bool buckets_s3_enforce_quota(s3_ctx *c, const char *bucket, int64_t size);
 
+/* ---- replication (replhandlers.c) ---- */
+/* What a write carries for incoming replication (putOpts / delOpts). */
+typedef struct {
+  bool request;      /* X-Minio-Source-Replication-Request */
+  bool replica;      /* X-Amz-Replication-Status: REPLICA */
+  bool has_vid;      /* PUT ?versionId= */
+  char version_id[37];
+  int64_t mtime_ns;  /* X-Minio-Source-Mtime, 0 when absent */
+  char etag[256];    /* X-Minio-Source-Etag */
+  bool delete_marker; /* X-Minio-Source-Deletemarker: true */
+} buckets_s3_repl_in;
+struct buckets_repl_dsc_s;
+bool buckets_s3_repl_request(s3_ctx *c);
+bool buckets_s3_repl_replica(s3_ctx *c);
+/* Parses and authorizes (s3:ReplicateObject / ReplicateDelete for replicas);
+ * writes the error and returns false on failure. */
+bool buckets_s3_repl_in_parse(s3_ctx *c, const char *object, bool put, buckets_s3_repl_in *ri);
+/* A replica's metadata: its REPLICA status and when it arrived. */
+void buckets_s3_repl_in_meta(s3_ctx *c, const buckets_s3_repl_in *ri, buckets_xl_kv **meta, size_t *n);
+/* mustReplicate for a new version: marks it pending (into meta) and fills dsc. */
+void buckets_s3_repl_out_meta(s3_ctx *c, const char *object, buckets_xl_kv **meta, size_t *n, bool request,
+                              struct buckets_repl_dsc_s *dsc);
+/* In a metadata edit of c->object's version: mustReplicate(Metadata) on
+ * the edited metadata; marks the version pending (into sys). tags: the
+ * tags the decision sees (NULL: those in user). */
+void buckets_s3_repl_meta_edit(s3_ctx *c, buckets_xl_kv **user, size_t *nuser, buckets_xl_kv **sys, size_t *nsys,
+                               const char *tags, struct buckets_repl_dsc_s *dsc);
+bool buckets_s3_is_local_endpoint(buckets_s3_server *s, const char *endpoint);
+void buckets_s3_put_bucket_replication(s3_ctx *c);
+void buckets_s3_get_bucket_replication(s3_ctx *c);
+void buckets_s3_delete_bucket_replication(s3_ctx *c);
+
 /* ---- lifecycle (lifecycle.c) ---- */
 void buckets_s3_put_bucket_lifecycle(s3_ctx *c);
 void buckets_s3_get_bucket_lifecycle(s3_ctx *c);
