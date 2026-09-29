@@ -177,5 +177,36 @@ done
 compare nats
 compare nats-config
 
+echo "== mqtt"
+for kind in minio buckets; do
+  mock_start mqttmock.py "$WORK/mqtt.raw"
+  MINIO_NOTIFY_MQTT_ENABLE_m1=on MINIO_NOTIFY_MQTT_BROKER_m1="tcp://127.0.0.1:$MOCK_PORT" MINIO_NOTIFY_MQTT_TOPIC_m1=q0 \
+    MINIO_NOTIFY_MQTT_USERNAME_m1=mqttuser MINIO_NOTIFY_MQTT_PASSWORD_m1=mqttpass MINIO_NOTIFY_MQTT_KEEP_ALIVE_INTERVAL_m1=2s \
+    MINIO_NOTIFY_MQTT_ENABLE_m2=on MINIO_NOTIFY_MQTT_BROKER_m2="tcp://127.0.0.1:$MOCK_PORT" MINIO_NOTIFY_MQTT_TOPIC_m2=q1 \
+    MINIO_NOTIFY_MQTT_QOS_m2=1 MINIO_NOTIFY_MQTT_QUEUE_DIR_m2="$WORK/$kind-mqttq" \
+    MINIO_NOTIFY_MQTT_ENABLE_m3=on MINIO_NOTIFY_MQTT_BROKER_m3="ws://127.0.0.1:$MOCK_PORT/mqtt" MINIO_NOTIFY_MQTT_TOPIC_m3=q2 \
+    MINIO_NOTIFY_MQTT_QOS_m3=2 \
+    start "$kind" "$WORK/$kind-mqtt"
+  curl -s -o /dev/null "${S3[@]}" -X PUT "$EP/tbucket"
+  notification arn:minio:sqs::m1:mqtt arn:minio:sqs::m2:mqtt arn:minio:sqs::m3:mqtt
+  workload
+  sleep 5 # keep-alive pings in the meantime
+  for kv in "notify_mqtt:c1 broker=tcp://127.0.0.1:1 topic=t" "notify_mqtt:c2 broker=tcp://127.0.0.1 topic=t" \
+    "notify_mqtt:c3 broker=http://127.0.0.1:$MOCK_PORT topic=t" "notify_mqtt:c4 broker=tcp://127.0.0.1:$MOCK_PORT topic=t qos=x" \
+    "notify_mqtt:c5 broker=tcp://127.0.0.1:$MOCK_PORT topic=t queue_dir=/tmp/q" \
+    "notify_mqtt:c6 broker=tcp://127.0.0.1:$MOCK_PORT topic=t keep_alive_interval=10" \
+    "notify_mqtt:c7 broker=tcp:/x topic=t"; do
+    # shellcheck disable=SC2086
+    config_set $kv >>"$WORK/$kind.mqtt-config"
+  done
+  stop
+  mock_stop
+  grep -c PINGREQ "$WORK/mqtt.raw" >"$WORK/$kind.mqtt-pings" || true
+  grep -v PINGREQ "$WORK/mqtt.raw" | python3 "$HERE/targets/normalize.py" >"$WORK/$kind.mqtt"
+done
+compare mqtt
+compare mqtt-config
+[[ $(cat "$WORK/buckets.mqtt-pings") -gt 0 ]] && echo "  ok    mqtt keep-alive pings" || { echo "  FAIL  no keep-alive pings"; fails=$((fails + 1)); }
+
 echo "notify-targets: $pass passed, $fails failed"
 [[ $fails -eq 0 ]]

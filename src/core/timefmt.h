@@ -35,5 +35,8 @@ long long buckets_days_from_civil(int y, int m, int d);
 /* time.ParseDuration: a signed sequence of decimal numbers with units
  * (ns, us, µs, ms, s, m, h), e.g. "300ms", "-1.5h", "2h45m". */
 bool buckets_go_duration_parse(const char *s, int64_t *ns);
+/* The error time.ParseDuration gives for s ("time: missing unit in duration
+ * \"10\"", "time: unknown unit ...", "time: invalid duration ..."). */
+void buckets_go_duration_error(const char *s, char *err, size_t errlen);
 
 #endif

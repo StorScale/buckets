@@ -72,6 +72,9 @@ void buckets_s3_handle(const buckets_http_request *req, buckets_http_response *r
 /* Stops the background threads; call once requests have drained and
  * before freeing the object layer. */
 void buckets_s3_server_stop(buckets_s3_server *s);
+/* Closes the notification and log targets (MQTT brokers get a DISCONNECT,
+ * connections close); after everything that sends events has stopped. */
+void buckets_s3_server_close_targets(buckets_s3_server *s);
 /* The data scanner's hooks: cycle length from `scanner speed`, bucket
  * versioning from the metadata cache. */
 void buckets_s3_scanner_hooks(buckets_s3_server *s, void *hooks /* buckets_scanner_hooks */);

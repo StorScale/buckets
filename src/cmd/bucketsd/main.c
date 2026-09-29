@@ -773,6 +773,7 @@ int main(int argc, char **argv) {
   buckets_tls_free(tls);
   buckets_scanner_stop(boot.scanner);
   buckets_healer_stop(boot.healer);
+  buckets_s3_server_close_targets(&s3); /* the scanner sends lifecycle events */
   buckets_loop_free(g_loop);
   if (boot.layer) buckets_objlayer_set_locker(boot.layer, NULL, NULL, NULL);
   buckets_peer_sys_free(s3.peers);

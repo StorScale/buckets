@@ -107,13 +107,13 @@ static bool build(const buckets_config *cfg, const char *subsys, const char *pre
       snprintf(err, errlen, "invalid %s max_retry", mretry);
       ok = false;
     } else if (*rint && !buckets_go_duration_parse(rint, &retry_ns)) {
-      snprintf(err, errlen, "time: invalid duration \"%s\"", rint);
+      buckets_go_duration_error(rint, err, errlen);
       ok = false;
     } else if (retry_ns > 60000000000LL) {
       snprintf(err, errlen, "maximum allowed value for retry interval is '1m': %s", rint);
       ok = false;
     } else if (*hto && !buckets_go_duration_parse(hto, &timeout_ns)) {
-      snprintf(err, errlen, "time: invalid duration \"%s\"", hto);
+      buckets_go_duration_error(hto, err, errlen);
       ok = false;
     } else if (timeout_ns < 1000000000LL) {
       snprintf(err, errlen, "minimum value allowed for http_timeout is '1s': %s", hto);

@@ -743,6 +743,15 @@ void buckets_s3_server_stop(buckets_s3_server *s) {
   buckets_iam_stop_refresh(s->iam);
 }
 
+void buckets_s3_server_close_targets(buckets_s3_server *s) {
+  buckets_notifier *n = s->notifier;
+  buckets_logger *l = s->logger;
+  s->notifier = NULL;
+  s->logger = NULL;
+  buckets_notifier_free(n);
+  buckets_logger_free(l);
+}
+
 /* ---- response helpers ---------------------------------------------------- */
 
 static void common_headers(s3_ctx *c) {

@@ -44,17 +44,20 @@ All notable changes to this project are documented here. The format follows
   - Admin routes carry MinIO's handler names (the trace's function names).
   - Streams of unknown length (listen, trace, logs) end when the server shuts down instead of holding the drain.
 
-- Notification targets `notify_redis`, `notify_nsq` and `notify_nats` (Phase 7):
+- Notification targets `notify_redis`, `notify_nsq`, `notify_nats` and `notify_mqtt` (Phase 7):
   - Redis: namespace format (HSET `<bucket>/<object>` with `{"Records":[event]}`, HDEL for `s3:ObjectRemoved:Delete`) and access format (RPUSH `[{"Event":[event],"EventTime":…}]`), AUTH with or without a user, the key's type checked on first use. The connection pool behaves as MinIO's redigo pool does, including the PING before an idle connection is reused, so the command stream is the same as MinIO's.
   - NSQ: go-nsq's producer protocol (the V2 magic, IDENTIFY with feature negotiation, a TLS upgrade when `tls=on` and nsqd agrees, NOP pings, PUB of the event.Log JSON), with server heartbeats answered while idle.
   - NATS: nats.go's connection (INFO, TLS when `tls=on` or the server requires it, or first with `tls_handshake_first`; `cert_authority`, `client_cert`/`client_key`), CONNECT with user/password, token, an NKey seed file or a `.creds` file signing the server's nonce (ed25519), PING/PONG both ways and reconnects every 2s; PUB of the event.Log JSON, or with `jetstream=on` a JetStream publish on the connection's `_INBOX` that waits for the PubAck (retrying no-responders twice). As in MinIO, `nkey_seed`, `user_credentials` and `tls_handshake_first` come from the environment only, and `tls_skip_verify` does not turn verification off. NATS Streaming (end-of-life upstream) is not supported. Checked against nats-server 2.11 too (TLS, JetStream).
+  - MQTT: paho's client (MQTT 3.1.1, falling back to 3.1 when refused; a clean session with a time-based client ID; username/password; QoS 0, 1 with PUBACK, 2 with PUBREC/PUBREL/PUBCOMP; PINGREQ on the keep-alive; reconnects with a doubling backoff up to `reconnect_interval`; DISCONNECT when the server stops) over tcp://, ssl://, tls://, tcps://, ws:// and wss:// brokers (WebSocket with the "mqtt" subprotocol). The broker URL is checked as MinIO's xnet.ParseURL does (a port is required).
   - All take `queue_dir`/`queue_limit` (MinIO's queue store, sent as SendFromStore does) and validate their settings with MinIO's messages. Addresses are parsed as minio/pkg's `net.ParseHost` does, errors included.
   - `mc admin config set` of a notification target now checks that the targets it names are reachable, as MinIO's TestSubSysNotificationTargets does (`error (<name>:<type>): dial tcp …: connect: connection refused`); webhooks included.
-  - `tests/integration/notify-targets.sh` diffs the commands MinIO and bucketsd send to logging Redis, nsqd and NATS stand-ins (Redis formats and AUTH, heartbeats, JetStream, NKey and credentials signatures, queue stores) and their config set messages.
+  - `tests/integration/notify-targets.sh` diffs the commands MinIO and bucketsd send to logging Redis, nsqd, NATS and MQTT stand-ins (Redis formats and AUTH, heartbeats, JetStream, NKey and credentials signatures, every MQTT QoS, WebSocket brokers, keep-alives, queue stores) and their config set messages.
   - Notification subsystems check their settings as MinIO's do: only the stored keys of targets explicitly enabled, not environment variables.
 - Audit entries for what the server does on its own (MinIO's auditLogInternal): `HealObject` for each healed version (tagged `healObject: name=…,pool=…,set=…`, with MinIO's "unable to heal N missing/corrupted blocks" errors) and `ILMExpiry` for each lifecycle expiry (trigger and event `ilm:expiry`, lcAuditEvent tags). trace-interop finds them identical to MinIO's.
 
 ### Changed
+- Duration settings report time.ParseDuration's errors (`missing unit`, `unknown unit`).
+- Notification and log targets are closed when the server stops.
 - The TLS client can present a client certificate and trust extra CA files (used by the NATS target).
 - Failed outbound HTTP connections are reported as Go reports them (`dial tcp HOST:PORT: connect: connection refused`, `i/o timeout`, `lookup HOST: no such host`).
 - Drive paths are cleaned as MinIO's endpoints are (`filepath.Clean`: repeated and trailing slashes, `.` and `..`), for local paths and URLs alike, so they read the same in traces, metrics and admin info.

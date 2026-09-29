@@ -7,7 +7,7 @@
 
 #include "core/common.h"
 
-static const buckets_target_kind *const k_kinds[] = {&buckets_target_webhook, &buckets_target_redis, &buckets_target_nsq, &buckets_target_nats};
+static const buckets_target_kind *const k_kinds[] = {&buckets_target_webhook, &buckets_target_redis, &buckets_target_nsq, &buckets_target_nats, &buckets_target_mqtt};
 
 /* A target's value, resolved (env, config, default); caller frees. */
 static char *get(const buckets_config *cfg, const char *subsys, const char *target, const char *key) {

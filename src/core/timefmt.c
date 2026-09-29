@@ -205,3 +205,30 @@ bool buckets_go_duration_parse(const char *s, int64_t *ns) {
   *ns = (int64_t)(neg ? -total : total);
   return true;
 }
+
+void buckets_go_duration_error(const char *orig, char *err, size_t errlen) {
+  const char *s = orig ? orig : "";
+  if (*s == '-' || *s == '+') s++;
+  if (!*s) goto invalid;
+  while (*s) {
+    const char *num = s;
+    while ((*s >= '0' && *s <= '9') || *s == '.') s++;
+    if (s == num || (s == num + 1 && *num == '.')) goto invalid;
+    const char *u = s;
+    while (*s && *s != '.' && !(*s >= '0' && *s <= '9')) s++;
+    if (u == s) {
+      snprintf(err, errlen, "time: missing unit in duration \"%s\"", orig);
+      return;
+    }
+    static const char *const units[] = {"ns", "us", "\xc2\xb5s", "\xce\xbcs", "ms", "s", "m", "h"};
+    bool known = false;
+    for (size_t i = 0; i < sizeof(units) / sizeof(units[0]) && !known; i++)
+      known = strlen(units[i]) == (size_t)(s - u) && strncmp(u, units[i], (size_t)(s - u)) == 0;
+    if (!known) {
+      snprintf(err, errlen, "time: unknown unit \"%.*s\" in duration \"%s\"", (int)(s - u), u, orig);
+      return;
+    }
+  }
+invalid:
+  snprintf(err, errlen, "time: invalid duration \"%s\"", orig);
+}
