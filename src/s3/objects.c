@@ -674,6 +674,38 @@ static bool put_preconditions(s3_ctx *c, const char *object) {
   return failed;
 }
 
+/* ---- objSweeper ------------------------------------------------------------------------
+ * The transitioned version a write or a delete replaces: its remote copy is
+ * removed right away (the free version left behind is swept later). */
+typedef struct {
+  char *tier, *remote, *version;
+} sweeper;
+
+static void sweep_prepare(s3_ctx *c, const char *object, const char *version_id, bool versioned, bool suspended,
+                          sweeper *sw) {
+  memset(sw, 0, sizeof(*sw));
+  if (buckets_tiers_empty(c->s->tiers)) return;
+  bool has_vid = version_id && *version_id;
+  if (versioned && !suspended && !has_vid) return; /* shouldRemoveRemoteObject */
+  buckets_object_info oi;
+  if (buckets_obj_stat(c->s->layer, c->bucket, object, has_vid ? version_id : suspended ? "null" : NULL, &oi)) return;
+  const char *remote, *rv, *tier = buckets_object_tier(&oi, &remote, &rv);
+  if (tier) {
+    sw->tier = buckets_xstrdup(tier);
+    sw->remote = buckets_xstrdup(remote);
+    sw->version = buckets_xstrdup(rv);
+  }
+  buckets_object_info_free(&oi);
+}
+
+static void sweep_done(s3_ctx *c, sweeper *sw, bool run) {
+  if (run && sw->tier) buckets_tiering_remove_remote(c->s->tiering, sw->tier, sw->remote, sw->version);
+  free(sw->tier);
+  free(sw->remote);
+  free(sw->version);
+  memset(sw, 0, sizeof(*sw));
+}
+
 static void put_object(s3_ctx *c) {
   if (buckets_http_header_get(c->req, "X-Amz-Copy-Source").p) {
     copy_object(c);
@@ -775,7 +807,14 @@ static void put_object(s3_ctx *c) {
                       buckets_xl_kv_get(sp.sys, sp.nsys, BUCKETS_SSE_META_SEALED_S3)))
     opts.preserve_etag = ri.etag;
   buckets_object_info oi;
+  sweeper sw;
+  { /* the transitioned version this write replaces */
+    bool v_on, v_susp;
+    buckets_s3_versioning(c, c->object, &v_on, &v_susp);
+    sweep_prepare(c, c->object, opts.version_id, v_on && !opts.version_id, v_susp, &sw);
+  }
   buckets_obj_err err = buckets_obj_put(c->s->layer, c->bucket, c->object, rd, rd_ud, size, &opts, &oi);
+  sweep_done(c, &sw, !err);
   free_kvs(meta, nmeta);
   if (xform) xform_close(&sp);
   if (err) {
@@ -1334,7 +1373,10 @@ static void delete_object(s3_ctx *c) {
     o.decide_ud = &dd;
   }
   buckets_delete_result res;
+  sweeper sw;
+  sweep_prepare(c, c->object, version, o.versioned, o.suspended, &sw);
   buckets_obj_err err = buckets_obj_delete_ex(c->s->layer, c->bucket, c->object, &o, &res);
+  sweep_done(c, &sw, !err);
   /* S3 deletes are idempotent: a missing key still succeeds. */
   if (err && err != BUCKETS_OBJ_ERR_NO_SUCH_KEY && err != BUCKETS_OBJ_ERR_NO_SUCH_VERSION) {
     buckets_s3_write_error(c, buckets_s3_obj_error(err));
@@ -3358,7 +3400,10 @@ void buckets_s3_delete_objects(s3_ctx *c) {
         o.decide = delete_decide;
         o.decide_ud = &dd;
       }
+      sweeper sw;
+      sweep_prepare(c, key.data, o.version_id, o.versioned, o.suspended, &sw);
       buckets_obj_err oe = buckets_obj_delete_ex(c->s->layer, c->bucket, key.data, &o, &res);
+      sweep_done(c, &sw, !oe);
       c->object = saved;
       if (!oe && o.decide) buckets_repl_schedule_delete(c->s, c->bucket, key.data, &res, "replicate:incoming:delete");
       if (oe && oe != BUCKETS_OBJ_ERR_NO_SUCH_KEY && oe != BUCKETS_OBJ_ERR_NO_SUCH_VERSION) e = buckets_s3_obj_error(oe);
