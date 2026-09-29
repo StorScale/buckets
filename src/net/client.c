@@ -8,6 +8,8 @@
 #include <netinet/tcp.h>
 #include <poll.h>
 #include <pthread.h>
+#include <time.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,9 +23,11 @@
 #define MAX_IDLE 64
 #define MAX_HEADER_BYTES (64 * 1024)
 
+struct buckets_http_client;
 typedef struct {
   int fd;
   buckets_tls_conn *tls;
+  struct buckets_http_client *c; /* for its traffic counters */
 } hconn;
 
 struct buckets_http_client {
@@ -34,6 +38,7 @@ struct buckets_http_client {
   pthread_mutex_t mu;
   hconn idle[MAX_IDLE];
   size_t nidle;
+  _Atomic uint64_t sent, received, errors, dials, dial_errors, dial_ns;
 };
 
 buckets_http_client *buckets_http_client_new(const char *host, int port, buckets_tls_client *tls, int timeout_ms) {
@@ -94,7 +99,13 @@ static bool dial(buckets_http_client *c, hconn *out) {
   struct addrinfo hints = {0}, *res = NULL;
   hints.ai_family = AF_UNSPEC;
   hints.ai_socktype = SOCK_STREAM;
-  if (getaddrinfo(c->host, port, &hints, &res) != 0) return false;
+  struct timespec t0, t1;
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+  atomic_fetch_add(&c->dials, 1);
+  if (getaddrinfo(c->host, port, &hints, &res) != 0) {
+    atomic_fetch_add(&c->dial_errors, 1);
+    return false;
+  }
   int fd = -1;
   for (struct addrinfo *ai = res; ai && fd < 0; ai = ai->ai_next) {
     fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
@@ -105,7 +116,12 @@ static bool dial(buckets_http_client *c, hconn *out) {
     }
   }
   freeaddrinfo(res);
-  if (fd < 0) return false;
+  clock_gettime(CLOCK_MONOTONIC, &t1);
+  atomic_fetch_add(&c->dial_ns, (uint64_t)((t1.tv_sec - t0.tv_sec) * 1000000000LL + (t1.tv_nsec - t0.tv_nsec)));
+  if (fd < 0) {
+    atomic_fetch_add(&c->dial_errors, 1);
+    return false;
+  }
   fcntl(fd, F_SETFD, FD_CLOEXEC);
   int one = 1;
   setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
@@ -117,6 +133,7 @@ static bool dial(buckets_http_client *c, hconn *out) {
   setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
   out->fd = fd;
   out->tls = NULL;
+  out->c = c;
   if (c->tls && !(out->tls = buckets_tls_connect(c->tls, fd, c->host))) {
     close(fd);
     return false;
@@ -141,6 +158,7 @@ static bool send_all(hconn *h, const void *data, size_t n) {
       if (w < 0 && errno == EINTR) continue;
     }
     if (w <= 0) return false;
+    if (h->c) atomic_fetch_add(&h->c->sent, (uint64_t)w);
     p += w;
     n -= (size_t)w;
   }
@@ -151,6 +169,7 @@ static long recv_some(hconn *h, void *buf, size_t n) {
   for (;;) {
     long r = h->tls ? buckets_tls_recv(h->tls, buf, n) : recv(h->fd, buf, n, 0);
     if (r < 0 && !h->tls && errno == EINTR) continue;
+    if (r > 0 && h->c) atomic_fetch_add(&h->c->received, (uint64_t)r);
     return r;
   }
 }
@@ -315,7 +334,17 @@ bool buckets_http_client_do(buckets_http_client *c, const char *method, const ch
     }
   }
   buckets_buf_free(&head);
+  if (!ok) atomic_fetch_add(&c->errors, 1);
   return ok;
+}
+
+void buckets_http_client_stats_get(buckets_http_client *c, buckets_http_client_stats *out) {
+  out->sent = atomic_load(&c->sent);
+  out->received = atomic_load(&c->received);
+  out->errors = atomic_load(&c->errors);
+  out->dials = atomic_load(&c->dials);
+  out->dial_errors = atomic_load(&c->dial_errors);
+  out->dial_ns = atomic_load(&c->dial_ns);
 }
 
 /* ---- streaming ------------------------------------------------------------ */

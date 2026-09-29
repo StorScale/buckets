@@ -50,6 +50,14 @@ typedef struct buckets_s3_server {
   struct buckets_notifier *notifier; /* event notification targets and listeners */
   char endpoint[256];  /* this server's URL, for x-minio-origin-endpoint */
   _Atomic uint64_t request_seq;
+  struct buckets_scanner *_Atomic scanner; /* the data scanner, once started (for its metrics) */
+  struct buckets_healer *_Atomic healer;   /* MRF and drive healing, once started (for its metrics) */
+  struct buckets_lock_server *lock_server; /* this node's dsync locks (distributed), for metrics */
+  struct buckets_http_client **internode;  /* clients to the other nodes (their traffic), and how many */
+  size_t ninternode;
+  _Atomic uint64_t ilm_actions[9];       /* their outcomes, by lifecycle action (bucket/lifecycle.h) */
+  pthread_t metrics_thread;              /* samples the host for the resource metrics */
+  bool metrics_thread_started;
 } buckets_s3_server;
 
 void buckets_s3_server_init(buckets_s3_server *s, buckets_objlayer *layer, const char *root_user,
@@ -68,6 +76,8 @@ void buckets_s3_scanner_hooks(buckets_s3_server *s, void *hooks /* buckets_scann
 void buckets_s3_peer_iam(void *server, const char *kind, const char *name);
 void buckets_s3_peer_bucket(void *server, const char *bucket);
 char *buckets_s3_peer_server_info(void *server);
+/* This node's contribution to the cluster metrics (Prometheus text). */
+char *buckets_s3_peer_metrics(void *server);
 /* The current OpenID providers (a reference to release), or NULL. */
 struct buckets_openid *buckets_s3_openid(buckets_s3_server *s);
 /* The current plugins (a reference to release), or NULL. */

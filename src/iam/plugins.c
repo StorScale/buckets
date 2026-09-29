@@ -2,7 +2,9 @@
 #include "iam/plugins.h"
 
 #include <openssl/sha.h>
+#include <pthread.h>
 #include <stdatomic.h>
+#include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,11 +13,64 @@
 #include "crypto/base64.h"
 #include "net/fetch.h"
 
+/* serviceRTTMinuteStats: one whole minute of identity plugin calls */
+typedef struct {
+  int64_t minute; /* unix minute */
+  uint64_t ok, failed;
+  double rtt_sum_ms, rtt_max_ms;
+} rtt_minute;
+
 struct buckets_plugins {
   _Atomic int refs;
   char *authz_url, *authz_token;
   char *idp_url, *idp_token, *idp_role_policy, *idp_role_arn;
+  pthread_mutex_t mu; /* the identity plugin's call statistics */
+  rtt_minute current, last_full;
+  int64_t last_success_ns, last_failure_ns;
 };
+
+static int64_t wall_ns(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_REALTIME, &ts);
+  return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
+
+/* accumRequestRTT */
+static void accum_rtt(buckets_plugins *p, int64_t start_ns, double rtt_ms, bool ok) {
+  pthread_mutex_lock(&p->mu);
+  if (ok && start_ns > p->last_success_ns) p->last_success_ns = start_ns;
+  if (!ok && start_ns > p->last_failure_ns) p->last_failure_ns = start_ns;
+  int64_t minute = start_ns / 60000000000LL;
+  if (minute > p->current.minute) {
+    p->last_full = p->current;
+    p->current = (rtt_minute){.minute = minute};
+  }
+  rtt_minute *e = minute == p->current.minute ? &p->current : minute == p->last_full.minute ? &p->last_full : NULL;
+  if (e) {
+    if (ok) {
+      e->ok++;
+      e->rtt_sum_ms += rtt_ms;
+      if (rtt_ms > e->rtt_max_ms) e->rtt_max_ms = rtt_ms;
+    } else {
+      e->failed++;
+    }
+  }
+  pthread_mutex_unlock(&p->mu);
+}
+
+void buckets_idp_plugin_metrics_get(buckets_plugins *p, buckets_idp_plugin_metrics *out) {
+  memset(out, 0, sizeof(*out));
+  if (!buckets_idp_plugin_enabled(p)) return;
+  pthread_mutex_lock(&p->mu);
+  int64_t now = wall_ns();
+  out->last_reachable_secs = (double)(now - p->last_success_ns) / 1e9;
+  out->last_unreachable_secs = (double)(now - p->last_failure_ns) / 1e9;
+  out->total_requests = p->last_full.ok + p->last_full.failed;
+  out->failed_requests = p->last_full.failed;
+  out->avg_rtt_ms = p->last_full.ok ? p->last_full.rtt_sum_ms / (double)p->last_full.ok : 0;
+  out->max_rtt_ms = p->last_full.rtt_max_ms;
+  pthread_mutex_unlock(&p->mu);
+}
 
 buckets_plugins *buckets_plugins_ref(buckets_plugins *p) {
   if (p) atomic_fetch_add(&p->refs, 1);
@@ -30,6 +85,7 @@ void buckets_plugins_release(buckets_plugins *p) {
   free(p->idp_token);
   free(p->idp_role_policy);
   free(p->idp_role_arn);
+  pthread_mutex_destroy(&p->mu);
   free(p);
 }
 
@@ -57,6 +113,7 @@ static bool probe_url(const char *url, const char *token, char *err, size_t errl
 buckets_plugins *buckets_plugins_build(const buckets_config *cfg, const char *region, bool probe, char *err,
                                        size_t errlen) {
   buckets_plugins *p = buckets_xcalloc(1, sizeof(*p));
+  pthread_mutex_init(&p->mu, NULL);
   atomic_init(&p->refs, 1);
   p->authz_url = nz(buckets_config_get(cfg, "policy_plugin", NULL, "url"));
   p->authz_token = nz(buckets_config_get(cfg, "policy_plugin", NULL, "auth_token"));
@@ -191,7 +248,9 @@ bool buckets_idp_plugin_authenticate(buckets_plugins *p, const char *role_arn, c
   size_t nh = 0;
   if (p->idp_token) h[nh++] = (buckets_http_kv){"Authorization", p->idp_token};
   buckets_http_result r;
+  int64_t t0 = wall_ns();
   bool ok = buckets_fetch("POST", url.data, NULL, h, nh, NULL, 0, 5000, &r, err, errlen);
+  accum_rtt(p, t0, (double)(wall_ns() - t0) / 1e6, ok);
   buckets_buf_free(&url);
   if (!ok) return false;
   yyjson_doc *d = yyjson_read(r.body.data ? r.body.data : "", r.body.len, 0);

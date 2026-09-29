@@ -20,6 +20,8 @@ void buckets_lock_server_free(buckets_lock_server *s);
 /* Handler for BUCKETS_INTERNODE_PREFIX "lock/". */
 void buckets_lock_server_handle(const buckets_http_request *req, buckets_http_response *resp, void *ud);
 size_t buckets_lock_server_held(buckets_lock_server *s); /* resources with holders */
+/* localLocker.stats: locked resources, read holders, write locks. */
+void buckets_lock_server_stats(buckets_lock_server *s, size_t *total, size_t *reads, size_t *writes);
 
 typedef struct buckets_dsync buckets_dsync;
 /* peers: the other nodes (borrowed); local: this node's lock server. */

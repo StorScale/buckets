@@ -146,13 +146,14 @@ bool buckets_peer_node_online(buckets_peer_sys *p, const char *node) {
 typedef struct {
   buckets_peer_sys *p;
   size_t i;
+  const char *target;
   buckets_peer_info *out;
 } info_job;
 
 static void *info_main(void *arg) {
   info_job *j = arg;
   buckets_peer_sys *p = j->p;
-  const char *target = BUCKETS_INTERNODE_PREFIX "peer/serverinfo";
+  const char *target = j->target;
   if (atomic_load(&p->down_until[j->i]) > now_ms()) return NULL;
   char auth[96];
   buckets_internode_sign("GET", target, auth);
@@ -167,7 +168,8 @@ static void *info_main(void *arg) {
   return NULL;
 }
 
-buckets_peer_info *buckets_peer_server_info(buckets_peer_sys *p, size_t *n) {
+/* GETs target from every peer in parallel. */
+static buckets_peer_info *fetch_all(buckets_peer_sys *p, const char *target, size_t *n) {
   *n = p ? p->n : 0;
   if (!*n) return NULL;
   buckets_peer_info *out = buckets_xcalloc(p->n, sizeof(*out));
@@ -178,7 +180,7 @@ buckets_peer_info *buckets_peer_server_info(buckets_peer_sys *p, size_t *n) {
     buckets_buf node = BUCKETS_BUF_INIT;
     buckets_buf_appendf(&node, "%s:%d", buckets_http_client_host(p->peers[i]), buckets_http_client_port(p->peers[i]));
     out[i].node = buckets_buf_detach(&node);
-    jobs[i] = (info_job){p, i, &out[i]};
+    jobs[i] = (info_job){p, i, target, &out[i]};
     started[i] = pthread_create(&th[i], NULL, info_main, &jobs[i]) == 0;
     if (!started[i]) info_main(&jobs[i]);
   }
@@ -189,6 +191,19 @@ buckets_peer_info *buckets_peer_server_info(buckets_peer_sys *p, size_t *n) {
   free(th);
   free(jobs);
   return out;
+}
+
+buckets_peer_info *buckets_peer_server_info(buckets_peer_sys *p, size_t *n) {
+  return fetch_all(p, BUCKETS_INTERNODE_PREFIX "peer/serverinfo", n);
+}
+
+buckets_peer_info *buckets_peer_metrics(buckets_peer_sys *p, size_t *n) {
+  return fetch_all(p, BUCKETS_INTERNODE_PREFIX "peer/metrics", n);
+}
+
+buckets_http_client *const *buckets_peer_clients(buckets_peer_sys *p, size_t *n) {
+  *n = p ? p->n : 0;
+  return p ? p->peers : NULL;
 }
 
 void buckets_peer_info_free(buckets_peer_info *info, size_t n) {
@@ -224,6 +239,11 @@ void buckets_peer_server_handle(const buckets_http_request *req, buckets_http_re
     buckets_http_resp_header(resp, "Content-Type", "application/json");
     buckets_buf_append_c(&resp->body, json);
     free(json);
+  } else if (buckets_str_eq_c(path, BUCKETS_INTERNODE_PREFIX "peer/metrics") && h->metrics) {
+    char *text = h->metrics(h->ud);
+    buckets_http_resp_header(resp, "Content-Type", "text/plain");
+    buckets_buf_append_c(&resp->body, text);
+    free(text);
   } else {
     resp->status = 404;
   }

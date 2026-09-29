@@ -100,6 +100,12 @@ bool buckets_iam_reload(buckets_iam *iam);
 void buckets_iam_start_refresh(buckets_iam *iam, int interval_sec);
 /* Stops and joins the periodic reload (before the object layer goes away). */
 void buckets_iam_stop_refresh(buckets_iam *iam);
+/* Loads of the IAM data (the first included): when the last one ended and
+ * how long it took, and how many succeeded or failed. */
+typedef struct {
+  uint64_t last_ns, last_duration_ms, successes, failures;
+} buckets_iam_refresh_stats;
+void buckets_iam_refresh_stats_get(buckets_iam_refresh_stats *out);
 
 /* Called after every change with what changed, for peer notification.
  * kind: "user", "svc", "sts", "group", "policy", "policydb-user",

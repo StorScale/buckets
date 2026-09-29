@@ -37,6 +37,14 @@ typedef struct {
   char *reason;           /* a 403 from the plugin */
 } buckets_idp_result;
 void buckets_idp_result_free(buckets_idp_result *r);
+
+/* AuthNPlugin.Metrics: reachability and the last whole minute's calls. */
+typedef struct {
+  double last_reachable_secs, last_unreachable_secs;
+  uint64_t total_requests, failed_requests;
+  double avg_rtt_ms, max_rtt_ms;
+} buckets_idp_plugin_metrics;
+void buckets_idp_plugin_metrics_get(buckets_plugins *p, buckets_idp_plugin_metrics *out);
 /* AuthNPlugin.Authenticate: false (err set) on transport/protocol errors. */
 bool buckets_idp_plugin_authenticate(buckets_plugins *p, const char *role_arn, const char *token,
                                      buckets_idp_result *out, char *err, size_t errlen);

@@ -1,4 +1,11 @@
 # libbuckets: everything except main(), so tests and fuzzers link the same code.
+# The commit metrics report (minio_software_commit_info), as MinIO's CommitID.
+execute_process(COMMAND git rev-parse HEAD WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+                OUTPUT_VARIABLE BUCKETS_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+if(NOT BUCKETS_COMMIT)
+  set(BUCKETS_COMMIT "DEVELOPMENT.GOGET")
+endif()
+
 add_library(buckets STATIC
   core/common.c
   core/str.c
@@ -32,6 +39,11 @@ add_library(buckets STATIC
   notify/targets.c
   notify/webhook.c
   notify/notifier.c
+  metrics/expo.c
+  metrics/stats.c
+  metrics/sys.c
+  s3/metrics.c
+  s3/apiname.c
   console/console.c
   net/http.c
   net/tls.c
@@ -51,6 +63,7 @@ add_library(buckets STATIC
   s3/checksum.c
   s3/postpolicy.c
   storage/drive.c
+  storage/drivestats.c
   storage/xlmeta.c
   storage/format.c
   storage/remote.c
@@ -105,7 +118,8 @@ add_library(buckets STATIC
 target_include_directories(buckets PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 # timegm, gmtime_r, arc4random_buf, strncasecmp live outside strict C17.
 target_compile_definitions(buckets PUBLIC _GNU_SOURCE _DARWIN_C_SOURCE
-  BUCKETS_VERSION="${PROJECT_VERSION}")
+  BUCKETS_VERSION="${PROJECT_VERSION}"
+  BUCKETS_COMMIT="${BUCKETS_COMMIT}")
 find_package(Threads REQUIRED)
 find_library(RESOLV_LIB resolv)
 if(RESOLV_LIB)

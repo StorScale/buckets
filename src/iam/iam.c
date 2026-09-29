@@ -4,6 +4,7 @@
 #include <openssl/crypto.h>
 #include <openssl/rand.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -718,7 +719,7 @@ static bool load_all(buckets_iam *iam, cache *c) {
   return ok;
 }
 
-static bool reload(buckets_iam *iam, bool first) {
+static bool reload_impl(buckets_iam *iam, bool first) {
   cache fresh = {0};
   pthread_rwlock_rdlock(&iam->lock);
   buckets_iam_time started = now_time();
@@ -739,6 +740,31 @@ static bool reload(buckets_iam *iam, bool first) {
   pthread_rwlock_unlock(&iam->lock);
   cache_free(&fresh);
   return true;
+}
+
+/* IAMSys.Load's statistics (the cluster/iam metrics) */
+static _Atomic uint64_t g_refresh_last_ns, g_refresh_ms, g_refresh_ok, g_refresh_fail;
+
+static bool reload(buckets_iam *iam, bool first) {
+  struct timespec t0, t1;
+  clock_gettime(CLOCK_REALTIME, &t0);
+  bool ok = reload_impl(iam, first);
+  clock_gettime(CLOCK_REALTIME, &t1);
+  if (!ok) {
+    atomic_fetch_add(&g_refresh_fail, 1);
+    return false;
+  }
+  atomic_store(&g_refresh_ms, (uint64_t)((t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000));
+  atomic_store(&g_refresh_last_ns, (uint64_t)t1.tv_sec * 1000000000ULL + (uint64_t)t1.tv_nsec);
+  atomic_fetch_add(&g_refresh_ok, 1);
+  return true;
+}
+
+void buckets_iam_refresh_stats_get(buckets_iam_refresh_stats *out) {
+  out->last_ns = atomic_load(&g_refresh_last_ns);
+  out->last_duration_ms = atomic_load(&g_refresh_ms);
+  out->successes = atomic_load(&g_refresh_ok);
+  out->failures = atomic_load(&g_refresh_fail);
 }
 
 bool buckets_iam_start(buckets_iam *iam, buckets_objlayer *layer) {

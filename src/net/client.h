@@ -60,4 +60,11 @@ const char *buckets_http_headers_get(const buckets_buf *headers, const char *nam
 /* Drops idle connections (e.g. after the peer restarted). */
 void buckets_http_client_reset(buckets_http_client *c);
 
+/* Traffic through a client (the internode metrics): bytes, failed
+ * requests, and connection attempts with their total time. */
+typedef struct {
+  uint64_t sent, received, errors, dials, dial_errors, dial_ns;
+} buckets_http_client_stats;
+void buckets_http_client_stats_get(buckets_http_client *c, buckets_http_client_stats *out);
+
 #endif

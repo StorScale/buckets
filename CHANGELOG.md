@@ -17,7 +17,16 @@ All notable changes to this project are documented here. The format follows
   - `x-minio-origin-endpoint` from `MINIO_SERVER_URL` (or `BUCKETS_SERVER_URL`), else the listen address, else the local IPv4 address MinIO would pick.
   - `tests/integration/notify-interop.sh` diffs MinIO and bucketsd (S3 transcript, webhook deliveries, both kinds of listener); `tests/integration/notify-store.sh` hands queue stores between them.
 
+- Prometheus metrics v2 and v3 (Phase 7), wire compatible with MinIO:
+  - `/minio/v2/metrics/{cluster,node,bucket,resource}` and `/minio/metrics/v3` with every collector path (and `/bucket/api/<bucket>`, `/bucket/replication/<bucket>`), with MinIO's metric groups, their conditions, labels and quirks: v2 keeps zero values and writes histograms as gauge buckets with `le="%.3f"`; v3 drops values that are not positive and names APIs as the handlers are named. Output is written as client_golang writes it (families by name, samples by label values, Go's shortest float format).
+  - The names, types and help come from a catalog generated from MinIO's own metric definitions (`tools/metrics-catalog`, which dumps them through a compile overlay of MinIO's `cmd` package; `src/metrics/minio-catalog.tsv`, plus the Go/process collectors and the resource endpoint in `extra-catalog.tsv`); a sample outside it is dropped and logged. 425 of the catalog's 500 families can be emitted today; the rest belong to replication, batch jobs and object lambda (later phases).
+  - In a cluster, the v2 cluster endpoint merges every node's per-node groups (over a new `peer/metrics` internode call), as MinIO does.
+  - Authentication as MinIO's: `MINIO_PROMETHEUS_AUTH_TYPE=public`, or a bearer JWT issued by `prometheus` and signed with its key owner's secret, whose owner may `admin:Prometheus` (tokens from `mc admin prometheus generate` work).
+  - New statistics behind them: requests per API (MinIO's route names, found by mirroring its router), time to first byte, traffic, rejections, per bucket too; per-drive call latency over the last minute, errors and calls in flight; scanner lifetime counts; IAM load statistics; internode traffic and dial times; dsync lock counts; healing activity; identity plugin calls per minute; host CPU, memory, drive I/O and network sampling for the resource endpoint.
+  - `tests/integration/metrics-names.sh`, the phase gate: the same deployment and workload on MinIO and bucketsd, then every endpoint's families, label names and help must match: 0 differences on 11 endpoints, single node, a 4-node cluster (with a node stopped and healed) and with an identity plugin. `tests/integration/metrics-auth.sh` compares the authentication outcomes (32 probes).
+
 ### Fixed
+- MRF healing no longer drops an object healed while one of its drives is still offline, which left that drive's copy unwritten once it came back: such entries, and ones that fail with a passing error, are retried with backoff (up to 20 times, about a quarter of an hour) instead of three times at once.
 - Requests with `.` or `..` path segments in a query value (other than `delimiter`), or an invalid or reserved bucket name, are now rejected before authentication and without `BucketName`/`Key` in the error, as MinIO's request validity filter does.
 
 ## [0.6.0] - 2026-09-28

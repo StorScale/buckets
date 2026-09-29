@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 #include "storage/drive.h"
+#include "storage/drivestats.h"
 #include "storage/remote.h"
 
 #include <dirent.h>
@@ -11,6 +12,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
+#include <time.h>
 #include <unistd.h>
 #include <yyjson.h>
 
@@ -244,12 +246,13 @@ fail:
 
 void buckets_drive_close(buckets_drive *d) {
   if (!d) return;
+  buckets_drive_stats_free(d);
   buckets_rdrive_free(d->remote);
   free(d->root);
   free(d);
 }
 
-buckets_drive_err buckets_drive_make_vol(buckets_drive *d, const char *name) {
+static buckets_drive_err drive_make_vol(buckets_drive *d, const char *name) {
   if (d->remote) return buckets_rdrive_make_vol(d, name);
   char *p = path_join(d->root, name);
   buckets_drive_err err = mkdir(p, 0755) == 0 ? BUCKETS_DRIVE_OK : from_errno(errno);
@@ -258,7 +261,7 @@ buckets_drive_err buckets_drive_make_vol(buckets_drive *d, const char *name) {
   return err;
 }
 
-buckets_drive_err buckets_drive_stat_vol(buckets_drive *d, const char *name, time_t *created) {
+static buckets_drive_err drive_stat_vol(buckets_drive *d, const char *name, time_t *created) {
   if (d->remote) return buckets_rdrive_stat_vol(d, name, created);
   char *p = path_join(d->root, name);
   struct stat st;
@@ -276,7 +279,7 @@ buckets_drive_err buckets_drive_stat_vol(buckets_drive *d, const char *name, tim
   return err;
 }
 
-buckets_drive_err buckets_drive_delete_vol(buckets_drive *d, const char *name) {
+static buckets_drive_err drive_delete_vol(buckets_drive *d, const char *name) {
   if (d->remote) return buckets_rdrive_delete_vol(d, name);
   char *p = path_join(d->root, name);
   buckets_drive_err err = BUCKETS_DRIVE_OK;
@@ -294,7 +297,7 @@ static int vol_cmp(const void *a, const void *b) {
   return strcmp(((const buckets_vol_info *)a)->name, ((const buckets_vol_info *)b)->name);
 }
 
-buckets_drive_err buckets_drive_list_vols(buckets_drive *d, buckets_vol_info **vols, size_t *n) {
+static buckets_drive_err drive_list_vols(buckets_drive *d, buckets_vol_info **vols, size_t *n) {
   if (d->remote) return buckets_rdrive_list_vols(d, vols, n);
   *vols = NULL;
   *n = 0;
@@ -347,7 +350,7 @@ static void parent_mkdir(const char *path) {
   free(dup);
 }
 
-buckets_drive_err buckets_drive_read_all(buckets_drive *d, const char *vol, const char *path, buckets_buf *out) {
+static buckets_drive_err drive_read_all(buckets_drive *d, const char *vol, const char *path, buckets_buf *out) {
   if (d->remote) return buckets_rdrive_read_all(d, vol, path, out);
   char *p = vpath(d, vol, path);
   int fd = open(p, O_RDONLY | O_CLOEXEC);
@@ -369,7 +372,7 @@ buckets_drive_err buckets_drive_read_all(buckets_drive *d, const char *vol, cons
   return err;
 }
 
-buckets_drive_err buckets_drive_write_all(buckets_drive *d, const char *vol, const char *path, const void *data,
+static buckets_drive_err drive_write_all(buckets_drive *d, const char *vol, const char *path, const void *data,
                                           size_t n) {
   if (d->remote) return buckets_rdrive_write_all(d, vol, path, data, n);
   char *dst = vpath(d, vol, path);
@@ -414,7 +417,7 @@ static buckets_drive_err writer_flush(buckets_drive_writer *w) {
   return e;
 }
 
-buckets_drive_err buckets_drive_create_file(buckets_drive *d, const char *vol, const char *path,
+static buckets_drive_err drive_create_file(buckets_drive *d, const char *vol, const char *path,
                                             buckets_drive_writer **w) {
   if (d->remote) return buckets_rdrive_create_file(d, vol, path, w);
   char *p = vpath(d, vol, path);
@@ -480,7 +483,7 @@ void buckets_drive_writer_abort(buckets_drive_writer *w) {
   free(w);
 }
 
-buckets_drive_err buckets_drive_append(buckets_drive *d, const char *vol, const char *path, int64_t off,
+static buckets_drive_err drive_append(buckets_drive *d, const char *vol, const char *path, int64_t off,
                                        const void *data, size_t n) {
   if (d->remote) return buckets_rdrive_append(d, vol, path, off, data, n);
   char *p = vpath(d, vol, path);
@@ -509,7 +512,7 @@ buckets_drive_err buckets_drive_append(buckets_drive *d, const char *vol, const 
   return err;
 }
 
-buckets_drive_err buckets_drive_fsync_file(buckets_drive *d, const char *vol, const char *path) {
+static buckets_drive_err drive_fsync_file(buckets_drive *d, const char *vol, const char *path) {
   if (d->remote) return buckets_rdrive_fsync_file(d, vol, path);
   char *p = vpath(d, vol, path);
   int fd = open(p, O_RDONLY | O_CLOEXEC);
@@ -526,7 +529,7 @@ struct buckets_drive_file {
   char *vol, *path; /* remote */
 };
 
-buckets_drive_err buckets_drive_open_file(buckets_drive *d, const char *vol, const char *path, buckets_drive_file **f) {
+static buckets_drive_err drive_open_file(buckets_drive *d, const char *vol, const char *path, buckets_drive_file **f) {
   int fd = -1;
   if (!d->remote) {
     char *p = vpath(d, vol, path);
@@ -565,7 +568,7 @@ void buckets_drive_file_close(buckets_drive_file *f) {
   free(f);
 }
 
-buckets_drive_err buckets_drive_read_at(buckets_drive *d, const char *vol, const char *path, int64_t off, void *buf,
+static buckets_drive_err drive_read_at(buckets_drive *d, const char *vol, const char *path, int64_t off, void *buf,
                                         size_t n, size_t *got) {
   if (d->remote) return buckets_rdrive_read_at(d, vol, path, off, buf, n, got);
   char *p = vpath(d, vol, path);
@@ -588,7 +591,7 @@ buckets_drive_err buckets_drive_read_at(buckets_drive *d, const char *vol, const
   return err;
 }
 
-buckets_drive_err buckets_drive_rename_data(buckets_drive *d, const char *src_vol, const char *src_dir,
+static buckets_drive_err drive_rename_data(buckets_drive *d, const char *src_vol, const char *src_dir,
                                             const char *data_dir, const char *dst_vol, const char *dst_path,
                                             const void *xlmeta, size_t xlmeta_len) {
   if (d->remote) return buckets_rdrive_rename_data(d, src_vol, src_dir, data_dir, dst_vol, dst_path, xlmeta, xlmeta_len);
@@ -615,7 +618,7 @@ static int rm_entry(const char *path, const struct stat *st, int flag, struct FT
   return remove(path) == 0 || errno == ENOENT ? 0 : -1;
 }
 
-buckets_drive_err buckets_drive_delete(buckets_drive *d, const char *vol, const char *path, bool recursive,
+static buckets_drive_err drive_delete(buckets_drive *d, const char *vol, const char *path, bool recursive,
                                        bool prune) {
   if (d->remote) return buckets_rdrive_delete(d, vol, path, recursive, prune);
   char *p = vpath(d, vol, path);
@@ -650,7 +653,7 @@ buckets_drive_err buckets_drive_delete(buckets_drive *d, const char *vol, const 
   return err;
 }
 
-buckets_drive_err buckets_drive_list_dir(buckets_drive *d, const char *vol, const char *dir, buckets_dir_list *out) {
+static buckets_drive_err drive_list_dir(buckets_drive *d, const char *vol, const char *dir, buckets_dir_list *out) {
   if (d->remote) return buckets_rdrive_list_dir(d, vol, dir, out);
   memset(out, 0, sizeof(*out));
   char *p = vpath(d, vol, dir);
@@ -688,7 +691,7 @@ void buckets_dir_list_free(buckets_dir_list *l) {
   memset(l, 0, sizeof(*l));
 }
 
-buckets_drive_err buckets_drive_disk_info(buckets_drive *d, uint64_t *total, uint64_t *free_bytes) {
+static buckets_drive_err drive_disk_info(buckets_drive *d, uint64_t *total, uint64_t *free_bytes) {
   if (d->remote) return buckets_rdrive_disk_info(d, total, free_bytes);
   struct statvfs sv;
   if (statvfs(d->root, &sv) != 0) return from_errno(errno);
@@ -697,7 +700,7 @@ buckets_drive_err buckets_drive_disk_info(buckets_drive *d, uint64_t *total, uin
   return BUCKETS_DRIVE_OK;
 }
 
-buckets_drive_err buckets_drive_file_size(buckets_drive *d, const char *vol, const char *path, int64_t *size) {
+static buckets_drive_err drive_file_size(buckets_drive *d, const char *vol, const char *path, int64_t *size) {
   if (d->remote) return buckets_rdrive_file_size(d, vol, path, size);
   char *p = vpath(d, vol, path);
   struct stat st;
@@ -717,7 +720,7 @@ int buckets_drive_stat(buckets_drive *d, const char *vol, const char *path) {
   return r;
 }
 
-buckets_drive_err buckets_drive_rename_file(buckets_drive *d, const char *src_vol, const char *src,
+static buckets_drive_err drive_rename_file(buckets_drive *d, const char *src_vol, const char *src,
                                             const char *dst_vol, const char *dst) {
   if (d->remote) return buckets_rdrive_rename_file(d, src_vol, src, dst_vol, dst);
   char *from = vpath(d, src_vol, src), *to = vpath(d, dst_vol, dst);
@@ -726,4 +729,184 @@ buckets_drive_err buckets_drive_rename_file(buckets_drive *d, const char *src_vo
   free(from);
   free(to);
   return err;
+}
+
+/* ---- the public calls, timed for the drive metrics ---- */
+
+buckets_drive_err buckets_drive_make_vol(buckets_drive *d, const char *name) {
+  struct timespec t0, t1;
+  buckets_drive_stats_begin(d);
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+  buckets_drive_err e = drive_make_vol(d, name);
+  clock_gettime(CLOCK_MONOTONIC, &t1);
+  buckets_drive_stats_end(d, BUCKETS_DOP_MAKE_VOL, (t1.tv_sec - t0.tv_sec) * 1000000000LL + (t1.tv_nsec - t0.tv_nsec), e);
+  return e;
+}
+
+buckets_drive_err buckets_drive_stat_vol(buckets_drive *d, const char *name, time_t *created) {
+  struct timespec t0, t1;
+  buckets_drive_stats_begin(d);
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+  buckets_drive_err e = drive_stat_vol(d, name, created);
+  clock_gettime(CLOCK_MONOTONIC, &t1);
+  buckets_drive_stats_end(d, BUCKETS_DOP_STAT_VOL, (t1.tv_sec - t0.tv_sec) * 1000000000LL + (t1.tv_nsec - t0.tv_nsec), e);
+  return e;
+}
+
+buckets_drive_err buckets_drive_delete_vol(buckets_drive *d, const char *name) {
+  struct timespec t0, t1;
+  buckets_drive_stats_begin(d);
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+  buckets_drive_err e = drive_delete_vol(d, name);
+  clock_gettime(CLOCK_MONOTONIC, &t1);
+  buckets_drive_stats_end(d, BUCKETS_DOP_DELETE_VOL, (t1.tv_sec - t0.tv_sec) * 1000000000LL + (t1.tv_nsec - t0.tv_nsec), e);
+  return e;
+}
+
+buckets_drive_err buckets_drive_list_vols(buckets_drive *d, buckets_vol_info **vols, size_t *n) {
+  struct timespec t0, t1;
+  buckets_drive_stats_begin(d);
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+  buckets_drive_err e = drive_list_vols(d, vols, n);
+  clock_gettime(CLOCK_MONOTONIC, &t1);
+  buckets_drive_stats_end(d, BUCKETS_DOP_LIST_VOLS, (t1.tv_sec - t0.tv_sec) * 1000000000LL + (t1.tv_nsec - t0.tv_nsec), e);
+  return e;
+}
+
+buckets_drive_err buckets_drive_read_all(buckets_drive *d, const char *vol, const char *path, buckets_buf *out) {
+  struct timespec t0, t1;
+  buckets_drive_stats_begin(d);
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+  buckets_drive_err e = drive_read_all(d, vol, path, out);
+  clock_gettime(CLOCK_MONOTONIC, &t1);
+  buckets_drive_stats_end(d, BUCKETS_DOP_READ_ALL, (t1.tv_sec - t0.tv_sec) * 1000000000LL + (t1.tv_nsec - t0.tv_nsec), e);
+  return e;
+}
+
+buckets_drive_err buckets_drive_write_all(buckets_drive *d, const char *vol, const char *path, const void *data,
+                                          size_t n) {
+  struct timespec t0, t1;
+  buckets_drive_stats_begin(d);
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+  buckets_drive_err e = drive_write_all(d, vol, path, data, n);
+  clock_gettime(CLOCK_MONOTONIC, &t1);
+  buckets_drive_stats_end(d, BUCKETS_DOP_WRITE_ALL, (t1.tv_sec - t0.tv_sec) * 1000000000LL + (t1.tv_nsec - t0.tv_nsec), e);
+  return e;
+}
+
+buckets_drive_err buckets_drive_create_file(buckets_drive *d, const char *vol, const char *path,
+                                            buckets_drive_writer **w) {
+  struct timespec t0, t1;
+  buckets_drive_stats_begin(d);
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+  buckets_drive_err e = drive_create_file(d, vol, path, w);
+  clock_gettime(CLOCK_MONOTONIC, &t1);
+  buckets_drive_stats_end(d, BUCKETS_DOP_CREATE_FILE, (t1.tv_sec - t0.tv_sec) * 1000000000LL + (t1.tv_nsec - t0.tv_nsec), e);
+  return e;
+}
+
+buckets_drive_err buckets_drive_append(buckets_drive *d, const char *vol, const char *path, int64_t off,
+                                       const void *data, size_t n) {
+  struct timespec t0, t1;
+  buckets_drive_stats_begin(d);
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+  buckets_drive_err e = drive_append(d, vol, path, off, data, n);
+  clock_gettime(CLOCK_MONOTONIC, &t1);
+  buckets_drive_stats_end(d, BUCKETS_DOP_APPEND_FILE, (t1.tv_sec - t0.tv_sec) * 1000000000LL + (t1.tv_nsec - t0.tv_nsec), e);
+  return e;
+}
+
+buckets_drive_err buckets_drive_fsync_file(buckets_drive *d, const char *vol, const char *path) {
+  struct timespec t0, t1;
+  buckets_drive_stats_begin(d);
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+  buckets_drive_err e = drive_fsync_file(d, vol, path);
+  clock_gettime(CLOCK_MONOTONIC, &t1);
+  buckets_drive_stats_end(d, BUCKETS_DOP_FSYNC_FILE, (t1.tv_sec - t0.tv_sec) * 1000000000LL + (t1.tv_nsec - t0.tv_nsec), e);
+  return e;
+}
+
+buckets_drive_err buckets_drive_open_file(buckets_drive *d, const char *vol, const char *path, buckets_drive_file **f) {
+  struct timespec t0, t1;
+  buckets_drive_stats_begin(d);
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+  buckets_drive_err e = drive_open_file(d, vol, path, f);
+  clock_gettime(CLOCK_MONOTONIC, &t1);
+  buckets_drive_stats_end(d, BUCKETS_DOP_OPEN_FILE, (t1.tv_sec - t0.tv_sec) * 1000000000LL + (t1.tv_nsec - t0.tv_nsec), e);
+  return e;
+}
+
+buckets_drive_err buckets_drive_read_at(buckets_drive *d, const char *vol, const char *path, int64_t off, void *buf,
+                                        size_t n, size_t *got) {
+  struct timespec t0, t1;
+  buckets_drive_stats_begin(d);
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+  buckets_drive_err e = drive_read_at(d, vol, path, off, buf, n, got);
+  clock_gettime(CLOCK_MONOTONIC, &t1);
+  buckets_drive_stats_end(d, BUCKETS_DOP_READ_FILE, (t1.tv_sec - t0.tv_sec) * 1000000000LL + (t1.tv_nsec - t0.tv_nsec), e);
+  return e;
+}
+
+buckets_drive_err buckets_drive_rename_data(buckets_drive *d, const char *src_vol, const char *src_dir,
+                                            const char *data_dir, const char *dst_vol, const char *dst_path,
+                                            const void *xlmeta, size_t xlmeta_len) {
+  struct timespec t0, t1;
+  buckets_drive_stats_begin(d);
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+  buckets_drive_err e = drive_rename_data(d, src_vol, src_dir, data_dir, dst_vol, dst_path, xlmeta, xlmeta_len);
+  clock_gettime(CLOCK_MONOTONIC, &t1);
+  buckets_drive_stats_end(d, BUCKETS_DOP_RENAME_DATA, (t1.tv_sec - t0.tv_sec) * 1000000000LL + (t1.tv_nsec - t0.tv_nsec), e);
+  return e;
+}
+
+buckets_drive_err buckets_drive_delete(buckets_drive *d, const char *vol, const char *path, bool recursive,
+                                       bool prune) {
+  struct timespec t0, t1;
+  buckets_drive_stats_begin(d);
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+  buckets_drive_err e = drive_delete(d, vol, path, recursive, prune);
+  clock_gettime(CLOCK_MONOTONIC, &t1);
+  buckets_drive_stats_end(d, BUCKETS_DOP_DELETE, (t1.tv_sec - t0.tv_sec) * 1000000000LL + (t1.tv_nsec - t0.tv_nsec), e);
+  return e;
+}
+
+buckets_drive_err buckets_drive_list_dir(buckets_drive *d, const char *vol, const char *dir, buckets_dir_list *out) {
+  struct timespec t0, t1;
+  buckets_drive_stats_begin(d);
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+  buckets_drive_err e = drive_list_dir(d, vol, dir, out);
+  clock_gettime(CLOCK_MONOTONIC, &t1);
+  buckets_drive_stats_end(d, BUCKETS_DOP_LIST_DIR, (t1.tv_sec - t0.tv_sec) * 1000000000LL + (t1.tv_nsec - t0.tv_nsec), e);
+  return e;
+}
+
+buckets_drive_err buckets_drive_disk_info(buckets_drive *d, uint64_t *total, uint64_t *free_bytes) {
+  struct timespec t0, t1;
+  buckets_drive_stats_begin(d);
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+  buckets_drive_err e = drive_disk_info(d, total, free_bytes);
+  clock_gettime(CLOCK_MONOTONIC, &t1);
+  buckets_drive_stats_end(d, BUCKETS_DOP_DISK_INFO, (t1.tv_sec - t0.tv_sec) * 1000000000LL + (t1.tv_nsec - t0.tv_nsec), e);
+  return e;
+}
+
+buckets_drive_err buckets_drive_file_size(buckets_drive *d, const char *vol, const char *path, int64_t *size) {
+  struct timespec t0, t1;
+  buckets_drive_stats_begin(d);
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+  buckets_drive_err e = drive_file_size(d, vol, path, size);
+  clock_gettime(CLOCK_MONOTONIC, &t1);
+  buckets_drive_stats_end(d, BUCKETS_DOP_STAT_FILE, (t1.tv_sec - t0.tv_sec) * 1000000000LL + (t1.tv_nsec - t0.tv_nsec), e);
+  return e;
+}
+
+buckets_drive_err buckets_drive_rename_file(buckets_drive *d, const char *src_vol, const char *src,
+                                            const char *dst_vol, const char *dst) {
+  struct timespec t0, t1;
+  buckets_drive_stats_begin(d);
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+  buckets_drive_err e = drive_rename_file(d, src_vol, src, dst_vol, dst);
+  clock_gettime(CLOCK_MONOTONIC, &t1);
+  buckets_drive_stats_end(d, BUCKETS_DOP_RENAME_FILE, (t1.tv_sec - t0.tv_sec) * 1000000000LL + (t1.tv_nsec - t0.tv_nsec), e);
+  return e;
 }

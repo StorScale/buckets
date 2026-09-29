@@ -45,6 +45,11 @@ static const struct {
     {"GREATER_THAN_10000", 10000, INT64_MAX},
 };
 
+const char *buckets_usage_size_bin_name(size_t i) { return i < BUCKETS_USAGE_SIZE_BINS ? k_size_bins[i].name : ""; }
+const char *buckets_usage_version_bin_name(size_t i) {
+  return i < BUCKETS_USAGE_VERSION_BINS ? k_version_bins[i].name : "";
+}
+
 void buckets_data_usage_free(buckets_data_usage *u) {
   for (size_t i = 0; i < u->nbuckets; i++) free(u->buckets[i].name);
   free(u->buckets);

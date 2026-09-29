@@ -151,6 +151,20 @@ size_t buckets_lock_server_held(buckets_lock_server *s) {
   return n;
 }
 
+void buckets_lock_server_stats(buckets_lock_server *s, size_t *total, size_t *reads, size_t *writes) {
+  *total = *reads = *writes = 0;
+  pthread_mutex_lock(&s->mu);
+  for (size_t i = 0; i < NBUCKETS; i++) {
+    for (lentry *e = s->tab[i]; e; e = e->next) {
+      if (!e->n) continue;
+      (*total)++;
+      if (e->write) (*writes)++;
+      else *reads += e->n;
+    }
+  }
+  pthread_mutex_unlock(&s->mu);
+}
+
 void buckets_lock_server_handle(const buckets_http_request *req, buckets_http_response *resp, void *ud) {
   buckets_lock_server *s = ud;
   if (!buckets_internode_verify(req)) {

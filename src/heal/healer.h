@@ -19,6 +19,7 @@ typedef struct {
   uint64_t queued, healed, failed, dropped; /* MRF */
   size_t drives_healing;
   uint64_t drive_objects_healed;
+  int64_t last_activity_ns; /* the last object healed (or not), 0 before any */
 } buckets_healer_stats;
 
 /* Registers as the layer's degraded hook and starts the thread. */
@@ -29,6 +30,8 @@ void buckets_healer_enqueue(buckets_healer *h, const char *bucket, const char *o
                             bool deep);
 void buckets_healer_stats_get(buckets_healer *h, buckets_healer_stats *out);
 /* Blocks until the MRF queue is empty and no drive heal is running (tests). */
+/* Waits until nothing is left to do now (entries waiting out a retry's
+ * backoff do not count). */
 void buckets_healer_wait_idle(buckets_healer *h);
 
 /* The tracker marking a drive as being healed. */

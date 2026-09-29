@@ -1,5 +1,7 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 #include "s3/server.h"
+#include "metrics/stats.h"
+#include "s3/metrics.h"
 #include "notify/notifier.h"
 
 #include <ctype.h>
@@ -514,6 +516,8 @@ static void scanner_object(void *ud, const char *bucket, const buckets_object_in
     objs[i].locked = version_locked(&v[i], now);
   }
   buckets_lifecycle_eval_versions(&st->lifecycle, st->lock_enabled, objs, n, now, ev);
+  for (size_t i = 0; i < n; i++)
+    if ((size_t)ev[i].action < BUCKETS_ARRAY_LEN(s->ilm_actions)) atomic_fetch_add(&s->ilm_actions[ev[i].action], 1);
   for (size_t i = 0; i < n; i++) {
     switch (ev[i].action) {
     case BUCKETS_LC_DELETE_ALL_VERSIONS:
@@ -564,6 +568,16 @@ void buckets_s3_scanner_hooks(buckets_s3_server *s, void *hooks) {
   h->ud = s;
 }
 
+/* The resource metrics' sampler (startResourceMetricsCollection). */
+static void *metrics_main(void *arg) {
+  buckets_s3_server *s = arg;
+  while (!s->cluster) /* a single node describes its drives after bootstrap */
+    if (!bg_sleep(s, 100)) return NULL;
+  do buckets_metrics_resource_collect(s);
+  while (bg_sleep(s, 60000));
+  return NULL;
+}
+
 void buckets_s3_server_set_layer(buckets_s3_server *s, buckets_objlayer *layer) {
   uint8_t h[32];
   buckets_sha256(layer->deployment_id_str, strlen(layer->deployment_id_str), h);
@@ -576,6 +590,7 @@ void buckets_s3_server_set_layer(buckets_s3_server *s, buckets_objlayer *layer) 
   buckets_metasys_set_notify(s->meta, notify_bucket, s);
   s->layer = layer; /* atomic store, after host_id and meta */
   s->iam_thread_started = pthread_create(&s->iam_thread, NULL, iam_start_main, s) == 0;
+  s->metrics_thread_started = pthread_create(&s->metrics_thread, NULL, metrics_main, s) == 0;
 }
 
 void buckets_s3_server_stop(buckets_s3_server *s) {
@@ -587,6 +602,8 @@ void buckets_s3_server_stop(buckets_s3_server *s) {
   s->iam_thread_started = false;
   if (s->ldap_thread_started) pthread_join(s->ldap_thread, NULL);
   s->ldap_thread_started = false;
+  if (s->metrics_thread_started) pthread_join(s->metrics_thread, NULL);
+  s->metrics_thread_started = false;
   buckets_iam_stop_refresh(s->iam);
 }
 
@@ -1591,6 +1608,10 @@ void buckets_s3_handle(const buckets_http_request *req, buckets_http_response *r
   }
 
   s3_ctx c = {.s = s, .req = req, .resp = resp};
+  int api = -1;          /* the MinIO API route taken, for request statistics */
+  char *stat_bucket = NULL; /* an existing bucket it names */
+  struct timespec t0;
+  clock_gettime(CLOCK_MONOTONIC, &t0);
   struct timespec ts;
   clock_gettime(CLOCK_REALTIME, &ts);
   uint64_t nanos = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec + (s->request_seq++ % 1000);
@@ -1629,6 +1650,15 @@ void buckets_s3_handle(const buckets_http_request *req, buckets_http_response *r
       goto fail;
     }
   }
+  if (!buckets_str_has_prefix(req->path, "/minio/") && !buckets_sts_matches(&c)) {
+    api = buckets_s3_api_index(&c); /* collectAPIStats: after the validity filter, before auth */
+    if (api >= 0 && c.bucket && s->meta) {
+      buckets_bucket_state *bst = buckets_metasys_get(s->meta, c.bucket);
+      if (bst->exists) stat_bucket = buckets_xstrdup(c.bucket);
+      buckets_bucket_state_release(bst);
+    }
+    buckets_stats_begin(api, stat_bucket);
+  }
   if (!buckets_admin_is_admin_path(req->path) && s->freeze_cnt > 0) {
     /* frozen (mc admin service freeze): S3 calls wait for the unfreeze */
     pthread_mutex_lock(&s->freeze_mu);
@@ -1650,8 +1680,9 @@ void buckets_s3_handle(const buckets_http_request *req, buckets_http_response *r
     buckets_sts_handle(&c);
     goto done;
   }
+  if (buckets_s3_metrics_handle(&c)) goto done;
   if (buckets_str_has_prefix(req->path, "/minio/")) {
-    err = BUCKETS_ERR_NOT_IMPLEMENTED; /* metrics and other MinIO APIs come later */
+    err = BUCKETS_ERR_NOT_IMPLEMENTED; /* other MinIO APIs come later */
     goto fail;
   }
   if ((err = authenticate(&c)) != BUCKETS_ERR_NONE) goto fail;
@@ -1673,11 +1704,29 @@ void buckets_s3_handle(const buckets_http_request *req, buckets_http_response *r
   goto done;
 
 fail:
+  /* setAuthMiddleware's rejections */
+  if (err == BUCKETS_ERR_REQUEST_TIME_TOO_SKEWED || err == BUCKETS_ERR_MISSING_DATE_HEADER ||
+      err == BUCKETS_ERR_MALFORMED_DATE)
+    buckets_stats_reject(BUCKETS_REJECT_TIMESTAMP);
+  else if (err == BUCKETS_ERR_SIGNATURE_VERSION_NOT_SUPPORTED)
+    buckets_stats_reject(BUCKETS_REJECT_AUTH);
   buckets_s3_write_error(&c, err);
 done:
   /* writeErrorResponseHeadersOnly: a HEAD error carries no body (nor its length). */
   if (resp->status >= 400 && buckets_str_eq_c(req->method, "HEAD") && !resp->stream) buckets_buf_reset(&resp->body);
   buckets_log_debug("%.*s %.*s -> %d", BUCKETS_STR_ARG(req->method), BUCKETS_STR_ARG(req->target), resp->status);
+  if (api >= 0) {
+    struct timespec t1;
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    double ttfb = (double)(t1.tv_sec - t0.tv_sec) + (double)(t1.tv_nsec - t0.tv_nsec) / 1e9;
+    uint64_t tx = buckets_str_eq_c(req->method, "HEAD") ? 0
+                  : resp->content_length >= 0          ? (uint64_t)resp->content_length
+                                                       : (uint64_t)resp->body.len;
+    buckets_stats_end(api, stat_bucket, resp->status, ttfb, req->body_len > 0 ? (uint64_t)req->body_len : 0, tx);
+    if (stat_bucket && api == buckets_api_index("deletebucket") && resp->status == 204)
+      buckets_stats_forget_bucket(stat_bucket);
+  }
+  free(stat_bucket);
   buckets_query_free(&c.q);
   free(c.path);
   free(c.bucket);

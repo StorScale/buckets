@@ -31,12 +31,18 @@ typedef struct {
 } buckets_peer_info;
 buckets_peer_info *buckets_peer_server_info(buckets_peer_sys *p, size_t *n);
 void buckets_peer_info_free(buckets_peer_info *info, size_t n);
+/* The clients to every peer (the internode traffic counters). */
+buckets_http_client *const *buckets_peer_clients(buckets_peer_sys *p, size_t *n);
+/* Each peer's node metrics (MinIO's peerMetricsGroups) as Prometheus text
+ * in json, NULL where unreachable. */
+buckets_peer_info *buckets_peer_metrics(buckets_peer_sys *p, size_t *n);
 
 /* The receiving side, under BUCKETS_INTERNODE_PREFIX "peer/". */
 typedef struct {
   void (*iam)(void *ud, const char *kind, const char *name);
   void (*bucket)(void *ud, const char *bucket);
   char *(*server_info)(void *ud); /* JSON, malloc'd */
+  char *(*metrics)(void *ud);     /* this node's metrics as Prometheus text, malloc'd */
   void *ud;
 } buckets_peer_handlers;
 void buckets_peer_server_handle(const buckets_http_request *req, buckets_http_response *resp, void *ud);

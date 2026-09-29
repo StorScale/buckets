@@ -37,6 +37,10 @@ typedef struct {
   uint64_t scanned;     /* objects looked at for healing */
   uint64_t healed;      /* objects a scan healed */
   uint64_t usage_saves; /* data usage stored (leader) */
+  /* lifetime counts, as MinIO's scanner metrics */
+  uint64_t objects, versions, folders;
+  uint64_t bucket_scans_started, bucket_scans_finished;
+  int64_t last_activity_ns; /* the last cycle's end (0: none yet) */
 } buckets_scanner_stats;
 
 buckets_scanner *buckets_scanner_start(buckets_objlayer *L, const buckets_scanner_hooks *hooks);

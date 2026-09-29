@@ -13,12 +13,15 @@
 #include "storage/drive.h"
 
 #define MRF_MAX 100000 /* MinIO's mrfOpsQueueSize */
-#define MRF_ATTEMPTS 3
+#define MRF_ATTEMPTS 20      /* over about a quarter of an hour of backoff */
+#define MRF_BACKOFF_MS 1000  /* the first retry's delay, doubling */
+#define MRF_BACKOFF_MAX_MS 60000
 #define TRACKER_EVERY 100 /* objects between tracker saves */
 
 typedef struct mrf {
   char *bucket, *object, *version_id;
   int attempts;
+  int64_t due_ms; /* not before (a retry's backoff) */
   bool deep;
   struct mrf *next;
 } mrf;
@@ -34,6 +37,18 @@ struct buckets_healer {
   buckets_healer_stats st;
 };
 
+
+
+static int64_t mono_ms(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+static int64_t wall_ns(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_REALTIME, &ts);
+  return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
 static void mrf_free(mrf *e) {
   free(e->bucket);
   free(e->object);
@@ -180,6 +195,7 @@ static bool heal_drive(buckets_healer *h, size_t di) {
         else t.failed++;
         pthread_mutex_lock(&h->mu);
         h->st.drive_objects_healed++;
+        h->st.last_activity_ns = wall_ns();
         pthread_mutex_unlock(&h->mu);
         if (++since_save >= TRACKER_EVERY) {
           free(t.bucket);
@@ -250,17 +266,47 @@ static void *run(void *arg) {
       pthread_cond_wait(&h->cv, &h->mu);
     }
     if (h->stop) break;
-    mrf *e = h->head;
-    h->head = e->next;
-    if (!h->head) h->tail = NULL;
+    /* the first entry that is due; otherwise wait for the soonest */
+    int64_t now = mono_ms(), soonest = INT64_MAX;
+    mrf *e = NULL, *prev = NULL;
+    for (mrf *x = h->head, *px = NULL; x; px = x, x = x->next) {
+      if (x->due_ms <= now) {
+        e = x, prev = px;
+        break;
+      }
+      if (x->due_ms < soonest) soonest = x->due_ms;
+    }
+    if (!e) {
+      pthread_cond_broadcast(&h->idle_cv); /* only backoffs left: idle for waiters */
+      struct timespec until;
+      clock_gettime(CLOCK_REALTIME, &until);
+      int64_t wait = soonest - now;
+      until.tv_sec += wait / 1000;
+      until.tv_nsec += (long)(wait % 1000) * 1000000L;
+      if (until.tv_nsec >= 1000000000L) until.tv_sec++, until.tv_nsec -= 1000000000L;
+      pthread_cond_timedwait(&h->cv, &h->mu, &until);
+      continue;
+    }
+    if (prev) prev->next = e->next;
+    else h->head = e->next;
+    if (h->tail == e) h->tail = prev;
     h->qlen--;
     h->busy = true;
     pthread_mutex_unlock(&h->mu);
     buckets_heal_result r;
     buckets_heal_opts opts = {.remove_dangling = true, .deep = e->deep};
     buckets_obj_err err = buckets_obj_heal(h->L, e->bucket, e->object, *e->version_id ? e->version_id : NULL, &opts, &r);
-    bool retry = err && err != BUCKETS_OBJ_ERR_NO_SUCH_KEY && err != BUCKETS_OBJ_ERR_NO_SUCH_VERSION &&
-                 err != BUCKETS_OBJ_ERR_NO_SUCH_BUCKET && ++e->attempts < MRF_ATTEMPTS;
+    /* a drive still offline (its copy can be written once it is back) or a
+     * passing error: again later, with backoff */
+    bool offline = false;
+    for (size_t i = 0; !err && i < r.ndrives; i++) offline |= r.after[i] == BUCKETS_HEAL_OFFLINE;
+    bool retry = (offline || (err && err != BUCKETS_OBJ_ERR_NO_SUCH_KEY && err != BUCKETS_OBJ_ERR_NO_SUCH_VERSION &&
+                              err != BUCKETS_OBJ_ERR_NO_SUCH_BUCKET)) &&
+                 ++e->attempts < MRF_ATTEMPTS;
+    if (retry) {
+      int64_t delay = (int64_t)MRF_BACKOFF_MS << (e->attempts - 1 < 10 ? e->attempts - 1 : 10);
+      e->due_ms = mono_ms() + (delay < MRF_BACKOFF_MAX_MS ? delay : MRF_BACKOFF_MAX_MS);
+    }
     if (err && !retry) {
       buckets_log_warn("heal %s/%s: %s", e->bucket, e->object, buckets_obj_strerror(err));
     } else if (!err && r.healed) {
@@ -277,6 +323,7 @@ static void *run(void *arg) {
     } else {
       if (err) h->st.failed++;
       else h->st.healed++;
+      h->st.last_activity_ns = wall_ns();
       mrf_free(e);
     }
   }
@@ -336,8 +383,16 @@ void buckets_healer_stats_get(buckets_healer *h, buckets_healer_stats *out) {
   pthread_mutex_unlock(&h->mu);
 }
 
+/* Entries that can be worked on now (not waiting out a retry's backoff). */
+static bool any_due(buckets_healer *h) {
+  int64_t now = mono_ms();
+  for (mrf *x = h->head; x; x = x->next)
+    if (x->due_ms <= now) return true;
+  return false;
+}
+
 void buckets_healer_wait_idle(buckets_healer *h) {
   pthread_mutex_lock(&h->mu);
-  while (!h->stop && (h->head || h->busy || h->drives_pending)) pthread_cond_wait(&h->idle_cv, &h->mu);
+  while (!h->stop && (any_due(h) || h->busy || h->drives_pending)) pthread_cond_wait(&h->idle_cv, &h->mu);
   pthread_mutex_unlock(&h->mu);
 }

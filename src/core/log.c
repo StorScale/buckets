@@ -2,6 +2,7 @@
 #include "core/log.h"
 
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
@@ -44,7 +45,12 @@ static void json_escape(buckets_buf *out, const char *s, size_t n) {
   }
 }
 
+static _Atomic uint64_t g_problems;
+
+uint64_t buckets_log_problems(void) { return atomic_load(&g_problems); }
+
 void buckets_log(buckets_log_level level, const char *fmt, ...) {
+  if (level >= BUCKETS_LOG_WARN) atomic_fetch_add(&g_problems, 1);
   if (level < g_level) return;
 
   buckets_buf msg = BUCKETS_BUF_INIT;

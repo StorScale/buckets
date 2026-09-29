@@ -453,10 +453,12 @@ static bool bootstrap(boot_state *b) {
   if (!t->first_local) t->first_local = buckets_objlayer_scratch(layer)->root;
   b->layer = layer;
   b->healer = buckets_healer_start(layer);
+  atomic_store(&b->s3->healer, b->healer);
   buckets_s3_server_set_layer(b->s3, layer);
   buckets_scanner_hooks hooks;
   buckets_s3_scanner_hooks(b->s3, &hooks);
   b->scanner = buckets_scanner_start(layer, &hooks);
+  atomic_store(&b->s3->scanner, b->scanner);
   if (t->distributed) buckets_log_info("storage initialized; serving S3");
   return true;
 }
@@ -661,7 +663,8 @@ int main(int argc, char **argv) {
   buckets_pool *internode_pool = NULL;
   buckets_storage_server *storage_srv = NULL;
   static buckets_peer_handlers peer_handlers;
-  peer_handlers = (buckets_peer_handlers){buckets_s3_peer_iam, buckets_s3_peer_bucket, buckets_s3_peer_server_info, &s3};
+  peer_handlers = (buckets_peer_handlers){buckets_s3_peer_iam, buckets_s3_peer_bucket, buckets_s3_peer_server_info,
+                                          buckets_s3_peer_metrics, &s3};
   if (topo.distributed) {
     internode_pool = buckets_pool_new((int)BUCKETS_MAX(16L, 2 * ncpu));
     storage_srv = buckets_storage_server_new(topo.local_drives, topo.nlocal);
@@ -721,7 +724,9 @@ int main(int argc, char **argv) {
     buckets_http_client **pc = buckets_xcalloc(topo.npeers ? topo.npeers : 1, sizeof(*pc));
     for (size_t i = 0; i < topo.npeers; i++) pc[i] = topo.peers[i].client;
     s3.peers = buckets_peer_sys_new(pc, topo.npeers);
-    free(pc);
+    s3.internode = pc; /* kept for the internode traffic metrics */
+    s3.ninternode = topo.npeers;
+    s3.lock_server = topo.lock_server;
   }
 
   app_state app = {0};
@@ -768,6 +773,7 @@ int main(int argc, char **argv) {
   buckets_loop_free(g_loop);
   if (boot.layer) buckets_objlayer_set_locker(boot.layer, NULL, NULL, NULL);
   buckets_peer_sys_free(s3.peers);
+  free(s3.internode);
   buckets_cluster_info_free(s3.cluster);
   buckets_dsync_free(topo.dsync);
   buckets_objlayer_free(boot.layer);

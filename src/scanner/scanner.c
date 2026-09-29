@@ -90,6 +90,10 @@ static void heal_bucket(buckets_scanner *s, const char *bucket) {
 
 /* The versions of one key: lifecycle, healing, then usage. */
 static void scan_key(buckets_scanner *s, const char *bucket, buckets_object_info *v, size_t n, buckets_bucket_usage *bu) {
+  pthread_mutex_lock(&s->mu);
+  s->st.objects++;
+  s->st.versions += n;
+  pthread_mutex_unlock(&s->mu);
   bool *removed = buckets_xcalloc(n, sizeof(bool));
   if (s->hooks.object) s->hooks.object(s->hooks.ud, bucket, v, n, removed);
   bool present = false;
@@ -191,8 +195,17 @@ static void scan_cycle(buckets_scanner *s) {
     buckets_buf_appendf(&meta, "buckets/%s/.metadata.bin", bk[b].name);
     if (leads(L, meta.data)) heal_object(s, BUCKETS_META_BUCKET, meta.data);
     buckets_buf_free(&meta);
-    if (leader) complete &= usage_bucket(s, bk[b].name, buckets_data_usage_add_bucket(&u, bk[b].name));
+    pthread_mutex_lock(&s->mu);
+    s->st.bucket_scans_started++;
+    s->st.folders++;
+    pthread_mutex_unlock(&s->mu);
+    bool done = true;
+    if (leader) done = usage_bucket(s, bk[b].name, buckets_data_usage_add_bucket(&u, bk[b].name));
     else heal_bucket(s, bk[b].name);
+    complete &= done;
+    pthread_mutex_lock(&s->mu);
+    s->st.bucket_scans_finished += done;
+    pthread_mutex_unlock(&s->mu);
   }
   complete &= !stopping(s);
   if (leader && complete) {
@@ -204,11 +217,10 @@ static void scan_cycle(buckets_scanner *s) {
   }
   buckets_data_usage_free(&u);
   buckets_bucket_info_free(bk, nb);
-  if (complete) {
-    pthread_mutex_lock(&s->mu);
-    s->st.cycles++;
-    pthread_mutex_unlock(&s->mu);
-  }
+  pthread_mutex_lock(&s->mu);
+  if (complete) s->st.cycles++;
+  s->st.last_activity_ns = now_ns();
+  pthread_mutex_unlock(&s->mu);
 }
 
 static int cycle_seconds(buckets_scanner *s) {

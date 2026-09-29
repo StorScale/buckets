@@ -31,6 +31,9 @@ typedef struct {
 } buckets_data_usage;
 
 void buckets_data_usage_free(buckets_data_usage *u);
+/* The histogram ranges' names (the keys MinIO stores and labels metrics with). */
+const char *buckets_usage_size_bin_name(size_t i);
+const char *buckets_usage_version_bin_name(size_t i);
 /* The bucket's entry, or NULL. */
 const buckets_bucket_usage *buckets_data_usage_bucket(const buckets_data_usage *u, const char *bucket);
 /* Adds a bucket entry (names must arrive sorted) and returns it. */

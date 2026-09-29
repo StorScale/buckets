@@ -81,6 +81,12 @@ void buckets_s3_send_event_early(s3_ctx *c, int event_name, const char *bucket, 
                                  const buckets_object_info *oi, const char *version_id);
 /* An event without a request (lifecycle expiry): no request parameters,
  * this node as the source host. */
+/* The index (metrics/stats.h) of the MinIO API route the request takes, or
+ * -1 when it takes none (admin, STS, health, unroutable). */
+/* Serves /minio/v2/metrics/... and /minio/metrics/v3... (authenticating as
+ * MinIO's AuthMiddleware); false when the request is not one of them. */
+bool buckets_s3_metrics_handle(s3_ctx *c);
+int buckets_s3_api_index(const s3_ctx *c);
 void buckets_s3_send_internal_event(buckets_s3_server *s, int event_name, const char *bucket, const char *object,
                                     const buckets_object_info *oi, const char *version_id, const char *user_agent);
 
