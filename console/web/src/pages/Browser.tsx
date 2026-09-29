@@ -1,11 +1,20 @@
 import { ChangeEvent, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
+  bucketDocs,
   deleteObject,
   deleteObjects,
   downloadUrl,
+  getLegalHold,
   getObjectTags,
+  getRetention,
   headObject,
+  inlineUrl,
+  loginMethods,
+  Retention,
+  setLegalHold,
+  setRetention,
+  shareLink,
   listObjects,
   listVersions,
   Listing,
@@ -335,10 +344,42 @@ function ObjectDetails({ bucket, objectKey, onClose, onDeleted }: { bucket: stri
   const [tags, setTags] = useState<Tag[]>([]);
   const [error, setError] = useState<unknown>();
   const [saved, setSaved] = useState<string | null>(null);
+  const [retention, setRet] = useState<Retention | null>(null);
+  const [hold, setHold] = useState<boolean | null>(null);
+  const [locking, setLocking] = useState(false);
+  const [canShare, setCanShare] = useState(false);
+  const [share, setShare] = useState<{ url: string; expiresAt: number } | null>(null);
+  const [shareFor, setShareFor] = useState(24 * 3600);
+  const [preview, setPreview] = useState<string | null>(null);
   useEffect(() => {
     headObject(bucket, objectKey).then(setHeaders).catch(setError);
     getObjectTags(bucket, objectKey).then(setTags).catch(setError);
+    // Retention and legal hold exist only in buckets with object locking.
+    bucketDocs.objectLock
+      .get(bucket)
+      .then((x) => {
+        if (!x || !x.includes("<ObjectLockEnabled>Enabled</ObjectLockEnabled>")) return;
+        setLocking(true);
+        getRetention(bucket, objectKey).then(setRet).catch(() => undefined);
+        getLegalHold(bucket, objectKey).then(setHold).catch(() => undefined);
+      })
+      .catch(() => undefined);
+    loginMethods()
+      .then((m) => setCanShare(m.share))
+      .catch(() => undefined);
   }, [bucket, objectKey]);
+  // Small text objects preview inline; images load by URL.
+  const type = headers?.get("content-type") ?? "";
+  const size = Number(headers?.get("content-length") ?? 0);
+  const isImage = type.startsWith("image/");
+  const isText = (type.startsWith("text/") || type === "application/json") && size <= 256 * 1024;
+  useEffect(() => {
+    if (!isText) return;
+    fetch(inlineUrl(bucket, objectKey), { credentials: "same-origin" })
+      .then((r) => r.text())
+      .then(setPreview)
+      .catch(() => undefined);
+  }, [bucket, objectKey, isText]);
   const meta: [string, string][] = [];
   headers?.forEach((v, k) => {
     if (["content-type", "etag", "last-modified", "content-length", "x-amz-version-id", "x-amz-server-side-encryption"].includes(k) || k.startsWith("x-amz-meta-"))
@@ -358,6 +399,54 @@ function ObjectDetails({ bucket, objectKey, onClose, onDeleted }: { bucket: stri
           ))}
         </tbody>
       </table>
+      {isImage && <img className="preview" src={inlineUrl(bucket, objectKey)} alt={objectKey} data-testid="preview" />}
+      {isText && preview !== null && (
+        <pre className="preview" data-testid="preview">
+          {preview}
+        </pre>
+      )}
+      {canShare && (
+        <>
+          <h3>Share</h3>
+          <div className="share">
+            <select value={shareFor} onChange={(e) => setShareFor(Number(e.target.value))}>
+              <option value={3600}>1 hour</option>
+              <option value={24 * 3600}>1 day</option>
+              <option value={7 * 24 * 3600}>7 days</option>
+            </select>
+            <button
+              data-testid="share"
+              onClick={() =>
+                shareLink(bucket, objectKey, shareFor)
+                  .then(setShare)
+                  .catch(setError)
+              }
+            >
+              Create link
+            </button>
+            {share && (
+              <>
+                <input className="url" readOnly value={share.url} onFocus={(e) => e.target.select()} data-testid="share-url" />
+                <span className="muted">until {new Date(share.expiresAt * 1000).toLocaleString()}</span>
+              </>
+            )}
+          </div>
+        </>
+      )}
+      {locking && (
+        <LockPanel
+          bucket={bucket}
+          objectKey={objectKey}
+          retention={retention}
+          hold={hold}
+          onChange={(r, h) => {
+            setRet(r);
+            setHold(h);
+          }}
+          onError={setError}
+          onSaved={setSaved}
+        />
+      )}
       <h3>Tags</h3>
       <TagEditor
         tags={tags}
@@ -384,6 +473,76 @@ function ObjectDetails({ bucket, objectKey, onClose, onDeleted }: { bucket: stri
         />
       </div>
     </Modal>
+  );
+}
+
+function LockPanel({
+  bucket,
+  objectKey,
+  retention,
+  hold,
+  onChange,
+  onError,
+  onSaved,
+}: {
+  bucket: string;
+  objectKey: string;
+  retention: Retention | null;
+  hold: boolean | null;
+  onChange: (r: Retention | null, h: boolean | null) => void;
+  onError: (e: unknown) => void;
+  onSaved: (s: string) => void;
+}) {
+  const [mode, setMode] = useState(retention?.mode || "GOVERNANCE");
+  const [until, setUntil] = useState(retention?.until ? retention.until.slice(0, 10) : "");
+  return (
+    <>
+      <h3>Retention</h3>
+      <p className="muted" data-testid="retention">
+        {retention?.mode ? `${retention.mode} until ${new Date(retention.until).toLocaleString()}` : "No retention."}
+      </p>
+      <label className="inline">
+        <select value={mode} onChange={(e) => setMode(e.target.value)}>
+          <option value="GOVERNANCE">Governance</option>
+          <option value="COMPLIANCE">Compliance</option>
+        </select>
+        <input type="date" value={until} onChange={(e) => setUntil(e.target.value)} data-testid="retain-until" />
+        <button
+          disabled={!until}
+          data-testid="save-retention"
+          onClick={() =>
+            setRetention(bucket, objectKey, mode, `${until}T23:59:59Z`)
+              .then(() => getRetention(bucket, objectKey))
+              .then((r) => {
+                onChange(r, hold);
+                onSaved("Retention saved.");
+              })
+              .catch(onError)
+          }
+        >
+          Set retention
+        </button>
+      </label>
+      <h3>Legal hold</h3>
+      <label className="check">
+        <input
+          type="checkbox"
+          checked={!!hold}
+          data-testid="legal-hold"
+          onChange={(e) => {
+            const on = e.target.checked;
+            onChange(retention, on); /* optimistic; undone if the server says no */
+            setLegalHold(bucket, objectKey, on)
+              .then(() => onSaved(on ? "Legal hold on." : "Legal hold off."))
+              .catch((err) => {
+                onChange(retention, !on);
+                onError(err);
+              });
+          }}
+        />{" "}
+        Legal hold (blocks deletion of this version)
+      </label>
+    </>
   );
 }
 

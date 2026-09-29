@@ -136,3 +136,11 @@ table.kv th { width: 35%; text-transform: none; font-size: 13px; }
   .content { padding: 16px; }
   .split { flex-direction: column; }
 }
+
+.tabs { display: flex; gap: 4px; margin-bottom: 12px; }
+.tabs button { flex: 1; }
+.tabs button.active { border-color: var(--accent); color: var(--accent); }
+.preview { max-width: 100%; max-height: 360px; display: block; margin: 8px 0; border: 1px solid var(--line); border-radius: 6px; }
+pre.preview { overflow: auto; padding: 8px; font-size: 12px; white-space: pre-wrap; }
+.share { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.share input.url { flex: 1; min-width: 200px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }

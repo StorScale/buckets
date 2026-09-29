@@ -108,3 +108,56 @@ bool buckets_sigv4_sign(const buckets_sigv4_creds *cr, const char *method, const
   buckets_buf_free(&names);
   return true;
 }
+
+static void uri_escape(buckets_buf *b, const char *s) {
+  static const char hex[] = "0123456789ABCDEF";
+  for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+    if (isalnum(*p) || *p == '-' || *p == '_' || *p == '.' || *p == '~') buckets_buf_append_char(b, (char)*p);
+    else buckets_buf_appendf(b, "%%%c%c", hex[*p >> 4], hex[*p & 15]);
+  }
+}
+
+void buckets_sigv4_presign(const buckets_sigv4_creds *cr, const char *method, const char *path, const char *extra_query,
+                           const char *host, int expires, time_t now, buckets_buf *query) {
+  const char *region = cr->region && *cr->region ? cr->region : "us-east-1";
+  const char *service = cr->service && *cr->service ? cr->service : "s3";
+  char date[17], date8[9], scope[128], cred[512];
+  buckets_time_amz(now, date);
+  memcpy(date8, date, 8);
+  date8[8] = '\0';
+  snprintf(scope, sizeof(scope), "%s/%s/%s/aws4_request", date8, region, service);
+  snprintf(cred, sizeof(cred), "%s/%s", cr->access_key, scope);
+  buckets_buf q = BUCKETS_BUF_INIT;
+  buckets_buf_append_c(&q, "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=");
+  uri_escape(&q, cred);
+  buckets_buf_appendf(&q, "&X-Amz-Date=%s&X-Amz-Expires=%d", date, expires);
+  if (cr->session_token && *cr->session_token) {
+    buckets_buf_append_c(&q, "&X-Amz-Security-Token=");
+    uri_escape(&q, cr->session_token);
+  }
+  buckets_buf_append_c(&q, "&X-Amz-SignedHeaders=host");
+  if (extra_query && *extra_query) buckets_buf_appendf(&q, "&%s", extra_query);
+
+  buckets_buf curi = BUCKETS_BUF_INIT, cq = BUCKETS_BUF_INIT, creq = BUCKETS_BUF_INIT;
+  buckets_sigv4_canonical_uri(buckets_str_c(path && *path ? path : "/"), &curi);
+  buckets_query pq = {0};
+  buckets_query_parse(buckets_str_c(q.data), &pq);
+  buckets_sigv4_canonical_query(&pq, false, &cq);
+  buckets_query_free(&pq);
+  buckets_buf_appendf(&creq, "%s\n%s\n%s\nhost:%s\n\nhost\nUNSIGNED-PAYLOAD", method, curi.data ? curi.data : "/",
+                      cq.data ? cq.data : "", host);
+  uint8_t sum[32], key[32], mac[32];
+  char creq_hash[65], sig[65], sts[512];
+  buckets_sha256(creq.data, creq.len, sum);
+  buckets_hex_encode(sum, 32, creq_hash);
+  snprintf(sts, sizeof(sts), "AWS4-HMAC-SHA256\n%s\n%s\n%s", date, scope, creq_hash);
+  buckets_sigv4_signing_key(cr->secret_key, buckets_str_c(date8), buckets_str_c(region), service, key);
+  buckets_hmac_sha256(key, 32, sts, strlen(sts), mac);
+  buckets_hex_encode(mac, 32, sig);
+  buckets_buf_appendf(&q, "&X-Amz-Signature=%s", sig);
+  buckets_buf_append(query, q.data, q.len);
+  buckets_buf_free(&q);
+  buckets_buf_free(&curi);
+  buckets_buf_free(&cq);
+  buckets_buf_free(&creq);
+}

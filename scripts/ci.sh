@@ -43,6 +43,7 @@ for t in iam config openid plugins ldap certsts service usage; do
   run tests/integration/$t.sh build-ci-asan/src/bucketsd
 done
 run tests/integration/s3diff.sh build-ci-asan/src/bucketsd
+run tests/integration/console.sh build-ci-asan/src/bucketsd build-ci-asan/src/consoled
 # The console: SPA build, typecheck and Playwright e2e against the sanitized
 # bucketsd and consoled (skipped without npm).
 if command -v npm >/dev/null; then

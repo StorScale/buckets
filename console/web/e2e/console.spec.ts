@@ -145,6 +145,48 @@ test.describe("buckets and objects", () => {
   });
 });
 
+test.describe("object details", () => {
+  test("preview, share link, retention and legal hold", async ({ page }) => {
+    const bucket = unique("lock");
+    await login(page);
+    await page.goto("/buckets");
+    await page.getByTestId("create-bucket").click();
+    await page.getByTestId("bucket-name").fill(bucket);
+    await page.getByRole("dialog").getByText("Object locking").click();
+    await page.getByTestId("bucket-create-submit").click();
+    await page.getByRole("link", { name: bucket }).click();
+    await page.getByTestId("file-input").setInputFiles({ name: "note.txt", mimeType: "text/plain", buffer: Buffer.from("keep this safe") });
+    await expect(page.getByTestId("notice")).toHaveText("Uploaded 1 file.");
+    await page.getByRole("link", { name: "note.txt" }).click();
+
+    await expect(page.getByTestId("preview")).toHaveText("keep this safe");
+
+    // a share link works without the console session (when set up to be reachable)
+    await page.getByTestId("share").click();
+    const url = await page.getByTestId("share-url").inputValue();
+    expect(url).toContain("X-Amz-Signature=");
+    const anon = await fetch(url);
+    expect(await anon.text()).toBe("keep this safe");
+
+    // retention and legal hold
+    await expect(page.getByTestId("retention")).toHaveText("No retention.");
+    const until = new Date(Date.now() + 3 * 86400_000).toISOString().slice(0, 10);
+    await page.getByTestId("retain-until").fill(until);
+    await page.getByTestId("save-retention").click();
+    await expect(page.getByTestId("retention")).toContainText("GOVERNANCE until");
+    await page.getByTestId("legal-hold").check();
+    await expect(page.getByRole("dialog").getByTestId("notice")).toHaveText("Legal hold on.");
+
+    // a locked version cannot be deleted (MinIO's ErrObjectLocked: 400, "WORM protected")
+    const vid = (await page.request.head(`/api/v1/s3/${bucket}/note.txt`)).headers()["x-amz-version-id"];
+    const del = await page.request.delete(`/api/v1/s3/${bucket}/note.txt?versionId=${vid}`, { headers: { "X-Console-Request": "1" } });
+    expect(del.status()).toBe(400);
+    expect(await del.text()).toContain("WORM protected");
+    await page.getByTestId("legal-hold").uncheck();
+    await expect(page.getByRole("dialog").getByTestId("notice")).toHaveText("Legal hold off.");
+  });
+});
+
 test.describe("identity", () => {
   test("users: create with a policy, sign in as them, disable, delete", async ({ page, browser }) => {
     const user = unique("alice");

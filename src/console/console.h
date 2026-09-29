@@ -14,7 +14,9 @@
  * calls to bucketsd, signing them with the session's credentials. It holds
  * no state beyond the cookie key.
  *
- *   POST /api/v1/login   {"accessKey","secretKey"}   -> session cookie
+ *   GET  /api/v1/login-methods                        -> {"ldap": bool, "share": bool}
+ *   POST /api/v1/login   {"accessKey","secretKey"[,"method":"ldap"]} -> session cookie
+ *   GET  /api/v1/share?bucket=&key=[&versionId=][&expires=]  -> {"url","expiresAt"}
  *   POST /api/v1/logout
  *   GET  /api/v1/session                              -> {"accessKey","expiresAt"}
  *   *    /api/v1/s3/<bucket>/<key>?...                -> bucketsd /<bucket>/<key>?...
@@ -36,6 +38,8 @@ typedef struct {
   int sts_duration;                 /* session length in seconds */
   bool secure_cookie;               /* the console is served over TLS */
   const char *region;
+  const char *s3_url; /* bucketsd as browsers reach it, for share links (NULL: none) */
+  bool ldap;          /* offer LDAP sign-in (AssumeRoleWithLDAPIdentity) */
 } buckets_console_config;
 
 typedef struct buckets_console buckets_console;

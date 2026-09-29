@@ -38,7 +38,7 @@ export default async function globalSetup() {
     process.env.CONSOLED_BIN ?? join(root, "build/src/consoled"),
     ["--address", "127.0.0.1:19890", "--web-dir", resolve(here, "../dist")],
     {
-      env: { ...process.env, CONSOLE_MINIO_SERVER: "http://127.0.0.1:19889", CONSOLE_PBKDF_PASSPHRASE: "e2e", CONSOLE_PBKDF_SALT: "e2e" },
+      env: { ...process.env, CONSOLE_MINIO_SERVER: "http://127.0.0.1:19889", CONSOLE_PBKDF_PASSPHRASE: "e2e", CONSOLE_PBKDF_SALT: "e2e", BUCKETS_CONSOLE_S3_URL: "http://127.0.0.1:19889" },
       stdio: ["ignore", "ignore", "inherit"],
     },
   );

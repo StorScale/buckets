@@ -36,4 +36,11 @@ bool buckets_sigv4_sign(const buckets_sigv4_creds *cr, const char *method, const
                         const char *host, const buckets_http_kv *hdrs, size_t nhdrs, const char *payload_hash, time_t now,
                         buckets_sigv4_signed *out);
 
+/* A presigned URL's query (query-string SigV4, UNSIGNED-PAYLOAD, signing
+ * only host) for method + raw path at host, valid for expires seconds:
+ * "X-Amz-Algorithm=...&X-Amz-Signature=...". extra_query (raw, may be NULL)
+ * is signed along. */
+void buckets_sigv4_presign(const buckets_sigv4_creds *cr, const char *method, const char *path, const char *extra_query,
+                           const char *host, int expires, time_t now, buckets_buf *query);
+
 #endif

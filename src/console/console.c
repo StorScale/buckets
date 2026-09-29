@@ -15,6 +15,7 @@
 #include <yyjson.h>
 
 #include "core/log.h"
+#include "core/query.h"
 #include "crypto/aead.h"
 #include "crypto/base64.h"
 #include "crypto/hex.h"
@@ -204,6 +205,16 @@ static bool upstream_call(buckets_console *c, const buckets_sigv4_creds *cr, con
 
 /* ---- login ------------------------------------------------------------------------ */
 
+static void form_escape(buckets_buf *b, const char *s) {
+  static const char hex[] = "0123456789ABCDEF";
+  for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+    if ((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9') || *p == '-' || *p == '_' ||
+        *p == '.' || *p == '~')
+      buckets_buf_append_char(b, (char)*p);
+    else buckets_buf_appendf(b, "%%%c%c", hex[*p >> 4], hex[*p & 15]);
+  }
+}
+
 static void handle_login(buckets_console *c, const buckets_http_request *req, buckets_http_response *resp) {
   if (req->body_len > MAX_JSON_BODY || req->body_fd >= 0 || req->pipe) {
     json_error(resp, 400, "InvalidRequest", "request too large");
@@ -218,14 +229,37 @@ static void handle_login(buckets_console *c, const buckets_http_request *req, bu
     json_error(resp, 400, "InvalidRequest", "accessKey and secretKey are required");
     return;
   }
-  /* STS AssumeRole with the user's own keys proves them and yields
-   * credentials the console can hold instead. */
-  char body[128];
-  int bn = snprintf(body, sizeof(body), "Action=AssumeRole&Version=2011-06-15&DurationSeconds=%d", c->cfg.sts_duration);
+  const char *method = yyjson_get_str(yyjson_obj_get(o, "method"));
+  bool ldap = method && strcmp(method, "ldap") == 0;
+  if (ldap && !c->cfg.ldap) {
+    yyjson_doc_free(d);
+    json_error(resp, 400, "InvalidRequest", "LDAP sign-in is not enabled");
+    return;
+  }
   buckets_http_kv h[] = {{"Content-Type", "application/x-www-form-urlencoded"}};
-  buckets_sigv4_creds cr = {.access_key = ak, .secret_key = sk, .region = c->cfg.region, .service = "sts"};
   buckets_http_result res;
-  bool ok = upstream_call(c, &cr, "POST", "/", NULL, h, 1, body, (size_t)bn, &res);
+  bool ok;
+  if (ldap) {
+    /* AssumeRoleWithLDAPIdentity: the directory checks the password. */
+    buckets_buf body = BUCKETS_BUF_INIT, eu = BUCKETS_BUF_INIT, ep = BUCKETS_BUF_INIT;
+    form_escape(&eu, ak);
+    form_escape(&ep, sk);
+    buckets_buf_appendf(&body, "Action=AssumeRoleWithLDAPIdentity&Version=2011-06-15&DurationSeconds=%d&LDAPUsername=%s&LDAPPassword=%s",
+                        c->cfg.sts_duration, eu.data, ep.data);
+    ok = buckets_http_client_do(c->http, "POST", "/", h, 1, body.data, body.len, &res);
+    OPENSSL_cleanse(body.data, body.len);
+    OPENSSL_cleanse(ep.data, ep.len);
+    buckets_buf_free(&body);
+    buckets_buf_free(&eu);
+    buckets_buf_free(&ep);
+  } else {
+    /* STS AssumeRole with the user's own keys proves them and yields
+     * credentials the console can hold instead. */
+    char body[128];
+    int bn = snprintf(body, sizeof(body), "Action=AssumeRole&Version=2011-06-15&DurationSeconds=%d", c->cfg.sts_duration);
+    buckets_sigv4_creds cr = {.access_key = ak, .secret_key = sk, .region = c->cfg.region, .service = "sts"};
+    ok = upstream_call(c, &cr, "POST", "/", NULL, h, 1, body, (size_t)bn, &res);
+  }
   if (!ok) {
     yyjson_doc_free(d);
     json_error(resp, 502, "UpstreamUnavailable", "the storage service did not answer");
@@ -257,6 +291,88 @@ static void handle_login(buckets_console *c, const buckets_http_request *req, bu
   OPENSSL_cleanse(&s, sizeof(s));
   buckets_http_result_free(&res);
   yyjson_doc_free(d);
+}
+
+static void json_reply(buckets_http_response *resp, yyjson_mut_doc *d) {
+  size_t n;
+  char *js = yyjson_mut_write(d, 0, &n);
+  yyjson_mut_doc_free(d);
+  resp->status = 200;
+  buckets_http_resp_header(resp, "Content-Type", "application/json");
+  buckets_buf_append(&resp->body, js, n);
+  free(js);
+}
+
+static void handle_login_methods(buckets_console *c, buckets_http_response *resp) {
+  yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
+  yyjson_mut_val *o = yyjson_mut_obj(d);
+  yyjson_mut_doc_set_root(d, o);
+  yyjson_mut_obj_add_bool(d, o, "ldap", c->cfg.ldap);
+  yyjson_mut_obj_add_bool(d, o, "share", c->cfg.s3_url != NULL);
+  json_reply(resp, d);
+}
+
+static void path_escape(buckets_buf *b, const char *s, bool keep_slash) {
+  static const char hex[] = "0123456789ABCDEF";
+  for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+    bool plain = (*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9') || *p == '-' ||
+                 *p == '_' || *p == '.' || *p == '~' || (keep_slash && *p == '/');
+    if (plain) buckets_buf_append_char(b, (char)*p);
+    else buckets_buf_appendf(b, "%%%c%c", hex[*p >> 4], hex[*p & 15]);
+  }
+}
+
+/* A presigned GET at the public S3 URL, valid while the session is (and at
+ * most 7 days): the link keeps working without the console. */
+static void handle_share(buckets_console *c, const buckets_http_request *req, buckets_http_response *resp,
+                         const buckets_console_session *s) {
+  if (!c->cfg.s3_url) {
+    json_error(resp, 501, "NotConfigured", "share links need BUCKETS_CONSOLE_S3_URL (the S3 endpoint browsers can reach)");
+    return;
+  }
+  buckets_query q = {0};
+  buckets_query_parse(req->query, &q);
+  const char *bucket = buckets_query_get(&q, "bucket"), *key = buckets_query_get(&q, "key");
+  const char *vid = buckets_query_get(&q, "versionId"), *exp_s = buckets_query_get(&q, "expires");
+  if (!bucket || !*bucket || !key || !*key) {
+    buckets_query_free(&q);
+    json_error(resp, 400, "InvalidRequest", "bucket and key are required");
+    return;
+  }
+  int64_t now = (int64_t)time(NULL);
+  int64_t left = s->expires - now;
+  int64_t expires = exp_s ? strtoll(exp_s, NULL, 10) : 24 * 3600;
+  if (expires <= 0 || expires > left) expires = left;
+  if (expires > 7 * 24 * 3600) expires = 7 * 24 * 3600;
+  /* scheme://authority from the configured URL */
+  const char *auth = strstr(c->cfg.s3_url, "://");
+  auth = auth ? auth + 3 : c->cfg.s3_url;
+  char host[512];
+  snprintf(host, sizeof(host), "%.*s", (int)strcspn(auth, "/"), auth);
+  buckets_buf path = BUCKETS_BUF_INIT, extra = BUCKETS_BUF_INIT, qs = BUCKETS_BUF_INIT, url = BUCKETS_BUF_INIT;
+  buckets_buf_append_char(&path, '/');
+  path_escape(&path, bucket, false);
+  buckets_buf_append_char(&path, '/');
+  path_escape(&path, key, true);
+  if (vid && *vid) {
+    buckets_buf_append_c(&extra, "versionId=");
+    path_escape(&extra, vid, false);
+  }
+  buckets_sigv4_creds cr = {.access_key = s->access_key, .secret_key = s->secret_key,
+                            .session_token = s->session_token, .region = c->cfg.region};
+  buckets_sigv4_presign(&cr, "GET", path.data, extra.data, host, (int)expires, (time_t)now, &qs);
+  buckets_buf_appendf(&url, "%.*s%s%s?%s", (int)(auth - c->cfg.s3_url), c->cfg.s3_url, host, path.data, qs.data);
+  yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
+  yyjson_mut_val *o = yyjson_mut_obj(d);
+  yyjson_mut_doc_set_root(d, o);
+  yyjson_mut_obj_add_strcpy(d, o, "url", url.data);
+  yyjson_mut_obj_add_int(d, o, "expiresAt", now + expires);
+  json_reply(resp, d);
+  buckets_buf_free(&path);
+  buckets_buf_free(&extra);
+  buckets_buf_free(&qs);
+  buckets_buf_free(&url);
+  buckets_query_free(&q);
 }
 
 static void handle_session(buckets_http_response *resp, const buckets_console_session *s) {
@@ -568,6 +684,10 @@ void buckets_console_handle(const buckets_http_request *req, buckets_http_respon
     else handle_login(c, req, resp);
     return;
   }
+  if (buckets_str_eq_c(path, "/api/v1/login-methods")) {
+    handle_login_methods(c, resp);
+    return;
+  }
   if (buckets_str_eq_c(path, "/api/v1/logout")) {
     set_cookie(c, resp, "", 0);
     resp->status = 204;
@@ -580,6 +700,8 @@ void buckets_console_handle(const buckets_http_request *req, buckets_http_respon
   }
   if (buckets_str_eq_c(path, "/api/v1/session")) {
     handle_session(resp, &s);
+  } else if (buckets_str_eq_c(path, "/api/v1/share")) {
+    handle_share(c, req, resp, &s);
   } else if (buckets_str_has_prefix(path, "/api/v1/s3/") || buckets_str_eq_c(path, "/api/v1/s3")) {
     char up[4096];
     snprintf(up, sizeof(up), "/%.*s", (int)(path.n > 11 ? path.n - 11 : 0), path.p + 11);

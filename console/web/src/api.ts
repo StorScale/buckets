@@ -67,9 +67,13 @@ export async function call(method: string, path: string, opts: CallOpts = {}): P
 
 export type Session = { accessKey: string; expiresAt: number };
 
-export async function login(accessKey: string, secretKey: string): Promise<void> {
+export type LoginMethods = { ldap: boolean; share: boolean };
+export async function loginMethods(): Promise<LoginMethods> {
+  return (await call("GET", "/api/v1/login-methods")).json();
+}
+export async function login(accessKey: string, secretKey: string, method?: "ldap"): Promise<void> {
   await call("POST", "/api/v1/login", {
-    body: JSON.stringify({ accessKey, secretKey }),
+    body: JSON.stringify({ accessKey, secretKey, method }),
     headers: { "Content-Type": "application/json" },
   });
 }
@@ -359,3 +363,53 @@ export async function setConfig(kv: string): Promise<void> {
 }
 export type ConfigHelp = { subSys: string; description: string; multipleTargets: boolean; keysHelp: { key: string; description: string; optional: boolean; type: string }[] };
 export const configHelp = (subSys?: string) => adminJson<ConfigHelp>("GET", "help-config-kv", { query: subSys ? { subSys } : {} });
+
+// ---- sharing, retention and legal hold ----
+
+export async function shareLink(bucket: string, key: string, expires: number, versionId?: string): Promise<{ url: string; expiresAt: number }> {
+  return (await call("GET", "/api/v1/share", { query: { bucket, key, versionId, expires: String(expires) } })).json();
+}
+
+export function inlineUrl(bucket: string, key: string): string {
+  return s3Path(bucket, key) + "?response-content-disposition=inline";
+}
+
+async function putObjectSub(bucket: string, key: string, sub: string, body: string, extra: Record<string, string> = {}): Promise<void> {
+  const bytes = new TextEncoder().encode(body);
+  await call("PUT", s3Path(bucket, key), {
+    query: { [sub]: "" },
+    body: bytes,
+    headers: { "Content-Type": "application/xml", "x-amz-checksum-crc32": crc32Base64(bytes), ...extra },
+  });
+}
+
+export type Retention = { mode: string; until: string };
+export async function getRetention(bucket: string, key: string): Promise<Retention | null> {
+  try {
+    const d = await xml(await call("GET", s3Path(bucket, key), { query: { retention: "" } }));
+    return { mode: txt(d, "Mode"), until: txt(d, "RetainUntilDate") };
+  } catch (e) {
+    if (e instanceof ApiError && ["NoSuchObjectLockConfiguration", "InvalidRequest", "InvalidBucketState"].includes(e.code)) return null;
+    throw e;
+  }
+}
+export async function setRetention(bucket: string, key: string, mode: string, until: string, bypass = false): Promise<void> {
+  await putObjectSub(
+    bucket,
+    key,
+    "retention",
+    `<Retention><Mode>${mode}</Mode><RetainUntilDate>${new Date(until).toISOString()}</RetainUntilDate></Retention>`,
+    bypass ? { "X-Amz-Bypass-Governance-Retention": "true" } : {},
+  );
+}
+export async function getLegalHold(bucket: string, key: string): Promise<boolean | null> {
+  try {
+    return txt(await xml(await call("GET", s3Path(bucket, key), { query: { "legal-hold": "" } })), "Status") === "ON";
+  } catch (e) {
+    if (e instanceof ApiError && ["NoSuchObjectLockConfiguration", "InvalidRequest", "InvalidBucketState"].includes(e.code)) return null;
+    throw e;
+  }
+}
+export async function setLegalHold(bucket: string, key: string, on: boolean): Promise<void> {
+  await putObjectSub(bucket, key, "legal-hold", `<LegalHold><Status>${on ? "ON" : "OFF"}</Status></LegalHold>`);
+}

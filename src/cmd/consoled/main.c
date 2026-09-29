@@ -10,7 +10,9 @@
  *                                                        cookie key (shared by replicas)
  *   BUCKETS_CONSOLE_STS_DURATION / CONSOLE_STS_DURATION  session length (3600, or 30m / 12h)
  *   BUCKETS_CONSOLE_REGION / CONSOLE_MINIO_REGION        region to sign for
- *   BUCKETS_CONSOLE_CA_DIR                                CAs for an https bucketsd */
+ *   BUCKETS_CONSOLE_CA_DIR                                CAs for an https bucketsd
+ *   BUCKETS_CONSOLE_S3_URL / CONSOLE_MINIO_SERVER_PUBLIC  S3 as browsers reach it (share links)
+ *   BUCKETS_CONSOLE_LDAP / CONSOLE_LDAP_ENABLED           offer LDAP sign-in (on) */
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -143,7 +145,10 @@ int main(int argc, char **argv) {
       .sts_duration = parse_duration(env2("BUCKETS_CONSOLE_STS_DURATION", "CONSOLE_STS_DURATION")),
       .secure_cookie = tls != NULL || env2("BUCKETS_CONSOLE_SECURE_COOKIE", NULL) != NULL,
       .region = env2("BUCKETS_CONSOLE_REGION", "CONSOLE_MINIO_REGION"),
+      .s3_url = env2("BUCKETS_CONSOLE_S3_URL", "CONSOLE_MINIO_SERVER_PUBLIC"),
   };
+  const char *ldap = env2("BUCKETS_CONSOLE_LDAP", "CONSOLE_LDAP_ENABLED");
+  cfg.ldap = ldap && (strcasecmp(ldap, "on") == 0 || strcasecmp(ldap, "true") == 0 || strcmp(ldap, "1") == 0);
   buckets_console *console = buckets_console_new(&cfg);
 
   g_loop = buckets_loop_new();
