@@ -7,7 +7,7 @@ registers is listed; statuses live in the script's `STATUS` table.
 
 **Overall:** 133 done, 4 partial, 85 not started (222 handlers).
 
-## S3 API (59/76)
+## S3 API (60/76)
 
 Source: `cmd/api-router.go`
 
@@ -79,7 +79,7 @@ Source: `cmd/api-router.go`
 | ✅ | `PutBucketTaggingHandler` |  |
 | ✅ | `PutBucketVersioningHandler` |  |
 | ✅ | `PutObjectACLHandler` | canned private, as MinIO |
-| ⬜ | `PutObjectExtractHandler` |  |
+| ✅ | `PutObjectExtractHandler` | snowball archives: plain tar or S2; gzip/zstd/lz4/bzip2 archives answer Unsupported format |
 | ✅ | `PutObjectHandler` |  |
 | ✅ | `PutObjectLegalHoldHandler` |  |
 | ✅ | `PutObjectPartHandler` |  |
@@ -90,7 +90,7 @@ Source: `cmd/api-router.go`
 | ⬜ | `SelectObjectContentHandler` |  |
 | ⬜ | `ValidateBucketReplicationCredsHandler` |  |
 
-## Admin API (madmin / mc admin) (77/123)
+## Admin API (madmin / mc admin) (82/123)
 
 Source: `cmd/admin-router.go`
 
@@ -106,8 +106,8 @@ Source: `cmd/admin-router.go`
 | ✅ | `AttachDetachPolicyBuiltin` |  |
 | ✅ | `AttachDetachPolicyLDAP` |  |
 | ⬜ | `BackgroundHealStatusHandler` |  |
-| ⬜ | `BatchJobStatus` |  |
-| ⬜ | `CancelBatchJob` |  |
+| ✅ | `BatchJobStatus` |  |
+| ✅ | `CancelBatchJob` | broadcast to every node |
 | ⬜ | `CancelDecommission` |  |
 | ✅ | `ClearConfigHistoryKVHandler` |  |
 | ⬜ | `ClientDevNull` |  |
@@ -117,7 +117,7 @@ Source: `cmd/admin-router.go`
 | ✅ | `DelConfigKVHandler` |  |
 | ✅ | `DeleteIdentityProviderCfg` |  |
 | ✅ | `DeleteServiceAccount` |  |
-| ⬜ | `DescribeBatchJob` |  |
+| ✅ | `DescribeBatchJob` |  |
 | ⬜ | `DownloadProfilingHandler` |  |
 | ⬜ | `DriveSpeedtestHandler` |  |
 | ✅ | `EditTierHandler` |  |
@@ -147,7 +147,7 @@ Source: `cmd/admin-router.go`
 | ✅ | `ListAccessKeysLDAP` |  |
 | ✅ | `ListAccessKeysLDAPBulk` |  |
 | ✅ | `ListAccessKeysOpenIDBulk` |  |
-| ⬜ | `ListBatchJobs` |  |
+| ✅ | `ListBatchJobs` |  |
 | ⬜ | `ListBucketPolicies` |  |
 | ⬜ | `ListBucketUsers` |  |
 | ✅ | `ListCannedPolicies` |  |
@@ -161,7 +161,7 @@ Source: `cmd/admin-router.go`
 | ✅ | `ListServiceAccounts` |  |
 | ✅ | `ListTierHandler` |  |
 | ✅ | `ListUsers` |  |
-| ⬜ | `MetricsHandler` |  |
+| 🟡 | `MetricsHandler` | batch jobs; the scanner, disk, OS, net, memory, CPU, RPC and runtime types are not reported yet |
 | ⬜ | `NetperfHandler` |  |
 | ⬜ | `ObjectSpeedTestHandler` |  |
 | ⬜ | `ProfileHandler` |  |
@@ -206,7 +206,7 @@ Source: `cmd/admin-router.go`
 | ✅ | `SiteReplicationRemove` | Phase 8 |
 | ✅ | `SiteReplicationResyncOp` | Phase 8 |
 | ✅ | `SiteReplicationStatus` | Phase 8 |
-| ⬜ | `StartBatchJob` |  |
+| ✅ | `StartBatchJob` | replicate (push, pull), keyrotate, expire |
 | ⬜ | `StartDecommission` |  |
 | ⬜ | `StartProfilingHandler` |  |
 | ⬜ | `StatusPool` |  |
@@ -273,8 +273,23 @@ Source: `cmd/healthcheck-router.go`
 
 ## Beyond the routers
 
-Subsystems with no single handler, tracked by phase in `docs/architecture.md`:
-erasure coding + bitrot, xl.meta v2, pools, distributed locking, healing, the scanner with data usage and
-lifecycle expiry, SSE-S3/KMS/C with the builtin KMS, and S2 compression (done); ILM transitions/tiering
-(S3, MinIO, Azure, GCS), bucket + site replication (done); notifications (10 targets), audit, KES/MinIO KMS backends, S3 Select, SFTP/FTP,
-batch jobs, decommission/rebalance, operator, console (IAM with LDAP, OpenID, plugins and OPA is done).
+Subsystems with no single handler, tracked by phase in `docs/architecture.md`.
+
+Done: erasure coding and bitrot, xl.meta v2, pools, distributed locking, healing, the scanner with data
+usage and lifecycle expiry, SSE-S3/KMS/C with the builtin KMS, S2 compression, IAM (LDAP, OpenID,
+plugins, OPA), notifications (10 targets), audit, metrics v2/v3, bucket and site replication, ILM
+transitions and tiering (S3, MinIO, Azure, GCS), batch jobs (replicate, keyrotate, expire), the operator
+and the console (their kind gates are still to be run).
+
+Open: decommission and rebalance, KES/MinIO KMS backends, S3 Select, SFTP/FTP.
+
+Known deviations from MinIO, kept on purpose:
+- batch keyrotate keeps the version's modification time (MinIO's metadata-only copy sets it to now,
+  which can reorder versions);
+- a batch replicate pull keeps the source's object tags (MinIO's pull drops them), and does not mark
+  plaintext copies of SSE-S3 sources as encrypted;
+- batch replicate pushes send every version on its own (MinIO batches small objects into snowball
+  archives); both servers accept either;
+- batch metadata filters match standard headers case-insensitively (MinIO compares them exactly, so
+  `content-type` never matches there);
+- jobs are resumed seconds after a restart (MinIO waits up to an hour per drive).

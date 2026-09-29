@@ -670,6 +670,18 @@ static void hfree(hdrs *h) {
   h->n = 0;
 }
 
+static void hdel(hdrs *h, const char *name) {
+  for (size_t i = 0; i < h->n; i++) {
+    if (strcasecmp(h->kv[i].name, name) != 0) continue;
+    free(h->own[i]);
+    free((char *)h->kv[i].name);
+    memmove(&h->kv[i], &h->kv[i + 1], (h->n - i - 1) * sizeof(h->kv[0]));
+    memmove(&h->own[i], &h->own[i + 1], (h->n - i - 1) * sizeof(h->own[0]));
+    h->n--;
+    return;
+  }
+}
+
 /* Go's http.CanonicalHeaderKey */
 static void canon(const char *in, char *out, size_t cap) {
   bool up = true;
@@ -901,6 +913,7 @@ typedef struct {
   bool resynced;
   char resync_ts[128];
   char err[512];
+  char code[64]; /* the remote's error code */
 } tinfo;
 
 static void query_vid(char *out, size_t cap, const char *vid) {
@@ -976,24 +989,44 @@ static long throttled_read(void *ud, void *buf, size_t n) {
   return k;
 }
 
-static bool single_put(buckets_s3_server *s, buckets_repl_target *t, const char *bucket, const char *object,
-                       src_info *si, hdrs *h, tinfo *ti) {
+/* Where a version goes: a replication target, or a batch job's remote. */
+typedef struct {
+  buckets_s3c *c;
+  const char *bucket, *object; /* the target's */
+  const char *arn;             /* bandwidth limit key */
+  int64_t limit;
+  const char *endpoint; /* replication targets: marked offline on network errors */
+  bool secure;
+  bool plain;           /* no version ID (S3 targets of batch jobs) */
+} dest;
+
+static dest dest_of(buckets_repl_target *t, const char *object) {
+  return (dest){t->c, t->t.target_bucket, object, t->t.arn, t->t.bandwidth_limit, t->t.endpoint, t->t.secure, false};
+}
+
+static void dest_offline(buckets_s3_server *s, const dest *d) {
+  if (d->endpoint) mark_offline(s->repl, d->endpoint, d->secure);
+}
+
+static bool single_put(buckets_s3_server *s, const dest *d, const char *bucket, const char *object, src_info *si,
+                       hdrs *h, tinfo *ti) {
   src_rd rd;
   if (!src_open(s, bucket, object, si, 0, si->oi.size, &rd)) {
     snprintf(ti->err, sizeof(ti->err), "unable to read source object");
     return false;
   }
-  char q[128];
-  query_vid(q, sizeof(q), si->oi.version_id);
+  char q[128] = "";
+  if (!d->plain) query_vid(q, sizeof(q), si->oi.version_id);
   buckets_s3c_result res;
-  throttled th = {&rd, bucket, t->t.arn, t->t.bandwidth_limit};
-  bool ok = buckets_s3c_do_stream(t->c, "PUT", t->t.target_bucket, object, q, h->kv, h->n, throttled_read, &th,
+  throttled th = {&rd, bucket, d->arn, d->limit};
+  bool ok = buckets_s3c_do_stream(d->c, "PUT", d->bucket, d->object, q[0] ? q : NULL, h->kv, h->n, throttled_read, &th,
                                   si->oi.size, &res);
   src_close(&rd);
   if (!ok) {
     snprintf(ti->err, sizeof(ti->err), "%s", buckets_s3c_error(&res));
+    snprintf(ti->code, sizeof(ti->code), "%s", res.code);
     if (strcmp(res.code, "PreconditionFailed") == 0) ok = true;
-    if (res.network) mark_offline(s->repl, t->t.endpoint, t->t.secure);
+    if (res.network) dest_offline(s, d);
   }
   buckets_s3c_result_free(&res);
   return ok;
@@ -1016,9 +1049,9 @@ static char *xml_text(const buckets_buf *body, const char *elem) {
 }
 
 /* replicateObjectWithMultipart */
-static bool multipart_put(buckets_s3_server *s, buckets_repl_target *t, const char *bucket, const char *object,
+static bool multipart_put(buckets_s3_server *s, const dest *d, const char *bucket, const char *object,
                           src_info *si, hdrs *h, tinfo *ti) {
-  const char *vid = si->oi.version_id;
+  const char *vid = d->plain ? "null" : si->oi.version_id;
   char q[256];
   buckets_buf qb = BUCKETS_BUF_INIT;
   buckets_buf_append_c(&qb, "uploads=");
@@ -1035,7 +1068,7 @@ static bool multipart_put(buckets_s3_server *s, buckets_repl_target *t, const ch
   char *upload_id = NULL;
   buckets_s3c_result res;
   for (int attempt = 0; attempt < 3 && !upload_id; attempt++) {
-    bool ok = buckets_s3c_do(t->c, "POST", t->t.target_bucket, object, q, nh.kv, nh.n, NULL, 0, &res);
+    bool ok = buckets_s3c_do(d->c, "POST", d->bucket, d->object, q, nh.kv, nh.n, NULL, 0, &res);
     if (ok) upload_id = xml_text(&res.body, "UploadId");
     else if (strcmp(res.code, "PreconditionFailed") == 0) {
       buckets_s3c_result_free(&res);
@@ -1043,7 +1076,7 @@ static bool multipart_put(buckets_s3_server *s, buckets_repl_target *t, const ch
       return true;
     } else {
       snprintf(ti->err, sizeof(ti->err), "%s", buckets_s3c_error(&res));
-      if (res.network) mark_offline(s->repl, t->t.endpoint, t->t.secure);
+      if (res.network) dest_offline(s, d);
     }
     buckets_s3c_result_free(&res);
   }
@@ -1058,7 +1091,7 @@ static bool multipart_put(buckets_s3_server *s, buckets_repl_target *t, const ch
     const buckets_xl_part *p = &si->oi.parts[i];
     int64_t size = si->ssec ? p->size : p->actual_size;
     hdrs ph = {0};
-    hset(&ph, BUCKETS_H_SRC_REPL_REQUEST, "true");
+    if (!d->plain) hset(&ph, BUCKETS_H_SRC_REPL_REQUEST, "true");
     if (!si->ssec) crc_headers(&si->oi, p->number, &ph, NULL, NULL);
     /* PutObjectPart sends no checksum algorithm header */
     for (size_t k = 0; k < ph.n; k++) {
@@ -1082,14 +1115,14 @@ static bool multipart_put(buckets_s3_server *s, buckets_repl_target *t, const ch
       ok = false;
       break;
     }
-    throttled th = {&rd, bucket, t->t.arn, t->t.bandwidth_limit};
-    ok = buckets_s3c_do_stream(t->c, "PUT", t->t.target_bucket, object, uq.data, ph.kv, ph.n, throttled_read, &th, size,
+    throttled th = {&rd, bucket, d->arn, d->limit};
+    ok = buckets_s3c_do_stream(d->c, "PUT", d->bucket, d->object, uq.data, ph.kv, ph.n, throttled_read, &th, size,
                                &res);
     src_close(&rd);
     hfree(&ph);
     if (!ok) {
       snprintf(ti->err, sizeof(ti->err), "%s", buckets_s3c_error(&res));
-      if (res.network) mark_offline(s->repl, t->t.endpoint, t->t.secure);
+      if (res.network) dest_offline(s, d);
       buckets_s3c_result_free(&res);
       break;
     }
@@ -1138,10 +1171,12 @@ static bool multipart_put(buckets_s3_server *s, buckets_repl_target *t, const ch
     }
     char ts[BUCKETS_TIME_RFC3339_NANO_LEN + 1];
     rfc3339nano(si->oi.mod_time_ns, ts);
-    hset(&ch, BUCKETS_H_SRC_MTIME, ts);
-    if (si->oi.etag[0]) hset(&ch, BUCKETS_H_SRC_ETAG, si->oi.etag);
-    hset(&ch, BUCKETS_H_SRC_REPL_REQUEST, "true");
-    ok = buckets_s3c_do(t->c, "POST", t->t.target_bucket, object, uq.data, ch.kv, ch.n, complete.data, complete.len, &res);
+    if (!d->plain) {
+      hset(&ch, BUCKETS_H_SRC_MTIME, ts);
+      if (si->oi.etag[0]) hset(&ch, BUCKETS_H_SRC_ETAG, si->oi.etag);
+      hset(&ch, BUCKETS_H_SRC_REPL_REQUEST, "true");
+    }
+    ok = buckets_s3c_do(d->c, "POST", d->bucket, d->object, uq.data, ch.kv, ch.n, complete.data, complete.len, &res);
     if (ok && res.body.len && strstr(res.body.data, "<Error>")) {
       char *code = xml_text(&res.body, "Code");
       snprintf(ti->err, sizeof(ti->err), "%s", code ? code : "InternalError");
@@ -1155,7 +1190,7 @@ static bool multipart_put(buckets_s3_server *s, buckets_repl_target *t, const ch
   }
   if (!ok) { /* abort the remote upload */
     for (int attempt = 0; attempt < 3; attempt++) {
-      bool aok = buckets_s3c_do(t->c, "DELETE", t->t.target_bucket, object, uq.data, NULL, 0, NULL, 0, &res);
+      bool aok = buckets_s3c_do(d->c, "DELETE", d->bucket, d->object, uq.data, NULL, 0, NULL, 0, &res);
       buckets_s3c_result_free(&res);
       if (aok) break;
     }
@@ -1397,7 +1432,8 @@ static void replicate_to(buckets_s3_server *s, const job *j, buckets_repl_target
     hdrs h = {0};
     bool mp = false;
     put_headers(&si, t->t.storage_class, &h, &mp);
-    ok = mp ? multipart_put(s, t, j->bucket, j->object, &si, &h, ti) : single_put(s, t, j->bucket, j->object, &si, &h, ti);
+    dest d = dest_of(t, j->object);
+    ok = mp ? multipart_put(s, &d, j->bucket, j->object, &si, &h, ti) : single_put(s, &d, j->bucket, j->object, &si, &h, ti);
     hfree(&h);
   }
   snprintf(ti->status, sizeof(ti->status), "%s", ok ? BUCKETS_RS_COMPLETED : BUCKETS_RS_FAILED);
@@ -2874,4 +2910,82 @@ static void mrf_load(buckets_repl *r) {
     buckets_buf_free(&data);
     break;
   }
+}
+
+/* ---- batch replication (ReplicateToTarget) ------------------------------------------------ */
+
+int buckets_repl_batch_put(buckets_s3_server *s, buckets_s3c *c, const char *bucket, const char *object,
+                           const char *version_id, const char *tgt_bucket, const char *tgt_object, bool plain,
+                           bool retry, char *err, size_t errlen) {
+  src_info si;
+  buckets_obj_err oerr;
+  if (!src_stat(s, bucket, object, version_id, &si, &oerr)) {
+    if (oerr == BUCKETS_OBJ_ERR_NO_SUCH_KEY || oerr == BUCKETS_OBJ_ERR_NO_SUCH_VERSION) return BUCKETS_REPL_BATCH_SKIP;
+    snprintf(err, errlen, "%s", buckets_obj_strerror(oerr));
+    return BUCKETS_REPL_BATCH_FAILED;
+  }
+  buckets_s3c_result res;
+  if (retry && !plain) { /* already there from an earlier attempt? */
+    hdrs mh = {0};
+    char etag[160];
+    snprintf(etag, sizeof(etag), "\"%s\"", si.oi.etag);
+    hset(&mh, "If-Match", etag);
+    bool there = buckets_s3c_do(c, "HEAD", tgt_bucket, tgt_object, NULL, mh.kv, mh.n, NULL, 0, &res);
+    buckets_s3c_result_free(&res);
+    hfree(&mh);
+    if (there) {
+      src_info_free(&si);
+      return BUCKETS_REPL_BATCH_OK;
+    }
+  }
+  hdrs h = {0};
+  bool mp = false;
+  put_headers(&si, NULL, &h, &mp);
+  /* batchReplicationOpts: no replica status; S3 targets get none of the
+   * internal headers */
+  hdel(&h, BUCKETS_H_REPL_STATUS);
+  if (plain) {
+    static const char *const internal[] = {BUCKETS_H_SRC_MTIME, BUCKETS_H_SRC_ETAG, BUCKETS_H_SRC_REPL_REQUEST,
+                                           BUCKETS_H_SRC_TAG_TS, BUCKETS_H_SRC_RET_TS, BUCKETS_H_SRC_LH_TS};
+    for (size_t i = 0; i < BUCKETS_ARRAY_LEN(internal); i++) hdel(&h, internal[i]);
+  }
+  dest d = {c, tgt_bucket, tgt_object, "batch", 0, NULL, false, plain};
+  tinfo ti = {0};
+  bool ok = mp ? multipart_put(s, &d, bucket, object, &si, &h, &ti) : single_put(s, &d, bucket, object, &si, &h, &ti);
+  hfree(&h);
+  src_info_free(&si);
+  if (strcmp(ti.code, "PreconditionFailed") == 0) return BUCKETS_REPL_BATCH_SKIP;
+  if (!ok) {
+    snprintf(err, errlen, "%s", ti.err);
+    return BUCKETS_REPL_BATCH_FAILED;
+  }
+  return BUCKETS_REPL_BATCH_OK;
+}
+
+int buckets_repl_batch_delete(buckets_s3c *c, const char *tgt_bucket, const char *tgt_object, const char *version_id,
+                              int64_t mod_time_ns, bool plain, bool retry, char *err, size_t errlen) {
+  char q[128] = "";
+  if (!plain) query_vid(q, sizeof(q), version_id);
+  buckets_s3c_result res;
+  if (retry && !plain) {
+    hdrs sh = {0};
+    hset(&sh, BUCKETS_H_SRC_PROXY, "false");
+    buckets_s3c_do(c, "HEAD", tgt_bucket, tgt_object, q, sh.kv, sh.n, NULL, 0, &res);
+    hfree(&sh);
+    bool there = res.status == 405; /* the marker is there */
+    buckets_s3c_result_free(&res);
+    if (there) return BUCKETS_REPL_BATCH_OK;
+  }
+  hdrs h = {0};
+  if (!plain) hset(&h, "X-Minio-Source-Deletemarker", "true");
+  char ts[BUCKETS_TIME_RFC3339_NANO_LEN + 1];
+  rfc3339nano(mod_time_ns, ts);
+  hset(&h, BUCKETS_H_SRC_MTIME, ts);
+  hset(&h, BUCKETS_H_REPL_STATUS, BUCKETS_RS_REPLICA);
+  hset(&h, BUCKETS_H_SRC_REPL_REQUEST, "true");
+  bool ok = buckets_s3c_do(c, "DELETE", tgt_bucket, tgt_object, q[0] ? q : NULL, h.kv, h.n, NULL, 0, &res);
+  hfree(&h);
+  if (!ok) snprintf(err, errlen, "%s", buckets_s3c_error(&res));
+  buckets_s3c_result_free(&res);
+  return ok ? BUCKETS_REPL_BATCH_OK : BUCKETS_REPL_BATCH_FAILED;
 }

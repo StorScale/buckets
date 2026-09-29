@@ -67,6 +67,14 @@ buckets_s3_error buckets_s3_sse_new_key(s3_ctx *c, const buckets_sse_req *r, con
 
 /* Stored objects */
 buckets_sse_kind buckets_s3_sse_kind_of(const buckets_object_info *oi);
+/* The same, from system metadata. */
+buckets_sse_kind buckets_s3_sse_kind_of_meta(const buckets_xl_kv *sys, size_t nsys);
+/* rotateKey for SSE-S3 and SSE-KMS objects (batch keyrotate): the object
+ * key is sealed under a new data key (the KMS default key for SSE-S3;
+ * new_key_id, "" for the default, for SSE-KMS, with the stored context).
+ * sys gets the system metadata to replace. */
+buckets_s3_error buckets_s3_sse_rotate(struct buckets_s3_server *s, const buckets_object_info *oi, const char *bucket,
+                                       const char *object, const char *new_key_id, buckets_xl_kv **sys, size_t *nsys);
 bool buckets_s3_sse_encrypted(const buckets_object_info *oi); /* crypto.IsEncrypted */
 bool buckets_s3_sse_is_multipart(const buckets_object_info *oi);
 /* decryptObjectMeta: the object key (SSE-C: from the request's key, copy

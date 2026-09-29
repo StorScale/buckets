@@ -39,6 +39,8 @@ buckets_http_client *const *buckets_peer_clients(buckets_peer_sys *p, size_t *n)
 buckets_peer_info *buckets_peer_metrics(buckets_peer_sys *p, size_t *n);
 /* Each peer's last-day tier stats (GetLastDayTierStats), NULL where unreachable. */
 buckets_peer_info *buckets_peer_tier_stats(buckets_peer_sys *p, size_t *n);
+/* Each peer's batch job metrics, NULL where unreachable. */
+buckets_peer_info *buckets_peer_batch_metrics(buckets_peer_sys *p, size_t *n);
 
 /* The receiving side, under BUCKETS_INTERNODE_PREFIX "peer/". */
 typedef struct {
@@ -51,6 +53,7 @@ typedef struct {
   bool (*listen)(void *ud, const buckets_query *q, buckets_http_response *resp);
   void *ud;
   char *(*tier_stats)(void *ud); /* this node's last-day transitions (JSON), malloc'd */
+  char *(*batch_metrics)(void *ud); /* this node's batch job metrics (JSON object by job ID), malloc'd */
 } buckets_peer_handlers;
 void buckets_peer_server_handle(const buckets_http_request *req, buckets_http_response *resp, void *ud);
 

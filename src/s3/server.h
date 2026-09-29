@@ -43,6 +43,7 @@ typedef struct buckets_s3_server {
   struct buckets_repl *repl;           /* bucket replication (targets and workers), once the layer is up */
   struct buckets_tiering *tiering;     /* transitions and remote reads, once the layer is up */
   struct buckets_tiers *tiers;         /* remote tiers (tier-config.bin), once the layer is up */
+  struct buckets_batch *batch;         /* batch jobs, once the layer is up */
   struct buckets_sr *sr;               /* site replication (always set; enabled by its state) */
   /* Background threads (IAM start and refresh, LDAP sync), stopped and
    * joined by buckets_s3_server_stop before the object layer is freed. */
@@ -87,6 +88,7 @@ void buckets_s3_peer_iam(void *server, const char *kind, const char *name);
 void buckets_s3_peer_bucket(void *server, const char *bucket);
 char *buckets_s3_peer_server_info(void *server);
 char *buckets_s3_peer_tier_stats(void *server);
+char *buckets_s3_peer_batch_metrics(void *server);
 /* This node's contribution to the cluster metrics (Prometheus text). */
 char *buckets_s3_peer_metrics(void *server);
 /* A peer's listener on this node's events (see buckets_peer_handlers.listen). */

@@ -38,7 +38,20 @@ All notable changes to this project are documented here. The format follows
   - `mc admin tier info` (`/tier-stats`): the scanner keeps MinIO's per-tier usage (`tierStats` in `.usage.json`: remote tiers, `STANDARD` and `REDUCED_REDUNDANCY`), merged with every node's hourly transitions of the last day; the tier metrics (`minio_cluster_ilm_transitioned_*`, `minio_node_tier_requests_*`, `minio_node_tier_ttlb_seconds_distribution`) and live transition queue gauges (v2 and v3);
   - MinIO reads what bucketsd transitioned and restored, and bucketsd reads (and deletes, and restores) what MinIO transitioned; `tests/integration/tier.sh` (with Azurite and fake-gcs-server when `AZURITE_BIN` / `FAKE_GCS_BIN` are set).
 
+- Batch jobs (Phase 8), compatible with MinIO's API and files:
+  - `mc batch start|list|describe|status|cancel` (`/start-job`, `/list-jobs`, `/status-job`, `/describe-job`, `/cancel-job`): job definitions parsed as yaml.v3 does (libyaml; the same unmarshal and syntax errors), MinIO's validation and error responses, and `describe`'s YAML byte for byte; jobs in `.minio.sys/batch-jobs/<id>` and reports in `batch-jobs/reports/<id>/`, in MinIO's msgp, so either server lists, describes, reports and resumes the other's jobs;
+  - replicate: pushes to a remote MinIO/Buckets/S3 target and pulls from a remote source, keeping version IDs, modification times, ETags, delete markers, metadata and tags, multipart layouts included; filters, retries and notifications as MinIO has them;
+  - keyrotate: SSE-S3 and SSE-KMS object keys re-sealed under new KMS data keys, in place;
+  - expire: rules by type, name, age, creation date, tags, metadata and size, with `purge.retainVersions`;
+  - the realtime metrics stream (`/metrics`) for batch jobs, which `mc batch status` follows; `minio_bucket_batch_*` metrics; batch trace records; the `batch` config's per-object waits; jobs resumed after a restart; finished jobs cleaned up after three days;
+  - `PutObjectExtract`: snowball archives (tar, plain or S2) are unpacked into objects, as MinIO's batch replication and `mc` send them;
+  - `tests/integration/batch.sh` runs every scenario on MinIO and bucketsd and compares them, replicate in every MinIO/Buckets pairing both ways.
+
 ### Fixed
+- Completing an SSE-S3 multipart upload compared part ETags using the wrong state (the completion hook's user data), so uploads with small parts, such as `mc pipe --enc-s3`, could fail with `InvalidPart`.
+- Objects whose drives' erasure indexes no longer follow their distribution (MinIO's metadata-only rewrites, such as its key rotation, renumber them) are read by the distribution, as MinIO reads them.
+- `GET` of a `null` delete marker in a versioning-suspended bucket carries `x-amz-version-id: null` and `x-amz-delete-marker: true`, as MinIO's does.
+- Peers' last-day tier statistics lost their update times when merged.
 - `GetBucketLifecycle`'s `X-Minio-LifecycleConfig-UpdatedAt` is in MinIO's `20060102T150405Z` form (mc failed to parse it when adding a second rule).
 - Resync of replication targets without a reset time no longer overflows computing the reset boundary.
 

@@ -35,6 +35,7 @@
 #include "notify/notifier.h"
 #include "s3/replicate.h"
 #include "s3/tiering.h"
+#include "s3/batch.h"
 #include "tier/tier.h"
 #include "object/epool.h"
 #include "s3/internal.h"
@@ -235,6 +236,44 @@ static void histogram_range(mctx *m, const char *name, const uint64_t *v, size_t
 }
 
 /* getClusterUsageMetrics */
+/* getBatchJobsMetrics: every node's batch jobs */
+static void batch_one(mctx *m, const char *type, const char *bucket, const char *id, double objects, double failed) {
+  char name[128];
+  snprintf(name, sizeof(name), "minio_bucket_batch_%s_objects", type);
+  ADD2(m, name, objects, "bucket", bucket, "jobId", id);
+  snprintf(name, sizeof(name), "minio_bucket_batch_%s_objects_failed", type);
+  ADD2(m, name, failed, "bucket", bucket, "jobId", id);
+}
+
+static void cluster_batch(mctx *m) {
+  if (!m->s->batch) return;
+  buckets_batch_metric *bm;
+  size_t n = buckets_batch_metrics(m->s->batch, &bm);
+  for (size_t i = 0; i < n; i++) batch_one(m, bm[i].type, bm[i].bucket, bm[i].id, bm[i].objects, bm[i].failed);
+  free(bm);
+  size_t np = 0;
+  buckets_peer_info *pi = m->s->peers ? buckets_peer_batch_metrics(m->s->peers, &np) : NULL;
+  for (size_t i = 0; i < np; i++) {
+    yyjson_doc *d = pi[i].json ? yyjson_read(pi[i].json, strlen(pi[i].json), 0) : NULL;
+    yyjson_val *root = d ? yyjson_doc_get_root(d) : NULL;
+    yyjson_obj_iter it = yyjson_obj_iter_with(root);
+    yyjson_val *k;
+    while (yyjson_is_obj(root) && (k = yyjson_obj_iter_next(&it))) {
+      yyjson_val *v = yyjson_obj_iter_get_val(k);
+      const char *type = yyjson_get_str(yyjson_obj_get(v, "jobType"));
+      if (!type) continue;
+      yyjson_val *sub = yyjson_obj_get(v, strcmp(type, "replicate") == 0   ? "replicate"
+                                          : strcmp(type, "keyrotate") == 0 ? "rotation"
+                                                                           : "expired");
+      const char *bucket = yyjson_get_str(yyjson_obj_get(sub, "lastBucket"));
+      batch_one(m, type, bucket ? bucket : "", yyjson_get_str(k), yyjson_get_num(yyjson_obj_get(sub, "objects")),
+                yyjson_get_num(yyjson_obj_get(sub, "objectsFailed")));
+    }
+    yyjson_doc_free(d);
+  }
+  buckets_peer_info_free(pi, np);
+}
+
 /* getClusterTierMetrics: the stored usage's tierStats, while tiers exist */
 static void cluster_tier(mctx *m) {
   if (buckets_tiers_empty(m->s->tiers)) return;
@@ -1042,6 +1081,7 @@ bool buckets_metrics_v2(buckets_s3_server *s, const char *which, buckets_buf *ou
       cluster_usage(&m);
       kms_metrics(&m);
       cluster_health(&m, dv, nd);
+      cluster_batch(&m);
       peer_groups(&m, &st, &ps);
       size_t np = 0;
       buckets_peer_info *pi = s->peers ? buckets_peer_metrics(s->peers, &np) : NULL;

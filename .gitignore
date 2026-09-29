@@ -12,3 +12,4 @@ timeout-*
 /.oracles/
 /.conformance/
 /.deps/
+/*.log

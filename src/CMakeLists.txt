@@ -12,6 +12,8 @@ add_library(buckets STATIC
   core/buf.c
   core/log.c
   core/timefmt.c
+  core/yaml.c
+  batch/job.c
   core/zip.c
   core/query.c
   core/uuid.c
@@ -78,6 +80,7 @@ add_library(buckets STATIC
   s3/replicate.c
   s3/replstats.c
   s3/tiering.c
+  s3/batch.c
   s3/replhandlers.c
   s3/sigv4.c
   s3/sign.c
@@ -144,6 +147,7 @@ add_library(buckets STATIC
   admin/replicate.c
   admin/siterepl.c
   admin/tier.c
+  admin/batch.c
   siterepl/siterepl.c
   siterepl/srstatus.c
   tier/tier.c
@@ -164,7 +168,7 @@ find_library(RESOLV_LIB resolv)
 if(RESOLV_LIB)
   target_link_libraries(buckets PUBLIC ${RESOLV_LIB})
 endif()
-target_link_libraries(buckets PUBLIC llhttp::llhttp yyjson libdeflate::libdeflate_static OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
+target_link_libraries(buckets PUBLIC llhttp::llhttp yyjson libdeflate::libdeflate_static buckets_libyaml OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
 buckets_warnings(buckets)
 
 add_executable(bucketsd cmd/bucketsd/main.c)

@@ -188,7 +188,7 @@ void buckets_tier_days_merge_json(buckets_tier_day **d, size_t *n, const char *j
     const char *tier = yyjson_get_str(k);
     if (!tier || strlen(tier) >= sizeof((*d)->tier)) continue;
     buckets_tier_day m = {0};
-    m.updated_ns = yyjson_get_sint(yyjson_obj_get(v, "updated"));
+    m.updated_ns = (int64_t)yyjson_get_uint(yyjson_obj_get(v, "updated"));
     for (int h = 0; h < 24 && yyjson_is_arr(bins); h++) {
       yyjson_val *b = yyjson_arr_get(bins, (size_t)h);
       m.bins[h].size = yyjson_get_uint(yyjson_arr_get(b, 0));

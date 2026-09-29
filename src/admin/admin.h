@@ -54,6 +54,13 @@ void buckets_admin_tier_list(s3_ctx *c);
 void buckets_admin_tier_remove(s3_ctx *c);
 void buckets_admin_tier_verify(s3_ctx *c);
 void buckets_admin_tier_stats(s3_ctx *c);
+/* batch jobs and the realtime metrics stream (batch.c) */
+void buckets_admin_batch_start(s3_ctx *c);
+void buckets_admin_batch_list(s3_ctx *c);
+void buckets_admin_batch_status(s3_ctx *c);
+void buckets_admin_batch_describe(s3_ctx *c);
+void buckets_admin_batch_cancel(s3_ctx *c);
+void buckets_admin_metrics(s3_ctx *c);
 /* site replication (siterepl.c) */
 void buckets_admin_sr_add(s3_ctx *c);
 void buckets_admin_sr_remove(s3_ctx *c);

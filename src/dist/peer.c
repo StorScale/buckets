@@ -207,6 +207,10 @@ buckets_peer_info *buckets_peer_tier_stats(buckets_peer_sys *p, size_t *n) {
   return fetch_all(p, BUCKETS_INTERNODE_PREFIX "peer/tier-stats", n);
 }
 
+buckets_peer_info *buckets_peer_batch_metrics(buckets_peer_sys *p, size_t *n) {
+  return fetch_all(p, BUCKETS_INTERNODE_PREFIX "peer/batch-metrics", n);
+}
+
 buckets_http_client *const *buckets_peer_clients(buckets_peer_sys *p, size_t *n) {
   *n = p ? p->n : 0;
   return p ? p->peers : NULL;
@@ -259,6 +263,11 @@ void buckets_peer_server_handle(const buckets_http_request *req, buckets_http_re
     free(text);
   } else if (buckets_str_eq_c(path, BUCKETS_INTERNODE_PREFIX "peer/tier-stats") && h->tier_stats) {
     char *json = h->tier_stats(h->ud);
+    buckets_http_resp_header(resp, "Content-Type", "application/json");
+    buckets_buf_append_c(&resp->body, json);
+    free(json);
+  } else if (buckets_str_eq_c(path, BUCKETS_INTERNODE_PREFIX "peer/batch-metrics") && h->batch_metrics) {
+    char *json = h->batch_metrics(h->ud);
     buckets_http_resp_header(resp, "Content-Type", "application/json");
     buckets_buf_append_c(&resp->body, json);
     free(json);

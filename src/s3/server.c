@@ -47,6 +47,7 @@
 #include "s3/replicate.h"
 #include "siterepl/siterepl.h"
 #include "s3/tiering.h"
+#include "s3/batch.h"
 #include "tier/tier.h"
 #include "s3/sigv2.h"
 #include "s3/xml.h"
@@ -96,6 +97,10 @@ void buckets_s3_peer_iam(void *server, const char *kind, const char *name) {
   }
   if (strcmp(kind, "site-replication") == 0) {
     buckets_sr_reload(s->sr);
+    return;
+  }
+  if (strcmp(kind, "batch-cancel") == 0) {
+    if (s->batch) buckets_batch_cancel(s->batch, name, false);
     return;
   }
   buckets_iam_on_notify(s->iam, kind, name);
@@ -406,6 +411,14 @@ void buckets_s3_peer_bucket(void *server, const char *bucket) {
 }
 
 char *buckets_s3_peer_server_info(void *server) { return buckets_admin_local_server_json(server); }
+
+char *buckets_s3_peer_batch_metrics(void *server) {
+  buckets_s3_server *s = server;
+  buckets_buf b = BUCKETS_BUF_INIT;
+  if (s->batch) buckets_batch_metrics_json(s->batch, NULL, &b);
+  else buckets_buf_append_c(&b, "{}");
+  return buckets_buf_detach(&b);
+}
 
 char *buckets_s3_peer_tier_stats(void *server) {
   buckets_s3_server *s = server;
@@ -813,6 +826,7 @@ void buckets_s3_server_set_layer(buckets_s3_server *s, buckets_objlayer *layer) 
   buckets_repl_resync_resume(s->repl);
   s->sr = buckets_sr_new(s);
   buckets_sr_start(s->sr); /* loads its state once IAM is up */
+  s->batch = buckets_batch_new(s);
   s->iam_thread_started = pthread_create(&s->iam_thread, NULL, iam_start_main, s) == 0;
   s->metrics_thread_started = pthread_create(&s->metrics_thread, NULL, metrics_main, s) == 0;
 }
@@ -831,6 +845,7 @@ void buckets_s3_server_stop(buckets_s3_server *s) {
   if (s->metrics_thread_started) pthread_join(s->metrics_thread, NULL);
   s->metrics_thread_started = false;
   buckets_sr_stop(s->sr);
+  buckets_batch_stop(s->batch);
   buckets_tiering_stop(s->tiering);
   buckets_repl_stop(s->repl);
   buckets_iam_stop_refresh(s->iam);

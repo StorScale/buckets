@@ -1206,7 +1206,9 @@ static buckets_obj_reader *reader_new(buckets_epool *L, buckets_eset *s, const c
     }
     buckets_xl_object mine;
     if (buckets_xl_object_decode(&m[i].x.versions[vidx[i]], &mine) != BUCKETS_XL_OK) continue;
-    int shard = mine.ec_index - 1;
+    /* shuffleDisks: the drive's shard follows the version's distribution
+     * (MinIO's metadata-only rewrites leave EcIndex at the drive's position) */
+    int shard = i < (size_t)o->ec_dist_n && o->ec_dist[i] > 0 ? o->ec_dist[i] - 1 : mine.ec_index - 1;
     buckets_xl_object_free(&mine);
     if (shard < 0 || shard >= r->total || r->drive_of_shard[shard] >= 0) continue;
     if (r->is_inline) {

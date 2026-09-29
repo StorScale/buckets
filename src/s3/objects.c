@@ -21,6 +21,7 @@
 #include "s3/chunked.h"
 #include "notify/event.h"
 #include "s3/internal.h"
+#include "compress/s2.h"
 #include "bucket/metasys.h"
 #include "bucket/objectlock.h"
 #include "crypto/md5.h"
@@ -706,14 +707,29 @@ static void sweep_done(s3_ctx *c, sweeper *sw, bool run) {
   memset(sw, 0, sizeof(*sw));
 }
 
+static void put_object_body(s3_ctx *c, body_src *bp, buckets_s3_error serr);
+static void put_extract(s3_ctx *c);
+
 static void put_object(s3_ctx *c) {
   if (buckets_http_header_get(c->req, "X-Amz-Copy-Source").p) {
     copy_object(c);
     return;
   }
+  buckets_str sb = buckets_http_header_get(c->req, "X-Amz-Meta-Snowball-Auto-Extract");
+  if (sb.p && memmem(sb.p, sb.n, "true", 4)) {
+    put_extract(c);
+    return;
+  }
   if (put_preconditions(c, c->object)) return;
   body_src b;
   buckets_s3_error serr = body_open(c, &b);
+  put_object_body(c, &b, serr);
+}
+
+/* PutObject once the body is open: every header of c->req, the body from b
+ * (closed here). */
+static void put_object_body(s3_ctx *c, body_src *bp, buckets_s3_error serr) {
+  body_src b = *bp;
   if (!serr && b.size > BUCKETS_S3_MAX_OBJECT_SIZE) serr = BUCKETS_ERR_ENTITY_TOO_LARGE;
   buckets_xl_kv *meta = NULL;
   size_t nmeta = 0;
@@ -837,6 +853,461 @@ static void put_object(s3_ctx *c) {
   }
   free_kvs(sp.sys, sp.nsys);
   OPENSSL_cleanse(sp.key, sizeof(sp.key));
+  body_close(&b);
+}
+
+/* ---- PutObjectExtract (snowball archives) --------------------------------------------------
+ * A tar archive (plain or S2-compressed), every entry stored as its own
+ * object through PutObject, with the entry's PAX minio.metadata.* records
+ * as its headers and minio.versionId as its version (minio-go's
+ * PutObjectsSnowball). */
+
+typedef struct {
+  body_src *b;
+  buckets_md5_ctx md5;
+  buckets_sha256_ctx sha;
+  uint8_t peek[4];
+  size_t npeek, peek_pos;
+  bool failed;
+} whole_src;
+
+static long whole_raw(void *ud, void *buf, size_t n) {
+  whole_src *w = ud;
+  if (w->peek_pos < w->npeek) {
+    size_t k = BUCKETS_MIN(n, w->npeek - w->peek_pos);
+    memcpy(buf, w->peek + w->peek_pos, k);
+    w->peek_pos += k;
+    return (long)k;
+  }
+  long k = w->b->rd(w->b->rd_ud, buf, n);
+  if (k > 0) {
+    if (w->b->has_md5) buckets_md5_update(&w->md5, buf, (size_t)k);
+    if (w->b->want_sha) buckets_sha256_update(&w->sha, buf, (size_t)k);
+  } else if (k < 0) {
+    w->failed = true;
+  }
+  return k;
+}
+
+typedef struct {
+  buckets_read_fn rd;
+  void *ud;
+  int64_t remaining; /* of the current entry */
+  int64_t pad;       /* after it, to the next 512-byte block */
+  bool failed;
+} tar_src;
+
+static bool tar_full(tar_src *t, void *buf, size_t n) {
+  uint8_t *p = buf;
+  while (n) {
+    long k = t->rd(t->ud, p, n);
+    if (k <= 0) {
+      t->failed = true;
+      return false;
+    }
+    p += k, n -= (size_t)k;
+  }
+  return true;
+}
+
+static bool tar_skip(tar_src *t, int64_t n) {
+  uint8_t tmp[8192];
+  while (n > 0) {
+    size_t k = (size_t)BUCKETS_MIN(n, (int64_t)sizeof(tmp));
+    if (!tar_full(t, tmp, k)) return false;
+    n -= (int64_t)k;
+  }
+  return true;
+}
+
+static long tar_entry_read(void *ud, void *buf, size_t n) {
+  tar_src *t = ud;
+  if (t->remaining <= 0) return 0;
+  if ((int64_t)n > t->remaining) n = (size_t)t->remaining;
+  long k = t->rd(t->ud, buf, n);
+  if (k <= 0) {
+    t->failed = true;
+    return -1;
+  }
+  t->remaining -= k;
+  return k;
+}
+
+/* A numeric tar field: octal text, or base-256 when the high bit is set. */
+static int64_t tar_num(const uint8_t *f, size_t n) {
+  if (f[0] & 0x80) {
+    int64_t v = f[0] & 0x7f;
+    for (size_t i = 1; i < n; i++) v = v << 8 | f[i];
+    return v;
+  }
+  int64_t v = 0;
+  size_t i = 0;
+  while (i < n && (f[i] == ' ' || f[i] == 0)) i++;
+  for (; i < n && f[i] >= '0' && f[i] <= '7'; i++) v = v * 8 + (f[i] - '0');
+  return v;
+}
+
+typedef struct {
+  char *name;
+  char type;
+  int64_t size, mtime;
+  buckets_xl_kv *pax; /* the entry's PAX records */
+  size_t npax;
+} tar_entry;
+
+static void tar_entry_free(tar_entry *e) {
+  free(e->name);
+  free_kvs(e->pax, e->npax);
+  memset(e, 0, sizeof(*e));
+}
+
+/* PAX records: "<len> <key>=<value>\n" */
+static void pax_parse(const char *p, size_t n, buckets_xl_kv **kv, size_t *nkv) {
+  size_t off = 0;
+  while (off < n) {
+    char *end;
+    long len = strtol(p + off, &end, 10);
+    if (len <= 0 || (size_t)len > n - off || *end != ' ') return;
+    const char *rec = end + 1, *rend = p + off + len - 1; /* before the newline */
+    const char *eq = memchr(rec, '=', (size_t)(rend - rec));
+    if (eq) {
+      char *k = buckets_xstrndup(rec, (size_t)(eq - rec));
+      buckets_xl_kv_set(kv, nkv, k, eq + 1, (size_t)(rend - eq - 1));
+      free(k);
+    }
+    off += (size_t)len;
+  }
+}
+
+static const char *pax_get(const tar_entry *e, const char *k) {
+  const buckets_xl_kv *kv = buckets_xl_kv_get(e->pax, e->npax, k);
+  return kv ? (const char *)kv->value : NULL;
+}
+
+/* The next entry (1), the end of the archive (0), or a bad archive (-1). */
+static int tar_next(tar_src *t, tar_entry *out) {
+  memset(out, 0, sizeof(*out));
+  if (t->remaining > 0 && !tar_skip(t, t->remaining)) return -1;
+  t->remaining = 0;
+  if (t->pad > 0 && !tar_skip(t, t->pad)) return -1;
+  t->pad = 0;
+  char *long_name = NULL;
+  buckets_xl_kv *pax = NULL;
+  size_t npax = 0;
+  for (;;) {
+    uint8_t h[512];
+    if (!tar_full(t, h, sizeof(h))) break;
+    bool zero = true;
+    for (size_t i = 0; i < sizeof(h) && zero; i++) zero = h[i] == 0;
+    if (zero) {
+      free(long_name);
+      free_kvs(pax, npax);
+      return 0;
+    }
+    int64_t size = tar_num(h + 124, 12);
+    char type = (char)h[156];
+    if (size < 0) break;
+    int64_t pad = (512 - size % 512) % 512;
+    if (type == 'x' || type == 'g' || type == 'L') { /* PAX or GNU long-name records for the next entry */
+      if (size > 1 << 20) break;
+      char *data = buckets_xmalloc((size_t)size + 1);
+      if (!tar_full(t, data, (size_t)size) || !tar_skip(t, pad)) {
+        free(data);
+        break;
+      }
+      data[size] = 0;
+      if (type == 'x') pax_parse(data, (size_t)size, &pax, &npax);
+      if (type == 'L') {
+        free(long_name);
+        long_name = buckets_xstrdup(data);
+      }
+      free(data);
+      continue;
+    }
+    char name[256 + 1 + 155 + 1];
+    char base[101], prefix[156];
+    memcpy(base, h, 100);
+    base[100] = 0;
+    memcpy(prefix, h + 345, 155);
+    prefix[155] = 0;
+    bool ustar = memcmp(h + 257, "ustar", 5) == 0;
+    if (ustar && prefix[0]) snprintf(name, sizeof(name), "%s/%s", prefix, base);
+    else snprintf(name, sizeof(name), "%s", base);
+    const char *path = pax_get(&(tar_entry){.pax = pax, .npax = npax}, "path");
+    out->name = buckets_xstrdup(path ? path : long_name ? long_name : name);
+    const char *psize = pax_get(&(tar_entry){.pax = pax, .npax = npax}, "size");
+    out->size = psize ? strtoll(psize, NULL, 10) : size;
+    const char *pm = pax_get(&(tar_entry){.pax = pax, .npax = npax}, "mtime");
+    out->mtime = pm ? strtoll(pm, NULL, 10) : tar_num(h + 136, 12);
+    out->type = type;
+    out->pax = pax;
+    out->npax = npax;
+    free(long_name);
+    t->remaining = out->size;
+    t->pad = (512 - out->size % 512) % 512;
+    return 1;
+  }
+  free(long_name);
+  free_kvs(pax, npax);
+  return -1;
+}
+
+/* path.Clean of a relative name, without the leading slash (trimLeadingSlash) */
+static char *clean_name(const char *in, bool dir) {
+  char **parts = buckets_xcalloc(strlen(in) + 2, sizeof(char *));
+  size_t n = 0;
+  char *copy = buckets_xstrdup(in), *save = NULL;
+  for (char *tok = strtok_r(copy, "/", &save); tok; tok = strtok_r(NULL, "/", &save)) {
+    if (strcmp(tok, ".") == 0) continue;
+    if (strcmp(tok, "..") == 0) {
+      if (n) n--;
+      continue;
+    }
+    parts[n++] = tok;
+  }
+  buckets_buf b = BUCKETS_BUF_INIT;
+  for (size_t i = 0; i < n; i++) {
+    if (i) buckets_buf_append_char(&b, '/');
+    buckets_buf_append_c(&b, parts[i]);
+  }
+  if (dir && n) buckets_buf_append_char(&b, '/');
+  buckets_buf_append_char(&b, '\0');
+  free(parts);
+  free(copy);
+  return buckets_buf_detach(&b);
+}
+
+/* Headers of the archive's request that an entry keeps (the others describe
+ * the archive, or come from the entry). */
+static bool entry_keeps(buckets_str name) {
+  static const char *const drop[] = {"Content-Md5", "Content-Type", "Content-Encoding", "Content-Length",
+                                     "Content-Disposition", "Content-Language", "Cache-Control", "Expires",
+                                     "X-Amz-Tagging", "X-Amz-Storage-Class", "X-Amz-Trailer",
+                                     "X-Amz-Decoded-Content-Length", "X-Amz-Content-Sha256",
+                                     "X-Amz-Sdk-Checksum-Algorithm", "X-Amz-Checksum-Algorithm", "X-Amz-Checksum-Type",
+                                     "If-Match", "If-None-Match"};
+  for (size_t i = 0; i < BUCKETS_ARRAY_LEN(drop); i++)
+    if (buckets_str_ieq_c(name, drop[i])) return false;
+  static const char *const prefixes[] = {"x-amz-meta-", "x-amz-checksum-", "x-minio-source-"};
+  for (size_t i = 0; i < BUCKETS_ARRAY_LEN(prefixes); i++) {
+    size_t k = strlen(prefixes[i]);
+    if (name.n >= k && strncasecmp(name.p, prefixes[i], k) == 0) return false;
+  }
+  return true;
+}
+
+static void put_extract(s3_ctx *c) {
+  if (buckets_s3_sse_s3_or_kms_requested(c)) {
+    buckets_str v = buckets_http_header_get(c->req, "X-Amz-Server-Side-Encryption");
+    if (v.p && buckets_str_eq_c(v, "aws:kms")) { /* SSE-KMS is not supported */
+      buckets_s3_write_error(c, BUCKETS_ERR_NOT_IMPLEMENTED);
+      return;
+    }
+  }
+  buckets_str scv = buckets_http_header_get(c->req, "X-Amz-Storage-Class");
+  char *sc = scv.p && scv.n ? buckets_str_dup(scv) : buckets_xstrdup("STANDARD");
+  if (strcmp(sc, "STANDARD") != 0 && strcmp(sc, "REDUCED_REDUNDANCY") != 0) {
+    free(sc);
+    buckets_s3_write_error(c, BUCKETS_ERR_INVALID_STORAGE_CLASS);
+    return;
+  }
+  body_src b;
+  buckets_s3_error serr = body_open(c, &b);
+  if (!serr && b.size < 0) serr = BUCKETS_ERR_MISSING_CONTENT_LENGTH;
+  if (!serr && b.size > BUCKETS_S3_MAX_OBJECT_SIZE) serr = BUCKETS_ERR_ENTITY_TOO_LARGE;
+  if (serr) {
+    free(sc);
+    body_close(&b);
+    buckets_s3_write_error(c, serr);
+    return;
+  }
+  buckets_str idirs = buckets_http_header_get(c->req, "X-Amz-Meta-Minio-Snowball-Ignore-Dirs");
+  buckets_str ierrs = buckets_http_header_get(c->req, "X-Amz-Meta-Minio-Snowball-Ignore-Errors");
+  buckets_str pfx = buckets_http_header_get(c->req, "X-Amz-Meta-Minio-Snowball-Prefix");
+  bool ignore_dirs = idirs.p && buckets_str_ieq_c(idirs, "true");
+  bool ignore_errs = ierrs.p && buckets_str_ieq_c(ierrs, "true");
+  char *prefix_all = NULL;
+  if (pfx.p && pfx.n) {
+    char *raw = buckets_str_dup(pfx);
+    prefix_all = clean_name(raw, true);
+    free(raw);
+  }
+  if (!buckets_s3_require(c, "s3:PutObject", c->bucket, prefix_all ? prefix_all : "", NULL)) {
+    free(sc), free(prefix_all);
+    body_close(&b);
+    return;
+  }
+  if (!buckets_s3_enforce_quota(c, c->bucket, b.size)) {
+    free(sc), free(prefix_all);
+    body_close(&b);
+    return;
+  }
+  whole_src w = {.b = &b};
+  buckets_md5_init(&w.md5);
+  buckets_sha256_init(&w.sha);
+  /* detect the compression */
+  while (w.npeek < 4) {
+    long k = b.rd(b.rd_ud, w.peek + w.npeek, 4 - w.npeek);
+    if (k <= 0) break;
+    if (b.has_md5) buckets_md5_update(&w.md5, w.peek + w.npeek, (size_t)k);
+    if (b.want_sha) buckets_sha256_update(&w.sha, w.peek + w.npeek, (size_t)k);
+    w.npeek += (size_t)k;
+  }
+  tar_src t = {.rd = whole_raw, .ud = &w};
+  buckets_s2_reader *s2 = NULL;
+  const char *unsupported = NULL;
+  if (w.npeek == 4 && memcmp(w.peek, "\xff\x06\x00\x00", 4) == 0) {
+    s2 = buckets_s2_reader_new(whole_raw, &w, false);
+    t.rd = buckets_s2_reader_read;
+    t.ud = s2;
+  } else if (w.npeek >= 3 && memcmp(w.peek, "\x1f\x8b\x08", 3) == 0) {
+    unsupported = "gzip";
+  } else if (w.npeek == 4 && (memcmp(w.peek, "\x28\xb5\x2f\xfd", 4) == 0 || memcmp(w.peek, "\x2a\x4d\x18", 3) == 0)) {
+    unsupported = "zstd";
+  } else if (w.npeek == 4 && memcmp(w.peek, "\x04\x22\x4d\x18", 4) == 0) {
+    unsupported = "lz4";
+  } else if (w.npeek >= 3 && memcmp(w.peek, "BZh", 3) == 0) {
+    unsupported = "bzip2";
+  }
+  if (unsupported) {
+    char msg[128];
+    snprintf(msg, sizeof(msg), "Unsupported format %s", unsupported);
+    free(sc), free(prefix_all);
+    body_close(&b);
+    buckets_s3_write_custom_error(c, 400, "BadRequest", msg);
+    return;
+  }
+  const buckets_http_request *orig = c->req;
+  char *orig_object = c->object;
+  buckets_query orig_q = c->q;
+  int n = 0;
+  bool failed = false;
+  for (;;) {
+    tar_entry e;
+    int r = tar_next(&t, &e);
+    if (r == 0) break;
+    if (r < 0) {
+      char msg[256];
+      if (n) snprintf(msg, sizeof(msg), "tar file error: unexpected EOF after %d successful object(s)", n);
+      else snprintf(msg, sizeof(msg), "tar file error: unexpected EOF");
+      buckets_s3_write_custom_error(c, 400, "BadRequest", msg);
+      failed = true;
+      break;
+    }
+    bool dir = e.type == '5';
+    bool regular = e.type == '0' || e.type == 0 || e.type == '7' || e.type == '3' || e.type == '4' ||
+                   e.type == '6' || e.type == 'S';
+    char *cleaned = (dir || regular) ? clean_name(e.name, dir) : NULL;
+    if (!cleaned || !*cleaned || (dir && ignore_dirs)) {
+      free(cleaned);
+      tar_entry_free(&e);
+      continue;
+    }
+    buckets_buf name = BUCKETS_BUF_INIT;
+    if (prefix_all) buckets_path_join(prefix_all, cleaned, &name);
+    else buckets_buf_append_c(&name, cleaned);
+    if (dir && name.len && name.data[name.len - 1] != '/') buckets_buf_append_c(&name, "/");
+    free(cleaned);
+    n++;
+    /* the entry's request: the archive's headers, then its own */
+    buckets_http_request *req = buckets_xmalloc(sizeof(*req));
+    *req = *orig;
+    req->nheaders = 0;
+    buckets_buf store = BUCKETS_BUF_INIT; /* the new header texts, NUL separated */
+    size_t offs[BUCKETS_HTTP_MAX_HEADERS * 2];
+    size_t nnew = 0;
+    for (size_t i = 0; i < orig->nheaders && req->nheaders < BUCKETS_HTTP_MAX_HEADERS; i++)
+      if (entry_keeps(orig->headers[i].name)) req->headers[req->nheaders++] = orig->headers[i];
+#define ADD_HDR(k, v)                                                                         \
+  do {                                                                                        \
+    if (req->nheaders + nnew / 2 < BUCKETS_HTTP_MAX_HEADERS) {                                \
+      offs[nnew++] = store.len;                                                               \
+      buckets_buf_append_c(&store, (k));                                                      \
+      buckets_buf_append_char(&store, '\0');                                                  \
+      offs[nnew++] = store.len;                                                               \
+      buckets_buf_append_c(&store, (v));                                                      \
+      buckets_buf_append_char(&store, '\0');                                                  \
+    }                                                                                         \
+  } while (0)
+    ADD_HDR("X-Amz-Storage-Class", sc);
+    const char *vid = NULL;
+    if (e.npax) {
+      vid = pax_get(&e, "minio.versionId");
+      for (size_t i = 0; i < e.npax; i++)
+        if (strncmp(e.pax[i].key, "minio.metadata.", 15) == 0) ADD_HDR(e.pax[i].key + 15, (const char *)e.pax[i].value);
+    } else {
+      vid = buckets_query_get(&orig_q, "versionId");
+    }
+    char mt[BUCKETS_TIME_RFC3339_NANO_LEN + 1];
+    struct timespec now;
+    clock_gettime(CLOCK_REALTIME, &now);
+    buckets_time_rfc3339_nano(e.mtime > 0 ? e.mtime : now.tv_sec, e.mtime > 0 ? 0 : now.tv_nsec, mt);
+    ADD_HDR(BUCKETS_H_SRC_MTIME, mt);
+#undef ADD_HDR
+    /* later headers win: replace earlier ones of the same name */
+    for (size_t k = 0; k + 1 < nnew; k += 2) {
+      buckets_str hn = buckets_str_c(store.data + offs[k]), hv = buckets_str_c(store.data + offs[k + 1]);
+      size_t i = 0;
+      for (; i < req->nheaders && !buckets_str_ieq_c(req->headers[i].name, store.data + offs[k]); i++) {
+      }
+      if (i == req->nheaders) req->nheaders++;
+      req->headers[i].name = hn;
+      req->headers[i].value = hv;
+    }
+    buckets_query q = {0};
+    buckets_buf qs = BUCKETS_BUF_INIT;
+    if (vid && *vid) {
+      buckets_buf_append_c(&qs, "versionId=");
+      buckets_url_encode(&qs, vid, false);
+    }
+    buckets_query_parse((buckets_str){qs.data ? qs.data : "", qs.len}, &q);
+    c->req = req;
+    c->object = name.data;
+    c->q = q;
+    tar_src *ts = &t;
+    body_src eb = {.rd = tar_entry_read, .rd_ud = ts, .size = e.size};
+    buckets_buf_reset(&c->resp->headers);
+    buckets_buf_reset(&c->resp->body);
+    c->resp->status = 0;
+    if (dir && e.size == 0) eb.size = 0;
+    put_object_body(c, &eb, BUCKETS_ERR_NONE);
+    int status = c->resp->status;
+    c->req = orig;
+    c->object = orig_object;
+    c->q = orig_q;
+    buckets_query_free(&q);
+    buckets_buf_free(&qs);
+    buckets_buf_free(&store);
+    free(req);
+    buckets_buf_free(&name);
+    tar_entry_free(&e);
+    if (t.failed || w.failed) {
+      buckets_s3_write_error(c, BUCKETS_ERR_INCOMPLETE_BODY);
+      failed = true;
+      break;
+    }
+    if (status != 200) {
+      if (ignore_errs) continue;
+      failed = true;
+      break;
+    }
+  }
+  if (!failed) { /* the whole body: drain it and check its digests */
+    uint8_t tmp[8192];
+    long k;
+    while ((k = whole_raw(&w, tmp, sizeof(tmp))) > 0) {
+    }
+    uint8_t md5[16], sha[32];
+    buckets_md5_final(&w.md5, md5);
+    buckets_sha256_final(&w.sha, sha);
+    buckets_buf_reset(&c->resp->headers);
+    buckets_buf_reset(&c->resp->body);
+    if (b.has_md5 && memcmp(md5, b.md5, 16) != 0) buckets_s3_write_error(c, BUCKETS_ERR_BAD_DIGEST);
+    else if (b.want_sha && memcmp(sha, b.sha, 32) != 0) buckets_s3_write_error(c, BUCKETS_ERR_CONTENT_SHA256_MISMATCH);
+    else c->resp->status = 200;
+  }
+  if (s2) buckets_s2_reader_free(s2);
+  free(sc), free(prefix_all);
   body_close(&b);
 }
 
@@ -1149,7 +1620,11 @@ static void get_object(s3_ctx *c, bool head) {
     } else if (buckets_repl_version_status(&oi, rst, sizeof(rst))) {
       buckets_http_resp_header(c->resp, "X-Minio-Replication-DeleteMarker-Status", rst);
     }
-    if (strcmp(oi.version_id, "null") != 0) {
+    /* ToObjectInfo: a null marker has the "null" version ID once the bucket
+     * is versioned or suspended */
+    bool v_on = false, v_susp = false;
+    if (strcmp(oi.version_id, "null") == 0) buckets_s3_versioning(c, c->object, &v_on, &v_susp);
+    if (strcmp(oi.version_id, "null") != 0 || v_on || v_susp) {
       buckets_http_resp_header(c->resp, "x-amz-version-id", oi.version_id);
       buckets_http_resp_header(c->resp, "x-amz-delete-marker", "true");
     }
@@ -2341,11 +2816,6 @@ static buckets_s3_error mpu_sse_open(s3_ctx *c, const buckets_object_info *ui, b
   return e;
 }
 
-static void mpu_client_etag(void *ud, const char *stored, char out[128]) {
-  mpu_sse *cs = ud;
-  sse_part_etag(cs->have_key ? cs->key : NULL, cs->sse_s3, stored, out);
-}
-
 
 
 typedef struct {
@@ -2355,6 +2825,12 @@ typedef struct {
   char *actual_size; /* X-Minio-Replication-Actual-Object-Size */
   char *ssec_crc;    /* X-Minio-Replication-Ssec-Crc */
 } mpu_commit;
+
+/* The part ETags clients were given (co.ud is the mpu_commit). */
+static void mpu_client_etag(void *ud, const char *stored, char out[128]) {
+  const mpu_sse *cs = ((const mpu_commit *)ud)->cs;
+  sse_part_etag(cs && cs->have_key ? cs->key : NULL, cs && cs->sse_s3, stored, out);
+}
 
 static buckets_obj_err mpu_pre_commit(void *ud, buckets_xl_object *o) {
   mpu_commit *mc = ud;

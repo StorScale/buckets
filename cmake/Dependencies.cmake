@@ -41,3 +41,19 @@ if(BUCKETS_BUILD_TESTS)
   set(PICKY_DEVELOPER OFF CACHE INTERNAL "")
   FetchContent_MakeAvailable(cmocka)
 endif()
+
+# libyaml: YAML parsing (batch job definitions). Its own CMakeLists predates
+# CMake 3.5, so only the sources are fetched and built here.
+FetchContent_Declare(libyaml
+  URL https://github.com/yaml/libyaml/archive/refs/tags/0.2.5.tar.gz
+  DOWNLOAD_EXTRACT_TIMESTAMP ON
+  SOURCE_SUBDIR no-cmake)
+FetchContent_MakeAvailable(libyaml)
+file(GLOB BUCKETS_LIBYAML_SOURCES ${libyaml_SOURCE_DIR}/src/*.c)
+add_library(buckets_libyaml STATIC ${BUCKETS_LIBYAML_SOURCES})
+target_include_directories(buckets_libyaml SYSTEM PUBLIC ${libyaml_SOURCE_DIR}/include)
+target_include_directories(buckets_libyaml PRIVATE ${libyaml_SOURCE_DIR}/src)
+target_compile_definitions(buckets_libyaml PUBLIC YAML_DECLARE_STATIC
+  PRIVATE YAML_VERSION_MAJOR=0 YAML_VERSION_MINOR=2 YAML_VERSION_PATCH=5 YAML_VERSION_STRING="0.2.5")
+set_target_properties(buckets_libyaml PROPERTIES POSITION_INDEPENDENT_CODE ON C_CLANG_TIDY "")
+target_compile_options(buckets_libyaml PRIVATE -w)

@@ -295,6 +295,13 @@ static const char *sys_str(const buckets_object_info *oi, const char *k) {
   return kv ? (const char *)kv->value : NULL;
 }
 
+buckets_sse_kind buckets_s3_sse_kind_of_meta(const buckets_xl_kv *sys, size_t nsys) {
+  if (buckets_xl_kv_get(sys, nsys, BUCKETS_SSE_META_SEALED_KMS)) return BUCKETS_SSE_KMS;
+  if (buckets_xl_kv_get(sys, nsys, BUCKETS_SSE_META_SEALED_S3)) return BUCKETS_SSE_S3;
+  if (buckets_xl_kv_get(sys, nsys, BUCKETS_SSE_META_SEALED_SSEC)) return BUCKETS_SSE_C;
+  return BUCKETS_SSE_NONE;
+}
+
 buckets_sse_kind buckets_s3_sse_kind_of(const buckets_object_info *oi) {
   if (sys_str(oi, BUCKETS_SSE_META_SEALED_KMS)) return BUCKETS_SSE_KMS;
   if (sys_str(oi, BUCKETS_SSE_META_SEALED_S3)) return BUCKETS_SSE_S3;
@@ -377,6 +384,51 @@ buckets_s3_error buckets_s3_sse_object_key(s3_ctx *c, const buckets_object_info 
   bool ok = buckets_objkey_unseal(ext, sealed, iv, alg, domain, bucket, object, key);
   OPENSSL_cleanse(ext, sizeof(ext));
   return ok ? BUCKETS_ERR_NONE : BUCKETS_ERR_ACCESS_DENIED; /* ErrSecretKeyMismatch */
+}
+
+buckets_s3_error buckets_s3_sse_rotate(buckets_s3_server *s, const buckets_object_info *oi, const char *bucket,
+                                       const char *object, const char *new_key_id, buckets_xl_kv **sys, size_t *nsys) {
+  buckets_sse_kind kind = buckets_s3_sse_kind_of(oi);
+  if (kind != BUCKETS_SSE_S3 && kind != BUCKETS_SSE_KMS) return BUCKETS_ERR_OBJECT_TAMPERED;
+  if (!s->kms) return BUCKETS_ERR_KMS_NOT_CONFIGURED;
+  s3_ctx c = {.s = s, .bucket = (char *)bucket};
+  uint8_t key[32];
+  buckets_s3_error e = buckets_s3_sse_object_key(&c, oi, bucket, object, false, key);
+  if (e) return e;
+  /* the stored context (SSE-KMS), with the object's own entry */
+  char *user_ctx = NULL;
+  const char *ctx64 = kind == BUCKETS_SSE_KMS ? sys_str(oi, BUCKETS_SSE_META_CONTEXT) : NULL;
+  if (ctx64) {
+    user_ctx = buckets_xmalloc(strlen(ctx64) + 3);
+    long cn = buckets_base64_decode(ctx64, strlen(ctx64), (uint8_t *)user_ctx);
+    user_ctx[cn < 0 ? 0 : cn] = '\0';
+  }
+  buckets_buf ctx = BUCKETS_BUF_INIT, dek = BUCKETS_BUF_INIT;
+  object_context(bucket, object, user_ctx, &ctx);
+  free(user_ctx);
+  uint8_t ext[32], iv[32], sealed[BUCKETS_SEALED_KEY_LEN];
+  char key_id[256] = "";
+  const char *name = kind == BUCKETS_SSE_KMS && new_key_id && *new_key_id ? new_key_id : NULL;
+  if (kind == BUCKETS_SSE_KMS && !name) name = sys_str(oi, BUCKETS_SSE_META_KEY_ID);
+  buckets_kms_err ke = buckets_kms_generate(s->kms, name, ctx.data, ext, &dek, key_id, sizeof(key_id));
+  buckets_buf_free(&ctx);
+  if (ke) {
+    OPENSSL_cleanse(key, sizeof(key));
+    buckets_buf_free(&dek);
+    return kms_error(ke);
+  }
+  const char *domain = kind == BUCKETS_SSE_S3 ? "SSE-S3" : "SSE-KMS";
+  buckets_objkey_seal(key, ext, NULL, domain, bucket, object, iv, sealed);
+  OPENSSL_cleanse(ext, sizeof(ext));
+  OPENSSL_cleanse(key, sizeof(key));
+  sys_set(sys, nsys, BUCKETS_SSE_META_ALGORITHM, BUCKETS_SEAL_ALGORITHM);
+  sys_set_b64(sys, nsys, BUCKETS_SSE_META_IV, iv, 32);
+  sys_set_b64(sys, nsys, kind == BUCKETS_SSE_S3 ? BUCKETS_SSE_META_SEALED_S3 : BUCKETS_SSE_META_SEALED_KMS, sealed,
+              sizeof(sealed));
+  sys_set(sys, nsys, BUCKETS_SSE_META_KEY_ID, key_id);
+  sys_set_b64(sys, nsys, BUCKETS_SSE_META_DATA_KEY, (uint8_t *)dek.data, dek.len);
+  buckets_buf_free(&dek);
+  return BUCKETS_ERR_NONE;
 }
 
 buckets_s3_error buckets_s3_sse_check_read(s3_ctx *c, const buckets_object_info *oi, bool copy) {

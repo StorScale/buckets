@@ -56,6 +56,7 @@ run tests/integration/notify-targets.sh build-ci-asan/src/bucketsd
 run tests/integration/replication.sh build-ci-asan/src/bucketsd
 run tests/integration/siterepl.sh build-ci-asan/src/bucketsd
 run tests/integration/tier.sh build-ci-asan/src/bucketsd
+run tests/integration/batch.sh build-ci-asan/src/bucketsd
 run tests/integration/console.sh build-ci-asan/src/bucketsd build-ci-asan/src/consoled
 # The console: SPA build, typecheck and Playwright e2e against the sanitized
 # bucketsd and consoled (skipped without npm).
@@ -84,6 +85,7 @@ run tests/integration/notify-targets.sh build-ci/src/bucketsd
 run tests/integration/replication.sh build-ci/src/bucketsd
 run tests/integration/siterepl.sh build-ci/src/bucketsd
 run tests/integration/tier.sh build-ci/src/bucketsd
+run tests/integration/batch.sh build-ci/src/bucketsd
 
 if [[ "$(uname -s)" == Linux ]]; then
   build build-ci-tsan -DCMAKE_BUILD_TYPE=Debug -DBUCKETS_SANITIZE=thread

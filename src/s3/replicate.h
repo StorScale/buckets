@@ -168,4 +168,17 @@ void buckets_repl_stats_node(buckets_repl_node_stats *out);
 void buckets_repl_stats_json(const char *bucket, const char *node_name, bool v2, buckets_buf *out);
 void buckets_repl_stats_upload_latency(const buckets_repl_target_stats *t, const char **tags, uint64_t *ms);
 
+/* Batch replication's pushes (ReplicateToTarget): one version of
+ * bucket/object to tgt_bucket/tgt_object on c, with the headers bucket
+ * replication sends (source version ID, mtime and ETag, without the replica
+ * status); plain sends none of MinIO's internal ones (S3 targets). retry
+ * first checks whether an earlier attempt got it there. */
+enum { BUCKETS_REPL_BATCH_OK, BUCKETS_REPL_BATCH_FAILED, BUCKETS_REPL_BATCH_SKIP /* source gone, or precondition */ };
+int buckets_repl_batch_put(struct buckets_s3_server *s, buckets_s3c *c, const char *bucket, const char *object,
+                           const char *version_id, const char *tgt_bucket, const char *tgt_object, bool plain,
+                           bool retry, char *err, size_t errlen);
+/* A delete marker, by its version ID. */
+int buckets_repl_batch_delete(buckets_s3c *c, const char *tgt_bucket, const char *tgt_object, const char *version_id,
+                              int64_t mod_time_ns, bool plain, bool retry, char *err, size_t errlen);
+
 #endif
