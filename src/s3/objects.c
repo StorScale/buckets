@@ -22,6 +22,7 @@
 #include "notify/event.h"
 #include "s3/internal.h"
 #include "compress/s2.h"
+#include "compress/stream.h"
 #include "bucket/metasys.h"
 #include "bucket/objectlock.h"
 #include "crypto/md5.h"
@@ -31,6 +32,7 @@
 #include "s3/xml.h"
 #include "object/sysconfig.h"
 #include "s3/tiering.h"
+#include "select/select.h"
 #include "tier/tier.h"
 
 /* ---- error mapping -------------------------------------------------------- */
@@ -1157,27 +1159,25 @@ static void put_extract(s3_ctx *c) {
   }
   tar_src t = {.rd = whole_raw, .ud = &w};
   buckets_s2_reader *s2 = NULL;
-  const char *unsupported = NULL;
+  buckets_decomp *dc = NULL;
+  buckets_decomp_type dt = BUCKETS_DECOMP_NONE;
   if (w.npeek == 4 && memcmp(w.peek, "\xff\x06\x00\x00", 4) == 0) {
     s2 = buckets_s2_reader_new(whole_raw, &w, false);
     t.rd = buckets_s2_reader_read;
     t.ud = s2;
   } else if (w.npeek >= 3 && memcmp(w.peek, "\x1f\x8b\x08", 3) == 0) {
-    unsupported = "gzip";
+    dt = BUCKETS_DECOMP_GZIP;
   } else if (w.npeek == 4 && (memcmp(w.peek, "\x28\xb5\x2f\xfd", 4) == 0 || memcmp(w.peek, "\x2a\x4d\x18", 3) == 0)) {
-    unsupported = "zstd";
+    dt = BUCKETS_DECOMP_ZSTD;
   } else if (w.npeek == 4 && memcmp(w.peek, "\x04\x22\x4d\x18", 4) == 0) {
-    unsupported = "lz4";
+    dt = BUCKETS_DECOMP_LZ4;
   } else if (w.npeek >= 3 && memcmp(w.peek, "BZh", 3) == 0) {
-    unsupported = "bzip2";
+    dt = BUCKETS_DECOMP_BZIP2;
   }
-  if (unsupported) {
-    char msg[128];
-    snprintf(msg, sizeof(msg), "Unsupported format %s", unsupported);
-    free(sc), free(prefix_all);
-    body_close(&b);
-    buckets_s3_write_custom_error(c, 400, "BadRequest", msg);
-    return;
+  if (dt != BUCKETS_DECOMP_NONE) {
+    dc = buckets_decomp_new(dt, whole_raw, &w);
+    t.rd = buckets_decomp_read;
+    t.ud = dc;
   }
   const buckets_http_request *orig = c->req;
   char *orig_object = c->object;
@@ -1190,8 +1190,11 @@ static void put_extract(s3_ctx *c) {
     if (r == 0) break;
     if (r < 0) {
       char msg[256];
-      if (n) snprintf(msg, sizeof(msg), "tar file error: unexpected EOF after %d successful object(s)", n);
-      else snprintf(msg, sizeof(msg), "tar file error: unexpected EOF");
+      const char *why = dc && buckets_decomp_error(dc) ? buckets_decomp_message(dc) : "unexpected EOF";
+      if (dc && buckets_decomp_error(dc) && n == 0 && dt == BUCKETS_DECOMP_GZIP && !strcmp(why, "gzip: invalid header"))
+        snprintf(msg, sizeof(msg), "%s", why); /* gzip.NewReader fails before the tar reader starts */
+      else if (n) snprintf(msg, sizeof(msg), "tar file error: %s after %d successful object(s)", why, n);
+      else snprintf(msg, sizeof(msg), "tar file error: %s", why);
       buckets_s3_write_custom_error(c, 400, "BadRequest", msg);
       failed = true;
       break;
@@ -1283,6 +1286,12 @@ static void put_extract(s3_ctx *c) {
     free(req);
     buckets_buf_free(&name);
     tar_entry_free(&e);
+    if (dc && buckets_decomp_error(dc) == BUCKETS_DECOMP_ERR_TRUNCATED) {
+      /* the archive ended inside an entry: MinIO reports the reader's error */
+      buckets_s3_write_custom_error(c, 400, "BadRequest", buckets_decomp_message(dc));
+      failed = true;
+      break;
+    }
     if (t.failed || w.failed) {
       buckets_s3_write_error(c, BUCKETS_ERR_INCOMPLETE_BODY);
       failed = true;
@@ -1309,6 +1318,7 @@ static void put_extract(s3_ctx *c) {
     else c->resp->status = 200;
   }
   if (s2) buckets_s2_reader_free(s2);
+  buckets_decomp_free(dc);
   free(sc), free(prefix_all);
   body_close(&b);
 }
@@ -1902,8 +1912,8 @@ static void src_close(src_stream *s) {
 /* Stats a copy source and prepares it: SSE request checks, its key, the
  * ETag clients see and its plaintext size (oi->size; stored_size keeps the
  * stored one). */
-static buckets_s3_error prepare_source(s3_ctx *c, const char *b, const char *o, const char *v, buckets_object_info *oi,
-                                       uint8_t key[32], bool *encrypted, int64_t *stored_size) {
+static buckets_s3_error prepare_source_ex(s3_ctx *c, const char *b, const char *o, const char *v, buckets_object_info *oi,
+                                          uint8_t key[32], bool *encrypted, int64_t *stored_size, bool copy) {
   buckets_obj_err err = buckets_obj_stat(c->s->layer, b, o, v, oi);
   if (!err && oi->delete_marker) {
     buckets_object_info_free(oi);
@@ -1911,9 +1921,9 @@ static buckets_s3_error prepare_source(s3_ctx *c, const char *b, const char *o, 
   }
   if (err) return err == BUCKETS_OBJ_ERR_NO_SUCH_BUCKET ? BUCKETS_ERR_NO_SUCH_BUCKET : buckets_s3_obj_error(err);
   *stored_size = oi->size;
-  buckets_s3_error e = buckets_s3_sse_check_read(c, oi, true);
+  buckets_s3_error e = buckets_s3_sse_check_read(c, oi, copy);
   *encrypted = !e && buckets_s3_sse_encrypted(oi);
-  if (!e && *encrypted) e = buckets_s3_sse_object_key(c, oi, b, o, true, key);
+  if (!e && *encrypted) e = buckets_s3_sse_object_key(c, oi, b, o, copy, key);
   if (e) {
     buckets_object_info_free(oi);
     return e;
@@ -1927,10 +1937,15 @@ static buckets_s3_error prepare_source(s3_ctx *c, const char *b, const char *o, 
   return BUCKETS_ERR_NONE;
 }
 
+static buckets_s3_error prepare_source(s3_ctx *c, const char *b, const char *o, const char *v, buckets_object_info *oi,
+                                       uint8_t key[32], bool *encrypted, int64_t *stored_size) {
+  return prepare_source_ex(c, b, o, v, oi, key, encrypted, stored_size, true);
+}
+
 /* Opens plaintext [off, off+len) of a prepared source. */
-static buckets_s3_error open_source(s3_ctx *c, const char *b, const char *o, const char *v, buckets_object_info *oi,
-                                    const uint8_t *key, bool encrypted, int64_t stored_size, int64_t off, int64_t len,
-                                    src_stream *s) {
+static buckets_s3_error open_source_layer(buckets_objlayer *L, const char *b, const char *o, const char *v,
+                                          buckets_object_info *oi, const uint8_t *key, bool encrypted, int64_t stored_size,
+                                          int64_t off, int64_t len, src_stream *s) {
   memset(s, 0, sizeof(*s));
   int64_t roff = off, rlen = len;
   buckets_sse_range rg;
@@ -1947,7 +1962,7 @@ static buckets_s3_error open_source(s3_ctx *c, const char *b, const char *o, con
     roff = rg.enc_off, rlen = rg.enc_len;
   }
   buckets_object_info tmp;
-  buckets_obj_err err = buckets_obj_open(c->s->layer, b, o, v, roff, rlen, &s->r, &tmp);
+  buckets_obj_err err = buckets_obj_open(L, b, o, v, roff, rlen, &s->r, &tmp);
   if (err) return err == BUCKETS_OBJ_ERR_NO_SUCH_BUCKET ? BUCKETS_ERR_NO_SUCH_BUCKET : buckets_s3_obj_error(err);
   buckets_object_info_free(&tmp);
   if (compressed) {
@@ -1961,6 +1976,138 @@ static buckets_s3_error open_source(s3_ctx *c, const char *b, const char *o, con
     s->r = NULL;
   }
   return BUCKETS_ERR_NONE;
+}
+
+static buckets_s3_error open_source(s3_ctx *c, const char *b, const char *o, const char *v, buckets_object_info *oi,
+                                    const uint8_t *key, bool encrypted, int64_t stored_size, int64_t off, int64_t len,
+                                    src_stream *s) {
+  return open_source_layer(c->s->layer, b, o, v, oi, key, encrypted, stored_size, off, len, s);
+}
+
+/* ---- SelectObjectContent (POST ?select&select-type=2) ---- */
+
+/* The object as S3 Select reads it: the plaintext from an offset, or any
+ * range (Parquet). */
+typedef struct {
+  buckets_objlayer *layer;
+  char *bucket, *object, *version;
+  buckets_object_info oi;
+  uint8_t key[32];
+  bool encrypted;
+  int64_t stored_size;
+  src_stream st;
+  bool open;
+  buckets_select_source src;
+  buckets_select *sel;
+} select_src;
+
+static bool select_open(void *ud, int64_t off) {
+  select_src *x = ud;
+  if (x->open) src_close(&x->st);
+  x->open = open_source_layer(x->layer, x->bucket, x->object, x->version, &x->oi, x->key, x->encrypted, x->stored_size,
+                              off, x->oi.size - off, &x->st) == BUCKETS_ERR_NONE;
+  return x->open;
+}
+
+static long select_read(void *ud, void *buf, size_t n) {
+  select_src *x = ud;
+  return x->open ? src_read(&x->st, buf, n) : -1;
+}
+
+static bool select_read_at(void *ud, int64_t off, void *buf, size_t n) {
+  select_src *x = ud;
+  src_stream st;
+  if (off < 0 || off + (int64_t)n > x->oi.size ||
+      open_source_layer(x->layer, x->bucket, x->object, x->version, &x->oi, x->key, x->encrypted, x->stored_size, off,
+                        (int64_t)n, &st) != BUCKETS_ERR_NONE)
+    return false;
+  size_t got = 0;
+  while (got < n) {
+    long k = src_read(&st, (char *)buf + got, n - got);
+    if (k <= 0) break;
+    got += (size_t)k;
+  }
+  src_close(&st);
+  return got == n;
+}
+
+static void select_src_free(void *ud) {
+  select_src *x = ud;
+  if (!x) return;
+  buckets_select_free(x->sel);
+  if (x->open) src_close(&x->st);
+  OPENSSL_cleanse(x->key, sizeof(x->key));
+  buckets_object_info_free(&x->oi);
+  free(x->bucket);
+  free(x->object);
+  free(x->version);
+  free(x);
+}
+
+static long select_stream(void *ud, char *buf, size_t n) { return buckets_select_read(((select_src *)ud)->sel, buf, n); }
+
+static bool select_parquet_enabled(void) {
+  const char *v = getenv("MINIO_API_SELECT_PARQUET");
+  return v && !strcmp(v, "on");
+}
+
+static void select_object(s3_ctx *c) {
+  if (buckets_s3_sse_s3_or_kms_requested(c)) {
+    buckets_s3_write_error(c, BUCKETS_ERR_BAD_REQUEST);
+    return;
+  }
+  if (buckets_http_header_get(c->req, "Range").p) {
+    buckets_s3_write_error(c, BUCKETS_ERR_UNSUPPORTED_RANGE_HEADER);
+    return;
+  }
+  buckets_str cl = buckets_http_header_get(c->req, "Content-Length");
+  if (!cl.p || strtoll(cl.p, NULL, 10) <= 0) {
+    buckets_s3_write_error(c, BUCKETS_ERR_EMPTY_REQUEST_BODY);
+    return;
+  }
+  buckets_s3_error oerr = buckets_s3_sse_get_opts(c);
+  if (oerr) {
+    buckets_s3_write_error(c, oerr);
+    return;
+  }
+  const char *version = buckets_query_get(&c->q, "versionId");
+  select_src *x = buckets_xcalloc(1, sizeof(*x));
+  buckets_s3_error e = prepare_source_ex(c, c->bucket, c->object, version, &x->oi, x->key, &x->encrypted,
+                                         &x->stored_size, false);
+  if (e) {
+    free(x);
+    buckets_s3_sse_write_error(c, e);
+    return;
+  }
+  buckets_s3_error re = buckets_s3_read_doc(c);
+  if (re) {
+    select_src_free(x);
+    buckets_s3_write_error(c, re);
+    return;
+  }
+  buckets_select_err se;
+  x->sel = buckets_select_parse(c->doc.data ? c->doc.data : "", c->doc.len, select_parquet_enabled(), &se);
+  if (x->sel) {
+    x->layer = c->s->layer;
+    x->bucket = buckets_xstrdup(c->bucket);
+    x->object = buckets_xstrdup(c->object);
+    x->version = version ? buckets_xstrdup(version) : NULL;
+    x->src = (buckets_select_source){x, select_open, select_read, select_read_at, x->oi.size};
+    buckets_select_open(x->sel, &x->src, &se);
+  }
+  if (se.code) {
+    select_src_free(x);
+    buckets_s3_write_custom_error(c, se.status ? se.status : 400, se.code, se.msg);
+    return;
+  }
+  if (x->encrypted) buckets_s3_sse_headers(c, &x->oi);
+  buckets_s3_send_event(c, BUCKETS_EV_OBJECT_ACCESSED_GET, c->bucket, c->object, &x->oi, NULL);
+  buckets_http_resp_header(c->resp, "Content-Type", "application/octet-stream");
+  c->resp->status = 200;
+  c->resp->chunked = true;
+  c->resp->stream = select_stream;
+  c->resp->stream_ud = x;
+  c->resp->stream_free = select_src_free;
 }
 
 static bool parse_copy_source(buckets_str h, char **decoded, const char **bucket, const char **object,
@@ -3528,16 +3675,36 @@ static void restore_object(s3_ctx *c) {
     return;
   }
   buckets_xml_doc doc = {0};
-  char *days_s = NULL, *type = NULL;
+  char *days_s = NULL, *type = NULL, *out_bucket = NULL, *out_prefix = NULL, *out_enc = NULL;
   const char *why = NULL;
+  char why_buf[600];
   bool select_params = false, output = false;
   if (!buckets_xml_parse(buckets_buf_str(&c->doc), &doc) || !buckets_str_eq_c(doc.nodes[0].name, "RestoreRequest")) {
     why = "XML syntax error";
   } else {
     days_s = xml_child_text(&doc, 0, "Days");
     type = xml_child_text(&doc, 0, "Type");
-    select_params = buckets_xml_child(&doc, 0, "SelectParameters") != 0;
-    output = buckets_xml_child(&doc, 0, "OutputLocation") != 0;
+    size_t sp = buckets_xml_child(&doc, 0, "SelectParameters");
+    select_params = sp != 0;
+    if (sp) {
+      /* decoded with the request: its errors are the document's */
+      buckets_select_err se;
+      buckets_select *sel = buckets_select_parse_node(&doc, sp, false, &se);
+      if (!sel) {
+        snprintf(why_buf, sizeof(why_buf), "%s", se.msg);
+        why = why_buf;
+      }
+      buckets_select_free(sel);
+    }
+    size_t ol = buckets_xml_child(&doc, 0, "OutputLocation");
+    size_t s3l = ol ? buckets_xml_child(&doc, ol, "S3") : 0;
+    if (s3l) {
+      out_bucket = xml_child_text(&doc, s3l, "BucketName");
+      out_prefix = xml_child_text(&doc, s3l, "Prefix");
+      size_t en = buckets_xml_child(&doc, s3l, "Encryption");
+      if (en) out_enc = xml_child_text(&doc, en, "EncryptionType");
+    }
+    output = out_bucket && *out_bucket; /* OutputLocation.IsEmpty: no bucket name */
   }
   long days = days_s ? strtol(days_s, NULL, 10) : 0;
   bool is_select = type && strcmp(type, "SELECT") == 0;
@@ -3548,22 +3715,51 @@ static void restore_object(s3_ctx *c) {
   else if (!why && is_select && !output) why = "OutputLocation required for SELECT requests";
   else if (!why && days != 0 && is_select) why = "Days cannot be specified with SELECT restore request";
   else if (!why && days == 0 && !is_select) why = "restoration days should be at least 1";
+  if (!why && output) {
+    if (buckets_obj_stat_bucket(c->s->layer, out_bucket) != BUCKETS_OBJ_OK) {
+      snprintf(why_buf, sizeof(why_buf), "Bucket not found: %s", out_bucket);
+      why = why_buf;
+    } else if (!out_prefix || !*out_prefix) {
+      why = "Prefix is a required parameter in OutputLocation";
+    } else if (!out_enc || strcmp(out_enc, "AES256") != 0) {
+      why = ""; /* NotImplemented{}: an error without text */
+    }
+  }
   if (doc.nodes) buckets_xml_doc_free(&doc);
   free(days_s);
   free(type);
+  free(out_enc);
   if (why) {
+    free(out_bucket);
+    free(out_prefix);
     buckets_object_info_free(&oi);
     buckets_s3_write_error_msg(c, BUCKETS_ERR_MALFORMED_XML, why);
-    return;
-  }
-  if (is_select) { /* restores through S3 Select arrive with S3 Select */
-    buckets_object_info_free(&oi);
-    buckets_s3_write_error(c, BUCKETS_ERR_NOT_IMPLEMENTED);
     return;
   }
   bool ongoing;
   int64_t expires;
   buckets_object_restore_state(&oi, &ongoing, &expires);
+  if (is_select) {
+    /* MinIO answers with where the result would go and evaluates the query
+     * on the remote copy in the background, discarding what it produces:
+     * nothing is written. The answer is the same here, without the work. */
+    char uuid[40], path[2048];
+    buckets_uuid_v4(uuid);
+    const char *pfx = out_prefix;
+    while (*pfx == '/') pfx++;
+    size_t pl = strlen(pfx);
+    snprintf(path, sizeof(path), "%s/%.*s%s%s", out_bucket, (int)(pl && pfx[pl - 1] == '/' ? pl - 1 : pl), pfx,
+             pl ? "/" : "", uuid);
+    buckets_http_resp_header(c->resp, "X-Amz-Restore-Output-Path", path);
+    c->resp->status = !ongoing && expires != 0 ? 202 : 200;
+    buckets_s3_send_event(c, BUCKETS_EV_OBJECT_RESTORE_POST, c->bucket, c->object, &oi, NULL);
+    free(out_bucket);
+    free(out_prefix);
+    buckets_object_info_free(&oi);
+    return;
+  }
+  free(out_bucket);
+  free(out_prefix);
   if (ongoing) {
     buckets_object_info_free(&oi);
     buckets_s3_write_error(c, BUCKETS_ERR_OBJECT_RESTORE_ALREADY_IN_PROGRESS);
@@ -3646,6 +3842,8 @@ static bool authorize_object_request(s3_ctx *c) {
     else if (buckets_str_eq_c(m, "DELETE")) action = "s3:DeleteObjectTagging";
   } else if (buckets_str_eq_c(m, "POST") && buckets_query_has(&c->q, "restore")) {
     action = "s3:RestoreObject";
+  } else if (buckets_str_eq_c(m, "POST") && buckets_query_has(&c->q, "select")) {
+    action = "s3:GetObject";
   } else if (buckets_str_eq_c(m, "PUT")) {
     action = "s3:PutObject"; /* plus s3:GetObject on a copy source, checked by the handler */
   } else if (buckets_str_eq_c(m, "GET") || buckets_str_eq_c(m, "HEAD")) {
@@ -3726,6 +3924,13 @@ void buckets_s3_route_object(s3_ctx *c) {
   if (buckets_str_eq_c(m, "POST") && buckets_query_has(&c->q, "restore")) {
     restore_object(c);
     return;
+  }
+  if (buckets_str_eq_c(m, "POST") && buckets_query_has(&c->q, "select")) {
+    const char *st = buckets_query_get(&c->q, "select-type");
+    if (st && !strcmp(st, "2")) {
+      select_object(c);
+      return;
+    }
   }
   static const char *const unsupported[] = {"select", "restore", "torrent"};
   for (size_t i = 0; i < BUCKETS_ARRAY_LEN(unsupported); i++) {

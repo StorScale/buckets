@@ -2,6 +2,8 @@
 # Optional servers for tests/integration/notify-targets.sh: PG_BIN (PostgreSQL's bin), MYSQL_DIR (a MySQL 8
 # installation) and KFAKE_BIN (tests/integration/targets/kfake built with Go); each adds its target.
 # AZURITE_BIN (azurite-blob) and FAKE_GCS_BIN add Azure and GCS warm tiers to tests/integration/tier.sh.
+# SELGEN (a fixture writer: see tests/integration/select.sh) adds zstd/lz4/s2/snappy and generated
+# Parquet cases to tests/integration/select.sh.
 # The full CI gate, runnable locally and from any CI host:
 #   1. release build + unit tests + fuzz corpus replay
 #   2. ASan/UBSan build + unit tests + end-to-end smoke test
@@ -58,6 +60,8 @@ run tests/integration/siterepl.sh build-ci-asan/src/bucketsd
 run tests/integration/tier.sh build-ci-asan/src/bucketsd
 run tests/integration/batch.sh build-ci-asan/src/bucketsd
 run tests/integration/decom.sh build-ci-asan/src/bucketsd
+run tests/integration/select.sh build-ci-asan/src/bucketsd
+run tests/integration/snowball.sh build-ci-asan/src/bucketsd
 run tests/integration/console.sh build-ci-asan/src/bucketsd build-ci-asan/src/consoled
 # The console: SPA build, typecheck and Playwright e2e against the sanitized
 # bucketsd and consoled (skipped without npm).
@@ -88,6 +92,8 @@ run tests/integration/siterepl.sh build-ci/src/bucketsd
 run tests/integration/tier.sh build-ci/src/bucketsd
 run tests/integration/batch.sh build-ci/src/bucketsd
 run tests/integration/decom.sh build-ci/src/bucketsd
+run tests/integration/select.sh build-ci/src/bucketsd
+run tests/integration/snowball.sh build-ci/src/bucketsd
 
 # kind end to end (needs docker, kind and kubectl; see tests/e2e-k8s/README.md)
 if [[ -n "${KIND_E2E:-}" ]]; then

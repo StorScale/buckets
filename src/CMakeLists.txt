@@ -37,6 +37,14 @@ add_library(buckets STATIC
   crypto/objkey.c
   kms/kms.c
   compress/s2.c
+  compress/stream.c
+  select/value.c
+  select/json.c
+  select/sql.c
+  select/eval.c
+  select/csv.c
+  select/parquet.c
+  select/select.c
   notify/event.c
   notify/target.c
   notify/targets.c
@@ -171,7 +179,8 @@ find_library(RESOLV_LIB resolv)
 if(RESOLV_LIB)
   target_link_libraries(buckets PUBLIC ${RESOLV_LIB})
 endif()
-target_link_libraries(buckets PUBLIC llhttp::llhttp yyjson libdeflate::libdeflate_static buckets_libyaml OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
+target_link_libraries(buckets PUBLIC llhttp::llhttp yyjson libdeflate::libdeflate_static buckets_libyaml
+  buckets_zlib buckets_bzip2 buckets_zstd buckets_lz4 OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
 buckets_warnings(buckets)
 
 add_executable(bucketsd cmd/bucketsd/main.c)

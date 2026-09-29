@@ -76,7 +76,8 @@ void buckets_json_go_string(buckets_buf *out, const char *s, size_t n) {
     uint32_t cp;
     size_t len = utf8_len(p + i, n - i, &cp);
     if (!len) {
-      buckets_buf_append_c(out, "\\ufffd");
+      /* encoding/json: the replacement character itself (U+FFFD) */
+      buckets_buf_append_c(out, "\xef\xbf\xbd");
       i++;
       continue;
     }

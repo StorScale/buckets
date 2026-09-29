@@ -57,3 +57,42 @@ target_compile_definitions(buckets_libyaml PUBLIC YAML_DECLARE_STATIC
   PRIVATE _GNU_SOURCE YAML_VERSION_MAJOR=0 YAML_VERSION_MINOR=2 YAML_VERSION_PATCH=5 YAML_VERSION_STRING="0.2.5")
 set_target_properties(buckets_libyaml PROPERTIES POSITION_INDEPENDENT_CODE ON C_CLANG_TIDY "")
 target_compile_options(buckets_libyaml PRIVATE -w)
+
+# Streaming decompressors (S3 Select input, snowball archives): zlib for gzip,
+# bzip2, zstd and LZ4 frames. Only their library sources are built.
+macro(buckets_fetch_sources name url)
+  FetchContent_Declare(${name} URL ${url} DOWNLOAD_EXTRACT_TIMESTAMP ON SOURCE_SUBDIR no-cmake)
+  FetchContent_MakeAvailable(${name})
+endmacro()
+macro(buckets_static_lib target)
+  add_library(${target} STATIC ${ARGN})
+  set_target_properties(${target} PROPERTIES POSITION_INDEPENDENT_CODE ON C_CLANG_TIDY "")
+  target_compile_options(${target} PRIVATE -w)
+endmacro()
+
+buckets_fetch_sources(zlib https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz)
+set(_s adler32.c compress.c crc32.c deflate.c infback.c inffast.c inflate.c inftrees.c trees.c uncompr.c zutil.c)
+list(TRANSFORM _s PREPEND ${zlib_SOURCE_DIR}/)
+buckets_static_lib(buckets_zlib ${_s})
+target_include_directories(buckets_zlib SYSTEM PUBLIC ${zlib_SOURCE_DIR})
+target_compile_definitions(buckets_zlib PRIVATE HAVE_UNISTD_H)
+
+buckets_fetch_sources(bzip2 https://sourceware.org/pub/bzip2/bzip2-1.0.8.tar.gz)
+set(_s blocksort.c huffman.c crctable.c randtable.c compress.c decompress.c bzlib.c)
+list(TRANSFORM _s PREPEND ${bzip2_SOURCE_DIR}/)
+buckets_static_lib(buckets_bzip2 ${_s})
+target_include_directories(buckets_bzip2 SYSTEM PUBLIC ${bzip2_SOURCE_DIR})
+target_compile_definitions(buckets_bzip2 PRIVATE BZ_NO_STDIO)
+
+buckets_fetch_sources(zstd https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz)
+file(GLOB _s ${zstd_SOURCE_DIR}/lib/common/*.c ${zstd_SOURCE_DIR}/lib/compress/*.c ${zstd_SOURCE_DIR}/lib/decompress/*.c)
+buckets_static_lib(buckets_zstd ${_s})
+target_include_directories(buckets_zstd SYSTEM PUBLIC ${zstd_SOURCE_DIR}/lib)
+target_compile_definitions(buckets_zstd PRIVATE ZSTD_DISABLE_ASM ZSTD_MULTITHREAD=0)
+
+buckets_fetch_sources(lz4 https://github.com/lz4/lz4/releases/download/v1.10.0/lz4-1.10.0.tar.gz)
+set(_s lz4.c lz4frame.c lz4hc.c xxhash.c)
+list(TRANSFORM _s PREPEND ${lz4_SOURCE_DIR}/lib/)
+buckets_static_lib(buckets_lz4 ${_s})
+target_include_directories(buckets_lz4 SYSTEM PUBLIC ${lz4_SOURCE_DIR}/lib)
+target_compile_definitions(buckets_lz4 PRIVATE XXH_NAMESPACE=LZ4_)

@@ -4,7 +4,7 @@
 #    as the warm tier;
 #  - transitions (immediate and by the scanner) of plain, multipart,
 #    SSE-S3 and compressed objects; reads (and ranges) from the tier;
-#  - RestoreObject, repeated and invalid restores;
+#  - RestoreObject, repeated and invalid restores, SELECT restores;
 #  - Azure (Azurite) and GCS (fake-gcs-server) tiers, when AZURITE_BIN and
 #    FAKE_GCS_BIN are set;
 #  - mc admin tier info (per-tier usage, last-day transitions), tier metrics;
@@ -241,6 +241,34 @@ assert sum(b["numVersions"] for b in w["DailyStats"]["Bins"]) == 6'; }
   stop_all
 }
 
+# SELECT restores of a transitioned object (MinIO answers with an output
+# path and writes nothing), and their errors: status, output path shape and
+# message, one line each.
+select_restores() { # port object
+  local sp='<SelectParameters><Expression>SELECT * FROM S3Object</Expression><ExpressionType>SQL</ExpressionType><InputSerialization><CSV/></InputSerialization><OutputSerialization><CSV/></OutputSerialization></SelectParameters>'
+  local bad='<SelectParameters><Expression>SELEC</Expression><ExpressionType>SQL</ExpressionType><InputSerialization><CSV/></InputSerialization><OutputSerialization><CSV/></OutputSerialization></SelectParameters>'
+  local out='<OutputLocation><S3><BucketName>outbkt</BucketName><Prefix>res/</Prefix><Encryption><EncryptionType>AES256</EncryptionType></Encryption></S3></OutputLocation>'
+  local body
+  for body in "<Type>SELECT</Type>$sp$out" "<Type>SELECT</Type>$sp" "<Type>SELECT</Type><Days>1</Days>$sp$out" \
+    "<Days>1</Days>$sp" "<Type>SELECT</Type>$bad$out" \
+    "<Type>SELECT</Type>$sp<OutputLocation><S3><BucketName>nosuch</BucketName><Prefix>x</Prefix></S3></OutputLocation>" \
+    "<Type>SELECT</Type>$sp<OutputLocation><S3><BucketName>outbkt</BucketName></S3></OutputLocation>" \
+    "<Type>SELECT</Type>$sp<OutputLocation><S3><BucketName>outbkt</BucketName><Prefix>p</Prefix></S3></OutputLocation>"; do
+    curl_s3 -s -D - -X POST --data "<RestoreRequest xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">$body</RestoreRequest>" \
+      "http://127.0.0.1:$1/$2?restore" | tr -d '\r' | python3 -c 'import re,sys
+t = sys.stdin.read()
+st = re.search(r"^HTTP/\S+ (\d+)", t, re.M).group(1)
+p = re.search(r"^x-amz-restore-output-path: (.*)$", t, re.M | re.I)
+p = re.sub(r"[0-9a-f-]{36}$", "UUID", p.group(1)) if p else ""
+c = re.search(r"<Code>(.*?)</Code>", t)
+m = re.search(r"<Message>(.*?)</Message>", t)
+msg = m.group(1) if m else ""
+if "SELEC" in sys.argv[1] and "SELECT *" not in sys.argv[1]:
+    msg = msg.split(":")[0].isdigit() and "parse error" or msg
+print(st, p, c.group(1) if c else "", msg)' "$body"
+  done
+}
+
 run_hot_minio() { # MinIO transitions, bucketsd reads (and deletes)
   CASE="hot=minio"
   local dir="$WORK/m"
@@ -257,6 +285,9 @@ run_hot_minio() { # MinIO transitions, bucketsd reads (and deletes)
   MC cp --enc-s3 hot/data "$dir/small" hot/data/enc >/dev/null
   MC cp "$dir/small" hot/data/gone >/dev/null
   for k in mp enc gone; do wait_for 30 is_tier "hot/data/$k" WARM1 || bad "minio did not transition $k"; done
+  MC mb hot/outbkt >/dev/null
+  local sel_minio
+  sel_minio=$(select_restores "$PORT" data/enc)
   stop_site hot
   start buckets "$PORT" hot "$dir/hot"
   MC admin config set hot scanner speed=fastest >/dev/null 2>&1
@@ -264,6 +295,8 @@ run_hot_minio() { # MinIO transitions, bucketsd reads (and deletes)
   check "transitioned" "$(MC cat hot/data/mp | md5)" "$(md5 <"$dir/mp")"
   check "sse" "$(MC cat hot/data/enc)" small
   check "class" "$(sclass hot/data/mp)" WARM1
+  check "select restores" "$(select_restores "$PORT" data/enc)" "$sel_minio"
+  check "select restore wrote nothing" "$(MC ls --recursive hot/outbkt | wc -l | tr -d ' ')" 0
   local n0
   n0=$(remote_count warm/tierbkt/pre/)
   MC rm hot/data/gone >/dev/null

@@ -6,6 +6,20 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- S3 Select (Phase 9): `SelectObjectContent` as MinIO answers it, request for request:
+  - MinIO's SQL (its participle grammar, parsed by backtracking recursive descent taking the same alternatives), query analysis and errors, value inference, comparison and arithmetic, the string, date and conversion functions, and COUNT/SUM/AVG/MIN/MAX;
+  - CSV input with every option (header use/ignore/none, field and multi-byte record delimiters, quote, quote escape, comments, lazy quotes) and output quoting; JSON DOCUMENT and LINES input as MinIO's jstream reads it (key order, float numbers, the 10 MiB document limit, its error messages); Parquet input (MINIO_API_SELECT_PARQUET) with every encoding and PLAIN/SNAPPY/GZIP/ZSTD/LZ4 pages, v1 and v2 data pages, converted by logical type as MinIO does;
+  - GZIP, BZIP2, ZSTD, LZ4, S2 and SNAPPY input, scan ranges, and objects stored encrypted or compressed;
+  - the event stream (Records batching, Cont keep-alives, Progress, Stats, End and error messages) byte for byte as MinIO frames it;
+  - RestoreObject of type SELECT answers as MinIO's does (the output path, nothing written);
+  - `tests/integration/select.sh` runs 393 cases against MinIO (MinIO's own test queries, every input format and compression, 120k-row inputs, Parquet generated with MinIO's own library, errors); `test_select` checks MinIO's exact event streams.
+- Streaming decompression (`src/compress/stream.c`: zlib, bzip2, zstd, LZ4 built from source) shared by S3 Select and snowball uploads.
+- Snowball uploads (PutObjectExtract) of gzip, bzip2, zstd and LZ4 archives, as well as S2 and plain tar; `tests/integration/snowball.sh`.
+
+### Fixed
+- JSON strings with invalid UTF-8 carry the replacement character itself, as Go's encoding/json writes it, not the `\ufffd` escape (event records too).
+
 ## [0.8.0] - 2026-09-29
 
 Phase 8: bucket and site replication, tiering, batch jobs, decommission and rebalance, all interoperable with MinIO, with the two-cluster/three-site gate run on kind.
