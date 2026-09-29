@@ -30,6 +30,7 @@
 #include "core/loop.h"
 #include "net/http.h"
 #include "s3/server.h"
+#include "trace/trace.h"
 #include "erasure/layout.h"
 #include "heal/healer.h"
 #include "scanner/scanner.h"
@@ -720,6 +721,7 @@ int main(int argc, char **argv) {
     }
   }
   s3.cluster = cluster_describe(&topo, host, tls != NULL);
+  buckets_trace_set_node(s3.cluster->self);
   if (topo.distributed) {
     topology_connect(&topo);
     buckets_http_client **pc = buckets_xcalloc(topo.npeers ? topo.npeers : 1, sizeof(*pc));

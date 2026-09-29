@@ -29,9 +29,9 @@ bool buckets_logger_audit_enabled(buckets_logger *l);
 void buckets_logger_audit(buckets_logger *l, const char *json, size_t n);
 /* A log entry (JSON) to every logger target. */
 void buckets_logger_log(buckets_logger *l, const char *json, size_t n);
-/* A server warning or error as MinIO's log.Entry, to every logger target. */
-void buckets_logger_entry(buckets_logger *l, const char *deployment_id, buckets_log_level level, const char *msg,
-                          size_t n);
+/* A server warning or error as MinIO's log.Entry JSON (appended to b). */
+void buckets_logger_entry_json(const char *deployment_id, buckets_log_level level, const char *msg, size_t n,
+                               buckets_buf *b);
 
 typedef struct {
   char name[160], endpoint[512];

@@ -1067,7 +1067,7 @@ static void get_object(s3_ctx *c, bool head) {
   }
   if (have_key) OPENSSL_cleanse(key, sizeof(key));
   const char *user_tags = buckets_object_meta(&oi, "X-Amz-Tagging");
-  if (c->audited && user_tags && *user_tags && !c->audit_tagging) c->audit_tagging = buckets_xstrdup(user_tags);
+  if (user_tags && *user_tags && !c->audit_tagging) c->audit_tagging = buckets_xstrdup(user_tags);
   buckets_s3_lock_filter_meta(c, &oi);
   write_object_headers(c, &oi);
   buckets_s3_version_header(c, oi.version_id);

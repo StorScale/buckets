@@ -226,30 +226,22 @@ size_t buckets_logger_targets(buckets_logger *l, buckets_logger_target_info **ou
   return n;
 }
 
-void buckets_logger_entry(buckets_logger *l, const char *deployment_id, buckets_log_level level, const char *msg,
-                          size_t n) {
-  if (!l) return;
-  pthread_rwlock_rdlock(&l->lock);
-  bool any = l->nlog > 0;
-  pthread_rwlock_unlock(&l->lock);
-  if (!any) return;
+void buckets_logger_entry_json(const char *deployment_id, buckets_log_level level, const char *msg, size_t n,
+                               buckets_buf *b) {
   struct timespec now;
   clock_gettime(CLOCK_REALTIME, &now);
   char when[64];
   buckets_time_rfc3339_nano((long long)now.tv_sec, now.tv_nsec, when);
   /* buildLogEntry without a request: API "SYSTEM", a request ID from the time */
-  buckets_buf b = BUCKETS_BUF_INIT;
-  buckets_buf_append_c(&b, "{");
+  buckets_buf_append_c(b, "{");
   if (deployment_id && *deployment_id) {
-    buckets_buf_append_c(&b, "\"deploymentid\":");
-    buckets_json_go_string(&b, deployment_id, strlen(deployment_id));
-    buckets_buf_append_char(&b, ',');
+    buckets_buf_append_c(b, "\"deploymentid\":");
+    buckets_json_go_string(b, deployment_id, strlen(deployment_id));
+    buckets_buf_append_char(b, ',');
   }
-  buckets_buf_appendf(&b, "\"level\":\"%s\",\"time\":\"%s\",\"api\":{\"name\":\"SYSTEM\",\"args\":{}},\"requestID\":\"%llX\",\"message\":",
+  buckets_buf_appendf(b, "\"level\":\"%s\",\"time\":\"%s\",\"api\":{\"name\":\"SYSTEM\",\"args\":{}},\"requestID\":\"%llX\",\"message\":",
                       level >= BUCKETS_LOG_ERROR ? "ERROR" : "WARNING", when,
                       (unsigned long long)now.tv_sec * 1000000000ULL + (unsigned long long)now.tv_nsec);
-  buckets_json_go_string(&b, msg, n);
-  buckets_buf_append_char(&b, '}');
-  buckets_logger_log(l, b.data, b.len);
-  buckets_buf_free(&b);
+  buckets_json_go_string(b, msg, n);
+  buckets_buf_append_char(b, '}');
 }

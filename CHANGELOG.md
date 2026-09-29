@@ -31,10 +31,17 @@ All notable changes to this project are documented here. The format follows
   - Warnings and errors go to the logger webhooks as MinIO's `log.Entry`.
   - The targets show in the metrics (`minio_audit_*` as `sys_http_<n>`/`audit_http_<n>`, `minio_cluster_webhook_*` and `minio_logger_webhook_*` by name and endpoint), next to the console target.
 
+- `mc admin trace` and `mc admin logs` (Phase 7):
+  - `GET /minio/admin/v3/trace` with MinIO's options (types, `err`, `threshold`, the deprecated `all`) and `admin:ServerTrace`: madmin.TraceInfo records as JSON lines, a space each idle second. HTTP records as MinIO's tracer writes them (function `s3.<API>`/`admin.<Handler>`, request and response headers, bodies or `<BLOB>` for header-only handlers, timings and byte counts, the path as Go reports it); `tests/integration/trace-interop.sh` finds them identical to MinIO's for 29 requests. Storage records (`storage.<Op>`, the drive and paths, errors) from every drive call.
+  - `GET /minio/admin/v3/log` (`node`, `limit`, `logType`, `admin:ConsoleLog`): the last records of a 10000-entry ring, then new ones, as log.Info JSON (warnings and errors as entries, other messages as console messages).
+  - Admin routes carry MinIO's handler names (the trace's function names).
+  - Streams of unknown length (listen, trace, logs) end when the server shuts down instead of holding the drain.
+
 ### Changed
 - Response headers MinIO writes in lowercase (`x-amz-version-id`, `x-amz-delete-marker`, `x-amz-mp-parts-count`, `x-amz-copy-source-version-id`) are written that way, `Vary` comes as separate headers as MinIO sends it, and S3 responses carry MinIO's `X-Ratelimit-Limit` and `X-Ratelimit-Remaining` (the API workers and how many are free).
 
 ### Fixed
+- A log message at exit (after the server's log targets were freed) no longer touches them.
 - CopyObject now gives the copy a checksum as MinIO does: the algorithm asked for with `x-amz-checksum-algorithm` (an unknown one is ignored), else the source's (a composite multipart one is computed again whole), else a CRC64NVME computed on the way; the response carries the ETag and the checksum. CompleteMultipartUpload's response carries the ETag header. New s3diff scenario `copy`.
 - MRF healing no longer drops an object healed while one of its drives is still offline, which left that drive's copy unwritten once it came back: such entries, and ones that fail with a passing error, are retried with backoff (up to 20 times, about a quarter of an hour) instead of three times at once.
 - Requests with `.` or `..` path segments in a query value (other than `delimiter`), or an invalid or reserved bucket name, are now rejected before authentication and without `BucketName`/`Key` in the error, as MinIO's request validity filter does.

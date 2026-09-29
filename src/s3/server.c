@@ -1,6 +1,9 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 #include "s3/server.h"
+#include "logger/console.h"
 #include "logger/logger.h"
+#include "notify/event.h"
+#include "trace/trace.h"
 #include "metrics/stats.h"
 #include "s3/metrics.h"
 #include "notify/notifier.h"
@@ -327,11 +330,30 @@ static char *oidc_role_policy(void *ud, const char *arn) {
   return r;
 }
 
-/* Warnings and errors to the logger webhooks. */
+/* Server messages: warnings and errors to the logger webhooks, and all of
+ * them to the console log (mc admin logs) as log.Info records. */
 static void log_sink(void *ud, buckets_log_level level, const char *msg, size_t n) {
   buckets_s3_server *s = ud;
   buckets_objlayer *L = s->layer;
-  buckets_logger_entry(s->logger, L ? L->deployment_id_str : "", level, msg, n);
+  const char *node = s->cluster && s->cluster->self ? s->cluster->self : "";
+  buckets_buf e = BUCKETS_BUF_INIT, info = BUCKETS_BUF_INIT;
+  if (level >= BUCKETS_LOG_WARN) {
+    buckets_logger_entry_json(L ? L->deployment_id_str : "", level, msg, n, &e);
+    buckets_logger_log(s->logger, e.data, e.len);
+    buckets_buf_append(&info, e.data, e.len - 1); /* the entry's fields, then Info's own */
+    buckets_buf_append_c(&info, ",\"ConsoleMsg\":\"\",\"node\":");
+  } else { /* a plain console message: the entry's fields empty */
+    buckets_buf_append_c(&info, "{\"level\":\"\",\"time\":\"0001-01-01T00:00:00Z\",\"ConsoleMsg\":");
+    buckets_json_go_string(&info, msg, n);
+    buckets_buf_append_c(&info, ",\"node\":");
+  }
+  buckets_json_go_string(&info, node, strlen(node));
+  buckets_buf_append_char(&info, '}');
+  uint32_t mask = level >= BUCKETS_LOG_ERROR ? BUCKETS_LOGMASK_ERROR : level >= BUCKETS_LOG_WARN ? BUCKETS_LOGMASK_WARNING
+                                                                                               : BUCKETS_LOGMASK_ALL;
+  buckets_console_add(mask, level >= BUCKETS_LOG_WARN, node, info.data, info.len);
+  buckets_buf_free(&e);
+  buckets_buf_free(&info);
 }
 
 static void configure_logger(buckets_s3_server *s, const char *subsys) {
@@ -618,6 +640,7 @@ void buckets_s3_server_set_layer(buckets_s3_server *s, buckets_objlayer *layer) 
 }
 
 void buckets_s3_server_stop(buckets_s3_server *s) {
+  buckets_log_set_sink(NULL, NULL); /* the server's log targets go away with it */
   pthread_mutex_lock(&s->bg_mu);
   s->bg_stop = true;
   pthread_cond_broadcast(&s->bg_cv);
@@ -1637,8 +1660,9 @@ void buckets_s3_handle(const buckets_http_request *req, buckets_http_response *r
   s3_ctx c = {.s = s, .req = req, .resp = resp};
   int api = -1;          /* the MinIO API route taken, for request statistics */
   char *stat_bucket = NULL; /* an existing bucket it names */
-  struct timespec t0;
+  struct timespec t0, w0;
   clock_gettime(CLOCK_MONOTONIC, &t0);
+  clock_gettime(CLOCK_REALTIME, &w0);
   struct timespec ts;
   clock_gettime(CLOCK_REALTIME, &ts);
   uint64_t nanos = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec + (s->request_seq++ % 1000);
@@ -1764,13 +1788,25 @@ done:
     if (stat_bucket && api == buckets_api_index("deletebucket") && resp->status == 204)
       buckets_stats_forget_bucket(stat_bucket);
   }
+  if (buckets_trace_wanted(BUCKETS_TRACE_S3 | BUCKETS_TRACE_INTERNAL)) {
+    struct timespec t1, w1;
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    clock_gettime(CLOCK_REALTIME, &w1);
+    int64_t start = (int64_t)w0.tv_sec * 1000000000LL + w0.tv_nsec;
+    int64_t end = (int64_t)w1.tv_sec * 1000000000LL + w1.tv_nsec;
+    int64_t ttfb = (int64_t)(t1.tv_sec - t0.tv_sec) * 1000000000LL + (t1.tv_nsec - t0.tv_nsec);
+    uint64_t sent = buckets_str_eq_c(req->method, "HEAD") ? 0
+                    : resp->content_length >= 0          ? (uint64_t)resp->content_length
+                                                         : (uint64_t)resp->body.len;
+    buckets_s3_trace_http(&c, api, start, end, ttfb, sent);
+  }
   free(stat_bucket);
   if (c.audited) {
     buckets_audit_tags_set(NULL);
     buckets_audit_tags_free(&c.tags);
     buckets_buf_free(&c.audit_objects);
-    free(c.audit_tagging);
   }
+  free(c.audit_tagging);
   buckets_query_free(&c.q);
   free(c.path);
   free(c.bucket);

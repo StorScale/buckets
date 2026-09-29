@@ -78,7 +78,7 @@ void buckets_s3_get_object_tagging(s3_ctx *c) {
   buckets_object_info oi;
   if (!stat_version(c, &oi)) return;
   const char *ut = buckets_object_meta(&oi, TAGGING_META);
-  if (c->audited && ut && *ut) c->audit_tagging = buckets_xstrdup(ut); /* into X-Amz-Tagging, as MinIO */
+  if (ut && *ut) c->audit_tagging = buckets_xstrdup(ut); /* into X-Amz-Tagging, as MinIO */
   buckets_tags t = {0};
   buckets_tags_error e;
   if (ut && *ut && !buckets_tags_parse_query(ut, true, &t, &e)) {
@@ -119,7 +119,7 @@ static void set_object_tags(s3_ctx *c, const char *tags, int status) {
   buckets_object_info oi;
   buckets_obj_err err = buckets_obj_update_meta(c->s->layer, c->bucket, c->object, version, edit_tags, &e, &oi);
   /* MinIO sets the request's X-Amz-Tagging: the new tags on a put, the old ones on a delete */
-  if (c->audited && !c->audit_tagging) {
+  if (!c->audit_tagging) {
     if (*tags || status == 200) c->audit_tagging = buckets_xstrdup(tags);
     else if (e.old) c->audit_tagging = buckets_xstrdup(e.old);
   }

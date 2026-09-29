@@ -1,6 +1,10 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 #include "storage/drive.h"
 #include "storage/drivestats.h"
+#include "core/timefmt.h"
+#include "notify/event.h"
+#include "trace/trace.h"
+#include <stdarg.h>
 #include "storage/remote.h"
 
 #include <dirent.h>
@@ -731,6 +735,45 @@ static buckets_drive_err drive_rename_file(buckets_drive *d, const char *src_vol
   return err;
 }
 
+
+/* storageTrace: the drive and the call's paths, joined by spaces */
+static void drive_trace(buckets_drive *d, buckets_drive_op op, struct timespec t0, struct timespec t1, buckets_drive_err e,
+                        int npaths, ...) {
+  buckets_buf path = BUCKETS_BUF_INIT;
+  buckets_buf_append_c(&path, d->root);
+  va_list ap;
+  va_start(ap, npaths);
+  for (int i = 0; i < npaths; i++) {
+    const char *p = va_arg(ap, const char *);
+    if (p && *p) buckets_buf_append_char(&path, ' '), buckets_buf_append_c(&path, p);
+  }
+  va_end(ap);
+  struct timespec w;
+  clock_gettime(CLOCK_REALTIME, &w);
+  int64_t dur = (t1.tv_sec - t0.tv_sec) * 1000000000LL + (t1.tv_nsec - t0.tv_nsec);
+  int64_t start = (int64_t)w.tv_sec * 1000000000LL + w.tv_nsec - dur;
+  char when[64], func[64];
+  buckets_time_rfc3339_nano(start / 1000000000LL, (long)(start % 1000000000LL), when);
+  snprintf(func, sizeof(func), "storage.%s", buckets_drive_op_name(op));
+  buckets_buf j = BUCKETS_BUF_INIT;
+  buckets_buf_appendf(&j, "{\"type\":%u,\"nodename\":", (unsigned)BUCKETS_TRACE_STORAGE);
+  const char *node = buckets_trace_node();
+  buckets_json_go_string(&j, node, strlen(node));
+  buckets_buf_appendf(&j, ",\"funcname\":\"%s\",\"time\":\"%s\",\"path\":", func, when);
+  buckets_json_go_string(&j, path.data, path.len);
+  buckets_buf_appendf(&j, ",\"dur\":%lld", (long long)dur);
+  if (e) {
+    const char *msg = buckets_drive_strerror(e);
+    buckets_buf_append_c(&j, ",\"error\":");
+    buckets_json_go_string(&j, msg, strlen(msg));
+  }
+  buckets_buf_append_char(&j, '}');
+  buckets_trace_meta m = {.type = BUCKETS_TRACE_STORAGE, .dur_ns = dur};
+  buckets_trace_publish(&m, j.data, j.len);
+  buckets_buf_free(&j);
+  buckets_buf_free(&path);
+}
+
 /* ---- the public calls, timed for the drive metrics ---- */
 
 buckets_drive_err buckets_drive_make_vol(buckets_drive *d, const char *name) {
@@ -740,6 +783,7 @@ buckets_drive_err buckets_drive_make_vol(buckets_drive *d, const char *name) {
   buckets_drive_err e = drive_make_vol(d, name);
   clock_gettime(CLOCK_MONOTONIC, &t1);
   buckets_drive_stats_end(d, BUCKETS_DOP_MAKE_VOL, (t1.tv_sec - t0.tv_sec) * 1000000000LL + (t1.tv_nsec - t0.tv_nsec), e);
+  if (buckets_trace_wanted(BUCKETS_TRACE_STORAGE)) drive_trace(d, BUCKETS_DOP_MAKE_VOL, t0, t1, e, 1, name);
   return e;
 }
 
@@ -750,6 +794,7 @@ buckets_drive_err buckets_drive_stat_vol(buckets_drive *d, const char *name, tim
   buckets_drive_err e = drive_stat_vol(d, name, created);
   clock_gettime(CLOCK_MONOTONIC, &t1);
   buckets_drive_stats_end(d, BUCKETS_DOP_STAT_VOL, (t1.tv_sec - t0.tv_sec) * 1000000000LL + (t1.tv_nsec - t0.tv_nsec), e);
+  if (buckets_trace_wanted(BUCKETS_TRACE_STORAGE)) drive_trace(d, BUCKETS_DOP_STAT_VOL, t0, t1, e, 1, name);
   return e;
 }
 
@@ -760,6 +805,7 @@ buckets_drive_err buckets_drive_delete_vol(buckets_drive *d, const char *name) {
   buckets_drive_err e = drive_delete_vol(d, name);
   clock_gettime(CLOCK_MONOTONIC, &t1);
   buckets_drive_stats_end(d, BUCKETS_DOP_DELETE_VOL, (t1.tv_sec - t0.tv_sec) * 1000000000LL + (t1.tv_nsec - t0.tv_nsec), e);
+  if (buckets_trace_wanted(BUCKETS_TRACE_STORAGE)) drive_trace(d, BUCKETS_DOP_DELETE_VOL, t0, t1, e, 1, name);
   return e;
 }
 
@@ -770,6 +816,7 @@ buckets_drive_err buckets_drive_list_vols(buckets_drive *d, buckets_vol_info **v
   buckets_drive_err e = drive_list_vols(d, vols, n);
   clock_gettime(CLOCK_MONOTONIC, &t1);
   buckets_drive_stats_end(d, BUCKETS_DOP_LIST_VOLS, (t1.tv_sec - t0.tv_sec) * 1000000000LL + (t1.tv_nsec - t0.tv_nsec), e);
+  if (buckets_trace_wanted(BUCKETS_TRACE_STORAGE)) drive_trace(d, BUCKETS_DOP_LIST_VOLS, t0, t1, e, 0);
   return e;
 }
 
@@ -780,6 +827,7 @@ buckets_drive_err buckets_drive_read_all(buckets_drive *d, const char *vol, cons
   buckets_drive_err e = drive_read_all(d, vol, path, out);
   clock_gettime(CLOCK_MONOTONIC, &t1);
   buckets_drive_stats_end(d, BUCKETS_DOP_READ_ALL, (t1.tv_sec - t0.tv_sec) * 1000000000LL + (t1.tv_nsec - t0.tv_nsec), e);
+  if (buckets_trace_wanted(BUCKETS_TRACE_STORAGE)) drive_trace(d, BUCKETS_DOP_READ_ALL, t0, t1, e, 2, vol, path);
   return e;
 }
 
@@ -791,6 +839,7 @@ buckets_drive_err buckets_drive_write_all(buckets_drive *d, const char *vol, con
   buckets_drive_err e = drive_write_all(d, vol, path, data, n);
   clock_gettime(CLOCK_MONOTONIC, &t1);
   buckets_drive_stats_end(d, BUCKETS_DOP_WRITE_ALL, (t1.tv_sec - t0.tv_sec) * 1000000000LL + (t1.tv_nsec - t0.tv_nsec), e);
+  if (buckets_trace_wanted(BUCKETS_TRACE_STORAGE)) drive_trace(d, BUCKETS_DOP_WRITE_ALL, t0, t1, e, 2, vol, path);
   return e;
 }
 
@@ -802,6 +851,7 @@ buckets_drive_err buckets_drive_create_file(buckets_drive *d, const char *vol, c
   buckets_drive_err e = drive_create_file(d, vol, path, w);
   clock_gettime(CLOCK_MONOTONIC, &t1);
   buckets_drive_stats_end(d, BUCKETS_DOP_CREATE_FILE, (t1.tv_sec - t0.tv_sec) * 1000000000LL + (t1.tv_nsec - t0.tv_nsec), e);
+  if (buckets_trace_wanted(BUCKETS_TRACE_STORAGE)) drive_trace(d, BUCKETS_DOP_CREATE_FILE, t0, t1, e, 2, vol, path);
   return e;
 }
 
@@ -813,6 +863,7 @@ buckets_drive_err buckets_drive_append(buckets_drive *d, const char *vol, const 
   buckets_drive_err e = drive_append(d, vol, path, off, data, n);
   clock_gettime(CLOCK_MONOTONIC, &t1);
   buckets_drive_stats_end(d, BUCKETS_DOP_APPEND_FILE, (t1.tv_sec - t0.tv_sec) * 1000000000LL + (t1.tv_nsec - t0.tv_nsec), e);
+  if (buckets_trace_wanted(BUCKETS_TRACE_STORAGE)) drive_trace(d, BUCKETS_DOP_APPEND_FILE, t0, t1, e, 2, vol, path);
   return e;
 }
 
@@ -823,6 +874,7 @@ buckets_drive_err buckets_drive_fsync_file(buckets_drive *d, const char *vol, co
   buckets_drive_err e = drive_fsync_file(d, vol, path);
   clock_gettime(CLOCK_MONOTONIC, &t1);
   buckets_drive_stats_end(d, BUCKETS_DOP_FSYNC_FILE, (t1.tv_sec - t0.tv_sec) * 1000000000LL + (t1.tv_nsec - t0.tv_nsec), e);
+  if (buckets_trace_wanted(BUCKETS_TRACE_STORAGE)) drive_trace(d, BUCKETS_DOP_FSYNC_FILE, t0, t1, e, 2, vol, path);
   return e;
 }
 
@@ -833,6 +885,7 @@ buckets_drive_err buckets_drive_open_file(buckets_drive *d, const char *vol, con
   buckets_drive_err e = drive_open_file(d, vol, path, f);
   clock_gettime(CLOCK_MONOTONIC, &t1);
   buckets_drive_stats_end(d, BUCKETS_DOP_OPEN_FILE, (t1.tv_sec - t0.tv_sec) * 1000000000LL + (t1.tv_nsec - t0.tv_nsec), e);
+  if (buckets_trace_wanted(BUCKETS_TRACE_STORAGE)) drive_trace(d, BUCKETS_DOP_OPEN_FILE, t0, t1, e, 2, vol, path);
   return e;
 }
 
@@ -844,6 +897,7 @@ buckets_drive_err buckets_drive_read_at(buckets_drive *d, const char *vol, const
   buckets_drive_err e = drive_read_at(d, vol, path, off, buf, n, got);
   clock_gettime(CLOCK_MONOTONIC, &t1);
   buckets_drive_stats_end(d, BUCKETS_DOP_READ_FILE, (t1.tv_sec - t0.tv_sec) * 1000000000LL + (t1.tv_nsec - t0.tv_nsec), e);
+  if (buckets_trace_wanted(BUCKETS_TRACE_STORAGE)) drive_trace(d, BUCKETS_DOP_READ_FILE, t0, t1, e, 2, vol, path);
   return e;
 }
 
@@ -856,6 +910,7 @@ buckets_drive_err buckets_drive_rename_data(buckets_drive *d, const char *src_vo
   buckets_drive_err e = drive_rename_data(d, src_vol, src_dir, data_dir, dst_vol, dst_path, xlmeta, xlmeta_len);
   clock_gettime(CLOCK_MONOTONIC, &t1);
   buckets_drive_stats_end(d, BUCKETS_DOP_RENAME_DATA, (t1.tv_sec - t0.tv_sec) * 1000000000LL + (t1.tv_nsec - t0.tv_nsec), e);
+  if (buckets_trace_wanted(BUCKETS_TRACE_STORAGE)) drive_trace(d, BUCKETS_DOP_RENAME_DATA, t0, t1, e, 5, src_vol, src_dir, data_dir, dst_vol, dst_path);
   return e;
 }
 
@@ -867,6 +922,7 @@ buckets_drive_err buckets_drive_delete(buckets_drive *d, const char *vol, const 
   buckets_drive_err e = drive_delete(d, vol, path, recursive, prune);
   clock_gettime(CLOCK_MONOTONIC, &t1);
   buckets_drive_stats_end(d, BUCKETS_DOP_DELETE, (t1.tv_sec - t0.tv_sec) * 1000000000LL + (t1.tv_nsec - t0.tv_nsec), e);
+  if (buckets_trace_wanted(BUCKETS_TRACE_STORAGE)) drive_trace(d, BUCKETS_DOP_DELETE, t0, t1, e, 2, vol, path);
   return e;
 }
 
@@ -877,6 +933,7 @@ buckets_drive_err buckets_drive_list_dir(buckets_drive *d, const char *vol, cons
   buckets_drive_err e = drive_list_dir(d, vol, dir, out);
   clock_gettime(CLOCK_MONOTONIC, &t1);
   buckets_drive_stats_end(d, BUCKETS_DOP_LIST_DIR, (t1.tv_sec - t0.tv_sec) * 1000000000LL + (t1.tv_nsec - t0.tv_nsec), e);
+  if (buckets_trace_wanted(BUCKETS_TRACE_STORAGE)) drive_trace(d, BUCKETS_DOP_LIST_DIR, t0, t1, e, 2, vol, dir);
   return e;
 }
 
@@ -887,6 +944,7 @@ buckets_drive_err buckets_drive_disk_info(buckets_drive *d, uint64_t *total, uin
   buckets_drive_err e = drive_disk_info(d, total, free_bytes);
   clock_gettime(CLOCK_MONOTONIC, &t1);
   buckets_drive_stats_end(d, BUCKETS_DOP_DISK_INFO, (t1.tv_sec - t0.tv_sec) * 1000000000LL + (t1.tv_nsec - t0.tv_nsec), e);
+  if (buckets_trace_wanted(BUCKETS_TRACE_STORAGE)) drive_trace(d, BUCKETS_DOP_DISK_INFO, t0, t1, e, 0);
   return e;
 }
 
@@ -897,6 +955,7 @@ buckets_drive_err buckets_drive_file_size(buckets_drive *d, const char *vol, con
   buckets_drive_err e = drive_file_size(d, vol, path, size);
   clock_gettime(CLOCK_MONOTONIC, &t1);
   buckets_drive_stats_end(d, BUCKETS_DOP_STAT_FILE, (t1.tv_sec - t0.tv_sec) * 1000000000LL + (t1.tv_nsec - t0.tv_nsec), e);
+  if (buckets_trace_wanted(BUCKETS_TRACE_STORAGE)) drive_trace(d, BUCKETS_DOP_STAT_FILE, t0, t1, e, 2, vol, path);
   return e;
 }
 
@@ -908,5 +967,6 @@ buckets_drive_err buckets_drive_rename_file(buckets_drive *d, const char *src_vo
   buckets_drive_err e = drive_rename_file(d, src_vol, src, dst_vol, dst);
   clock_gettime(CLOCK_MONOTONIC, &t1);
   buckets_drive_stats_end(d, BUCKETS_DOP_RENAME_FILE, (t1.tv_sec - t0.tv_sec) * 1000000000LL + (t1.tv_nsec - t0.tv_nsec), e);
+  if (buckets_trace_wanted(BUCKETS_TRACE_STORAGE)) drive_trace(d, BUCKETS_DOP_RENAME_FILE, t0, t1, e, 4, src_vol, src, dst_vol, dst);
   return e;
 }

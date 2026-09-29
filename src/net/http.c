@@ -405,8 +405,11 @@ static int take_chunk(conn *c, long got) {
   return 1;
 }
 
-/* Pulls the next stream chunk into buf (leaving room for chunk framing). */
+/* Pulls the next stream chunk into buf (leaving room for chunk framing).
+ * Streams of unknown length (listen, trace, logs) end when the server
+ * shuts down, so draining does not wait for them. */
 static long pull_stream(conn *c, buckets_buf *buf) {
+  if (c->chunked && c->srv->shutting_down) return 0;
   if (!c->chunked) return c->stream(c->stream_ud, buf->data, buf->cap - 1);
   return c->stream(c->stream_ud, buf->data + CHUNK_HDR, buf->cap - 1 - CHUNK_HDR - 2);
 }

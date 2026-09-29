@@ -43,11 +43,12 @@ typedef struct {
   bool owner;               /* root, or root-derived without a session policy */
   s3_conds *conds;          /* policy condition values, built on first use */
   buckets_iam_key_status key_status; /* from the signature's key lookup */
+  const char *op_name; /* admin/STS handler name for trace ("ServerInfo"), when not an S3 API */
   /* audit (only while audit targets exist) */
   bool audited;
   buckets_audit_tags tags;       /* the object layer's operations */
   buckets_buf audit_objects;     /* DeleteObjects: the objects, as JSON array elements */
-  char *audit_tagging;           /* the object's tags, as MinIO sets them into the request's X-Amz-Tagging */
+  char *audit_tagging;           /* the object's tags, as MinIO sets them into the request's X-Amz-Tagging (audit, trace) */
 } s3_ctx;
 
 /* ---- STS (sts.c) ---- */
@@ -96,6 +97,9 @@ bool buckets_s3_metrics_handle(s3_ctx *c);
  * api is its route (metrics/stats.h), with its time to first byte, time to
  * response and body bytes sent. */
 void buckets_s3_audit(s3_ctx *c, int api, int64_t ttfb_ns, int64_t ttr_ns, uint64_t tx);
+/* The request's trace record to trace subscribers, when there are any:
+ * start and end (unix ns), time to first byte and body bytes sent. */
+void buckets_s3_trace_http(s3_ctx *c, int api, int64_t start_ns, int64_t end_ns, int64_t ttfb_ns, uint64_t tx);
 int buckets_s3_api_index(const s3_ctx *c);
 void buckets_s3_send_internal_event(buckets_s3_server *s, int event_name, const char *bucket, const char *object,
                                     const buckets_object_info *oi, const char *version_id, const char *user_agent);

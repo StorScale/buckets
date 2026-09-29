@@ -44,8 +44,11 @@ add_library(buckets STATIC
   metrics/sys.c
   s3/metrics.c
   s3/audit.c
+  s3/tracehttp.c
+  trace/trace.c
   logger/httptarget.c
   logger/logger.c
+  logger/console.c
   core/auditctx.c
   s3/apiname.c
   console/console.c

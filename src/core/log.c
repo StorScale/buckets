@@ -61,7 +61,7 @@ uint64_t buckets_log_problems(void) { return atomic_load(&g_problems); }
 
 void buckets_log(buckets_log_level level, const char *fmt, ...) {
   if (level >= BUCKETS_LOG_WARN) atomic_fetch_add(&g_problems, 1);
-  buckets_log_sink_fn sink = level >= BUCKETS_LOG_WARN && !g_sink_off ? g_sink : NULL;
+  buckets_log_sink_fn sink = level >= BUCKETS_LOG_INFO && !g_sink_off ? g_sink : NULL;
   if (level < g_level && !sink) return;
 
   buckets_buf msg = BUCKETS_BUF_INIT;

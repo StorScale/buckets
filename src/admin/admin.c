@@ -3,6 +3,9 @@
  * canned policies, policy mappings and service accounts.
  * Replaces MinIO's cmd/admin-handlers-users.go. */
 #include "admin/admin.h"
+#include "core/timefmt.h"
+#include "logger/console.h"
+#include "trace/trace.h"
 #include "admin/info.h"
 
 #include <stdio.h>
@@ -2056,10 +2059,79 @@ typedef struct {
   const char *method;
   const char *path; /* after /minio/admin/v3 */
   void (*fn)(s3_ctx *c);
+  const char *name; /* MinIO's handler (trace: "admin.<name>") */
 } route;
 
 static void h_server_info(s3_ctx *c) {
   if (admin_req1(c, "admin:ServerInfo")) buckets_admin_server_info(c);
+}
+
+/* TraceHandler: madmin.TraceInfo records as they happen, as JSON lines */
+static void h_trace(s3_ctx *c) {
+  if (!admin_req1(c, "admin:ServerTrace")) return;
+  static const struct {
+    const char *q;
+    uint64_t bit;
+  } k[] = {{"s3", BUCKETS_TRACE_S3},
+           {"internal", BUCKETS_TRACE_INTERNAL},
+           {"storage", BUCKETS_TRACE_STORAGE},
+           {"os", BUCKETS_TRACE_OS},
+           {"scanner", BUCKETS_TRACE_SCANNER},
+           {"decommission", BUCKETS_TRACE_DECOMMISSION},
+           {"healing", BUCKETS_TRACE_HEALING},
+           {"batch-replication", BUCKETS_TRACE_BATCH_REPLICATION},
+           {"batch-keyrotation", BUCKETS_TRACE_BATCH_KEYROTATION},
+           {"batch-expire", BUCKETS_TRACE_BATCH_EXPIRE},
+           {"rebalance", BUCKETS_TRACE_REBALANCE},
+           {"replication-resync", BUCKETS_TRACE_REPLICATION_RESYNC},
+           {"bootstrap", BUCKETS_TRACE_BOOTSTRAP},
+           {"ftp", BUCKETS_TRACE_FTP},
+           {"ilm", BUCKETS_TRACE_ILM},
+           {"kms", BUCKETS_TRACE_KMS},
+           {"formatting", BUCKETS_TRACE_FORMATTING}};
+  buckets_trace_opts o = {0};
+  for (size_t i = 0; i < BUCKETS_ARRAY_LEN(k); i++) {
+    const char *v = buckets_query_get(&c->q, k[i].q);
+    if (v && strcmp(v, "true") == 0) o.types |= k[i].bit;
+  }
+  const char *all = buckets_query_get(&c->q, "all"); /* deprecated: s3, internal, storage and os */
+  if (all && strcmp(all, "true") == 0) o.types |= BUCKETS_TRACE_S3 | BUCKETS_TRACE_INTERNAL | BUCKETS_TRACE_STORAGE | BUCKETS_TRACE_OS;
+  o.internal = (o.types & BUCKETS_TRACE_INTERNAL) != 0;
+  const char *err = buckets_query_get(&c->q, "err");
+  o.only_errors = err && strcmp(err, "true") == 0;
+  const char *th = buckets_query_get(&c->q, "threshold");
+  if (th && *th && !buckets_go_duration_parse(th, &o.threshold_ns)) {
+    buckets_admin_error(c, BUCKETS_ERR_INVALID_REQUEST);
+    return;
+  }
+  buckets_http_resp_header(c->resp, "Content-Type", "text/event-stream");
+  buckets_http_resp_header(c->resp, "Cache-Control", "no-cache");
+  buckets_http_resp_header(c->resp, "X-Accel-Buffering", "no");
+  c->resp->status = 200;
+  c->resp->chunked = true;
+  c->resp->stream = buckets_trace_sub_read;
+  c->resp->stream_ud = buckets_trace_subscribe(&o);
+  c->resp->stream_free = buckets_trace_sub_free;
+}
+
+/* ConsoleLogHandler: the last `limit` records, then new ones */
+static void h_console_log(s3_ctx *c) {
+  if (!admin_req1(c, "admin:ConsoleLog")) return;
+  const char *node = buckets_query_get(&c->q, "node");
+  const char *limit = buckets_query_get(&c->q, "limit");
+  char *end = NULL;
+  long last = limit ? strtol(limit, &end, 10) : 10;
+  if (!limit || !*limit || *end) last = 10;
+  uint32_t mask = buckets_log_kind_mask(buckets_query_get(&c->q, "logType"));
+  buckets_http_resp_header(c->resp, "Connection", "close");
+  buckets_http_resp_header(c->resp, "Content-Type", "text/event-stream");
+  buckets_http_resp_header(c->resp, "Cache-Control", "no-cache");
+  buckets_http_resp_header(c->resp, "X-Accel-Buffering", "no");
+  c->resp->status = 200;
+  c->resp->chunked = true;
+  c->resp->stream = buckets_console_sub_read;
+  c->resp->stream_ud = buckets_console_subscribe(node, (int)last, mask);
+  c->resp->stream_free = buckets_console_sub_free;
 }
 
 static void h_attach(s3_ctx *c) { attach_detach(c, true, false); }
@@ -2068,60 +2140,62 @@ static void h_ldap_attach(s3_ctx *c) { attach_detach(c, true, true); }
 static void h_ldap_detach(s3_ctx *c) { attach_detach(c, false, true); }
 
 static const route k_routes[] = {
-    {"GET", "/info", h_server_info},
-    {"GET", "/get-config-kv", buckets_admin_config_get_kv},
-    {"PUT", "/set-config-kv", buckets_admin_config_set_kv},
-    {"DELETE", "/del-config-kv", buckets_admin_config_del_kv},
-    {"GET", "/help-config-kv", buckets_admin_config_help},
-    {"GET", "/list-config-history-kv", buckets_admin_config_history_list},
-    {"DELETE", "/clear-config-history-kv", buckets_admin_config_history_clear},
-    {"PUT", "/restore-config-history-kv", buckets_admin_config_history_restore},
-    {"GET", "/config", buckets_admin_config_export},
-    {"PUT", "/config", buckets_admin_config_import},
-    {"PUT", "/add-user", h_add_user},
-    {"DELETE", "/remove-user", h_remove_user},
-    {"GET", "/list-users", h_list_users},
-    {"GET", "/user-info", h_user_info},
-    {"PUT", "/set-user-status", h_set_user_status},
-    {"PUT", "/update-group-members", h_update_group_members},
-    {"GET", "/group", h_get_group},
-    {"GET", "/groups", h_list_groups},
-    {"PUT", "/set-group-status", h_set_group_status},
-    {"GET", "/list-canned-policies", h_list_policies},
-    {"GET", "/info-canned-policy", h_info_policy},
-    {"PUT", "/add-canned-policy", h_add_policy},
-    {"DELETE", "/remove-canned-policy", h_remove_policy},
-    {"PUT", "/set-user-or-group-policy", h_set_user_or_group_policy},
-    {"POST", "/idp/builtin/policy/attach", h_attach},
-    {"POST", "/idp/builtin/policy/detach", h_detach},
-    {"PUT", "/add-service-account", h_add_svc},
-    {"POST", "/update-service-account", h_update_svc},
-    {"GET", "/info-service-account", h_info_svc},
-    {"GET", "/list-service-accounts", h_list_svc},
-    {"DELETE", "/delete-service-account", h_delete_svc},
-    {"GET", "/list-access-keys-bulk", h_list_access_keys_bulk},
-    {"POST", "/revoke-tokens/*", h_revoke_tokens},
-    {"POST", "/service", h_service},
-    {"GET", "/export-iam", buckets_admin_export_iam},
-    {"PUT", "/import-iam", buckets_admin_import_iam},
-    {"PUT", "/import-iam-v2", buckets_admin_import_iam_v2},
-    {"GET", "/accountinfo", h_account_info},
-    {"GET", "/idp/openid/list-access-keys-bulk", h_openid_list_access_keys_bulk},
-    {"GET", "/idp/ldap/policy-entities", h_ldap_policy_entities},
-    {"POST", "/idp/ldap/policy/attach", h_ldap_attach},
-    {"POST", "/idp/ldap/policy/detach", h_ldap_detach},
-    {"PUT", "/idp/ldap/add-service-account", h_add_svc_ldap},
-    {"GET", "/idp/ldap/list-access-keys", h_ldap_list_access_keys},
-    {"GET", "/idp/ldap/list-access-keys-bulk", h_ldap_list_access_keys_bulk},
-    {"GET", "/info-access-key", h_info_access_key},
-    {"GET", "/temporary-account-info", h_temp_account_info},
-    {"GET", "/idp/builtin/policy-entities", h_policy_entities},
-    {"GET", "/get-bucket-quota", buckets_admin_get_bucket_quota},
-    {"PUT", "/set-bucket-quota", buckets_admin_set_bucket_quota},
-    {"GET", "/datausageinfo", buckets_admin_data_usage_info},
-    {"POST", "/kms/status", buckets_admin_kms_status_v3},
-    {"POST", "/kms/key/create", buckets_admin_kms_create_key_v3},
-    {"GET", "/kms/key/status", buckets_admin_kms_key_status_v3},
+    {"GET", "/info", h_server_info, "ServerInfo"},
+    {"GET", "/trace", h_trace, "Trace"},
+    {"GET", "/log", h_console_log, "ConsoleLog"},
+    {"GET", "/get-config-kv", buckets_admin_config_get_kv, "GetConfigKV"},
+    {"PUT", "/set-config-kv", buckets_admin_config_set_kv, "SetConfigKV"},
+    {"DELETE", "/del-config-kv", buckets_admin_config_del_kv, "DelConfigKV"},
+    {"GET", "/help-config-kv", buckets_admin_config_help, "HelpConfigKV"},
+    {"GET", "/list-config-history-kv", buckets_admin_config_history_list, "ListConfigHistoryKV"},
+    {"DELETE", "/clear-config-history-kv", buckets_admin_config_history_clear, "ClearConfigHistoryKV"},
+    {"PUT", "/restore-config-history-kv", buckets_admin_config_history_restore, "RestoreConfigHistoryKV"},
+    {"GET", "/config", buckets_admin_config_export, "GetConfig"},
+    {"PUT", "/config", buckets_admin_config_import, "SetConfig"},
+    {"PUT", "/add-user", h_add_user, "AddUser"},
+    {"DELETE", "/remove-user", h_remove_user, "RemoveUser"},
+    {"GET", "/list-users", h_list_users, "ListBucketUsers"},
+    {"GET", "/user-info", h_user_info, "GetUserInfo"},
+    {"PUT", "/set-user-status", h_set_user_status, "SetUserStatus"},
+    {"PUT", "/update-group-members", h_update_group_members, "UpdateGroupMembers"},
+    {"GET", "/group", h_get_group, "GetGroup"},
+    {"GET", "/groups", h_list_groups, "ListGroups"},
+    {"PUT", "/set-group-status", h_set_group_status, "SetGroupStatus"},
+    {"GET", "/list-canned-policies", h_list_policies, "ListBucketPolicies"},
+    {"GET", "/info-canned-policy", h_info_policy, "InfoCannedPolicy"},
+    {"PUT", "/add-canned-policy", h_add_policy, "AddCannedPolicy"},
+    {"DELETE", "/remove-canned-policy", h_remove_policy, "RemoveCannedPolicy"},
+    {"PUT", "/set-user-or-group-policy", h_set_user_or_group_policy, "SetPolicyForUserOrGroup"},
+    {"POST", "/idp/builtin/policy/attach", h_attach, "AttachDetachPolicyBuiltin"},
+    {"POST", "/idp/builtin/policy/detach", h_detach, "AttachDetachPolicyBuiltin"},
+    {"PUT", "/add-service-account", h_add_svc, "AddServiceAccount"},
+    {"POST", "/update-service-account", h_update_svc, "UpdateServiceAccount"},
+    {"GET", "/info-service-account", h_info_svc, "InfoServiceAccount"},
+    {"GET", "/list-service-accounts", h_list_svc, "ListServiceAccounts"},
+    {"DELETE", "/delete-service-account", h_delete_svc, "DeleteServiceAccount"},
+    {"GET", "/list-access-keys-bulk", h_list_access_keys_bulk, "ListAccessKeysBulk"},
+    {"POST", "/revoke-tokens/*", h_revoke_tokens, "RevokeTokens"},
+    {"POST", "/service", h_service, "ServiceV2"},
+    {"GET", "/export-iam", buckets_admin_export_iam, "ExportIAM"},
+    {"PUT", "/import-iam", buckets_admin_import_iam, "ImportIAM"},
+    {"PUT", "/import-iam-v2", buckets_admin_import_iam_v2, "ImportIAMV2"},
+    {"GET", "/accountinfo", h_account_info, "AccountInfo"},
+    {"GET", "/idp/openid/list-access-keys-bulk", h_openid_list_access_keys_bulk, "ListAccessKeysOpenIDBulk"},
+    {"GET", "/idp/ldap/policy-entities", h_ldap_policy_entities, "ListLDAPPolicyMappingEntities"},
+    {"POST", "/idp/ldap/policy/attach", h_ldap_attach, "AttachDetachPolicyLDAP"},
+    {"POST", "/idp/ldap/policy/detach", h_ldap_detach, "AttachDetachPolicyLDAP"},
+    {"PUT", "/idp/ldap/add-service-account", h_add_svc_ldap, "AddServiceAccountLDAP"},
+    {"GET", "/idp/ldap/list-access-keys", h_ldap_list_access_keys, "ListAccessKeysLDAP"},
+    {"GET", "/idp/ldap/list-access-keys-bulk", h_ldap_list_access_keys_bulk, "ListAccessKeysLDAPBulk"},
+    {"GET", "/info-access-key", h_info_access_key, "InfoAccessKey"},
+    {"GET", "/temporary-account-info", h_temp_account_info, "TemporaryAccountInfo"},
+    {"GET", "/idp/builtin/policy-entities", h_policy_entities, "ListPolicyMappingEntities"},
+    {"GET", "/get-bucket-quota", buckets_admin_get_bucket_quota, "GetBucketQuotaConfig"},
+    {"PUT", "/set-bucket-quota", buckets_admin_set_bucket_quota, "PutBucketQuotaConfig"},
+    {"GET", "/datausageinfo", buckets_admin_data_usage_info, "DataUsageInfo"},
+    {"POST", "/kms/status", buckets_admin_kms_status_v3, "KMSStatus"},
+    {"POST", "/kms/key/create", buckets_admin_kms_create_key_v3, "KMSCreateKey"},
+    {"GET", "/kms/key/status", buckets_admin_kms_key_status_v3, "KMSKeyStatus"},
 };
 
 bool buckets_admin_is_admin_path(buckets_str path) { return buckets_str_has_prefix(path, ADMIN_PREFIX "/"); }
@@ -2144,6 +2218,7 @@ void buckets_admin_handle(s3_ctx *c) {
     if (!match) continue;
     path_known = true;
     if (!buckets_str_eq_c(c->req->method, k_routes[i].method)) continue;
+    c->op_name = k_routes[i].name; /* for trace */
     if (!c->s->layer) {
       buckets_admin_error(c, BUCKETS_ERR_SERVER_NOT_INITIALIZED);
       return;
