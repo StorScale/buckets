@@ -16,8 +16,10 @@ All notable changes to this project are documented here. The format follows
   - `tests/integration/select.sh` runs 393 cases against MinIO (MinIO's own test queries, every input format and compression, 120k-row inputs, Parquet generated with MinIO's own library, errors); `test_select` checks MinIO's exact event streams.
 - Streaming decompression (`src/compress/stream.c`: zlib, bzip2, zstd, LZ4 built from source) shared by S3 Select and snowball uploads.
 - Snowball uploads (PutObjectExtract) of gzip, bzip2, zstd and LZ4 archives, as well as S2 and plain tar; `tests/integration/snowball.sh`.
+- Files inside zip objects (`x-minio-extract: true`): GET and HEAD of `archive.zip/path/in/zip` and ListObjectsV2 under such a prefix, from MinIO's zipindex of the archive's central directory (zip64, stored/deflate/zstd entries, data descriptors, CRCs checked), kept in `x-minio-internal-archive-info` in all four of zipindex's forms and sealed for SSE-S3/KMS objects as MinIO seals it, so each server reads the other's; indexed at upload with the header too. Content types as Go's `mime` table and `net/http` sniffing give them. `tests/integration/zip.sh` compares with MinIO and swaps the servers' drives.
 
 ### Fixed
+- ListObjects (V1 and V2) elements are in MinIO's order (NextContinuationToken before KeyCount, NextMarker after Marker, EncodingType last).
 - JSON strings with invalid UTF-8 carry the replacement character itself, as Go's encoding/json writes it, not the `\ufffd` escape (event records too).
 
 ## [0.8.0] - 2026-09-29

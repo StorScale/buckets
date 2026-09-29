@@ -19,6 +19,7 @@ add_library(buckets STATIC
   core/query.c
   core/uuid.c
   core/loop.c
+  core/mime.c
   core/msgpack.c
   core/pool.c
   crypto/sha256.c
@@ -86,6 +87,7 @@ add_library(buckets STATIC
   s3/errors.c
   s3/errors_gen.c
   s3/xml.c
+  s3/zipindex.c
   s3/replicate.c
   s3/replstats.c
   s3/tiering.c

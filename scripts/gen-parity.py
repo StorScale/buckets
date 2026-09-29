@@ -28,7 +28,7 @@ STATUS = {
     "ListObjectsV2Handler": (DONE, ""),
     "ListObjectsV2MHandler": (DONE, "metadata=true extension"),
     "PutObjectHandler": (DONE, ""),
-    "GetObjectHandler": (PARTIAL, "no zip-extract yet"),
+    "GetObjectHandler": (DONE, "files inside zip archives with x-minio-extract, as MinIO"),
     "HeadObjectHandler": (DONE, ""),
     "DeleteObjectHandler": (DONE, ""),
     "DeleteMultipleObjectsHandler": (DONE, ""),

@@ -33,6 +33,8 @@
 #include "object/sysconfig.h"
 #include "s3/tiering.h"
 #include "select/select.h"
+#include "s3/zipindex.h"
+#include "core/mime.h"
 #include "tier/tier.h"
 
 /* ---- error mapping -------------------------------------------------------- */
@@ -711,6 +713,8 @@ static void sweep_done(s3_ctx *c, sweeper *sw, bool run) {
   memset(sw, 0, sizeof(*sw));
 }
 
+static bool index_new_archive(s3_ctx *c, const char *version_id);
+
 static void put_object_body(s3_ctx *c, body_src *bp, buckets_s3_error serr);
 static void put_extract(s3_ctx *c);
 
@@ -840,6 +844,9 @@ static void put_object_body(s3_ctx *c, body_src *bp, buckets_s3_error serr) {
   if (err) {
     buckets_repl_dsc_free(&dsc);
     buckets_s3_write_error(c, body_error(&b, err));
+  } else if (!index_new_archive(c, oi.version_id)) {
+    buckets_repl_dsc_free(&dsc);
+    buckets_object_info_free(&oi);
   } else {
     if (encrypt) sse_put_response(c, &oi, sp.key);
     else etag_header(c->resp, oi.etag);
@@ -1982,6 +1989,373 @@ static buckets_s3_error open_source(s3_ctx *c, const char *b, const char *o, con
                                     const uint8_t *key, bool encrypted, int64_t stored_size, int64_t off, int64_t len,
                                     src_stream *s) {
   return open_source_layer(c->s->layer, b, o, v, oi, key, encrypted, stored_size, off, len, s);
+}
+
+/* ---- files inside zip archives (x-minio-extract) ----
+ * MinIO's s3-zip-handlers.go: GET and HEAD of archive.zip/path/in/zip, and
+ * ListObjectsV2 under such a prefix, from the archive's zipindex (built from
+ * its central directory on first use and kept in x-minio-internal-archive-
+ * info, sealed with the object key for SSE-S3/KMS objects as "zip-enc"). */
+
+#define ARCHIVE_INFO_KEY "x-minio-internal-archive-info"
+#define ARCHIVE_TYPE_KEY "x-minio-internal-archive-type"
+
+static bool extract_requested(s3_ctx *c) {
+  buckets_str h = buckets_http_header_get(c->req, "X-Minio-Extract");
+  return h.p && buckets_str_eq_c(h, "true");
+}
+
+/* splitZipExtensionPath: the archive's key and the path inside it. */
+static bool split_zip_path(const char *in, char **zip, const char **inner) {
+  const char *at = strstr(in, ".zip/");
+  if (!at) return false;
+  *zip = buckets_xstrndup(in, (size_t)(at - in) + 4);
+  *inner = at + 5;
+  return true;
+}
+
+static void write_internal_cause(s3_ctx *c, const char *cause) {
+  char msg[512];
+  snprintf(msg, sizeof(msg), "We encountered an internal error, please try again.: cause(%s)", cause);
+  buckets_s3_write_custom_error(c, 500, "InternalError", msg);
+}
+
+typedef struct {
+  const char *type;
+  buckets_buf info;
+} zip_meta;
+
+static buckets_obj_err set_zip_meta(void *ud, const buckets_object_info *cur, buckets_xl_kv **user, size_t *nuser,
+                                    buckets_xl_kv **sys, size_t *nsys) {
+  (void)cur, (void)user, (void)nuser;
+  zip_meta *m = ud;
+  buckets_xl_kv_set(sys, nsys, ARCHIVE_TYPE_KEY, m->type, strlen(m->type));
+  buckets_xl_kv_set(sys, nsys, ARCHIVE_INFO_KEY, m->info.data ? m->info.data : "", m->info.len);
+  return BUCKETS_OBJ_OK;
+}
+
+/* updateObjectMetadataWithZipInfo: the directory read from the archive's
+ * end (a larger suffix when zipindex asks for one), stored with the
+ * version. seal: as zip-enc under the object key. */
+static bool zip_build_index(s3_ctx *c, const char *bucket, const char *zip, buckets_object_info *oi, const uint8_t *key,
+                            bool encrypted, int64_t stored, bool seal, buckets_zipfiles *out, char *cause, size_t cap) {
+  int64_t size = oi->size, want = 1 << 20;
+  for (;;) {
+    int64_t len = want < size ? want : size;
+    src_stream st;
+    buckets_buf b = BUCKETS_BUF_INIT;
+    if (len > 0) {
+      if (open_source(c, bucket, zip, oi->version_id, oi, key, encrypted, stored, size - len, len, &st)) {
+        snprintf(cause, cap, "reading the archive failed");
+        return false;
+      }
+      buckets_buf_reserve(&b, (size_t)len);
+      char tmp[65536];
+      long k;
+      while ((k = src_read(&st, tmp, sizeof(tmp))) > 0) buckets_buf_append(&b, tmp, (size_t)k);
+      src_close(&st);
+      if (k < 0 || (int64_t)b.len != len) {
+        buckets_buf_free(&b);
+        snprintf(cause, cap, "reading the archive failed");
+        return false;
+      }
+    }
+    int64_t need;
+    buckets_zip_dir_status zs =
+        buckets_zipindex_read_dir((const uint8_t *)(b.data ? b.data : ""), b.len, size, out, &need, cause, cap);
+    buckets_buf_free(&b);
+    if (zs == BUCKETS_ZIP_DIR_OK) break;
+    if (zs == BUCKETS_ZIP_DIR_BAD) return false;
+    if (need <= 0 || need > (100 << 20) || need <= len) {
+      snprintf(cause, cap, "zip directory too large");
+      return false;
+    }
+    want = need;
+  }
+  buckets_zipindex_optimize(out);
+  zip_meta m = {seal ? "zip-enc" : "zip", BUCKETS_BUF_INIT};
+  buckets_buf plain = BUCKETS_BUF_INIT;
+  buckets_zipindex_serialize(out, &plain);
+  if (seal) buckets_s3_meta_seal(key, "zip-enc", plain.data, plain.len, &m.info);
+  else buckets_buf_append(&m.info, plain.data, plain.len);
+  buckets_buf_free(&plain);
+  buckets_obj_err err = buckets_obj_update_meta(c->s->layer, bucket, zip, oi->version_id, set_zip_meta, &m, NULL);
+  buckets_buf_free(&m.info);
+  if (err) {
+    buckets_zipfiles_free(out);
+    snprintf(cause, cap, "%s", buckets_s3_error_get(buckets_s3_obj_error(err))->code);
+    return false;
+  }
+  return true;
+}
+
+/* ObjectInfo.ArchiveInfo, else a new index (sealed for SSE-S3/KMS objects). */
+static bool zip_index(s3_ctx *c, const char *bucket, const char *zip, buckets_object_info *oi, const uint8_t *key,
+                      bool encrypted, int64_t stored, buckets_zipfiles *out, char *cause, size_t cap) {
+  memset(out, 0, sizeof(*out));
+  const buckets_xl_kv *info = buckets_object_sys(oi, ARCHIVE_INFO_KEY);
+  const buckets_xl_kv *type = buckets_object_sys(oi, ARCHIVE_TYPE_KEY);
+  if (info && info->value_len) {
+    buckets_buf plain = BUCKETS_BUF_INIT;
+    bool have = true;
+    if (type && type->value_len == 7 && !memcmp(type->value, "zip-enc", 7))
+      have = encrypted && buckets_s3_meta_open(key, "zip-enc", info->value, info->value_len, &plain);
+    else buckets_buf_append(&plain, info->value, info->value_len);
+    if (have) {
+      bool ok = buckets_zipindex_deserialize((const uint8_t *)plain.data, plain.len, out);
+      buckets_buf_free(&plain);
+      if (!ok) snprintf(cause, cap, "unknown version");
+      return ok;
+    }
+    buckets_buf_free(&plain);
+  }
+  bool seal = encrypted && buckets_s3_sse_kind_of(oi) != BUCKETS_SSE_C;
+  return zip_build_index(c, bucket, zip, oi, key, encrypted, stored, seal, out, cause, cap);
+}
+
+typedef struct {
+  src_stream st;
+  bool open;
+  buckets_zip_reader *zr;
+  char pre[512];
+  size_t npre, pre_pos;
+} zip_stream;
+
+static long zip_src_read(void *ud, void *buf, size_t n) { return src_read(ud, buf, n); }
+
+static long zip_stream_read(void *ud, char *buf, size_t n) {
+  zip_stream *z = ud;
+  if (z->pre_pos < z->npre) {
+    size_t k = z->npre - z->pre_pos < n ? z->npre - z->pre_pos : n;
+    memcpy(buf, z->pre + z->pre_pos, k);
+    z->pre_pos += k;
+    return (long)k;
+  }
+  if (!z->zr) return 0;
+  return buckets_zip_reader_read(z->zr, buf, n);
+}
+
+static void zip_stream_free(void *ud) {
+  zip_stream *z = ud;
+  if (!z) return;
+  buckets_zip_reader_free(z->zr);
+  if (z->open) src_close(&z->st);
+  free(z);
+}
+
+/* GET (head: HEAD) of a file inside an archive. */
+static void get_in_archive(s3_ctx *c, bool head) {
+  if (buckets_s3_sse_s3_or_kms_requested(c)) {
+    buckets_s3_write_error(c, BUCKETS_ERR_BAD_REQUEST);
+    return;
+  }
+  char *zip;
+  const char *inner;
+  if (!split_zip_path(c->object, &zip, &inner)) {
+    buckets_s3_write_error(c, BUCKETS_ERR_INTERNAL_ERROR);
+    return;
+  }
+  if (buckets_query_get(&c->q, "partNumber")) {
+    free(zip);
+    buckets_s3_write_error(c, BUCKETS_ERR_INVALID_PART_NUMBER);
+    return;
+  }
+  if (buckets_http_header_get(c->req, "Range").p) {
+    free(zip);
+    buckets_s3_write_error(c, BUCKETS_ERR_INVALID_RANGE);
+    return;
+  }
+  const char *version = buckets_query_get(&c->q, "versionId");
+  buckets_object_info oi;
+  uint8_t key[32];
+  bool encrypted;
+  int64_t stored;
+  buckets_s3_error e = prepare_source_ex(c, c->bucket, zip, version, &oi, key, &encrypted, &stored, false);
+  if (e) {
+    free(zip);
+    buckets_s3_sse_write_error(c, e);
+    return;
+  }
+  if (check_preconditions(c, &oi)) {
+    buckets_object_info_free(&oi);
+    free(zip);
+    return;
+  }
+  buckets_zipfiles files;
+  char cause[256];
+  if (!zip_index(c, c->bucket, zip, &oi, key, encrypted, stored, &files, cause, sizeof(cause))) {
+    buckets_object_info_free(&oi);
+    OPENSSL_cleanse(key, sizeof(key));
+    free(zip);
+    write_internal_cause(c, cause);
+    return;
+  }
+  const buckets_zipfile *f = buckets_zipindex_find(&files, inner, strlen(inner));
+  if (!f) {
+    buckets_zipfiles_free(&files);
+    buckets_object_info_free(&oi);
+    OPENSSL_cleanse(key, sizeof(key));
+    free(zip);
+    buckets_s3_write_error(c, BUCKETS_ERR_NO_SUCH_KEY);
+    return;
+  }
+  char lm[BUCKETS_TIME_HTTP_LEN + 1];
+  buckets_time_http((time_t)(oi.mod_time_ns / 1000000000LL), lm);
+  buckets_http_resp_header(c->resp, "Last-Modified", lm);
+  zip_stream *z = NULL;
+  const char *ctype = head ? "" : buckets_mime_by_ext(inner);
+  if (!head && f->usize > 0) {
+    z = buckets_xcalloc(1, sizeof(*z));
+    int64_t end = f->offset + (int64_t)f->csize + (64 << 10);
+    if (end > oi.size) end = oi.size;
+    if (f->offset < 0 || f->offset >= oi.size ||
+        open_source(c, c->bucket, zip, oi.version_id, &oi, key, encrypted, stored, f->offset, end - f->offset, &z->st)) {
+      free(z);
+      buckets_zipfiles_free(&files);
+      buckets_object_info_free(&oi);
+      OPENSSL_cleanse(key, sizeof(key));
+      free(zip);
+      buckets_s3_write_error(c, BUCKETS_ERR_INTERNAL_ERROR);
+      return;
+    }
+    z->open = true;
+    z->zr = buckets_zip_reader_new(f, zip_src_read, &z->st);
+    if (!*ctype) {
+      /* net/http sniffs a body without a Content-Type from its first bytes */
+      while (z->npre < sizeof(z->pre)) {
+        long k = buckets_zip_reader_read(z->zr, z->pre + z->npre, sizeof(z->pre) - z->npre);
+        if (k <= 0) break;
+        z->npre += (size_t)k;
+      }
+      ctype = buckets_mime_sniff(z->pre, z->npre);
+    }
+  }
+  if (*ctype) buckets_http_resp_header(c->resp, "Content-Type", ctype);
+  buckets_http_resp_header_del(c->resp, "Accept-Ranges"); /* no ranges into archive files */
+  if (!head) response_overrides(c);
+  c->resp->status = 200;
+  c->resp->content_length = (long long)f->usize;
+  if (z) {
+    c->resp->stream = zip_stream_read;
+    c->resp->stream_ud = z;
+    c->resp->stream_free = zip_stream_free;
+  }
+  buckets_zipfiles_free(&files);
+  buckets_object_info_free(&oi);
+  OPENSSL_cleanse(key, sizeof(key));
+  free(zip);
+}
+
+/* After a PUT or CompleteMultipartUpload of archive.zip with
+ * x-minio-extract: the index is built now (and stored unsealed, as MinIO's
+ * write path stores it). false: the error is written. */
+static bool index_new_archive(s3_ctx *c, const char *version_id) {
+  size_t kl = strlen(c->object);
+  if (!extract_requested(c) || kl < 4 || strcmp(c->object + kl - 4, ".zip") != 0) return true;
+  buckets_object_info oi;
+  uint8_t key[32];
+  bool encrypted;
+  int64_t stored;
+  buckets_s3_error e = prepare_source_ex(c, c->bucket, c->object, version_id, &oi, key, &encrypted, &stored, false);
+  if (e) {
+    buckets_s3_sse_write_error(c, e);
+    return false;
+  }
+  buckets_zipfiles files;
+  char cause[256];
+  bool ok = zip_build_index(c, c->bucket, c->object, &oi, key, encrypted, stored, false, &files, cause, sizeof(cause));
+  if (ok) buckets_zipfiles_free(&files);
+  else write_internal_cause(c, cause);
+  buckets_object_info_free(&oi);
+  OPENSSL_cleanse(key, sizeof(key));
+  return ok;
+}
+
+/* listObjectsV2InArchive: the archive's files as keys under it. Any trouble
+ * finding the archive lists nothing. */
+static bool list_in_archive(s3_ctx *c, const char *prefix, const char *token, const char *start_after,
+                            const char *delimiter, long long max_keys, buckets_obj_listing *l) {
+  memset(l, 0, sizeof(*l));
+  char *zip;
+  const char *inner;
+  if (!split_zip_path(prefix, &zip, &inner)) return true;
+  buckets_object_info oi;
+  uint8_t key[32];
+  bool encrypted;
+  int64_t stored;
+  if (prepare_source_ex(c, c->bucket, zip, NULL, &oi, key, &encrypted, &stored, false)) {
+    free(zip);
+    return true;
+  }
+  buckets_zipfiles files;
+  char cause[256];
+  if (!zip_index(c, c->bucket, zip, &oi, key, encrypted, stored, &files, cause, sizeof(cause))) {
+    buckets_object_info_free(&oi);
+    free(zip);
+    write_internal_cause(c, cause);
+    return false;
+  }
+  /* by name */
+  char **names = buckets_xmalloc((files.n ? files.n : 1) * sizeof(char *));
+  int64_t *sizes = buckets_xmalloc((files.n ? files.n : 1) * sizeof(int64_t));
+  for (size_t i = 0; i < files.n; i++) {
+    buckets_buf nb = BUCKETS_BUF_INIT;
+    buckets_buf_appendf(&nb, "%s/", zip);
+    buckets_buf_append(&nb, files.f[i].name, files.f[i].name_len);
+    names[i] = buckets_buf_detach(&nb);
+    sizes[i] = (int64_t)files.f[i].usize;
+  }
+  for (size_t i = 1; i < files.n; i++) /* insertion sort, stable like sort.Slice is not guaranteed to be */
+    for (size_t j = i; j > 0 && strcmp(names[j - 1], names[j]) > 0; j--) {
+      char *t = names[j];
+      names[j] = names[j - 1];
+      names[j - 1] = t;
+      int64_t ts = sizes[j];
+      sizes[j] = sizes[j - 1];
+      sizes[j - 1] = ts;
+    }
+  size_t pl = strlen(prefix), dl = delimiter ? strlen(delimiter) : 0, count = 0, ocap = 0, pcap = 0;
+  char *next = NULL;
+  for (size_t i = 0; i < files.n; i++) {
+    const char *name = names[i];
+    if ((start_after && strcmp(name, start_after) <= 0) || (token && strcmp(name, token) <= 0)) continue;
+    if (strncmp(name, prefix, pl) == 0) {
+      if ((long long)count == max_keys) {
+        l->truncated = true;
+        break;
+      }
+      const char *d = dl ? strstr(name + pl, delimiter) : NULL;
+      if (d) {
+        size_t cl = (size_t)(d - name) + dl;
+        if (!l->nprefixes || strlen(l->prefixes[l->nprefixes - 1]) != cl || strncmp(l->prefixes[l->nprefixes - 1], name, cl)) {
+          if (l->nprefixes == pcap) l->prefixes = buckets_xrealloc(l->prefixes, (pcap = pcap ? pcap * 2 : 8) * sizeof(char *));
+          l->prefixes[l->nprefixes++] = buckets_xstrndup(name, cl);
+          count++;
+        }
+      } else {
+        if (l->nobjects == ocap)
+          l->objects = buckets_xrealloc(l->objects, (ocap = ocap ? ocap * 2 : 16) * sizeof(buckets_object_info));
+        buckets_object_info *o = &l->objects[l->nobjects++];
+        memset(o, 0, sizeof(*o));
+        o->name = buckets_xstrdup(name);
+        o->size = sizes[i];
+        o->mod_time_ns = oi.mod_time_ns;
+        count++;
+      }
+    }
+    free(next);
+    next = buckets_xstrdup(name);
+  }
+  if (l->truncated) l->next_marker = next;
+  else free(next);
+  for (size_t i = 0; i < files.n; i++) free(names[i]);
+  free(names);
+  free(sizes);
+  buckets_zipfiles_free(&files);
+  buckets_object_info_free(&oi);
+  OPENSSL_cleanse(key, sizeof(key));
+  free(zip);
+  return true;
 }
 
 /* ---- SelectObjectContent (POST ?select&select-type=2) ---- */
@@ -3139,6 +3513,10 @@ static void mpu_complete(s3_ctx *c, const char *upload_id) {
                                                                           : buckets_s3_obj_error(err));
     return;
   }
+  if (!index_new_archive(c, oi.version_id)) {
+    buckets_object_info_free(&oi);
+    return;
+  }
   buckets_s3_version_header(c, oi.version_id);
   oi.is_latest = true; /* the version just written */
   buckets_s3_expiration_header(c, &oi);
@@ -3848,6 +4226,14 @@ static bool authorize_object_request(s3_ctx *c) {
     action = "s3:PutObject"; /* plus s3:GetObject on a copy source, checked by the handler */
   } else if (buckets_str_eq_c(m, "GET") || buckets_str_eq_c(m, "HEAD")) {
     action = "s3:GetObject";
+    char *zip;
+    const char *inner;
+    if (extract_requested(c) && split_zip_path(c->object, &zip, &inner)) {
+      /* a file in an archive: the archive is the resource */
+      bool ok = buckets_s3_require(c, action, c->bucket, zip, vid);
+      free(zip);
+      return ok;
+    }
   } else if (buckets_str_eq_c(m, "DELETE")) {
     action = "s3:DeleteObject";
   }
@@ -3938,6 +4324,10 @@ void buckets_s3_route_object(s3_ctx *c) {
       buckets_s3_write_error(c, BUCKETS_ERR_NOT_IMPLEMENTED);
       return;
     }
+  }
+  if ((buckets_str_eq_c(m, "GET") || buckets_str_eq_c(m, "HEAD")) && extract_requested(c) && strstr(c->object, ".zip/")) {
+    get_in_archive(c, buckets_str_eq_c(m, "HEAD"));
+    return;
   }
   if (buckets_str_eq_c(m, "PUT")) {
     put_object(c);
@@ -4245,16 +4635,25 @@ void buckets_s3_list_objects(s3_ctx *c, bool v2) {
   }
 
   buckets_obj_listing l;
-  buckets_obj_err err = buckets_obj_list(c->s->layer, c->bucket, prefix ? prefix : "", marker, delimiter,
-                                         (int)BUCKETS_MIN(max_keys, BUCKETS_MAX_LIST_KEYS), &l);
-  if (err) {
-    free(marker);
-    buckets_s3_write_error(c, buckets_s3_obj_error(err));
-    return;
+  if (v2 && extract_requested(c) && prefix && strstr(prefix, ".zip/")) {
+    char *tok = token ? marker : NULL;
+    if (!list_in_archive(c, prefix, tok, start_after, delimiter, BUCKETS_MIN(max_keys, BUCKETS_MAX_LIST_KEYS), &l)) {
+      free(marker);
+      return;
+    }
+  } else {
+    buckets_obj_err err = buckets_obj_list(c->s->layer, c->bucket, prefix ? prefix : "", marker, delimiter,
+                                           (int)BUCKETS_MIN(max_keys, BUCKETS_MAX_LIST_KEYS), &l);
+    if (err) {
+      free(marker);
+      buckets_s3_write_error(c, buckets_s3_obj_error(err));
+      return;
+    }
+    sse_list_view(c, &l);
   }
-  sse_list_view(c, &l);
 
 
+  /* in the order of MinIO's ListObjectsResponse / ListObjectsV2Response */
   buckets_buf *b = &c->resp->body;
   buckets_xml_header(b);
   buckets_xml_open_ns(b, "ListBucketResult", BUCKETS_S3_XMLNS);
@@ -4263,25 +4662,21 @@ void buckets_s3_list_objects(s3_ctx *c, bool v2) {
   if (v2) {
     if (start_after) xml_key(b, "StartAfter", start_after, url);
     if (token) buckets_xml_elem(b, "ContinuationToken", token);
-    buckets_buf_appendf(b, "<KeyCount>%zu</KeyCount>", l.nobjects + l.nprefixes);
-  } else {
-    xml_key(b, "Marker", buckets_query_get(&c->q, "marker"), url);
-  }
-  buckets_buf_appendf(b, "<MaxKeys>%lld</MaxKeys>", max_keys);
-  if (delimiter && *delimiter) xml_key(b, "Delimiter", delimiter, url);
-  if (url) buckets_xml_elem(b, "EncodingType", "url");
-  buckets_xml_elem(b, "IsTruncated", l.truncated ? "true" : "false");
-  if (l.truncated && l.next_marker) {
-    if (v2) {
+    if (l.truncated && l.next_marker) {
       size_t nl = strlen(l.next_marker);
       char *tok = buckets_xmalloc(4 * ((nl + 2) / 3) + 1);
       buckets_base64_encode((const uint8_t *)l.next_marker, nl, tok);
       buckets_xml_elem(b, "NextContinuationToken", tok);
       free(tok);
-    } else if (delimiter && *delimiter) {
-      xml_key(b, "NextMarker", l.next_marker, url);
     }
+    buckets_buf_appendf(b, "<KeyCount>%zu</KeyCount>", l.nobjects + l.nprefixes);
+  } else {
+    xml_key(b, "Marker", buckets_query_get(&c->q, "marker"), url);
+    if (l.truncated && l.next_marker && delimiter && *delimiter) xml_key(b, "NextMarker", l.next_marker, url);
   }
+  buckets_buf_appendf(b, "<MaxKeys>%lld</MaxKeys>", max_keys);
+  if (delimiter && *delimiter) xml_key(b, "Delimiter", delimiter, url);
+  buckets_xml_elem(b, "IsTruncated", l.truncated ? "true" : "false");
   for (size_t i = 0; i < l.nobjects; i++) {
     const buckets_object_info *o = &l.objects[i];
     char lm[BUCKETS_TIME_ISO8601_LEN + 1];
@@ -4289,7 +4684,8 @@ void buckets_s3_list_objects(s3_ctx *c, bool v2) {
     buckets_xml_open(b, "Contents");
     xml_key(b, "Key", o->name, url);
     buckets_xml_elem(b, "LastModified", lm);
-    buckets_buf_appendf(b, "<ETag>&#34;%s&#34;</ETag>", o->etag);
+    if (o->etag[0]) buckets_buf_appendf(b, "<ETag>&#34;%s&#34;</ETag>", o->etag);
+    else buckets_buf_append_c(b, "<ETag></ETag>"); /* files in archives have none */
     buckets_buf_appendf(b, "<Size>%lld</Size>", (long long)o->size);
     if (!v2 || fetch_owner) {
       buckets_xml_open(b, "Owner");
@@ -4328,6 +4724,7 @@ void buckets_s3_list_objects(s3_ctx *c, bool v2) {
     xml_key(b, "Prefix", l.prefixes[i], url);
     buckets_xml_close(b, "CommonPrefixes");
   }
+  if (url) buckets_xml_elem(b, "EncodingType", "url");
   buckets_xml_close(b, "ListBucketResult");
   buckets_obj_list_free(&l);
   free(marker);

@@ -131,7 +131,12 @@ void buckets_http_resp_header(buckets_http_response *resp, const char *name, con
 }
 
 void buckets_http_resp_header_set(buckets_http_response *resp, const char *name, const char *value) {
-  /* Drop earlier "name:" lines (case-insensitive), then append. */
+  buckets_http_resp_header_del(resp, name);
+  buckets_http_resp_header(resp, name, value);
+}
+
+void buckets_http_resp_header_del(buckets_http_response *resp, const char *name) {
+  /* Drop the "name:" lines (case-insensitive). */
   buckets_buf kept = BUCKETS_BUF_INIT;
   size_t nl = strlen(name);
   const char *p = resp->headers.data, *end = p + resp->headers.len;
@@ -145,7 +150,6 @@ void buckets_http_resp_header_set(buckets_http_response *resp, const char *name,
   buckets_buf_reset(&resp->headers);
   if (kept.len) buckets_buf_append(&resp->headers, kept.data, kept.len);
   buckets_buf_free(&kept);
-  buckets_http_resp_header(resp, name, value);
 }
 
 void buckets_http_resp_headerf(buckets_http_response *resp, const char *name, const char *fmt, ...) {
