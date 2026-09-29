@@ -29,9 +29,13 @@ for line in sys.stdin:
     fields = ["Buckets" if f == "MinIO" else clean(f) if isinstance(f, str) else f for f in rec[1:]]
     for f in fields:  # NSQ's IDENTIFY: the host's names and the client library
         if isinstance(f, dict):
-            for k in ("client_id", "hostname", "long_id", "short_id", "user_agent"):
+            for k in ("client_id", "hostname", "long_id", "short_id", "user_agent",  # NSQ IDENTIFY
+                      "name", "lang", "version"):  # NATS CONNECT: the client library
                 if k in f:
                     f[k] = "(v)"
+    # NATS inboxes: _INBOX.<nuid>.<token>
+    fields = [re.sub(r"_INBOX\.[A-Za-z0-9]+\.([A-Za-z0-9]+|\*)", lambda m: "_INBOX.(nuid)." + ("*" if m.group(1) == "*" else "(token)"), f)
+              if isinstance(f, str) else f for f in fields]
     blocks.setdefault(rec[0], []).append(json.dumps(fields))
 for b in sorted("\n".join(v) for v in blocks.values()):
     print(b)

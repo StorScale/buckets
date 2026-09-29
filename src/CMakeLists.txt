@@ -40,6 +40,8 @@ add_library(buckets STATIC
   notify/webhook.c
   notify/redis.c
   notify/nsq.c
+  notify/nats.c
+  notify/nkeys.c
   notify/xnet.c
   notify/notifier.c
   metrics/expo.c

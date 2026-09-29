@@ -29,5 +29,6 @@ typedef struct {
 extern const buckets_target_kind buckets_target_webhook;
 extern const buckets_target_kind buckets_target_redis;
 extern const buckets_target_kind buckets_target_nsq;
+extern const buckets_target_kind buckets_target_nats;
 
 #endif

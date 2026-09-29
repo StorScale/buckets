@@ -723,6 +723,41 @@ bool buckets_config_check_valid_keys(const buckets_config *c, const char *name, 
   return true;
 }
 
+bool buckets_config_check_notify_keys(const buckets_config *c, const char *name, char *err, size_t errlen) {
+  const subsys *s = cfind(c, name);
+  if (!s) return true;
+  for (size_t t = 0; t < s->n; t++) {
+    const char *en = kvs_lookup(&s->t[t].k, "enable");
+    if (!en || strcmp(en, "on") != 0) continue; /* only targets explicitly on */
+    buckets_buf bad = BUCKETS_BUF_INIT;
+    for (size_t i = 0; i < s->t[t].k.n; i++) {
+      const char *key = s->t[t].k.v[i].key;
+      if (key_def(s->def, key) || strcmp(key, "comment") == 0) continue;
+      if (bad.len) buckets_buf_append_c(&bad, " ");
+      kv_write(&bad, key, s->t[t].k.v[i].value);
+    }
+    if (bad.len) {
+      char st[300];
+      if (strcmp(s->t[t].name, DEF) == 0) snprintf(st, sizeof(st), "%s", name);
+      else snprintf(st, sizeof(st), "%s:%s", name, s->t[t].name);
+      snprintf(err, errlen,
+               "found invalid keys (%s) for '%s' sub-system, use 'mc admin config reset myminio %s' to fix invalid keys",
+               bad.data, st, st);
+      buckets_buf_free(&bad);
+      return false;
+    }
+    buckets_buf_free(&bad);
+  }
+  return true;
+}
+
+char *buckets_config_getenv_only(const char *name, const char *tgt, const char *key) {
+  char en[512];
+  env_name(name, tgt && *tgt ? tgt : DEF, key, en, sizeof(en));
+  const char *v = buckets_config_getenv(en);
+  return buckets_xstrdup(v ? v : "");
+}
+
 /* ---- output ------------------------------------------------------------------------------------------ */
 
 /* SubsysInfo.WriteTo for one target. */
@@ -907,6 +942,8 @@ bool buckets_config_validate(const buckets_config *c, const char *subsys, char *
   for (size_t i = 0; i < K_SUBSYSTEMS_N; i++) {
     const char *n = k_subsystems[i].name;
     if (!all && strcmp(n, subsys) != 0) continue;
+    /* notification targets check their own keys (checkValidNotificationKeysForSubSys) */
+    if (strncmp(n, "notify_", 7) == 0) continue;
     if (!buckets_config_check_valid_keys(c, n, err, errlen)) return false;
   }
   for (size_t i = 0; i < g_nvalidators; i++) {

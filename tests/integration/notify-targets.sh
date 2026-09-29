@@ -130,5 +130,52 @@ done
 compare nsq
 compare nsq-config
 
+echo "== nats"
+# an NKey user seed and a .creds file (JWT, then the seed)
+SEED=$(python3 -c '
+import base64, os
+def crc16(b):
+    c = 0
+    for x in b:
+        c ^= x << 8
+        for _ in range(8):
+            c = ((c << 1) ^ 0x1021 if c & 0x8000 else c << 1) & 0xFFFF
+    return c
+raw = bytes([149, 0]) + bytes(range(32))
+c = crc16(raw)
+print(base64.b32encode(raw + bytes([c & 255, c >> 8])).decode().rstrip("="))')
+echo "$SEED" >"$WORK/user.nk"
+printf -- '-----BEGIN NATS USER JWT-----\neyJ0eXAiOiJKV1QifQ.e30.c2ln\n------END NATS USER JWT------\n\n************************* IMPORTANT *************************\n\n-----BEGIN USER NKEY SEED-----\n%s\n------END USER NKEY SEED------\n' "$SEED" >"$WORK/user.creds"
+for kind in minio buckets; do
+  mock_start natsmock.py "$WORK/nats.raw"
+  MINIO_NOTIFY_NATS_ENABLE_n1=on MINIO_NOTIFY_NATS_ADDRESS_n1="127.0.0.1:$MOCK_PORT" MINIO_NOTIFY_NATS_SUBJECT_n1=core \
+    MINIO_NOTIFY_NATS_USERNAME_n1=natsuser MINIO_NOTIFY_NATS_PASSWORD_n1=natspass \
+    MINIO_NOTIFY_NATS_ENABLE_n2=on MINIO_NOTIFY_NATS_ADDRESS_n2="127.0.0.1:$MOCK_PORT" MINIO_NOTIFY_NATS_SUBJECT_n2=js \
+    MINIO_NOTIFY_NATS_JETSTREAM_n2=on MINIO_NOTIFY_NATS_NKEY_SEED_n2="$WORK/user.nk" \
+    MINIO_NOTIFY_NATS_ENABLE_n3=on MINIO_NOTIFY_NATS_ADDRESS_n3="127.0.0.1:$MOCK_PORT" MINIO_NOTIFY_NATS_SUBJECT_n3=stored \
+    MINIO_NOTIFY_NATS_TOKEN_n3=s3cret MINIO_NOTIFY_NATS_QUEUE_DIR_n3="$WORK/$kind-natsq" \
+    MINIO_NOTIFY_NATS_ENABLE_n4=on MINIO_NOTIFY_NATS_ADDRESS_n4="127.0.0.1:$MOCK_PORT" MINIO_NOTIFY_NATS_SUBJECT_n4=creds \
+    MINIO_NOTIFY_NATS_USER_CREDENTIALS_n4="$WORK/user.creds" \
+    start "$kind" "$WORK/$kind-nats"
+  curl -s -o /dev/null "${S3[@]}" -X PUT "$EP/tbucket"
+  notification arn:minio:sqs::n1:nats arn:minio:sqs::n2:nats arn:minio:sqs::n3:nats arn:minio:sqs::n4:nats
+  workload
+  sleep 3
+  for kv in "notify_nats:c1 address=127.0.0.1:1 subject=s" "notify_nats:c2 address=127.0.0.1:$MOCK_PORT subject=" \
+    "notify_nats:c3 address=127.0.0.1:$MOCK_PORT subject=s username=u" \
+    "notify_nats:c4 address=127.0.0.1:$MOCK_PORT subject=s client_cert=/x" \
+    "notify_nats:c5 address=127.0.0.1:$MOCK_PORT subject=s ping_interval=x" \
+    "notify_nats:c6 address=127.0.0.1:$MOCK_PORT subject=s queue_dir=rel" \
+    "notify_nats:c7 address=127.0.0.1:$MOCK_PORT subject=s streaming=on"; do
+    # shellcheck disable=SC2086
+    config_set $kv >>"$WORK/$kind.nats-config"
+  done
+  stop
+  mock_stop
+  python3 "$HERE/targets/normalize.py" <"$WORK/nats.raw" >"$WORK/$kind.nats"
+done
+compare nats
+compare nats-config
+
 echo "notify-targets: $pass passed, $fails failed"
 [[ $fails -eq 0 ]]

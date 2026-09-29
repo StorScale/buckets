@@ -445,6 +445,33 @@ struct buckets_tls_client {
 
 void buckets_tls_client_skip_verify(buckets_tls_client *t) { SSL_CTX_set_verify(t->ctx, SSL_VERIFY_NONE, NULL); }
 
+bool buckets_tls_client_use_cert(buckets_tls_client *t, const char *cert_file, const char *key_file, char *err,
+                                 size_t errlen) {
+  if (SSL_CTX_use_certificate_chain_file(t->ctx, cert_file) != 1) {
+    ssl_err(err, errlen, "load client certificate", cert_file);
+    return false;
+  }
+  if (SSL_CTX_use_PrivateKey_file(t->ctx, key_file, SSL_FILETYPE_PEM) != 1 || SSL_CTX_check_private_key(t->ctx) != 1) {
+    ssl_err(err, errlen, "load client key", key_file);
+    return false;
+  }
+  return true;
+}
+
+bool buckets_tls_client_add_ca_file(buckets_tls_client *t, const char *file) {
+  FILE *f = fopen(file, "r");
+  if (!f) return false;
+  bool any = false;
+  X509_STORE *store = SSL_CTX_get_cert_store(t->ctx);
+  for (X509 *x; (x = PEM_read_X509(f, NULL, NULL, NULL)) != NULL; any = true) {
+    X509_STORE_add_cert(store, x);
+    X509_free(x);
+  }
+  fclose(f);
+  ERR_clear_error();
+  return any;
+}
+
 buckets_tls_client *buckets_tls_client_new(const char *ca_dir, char *err, size_t errlen) {
   SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
   if (!ctx) {

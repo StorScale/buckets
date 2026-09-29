@@ -7,7 +7,7 @@
 
 #include "core/common.h"
 
-static const buckets_target_kind *const k_kinds[] = {&buckets_target_webhook, &buckets_target_redis, &buckets_target_nsq};
+static const buckets_target_kind *const k_kinds[] = {&buckets_target_webhook, &buckets_target_redis, &buckets_target_nsq, &buckets_target_nats};
 
 /* A target's value, resolved (env, config, default); caller frees. */
 static char *get(const buckets_config *cfg, const char *subsys, const char *target, const char *key) {
@@ -38,7 +38,7 @@ static bool run(const buckets_config *cfg, const char *ca_file, buckets_target *
   bool ok = true;
   for (size_t i = 0; ok && i < BUCKETS_ARRAY_LEN(k_kinds); i++) {
     const buckets_target_kind *kind = k_kinds[i];
-    if (!buckets_config_check_valid_keys(cfg, kind->subsys, err, errlen)) {
+    if (!buckets_config_check_notify_keys(cfg, kind->subsys, err, errlen)) {
       ok = false;
       break;
     }

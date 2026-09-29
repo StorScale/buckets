@@ -74,5 +74,8 @@ class S(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
 
+    def handle_error(self, request, client_address):
+        pass  # clients hanging up mid-conversation are expected
+
 
 S(("127.0.0.1", port), H).serve_forever()

@@ -88,6 +88,11 @@ buckets_tls_client *buckets_tls_client_new(const char *ca_dir, char *err, size_t
 void buckets_tls_client_free(buckets_tls_client *t);
 /* Accept any server certificate (identity_ldap tls_skip_verify=on). */
 void buckets_tls_client_skip_verify(buckets_tls_client *t);
+/* Presents a client certificate (PEM chain and key files). */
+bool buckets_tls_client_use_cert(buckets_tls_client *t, const char *cert_file, const char *key_file, char *err,
+                                 size_t errlen);
+/* Also trusts the certificates in a PEM file; false if it held none. */
+bool buckets_tls_client_add_ca_file(buckets_tls_client *t, const char *file);
 /* Handshakes on a connected blocking socket, verifying host; NULL on failure. */
 buckets_tls_conn *buckets_tls_connect(buckets_tls_client *t, int fd, const char *host);
 

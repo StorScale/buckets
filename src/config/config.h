@@ -60,6 +60,13 @@ typedef bool (*buckets_config_validator)(const buckets_config *c, char *err, siz
 void buckets_config_register_validator(const char *subsys, buckets_config_validator fn);
 bool buckets_config_validate(const buckets_config *c, const char *subsys, char *err, size_t errlen);
 
+/* checkValidNotificationKeysForSubSys: the stored keys of targets that are
+ * explicitly enabled (environment variables are not checked for these). */
+bool buckets_config_check_notify_keys(const buckets_config *c, const char *subsys, char *err, size_t errlen);
+/* A setting read only from the environment (MINIO_<SUBSYS>_<KEY>[_<TARGET>])
+ * such as notify_nats's nkey_seed; "" when unset. Malloc'd. */
+char *buckets_config_getenv_only(const char *subsys, const char *target, const char *key);
+
 /* GetResolvedConfigParams: every key of subsys with its resolved value and
  * where it came from, plus the comment when set. With redact, secret keys
  * are left out. */
