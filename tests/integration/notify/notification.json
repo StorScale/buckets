@@ -1,0 +1,318 @@
+[
+ {
+  "method": "GET",
+  "path": "/nbkt",
+  "query": "notification",
+  "label": "empty config"
+ },
+ {
+  "method": "PUT",
+  "path": "/nbkt",
+  "query": "notification",
+  "label": "no body"
+ },
+ {
+  "method": "PUT",
+  "path": "/nbkt",
+  "query": "notification",
+  "body": "<bad",
+  "label": "malformed"
+ },
+ {
+  "method": "PUT",
+  "path": "/nbkt",
+  "query": "notification",
+  "body": "<NotificationConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><QueueConfiguration><Queue>arn:minio:sqs::nope:webhook</Queue><Event>s3:ObjectCreated:*</Event></QueueConfiguration></NotificationConfiguration>",
+  "label": "unknown target"
+ },
+ {
+  "method": "PUT",
+  "path": "/nbkt",
+  "query": "notification",
+  "body": "<NotificationConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><QueueConfiguration><Queue>arn:minio:sqs:eu-west-9:primary:webhook</Queue><Event>s3:ObjectCreated:*</Event></QueueConfiguration></NotificationConfiguration>",
+  "label": "wrong region"
+ },
+ {
+  "method": "PUT",
+  "path": "/nbkt",
+  "query": "notification",
+  "body": "<NotificationConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><QueueConfiguration><Queue>arn:aws:sqs::primary:webhook</Queue><Event>s3:ObjectCreated:*</Event></QueueConfiguration></NotificationConfiguration>",
+  "label": "bad arn"
+ },
+ {
+  "method": "PUT",
+  "path": "/nbkt",
+  "query": "notification",
+  "body": "<NotificationConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><QueueConfiguration><Queue>arn:minio:sqs::primary:webhook</Queue><Event>s3:ObjectCreated:Nope</Event></QueueConfiguration></NotificationConfiguration>",
+  "label": "bad event"
+ },
+ {
+  "method": "PUT",
+  "path": "/nbkt",
+  "query": "notification",
+  "body": "<NotificationConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><QueueConfiguration><Filter><S3Key><FilterRule><Name>prefix</Name><Value>a</Value></FilterRule><FilterRule><Name>other</Name><Value>b</Value></FilterRule></S3Key></Filter><Queue>arn:minio:sqs::primary:webhook</Queue><Event>s3:ObjectCreated:*</Event></QueueConfiguration></NotificationConfiguration>",
+  "label": "bad filter name"
+ },
+ {
+  "method": "PUT",
+  "path": "/nbkt",
+  "query": "notification",
+  "body": "<NotificationConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><QueueConfiguration><Queue>arn:minio:sqs::primary:webhook</Queue><Event>s3:ObjectCreated:*</Event></QueueConfiguration><QueueConfiguration><Queue>arn:minio:sqs::primary:webhook</Queue><Event>s3:ObjectCreated:Put</Event></QueueConfiguration></NotificationConfiguration>",
+  "label": "overlapping"
+ },
+ {
+  "method": "PUT",
+  "path": "/nbkt",
+  "query": "notification",
+  "body": "<NotificationConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><TopicConfiguration><Topic>arn:aws:sns:us-east-1:1:t</Topic><Event>s3:ObjectCreated:*</Event></TopicConfiguration></NotificationConfiguration>",
+  "label": "topic"
+ },
+ {
+  "method": "PUT",
+  "path": "/nbkt",
+  "query": "notification",
+  "body": "<NotificationConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><QueueConfiguration><Id>all-p</Id><Filter><S3Key><FilterRule><Name>prefix</Name><Value>p/</Value></FilterRule></S3Key></Filter><Queue>arn:minio:sqs::primary:webhook</Queue><Event>s3:ObjectCreated:*</Event><Event>s3:ObjectRemoved:*</Event><Event>s3:ObjectAccessed:*</Event></QueueConfiguration><QueueConfiguration><Filter><S3Key><FilterRule><Name>prefix</Name><Value>q/</Value></FilterRule><FilterRule><Name>suffix</Name><Value>.log</Value></FilterRule></S3Key></Filter><Queue>arn:minio:sqs::primary:webhook</Queue><Event>s3:ObjectCreated:Put</Event></QueueConfiguration></NotificationConfiguration>",
+  "label": "good config"
+ },
+ {
+  "method": "GET",
+  "path": "/nbkt",
+  "query": "notification",
+  "label": "stored config"
+ },
+ {
+  "method": "PUT",
+  "path": "/nbkt/p/a.txt",
+  "body": "hello world",
+  "headers": {
+   "X-Amz-Meta-Color": "blue",
+   "Content-Type": "text/plain",
+   "X-Amz-Tagging": "k=v"
+  },
+  "label": "put a"
+ },
+ {
+  "method": "PUT",
+  "path": "/nbkt/q/skip.txt",
+  "body": "no",
+  "label": "filtered out"
+ },
+ {
+  "method": "PUT",
+  "path": "/nbkt/q/app.log",
+  "body": "log line",
+  "label": "second queue"
+ },
+ {
+  "method": "GET",
+  "path": "/nbkt/p/a.txt",
+  "label": "get a"
+ },
+ {
+  "method": "GET",
+  "path": "/nbkt/p/a.txt",
+  "headers": {
+   "Range": "bytes=0-3"
+  },
+  "label": "range get"
+ },
+ {
+  "method": "HEAD",
+  "path": "/nbkt/p/a.txt",
+  "label": "head a"
+ },
+ {
+  "method": "PUT",
+  "path": "/nbkt/p/b%20c+%C3%A9.txt",
+  "headers": {
+   "X-Amz-Copy-Source": "/nbkt/p/a.txt"
+  },
+  "label": "copy"
+ },
+ {
+  "method": "PUT",
+  "path": "/nbkt/p/a.txt",
+  "query": "tagging",
+  "body": "<Tagging><TagSet><Tag><Key>x</Key><Value>y</Value></Tag></TagSet></Tagging>",
+  "label": "put tagging"
+ },
+ {
+  "method": "DELETE",
+  "path": "/nbkt/p/a.txt",
+  "query": "tagging",
+  "label": "delete tagging"
+ },
+ {
+  "method": "POST",
+  "path": "/nbkt/p/mp.bin",
+  "query": "uploads",
+  "save": {
+   "u": "xml:UploadId"
+  },
+  "label": "mpu create"
+ },
+ {
+  "method": "PUT",
+  "path": "/nbkt/p/mp.bin",
+  "query": "partNumber=1&uploadId=$u",
+  "body": "part-one",
+  "save": {
+   "e": "etag"
+  },
+  "label": "mpu part"
+ },
+ {
+  "method": "POST",
+  "path": "/nbkt/p/mp.bin",
+  "query": "uploadId=$u",
+  "body": "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>$e</ETag></Part></CompleteMultipartUpload>",
+  "label": "mpu complete"
+ },
+ {
+  "method": "DELETE",
+  "path": "/nbkt/p/b%20c+%C3%A9.txt",
+  "label": "delete copy"
+ },
+ {
+  "method": "DELETE",
+  "path": "/nbkt/p/none.txt",
+  "label": "delete missing"
+ },
+ {
+  "method": "POST",
+  "path": "/nbkt",
+  "query": "delete",
+  "md5": true,
+  "body": "<Delete><Object><Key>p/a.txt</Key></Object><Object><Key>p/mp.bin</Key></Object></Delete>",
+  "label": "delete objects"
+ },
+ {
+  "method": "PUT",
+  "path": "/nbkt",
+  "query": "versioning",
+  "body": "<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>",
+  "label": "enable versioning"
+ },
+ {
+  "method": "PUT",
+  "path": "/nbkt/p/v.txt",
+  "body": "v1",
+  "label": "versioned put",
+  "save": {
+   "v": "x-amz-version-id"
+  }
+ },
+ {
+  "method": "DELETE",
+  "path": "/nbkt/p/v.txt",
+  "label": "delete marker"
+ },
+ {
+  "method": "DELETE",
+  "path": "/nbkt/p/v.txt",
+  "query": "versionId=$v",
+  "label": "delete version"
+ },
+ {
+  "method": "GET",
+  "path": "/nbkt",
+  "query": "events=s3:Nope",
+  "label": "listen bad event"
+ },
+ {
+  "method": "GET",
+  "path": "/nbkt",
+  "query": "events=s3:ObjectCreated:*&prefix=a&prefix=b",
+  "label": "listen two prefixes"
+ },
+ {
+  "method": "GET",
+  "path": "/nbkt",
+  "query": "events=s3:ObjectCreated:*&suffix=../x",
+  "label": "listen bad suffix"
+ },
+ {
+  "method": "GET",
+  "path": "/nbkt",
+  "query": "events=s3:ObjectCreated:*&ping=0",
+  "label": "listen bad ping"
+ },
+ {
+  "method": "GET",
+  "path": "/nobucket",
+  "query": "events=s3:ObjectCreated:*",
+  "label": "listen no bucket"
+ },
+ {
+  "method": "PUT",
+  "path": "/nbkt2",
+  "label": "create bucket"
+ },
+ {
+  "method": "DELETE",
+  "path": "/nbkt2",
+  "label": "remove bucket"
+ },
+ {
+  "method": "PUT",
+  "path": "/nlock",
+  "headers": {
+   "X-Amz-Bucket-Object-Lock-Enabled": "true"
+  },
+  "label": "lock bucket"
+ },
+ {
+  "method": "PUT",
+  "path": "/nlock",
+  "query": "notification",
+  "body": "<NotificationConfiguration><QueueConfiguration><Queue>arn:minio:sqs::primary:webhook</Queue><Event>s3:ObjectCreated:*</Event><Event>s3:ObjectAccessed:*</Event></QueueConfiguration></NotificationConfiguration>",
+  "label": "lock bucket config"
+ },
+ {
+  "method": "PUT",
+  "path": "/nlock/r.txt",
+  "body": "retain me",
+  "md5": true,
+  "label": "lock put"
+ },
+ {
+  "method": "PUT",
+  "path": "/nlock/r.txt",
+  "query": "retention",
+  "md5": true,
+  "body": "<Retention><Mode>GOVERNANCE</Mode><RetainUntilDate>2099-01-01T00:00:00Z</RetainUntilDate></Retention>",
+  "label": "put retention"
+ },
+ {
+  "method": "GET",
+  "path": "/nlock/r.txt",
+  "query": "retention",
+  "label": "get retention"
+ },
+ {
+  "method": "PUT",
+  "path": "/nlock/r.txt",
+  "query": "legal-hold",
+  "md5": true,
+  "body": "<LegalHold><Status>ON</Status></LegalHold>",
+  "label": "put legal hold"
+ },
+ {
+  "method": "GET",
+  "path": "/nlock/r.txt",
+  "query": "legal-hold",
+  "label": "get legal hold"
+ },
+ {
+  "method": "GET",
+  "path": "/nlock/r.txt",
+  "query": "attributes",
+  "headers": {
+   "X-Amz-Object-Attributes": "ETag,ObjectSize"
+  },
+  "label": "get attributes"
+ },
+ {
+  "sleep": 1
+ }
+]

@@ -3,6 +3,7 @@
 #ifndef BUCKETS_S3_INTERNAL_H
 #define BUCKETS_S3_INTERNAL_H
 
+#include "bucket/notification.h"
 #include "core/query.h"
 #include "iam/iam.h"
 #include "net/http.h"
@@ -63,6 +64,21 @@ bool buckets_s3_require(s3_ctx *c, const char *action, const char *bucket, const
 /* Sets one condition value (e.g. object-lock keys for retention checks). */
 void buckets_s3_cond_override(s3_ctx *c, const char *key, const char *value);
 void buckets_s3_conds_free(s3_conds *cs);
+
+/* handlers.GetSourceIP: X-Forwarded-For, X-Real-Ip, Forwarded, else the peer. */
+void buckets_s3_source_ip(const buckets_http_request *req, char *out, size_t cap);
+
+/* ---- event notifications (notification.c) ---- */
+void buckets_s3_get_notification(s3_ctx *c);
+void buckets_s3_put_notification(s3_ctx *c);
+void buckets_s3_listen_notification(s3_ctx *c);
+/* sendEvent for an object (oi may be NULL: removals, bucket events). */
+void buckets_s3_send_event(s3_ctx *c, int event_name, const char *bucket, const char *object, const buckets_object_info *oi,
+                           const char *version_id);
+/* As MinIO's handlers that send the event before writing the response
+ * (PutObject, a no-op delete): no content-length element. */
+void buckets_s3_send_event_early(s3_ctx *c, int event_name, const char *bucket, const char *object,
+                                 const buckets_object_info *oi, const char *version_id);
 
 /* The bucket's versioning as it applies to object (PrefixEnabled / PrefixSuspended). */
 void buckets_s3_versioning(s3_ctx *c, const char *object, bool *enabled, bool *suspended);

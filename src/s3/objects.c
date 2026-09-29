@@ -722,6 +722,7 @@ static void put_object(s3_ctx *c) {
     buckets_s3_expiration_header(c, &oi);
     cks_echo(c->resp, &cx);
     c->resp->status = 200;
+    buckets_s3_send_event_early(c, BUCKETS_EV_OBJECT_CREATED_PUT, c->bucket, c->object, &oi, NULL);
     buckets_object_info_free(&oi);
   }
   free_kvs(sp.sys, sp.nsys);
@@ -1101,6 +1102,8 @@ static void get_object(s3_ctx *c, bool head) {
     c->resp->stream_ud = cr;
     c->resp->stream_free = buckets_comp_reader_free;
   }
+  buckets_s3_send_event(c, head ? BUCKETS_EV_OBJECT_ACCESSED_HEAD : BUCKETS_EV_OBJECT_ACCESSED_GET, c->bucket, c->object,
+                        &oi, NULL);
   buckets_object_info_free(&oi);
 }
 
@@ -1135,6 +1138,13 @@ static void delete_object(s3_ctx *c) {
     if (res.delete_marker) buckets_http_resp_header(c->resp, "X-Amz-Delete-Marker", "true");
   }
   c->resp->status = 204;
+  if (err) {
+    buckets_s3_send_event_early(c, BUCKETS_EV_OBJECT_REMOVED_NOOP, c->bucket, c->object, NULL, version);
+  } else {
+    buckets_s3_send_event(c, res.delete_marker ? BUCKETS_EV_OBJECT_REMOVED_DELETE_MARKER_CREATED
+                                               : BUCKETS_EV_OBJECT_REMOVED_DELETE,
+                          c->bucket, c->object, NULL, res.version_id);
+  }
 }
 
 /* ---- CopyObject ----------------------------------------------------------- */
@@ -1413,6 +1423,7 @@ static void copy_object(s3_ctx *c) {
   buckets_buf_appendf(b, "<ETag>&#34;%s&#34;</ETag>", oi.etag);
   buckets_xml_close(b, "CopyObjectResult");
   buckets_s3_write_xml(c, 200);
+  buckets_s3_send_event(c, BUCKETS_EV_OBJECT_CREATED_COPY, c->bucket, c->object, &oi, NULL);
   buckets_object_info_free(&oi);
 }
 
@@ -2051,6 +2062,7 @@ static void mpu_complete(s3_ctx *c, const char *upload_id) {
   }
   buckets_xml_close(b, "CompleteMultipartUploadResult");
   buckets_s3_write_xml(c, 200);
+  buckets_s3_send_event(c, BUCKETS_EV_OBJECT_CREATED_COMPLETE_MULTIPART_UPLOAD, c->bucket, c->object, &oi, NULL);
   buckets_object_info_free(&oi);
 }
 
@@ -2331,8 +2343,9 @@ static void get_object_attributes(s3_ctx *c) {
   }
   if (want[4] && oi.size) buckets_buf_appendf(b, "<ObjectSize>%lld</ObjectSize>", (long long)oi.size);
   buckets_xml_close(b, "getObjectAttributesResponse");
-  buckets_object_info_free(&oi);
   buckets_s3_write_xml(c, 200);
+  buckets_s3_send_event(c, BUCKETS_EV_OBJECT_ACCESSED_ATTRIBUTES, c->bucket, c->object, &oi, NULL);
+  buckets_object_info_free(&oi);
 }
 
 /* MinIO supports only the canned private ACL (acl-handlers.go). */
@@ -2560,6 +2573,21 @@ buckets_s3_error buckets_s3_read_checked_doc(s3_ctx *c) {
   return rl != want.raw_len || memcmp(raw, want.raw, rl) != 0 ? BUCKETS_ERR_BAD_DIGEST : BUCKETS_ERR_NONE;
 }
 
+typedef struct {
+  char *key;
+  char version[64];
+  bool marker;
+} deleted_ev;
+
+static void flush_delete_events(s3_ctx *c, deleted_ev *evs, size_t n) {
+  for (size_t i = 0; i < n; i++) {
+    buckets_s3_send_event(c, evs[i].marker ? BUCKETS_EV_OBJECT_REMOVED_DELETE_MARKER_CREATED : BUCKETS_EV_OBJECT_REMOVED_DELETE,
+                          c->bucket, evs[i].key, NULL, evs[i].version);
+    free(evs[i].key);
+    evs[i].key = NULL;
+  }
+}
+
 void buckets_s3_delete_objects(s3_ctx *c) {
   buckets_s3_error err = buckets_s3_read_checked_doc(c);
   if (err) {
@@ -2585,6 +2613,8 @@ void buckets_s3_delete_objects(s3_ctx *c) {
     return;
   }
 
+  deleted_ev *evs = buckets_xcalloc(count, sizeof(*evs));
+  size_t nev = 0;
   buckets_buf *b = &c->resp->body;
   buckets_xml_header(b);
   buckets_xml_open_ns(b, "DeleteResult", BUCKETS_S3_XMLNS);
@@ -2633,7 +2663,15 @@ void buckets_s3_delete_objects(s3_ctx *c) {
       if (ver.len) buckets_xml_elem(b, "VersionId", ver.data);
       buckets_xml_close(b, "Error");
       buckets_buf_free(&msg);
-    } else if (!quiet) {
+    } else {
+      /* the event goes out once the response is written (extractRespElements) */
+      deleted_ev *d = &evs[nev++];
+      d->key = buckets_xstrdup(key.data);
+      snprintf(d->version, sizeof(d->version), "%s",
+               res.delete_marker ? (ver.len ? ver.data : res.version_id) : (ver.len ? ver.data : ""));
+      d->marker = res.delete_marker;
+    }
+    if (!e && !quiet) {
       /* DeletedObject: DeleteMarker, DeleteMarkerVersionId, Key, VersionId (omitempty) */
       buckets_xml_open(b, "Deleted");
       if (res.delete_marker) {
@@ -2651,6 +2689,8 @@ void buckets_s3_delete_objects(s3_ctx *c) {
   buckets_xml_close(b, "DeleteResult");
   buckets_xml_doc_free(&doc);
   buckets_s3_write_xml(c, 200);
+  flush_delete_events(c, evs, nev);
+  free(evs);
 }
 
 /* ---- ListObjects v1 / v2 -------------------------------------------------- */

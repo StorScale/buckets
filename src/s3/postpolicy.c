@@ -813,6 +813,7 @@ void buckets_s3_post_policy(s3_ctx *c) {
         c->resp->status = 204;
       }
       buckets_buf_free(&loc);
+      buckets_s3_send_event(c, BUCKETS_EV_OBJECT_CREATED_POST, c->bucket, oi.name, &oi, NULL);
       buckets_object_info_free(&oi);
     }
   }

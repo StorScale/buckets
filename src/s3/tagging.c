@@ -118,8 +118,10 @@ static void set_object_tags(s3_ctx *c, const char *tags, int status) {
     return;
   }
   buckets_s3_version_header(c, oi.version_id);
-  buckets_object_info_free(&oi);
   c->resp->status = status;
+  buckets_s3_send_event(c, *tags ? BUCKETS_EV_OBJECT_CREATED_PUT_TAGGING : BUCKETS_EV_OBJECT_CREATED_DELETE_TAGGING, c->bucket,
+                        c->object, &oi, NULL);
+  buckets_object_info_free(&oi);
 }
 
 void buckets_s3_put_object_tagging(s3_ctx *c) {

@@ -97,7 +97,7 @@ static void canonical_key(buckets_str in, char *out, size_t cap) {
 
 /* GetSourceIPRaw: X-Forwarded-For (first address), X-Real-Ip, Forwarded
  * for=, else the peer address. */
-static void source_ip(const buckets_http_request *req, char *out, size_t cap) {
+void buckets_s3_source_ip(const buckets_http_request *req, char *out, size_t cap) {
   buckets_str h = buckets_http_header_get(req, "X-Forwarded-For");
   if (h.p && h.n) {
     size_t n = h.n;
@@ -191,7 +191,7 @@ static s3_conds *build_conds(s3_ctx *c) {
   char ts[32], epoch[24], ip[128];
   strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", &tm);
   snprintf(epoch, sizeof(epoch), "%lld", (long long)now);
-  source_ip(req, ip, sizeof(ip));
+  buckets_s3_source_ip(req, ip, sizeof(ip));
   buckets_str ua = buckets_http_header_get(req, "User-Agent"), ref = buckets_http_header_get(req, "Referer");
   char *uas = buckets_xstrndup(ua.p ? ua.p : "", ua.n), *refs = buckets_xstrndup(ref.p ? ref.p : "", ref.n);
 

@@ -277,8 +277,10 @@ static void apply_edit(s3_ctx *c, lock_edit *e) {
     buckets_s3_write_error(c, buckets_s3_obj_error(err));
     return;
   }
-  buckets_object_info_free(&oi);
   c->resp->status = 200;
+  buckets_s3_send_event(c, e->is_hold ? BUCKETS_EV_OBJECT_CREATED_PUT_LEGAL_HOLD : BUCKETS_EV_OBJECT_CREATED_PUT_RETENTION,
+                        c->bucket, c->object, &oi, NULL);
+  buckets_object_info_free(&oi);
 }
 
 void buckets_s3_put_object_retention(s3_ctx *c) {
@@ -328,8 +330,8 @@ void buckets_s3_get_object_retention(s3_ctx *c) {
   if (!get_lock_object(c, &oi)) return;
   int64_t until;
   buckets_ret_mode mode = meta_retention(&oi, &until);
-  buckets_object_info_free(&oi);
   if (mode == BUCKETS_RET_NONE) {
+    buckets_object_info_free(&oi);
     buckets_s3_write_error(c, BUCKETS_ERR_NO_SUCH_OBJECT_LOCK_CONFIGURATION);
     return;
   }
@@ -344,6 +346,8 @@ void buckets_s3_get_object_retention(s3_ctx *c) {
   }
   buckets_xml_close(b, "Retention");
   buckets_s3_write_xml(c, 200);
+  buckets_s3_send_event(c, BUCKETS_EV_OBJECT_ACCESSED_GET_RETENTION, c->bucket, c->object, &oi, NULL);
+  buckets_object_info_free(&oi);
 }
 
 void buckets_s3_get_object_legal_hold(s3_ctx *c) {
@@ -353,8 +357,8 @@ void buckets_s3_get_object_legal_hold(s3_ctx *c) {
   char status[8] = "";
   if (h && (strcasecmp(h, "ON") == 0 || strcasecmp(h, "OFF") == 0)) snprintf(status, sizeof(status), "%s", h);
   for (char *p = status; *p; p++) *p = (char)(*p >= 'a' && *p <= 'z' ? *p - 32 : *p);
-  buckets_object_info_free(&oi);
   if (!*status) {
+    buckets_object_info_free(&oi);
     buckets_s3_write_error(c, BUCKETS_ERR_NO_SUCH_OBJECT_LOCK_CONFIGURATION);
     return;
   }
@@ -364,6 +368,8 @@ void buckets_s3_get_object_legal_hold(s3_ctx *c) {
   buckets_xml_elem(b, "Status", status);
   buckets_xml_close(b, "LegalHold");
   buckets_s3_write_xml(c, 200);
+  buckets_s3_send_event(c, BUCKETS_EV_OBJECT_ACCESSED_GET_LEGAL_HOLD, c->bucket, c->object, &oi, NULL);
+  buckets_object_info_free(&oi);
 }
 
 /* ---- bucket configuration ---------------------------------------------------------- */

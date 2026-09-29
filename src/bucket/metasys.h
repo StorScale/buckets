@@ -6,6 +6,7 @@
 
 #include "bucket/metadata.h"
 #include "bucket/lifecycle.h"
+#include "bucket/notification.h"
 #include "bucket/objectlock.h"
 #include "bucket/quota.h"
 #include "bucket/sseconfig.h"
@@ -27,6 +28,8 @@ typedef struct {
   buckets_quota quota;             /* parsed QuotaConfigJSON, when has_quota */
   buckets_lifecycle lifecycle;     /* parsed LifecycleConfigXML, when has_lifecycle */
   buckets_sse_config sse;          /* parsed EncryptionConfigXML, when has_sse */
+  buckets_notify_config notify;    /* parsed NotificationConfigXML, when has_notify */
+  bool has_notify;
   bool has_sse;
   bool has_lifecycle;
   bool has_quota;

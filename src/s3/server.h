@@ -47,6 +47,8 @@ typedef struct buckets_s3_server {
   pthread_t iam_thread, ldap_thread;
   bool iam_thread_started, ldap_thread_started;
   char host_id[65];   /* x-amz-id-2 */
+  struct buckets_notifier *notifier; /* event notification targets and listeners */
+  char endpoint[256];  /* this server's URL, for x-minio-origin-endpoint */
   _Atomic uint64_t request_seq;
 } buckets_s3_server;
 

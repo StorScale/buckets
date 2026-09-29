@@ -27,6 +27,11 @@ add_library(buckets STATIC
   crypto/objkey.c
   kms/kms.c
   compress/s2.c
+  notify/event.c
+  notify/target.c
+  notify/targets.c
+  notify/webhook.c
+  notify/notifier.c
   console/console.c
   net/http.c
   net/tls.c
@@ -63,6 +68,7 @@ add_library(buckets STATIC
   bucket/tags.c
   bucket/quota.c
   bucket/lifecycle.c
+  bucket/notification.c
   bucket/sseconfig.c
   bucket/objectlock.c
   erasure/rs.c
@@ -86,6 +92,7 @@ add_library(buckets STATIC
   s3/lifecycle.c
   s3/sse.c
   s3/compress.c
+  s3/notification.c
   admin/admin.c
   admin/info.c
   admin/config.c

@@ -50,6 +50,7 @@ typedef struct conn {
   void *stream_ud;
   void (*stream_free)(void *);
   bool stream_close_after; /* close the connection when the stream ends */
+  bool chunked;            /* frame the stream as chunked transfer coding */
   hdr_span spans[BUCKETS_HTTP_MAX_HEADERS];
   size_t nspans;
   int last;
@@ -368,6 +369,8 @@ static void conn_abort(conn *c) {
  * connection was closed. */
 static void start_fill(conn *c);
 
+#define CHUNK_HDR 18 /* "<hex size>\r\n", at most 16 digits */
+
 /* Installs a pulled stream chunk into c->out. Returns -1 if the connection
  * was closed, 0 when the stream ended, 1 when there is data to send. */
 static int take_chunk(conn *c, long got) {
@@ -378,11 +381,34 @@ static int take_chunk(conn *c, long got) {
   if (got == 0) {
     stream_end(c);
     if (c->stream_close_after) c->closing = true;
+    if (c->chunked) { /* the last chunk */
+      c->chunked = false;
+      buckets_buf_reset(&c->out);
+      buckets_buf_append_c(&c->out, "0\r\n\r\n");
+      c->out_off = 0;
+      return 1;
+    }
     return 0;
+  }
+  if (c->chunked) { /* the data sits at CHUNK_HDR: its size line goes just before it */
+    char hdr[CHUNK_HDR + 1];
+    int h = snprintf(hdr, sizeof(hdr), "%lx\r\n", got);
+    memcpy(c->out.data + CHUNK_HDR - h, hdr, (size_t)h);
+    memcpy(c->out.data + CHUNK_HDR + got, "\r\n", 2);
+    c->out_off = (size_t)(CHUNK_HDR - h);
+    c->out.len = (size_t)(CHUNK_HDR + got + 2);
+    c->out.data[c->out.len] = '\0';
+    return 1;
   }
   c->out.len = (size_t)got;
   c->out.data[c->out.len] = '\0';
   return 1;
+}
+
+/* Pulls the next stream chunk into buf (leaving room for chunk framing). */
+static long pull_stream(conn *c, buckets_buf *buf) {
+  if (!c->chunked) return c->stream(c->stream_ud, buf->data, buf->cap - 1);
+  return c->stream(c->stream_ud, buf->data + CHUNK_HDR, buf->cap - 1 - CHUNK_HDR - 2);
 }
 
 static bool conn_flush(conn *c) {
@@ -409,7 +435,7 @@ static bool conn_flush(conn *c) {
         buckets_loop_watch(c->srv->loop, c->fd, 0, conn_io, c);
         return true;
       }
-      int r = take_chunk(c, c->stream(c->stream_ud, c->out.data, c->out.cap - 1));
+      int r = take_chunk(c, pull_stream(c, &c->out));
       if (r < 0) return false;
       if (r == 0) break;
       continue;
@@ -460,9 +486,11 @@ static void write_response(conn *c, buckets_http_response *resp, bool keep_alive
   buckets_time_http(time(NULL), date);
   c->last_write = time(NULL); /* the stall clock starts with each response */
   long long clen = resp->content_length >= 0 ? resp->content_length : (long long)resp->body.len;
-  buckets_buf_appendf(&c->out, "HTTP/1.1 %d %s\r\nServer: %s\r\nDate: %s\r\nContent-Length: %lld\r\n",
-                      resp->status, buckets_http_status_text(resp->status), srv->cfg.server_header,
-                      date, clen);
+  bool chunked = resp->chunked && resp->stream && !resp->head_only;
+  buckets_buf_appendf(&c->out, "HTTP/1.1 %d %s\r\nServer: %s\r\nDate: %s\r\n", resp->status,
+                      buckets_http_status_text(resp->status), srv->cfg.server_header, date);
+  if (chunked) buckets_buf_append_c(&c->out, "Transfer-Encoding: chunked\r\n");
+  else buckets_buf_appendf(&c->out, "Content-Length: %lld\r\n", clen);
   if (!keep_alive) buckets_buf_append_c(&c->out, "Connection: close\r\n");
   buckets_buf_append(&c->out, resp->headers.data, resp->headers.len);
   buckets_buf_append(&c->out, "\r\n", 2);
@@ -473,6 +501,7 @@ static void write_response(conn *c, buckets_http_response *resp, bool keep_alive
       c->stream = resp->stream;
       c->stream_ud = resp->stream_ud;
       c->stream_free = resp->stream_free;
+      c->chunked = chunked;
     }
     resp->stream = NULL;
     return;
@@ -531,7 +560,7 @@ static void fill_done(buckets_loop *loop, void *ud) {
 static void fill_task(void *ud, size_t i) {
   conn *c = ud;
   (void)i;
-  c->fill_got = c->stream(c->stream_ud, c->pre.data, c->pre.cap - 1);
+  c->fill_got = pull_stream(c, &c->pre);
   buckets_loop_post(c->srv->loop, fill_done, c);
 }
 

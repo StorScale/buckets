@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- Bucket notifications (Phase 7, in progress):
+  - `?notification` GET and PUT with MinIO's validation and error order (unknown ARNs, regions, event names, filter rules, overlapping queues, topics and lambdas), stored in the bucket metadata as MinIO stores it; queues whose target is gone are left out when read back.
+  - Events from every handler MinIO sends them from: Put, Post, Copy, CompleteMultipartUpload, Get, Head, GetObjectAttributes, tagging put and delete, retention and legal hold put and get, Delete, DeleteMarkerCreated, NoOP deletes, DeleteObjects, BucketCreated and BucketRemoved. Records match MinIO's byte for byte (field order, Go's JSON escaping, the escaped key for targets, userMetadata as cleanMetadata leaves it, content-length only where MinIO's handler had written the response).
+  - The webhook target (`notify_webhook`: endpoint, auth_token, queue_dir, queue_limit, client_cert/client_key), with a worker per target and MinIO's queue store: `<queue_dir>/minio-webhook-<id>/<uuid>.event` files kept until delivered, retried every 3s, replayed after restarts; stores are interchangeable with MinIO's in both directions (batched and S2-compressed entries are read too). Targets are rebuilt when a `notify_*` subsystem changes, and `config set` validates them.
+  - ListenNotification and ListenBucketNotification (`GET /?events=` and `GET /bucket?events=`, with prefix, suffix and ping), streamed as chunked `text/event-stream`: the HTTP server now sends chunked responses for streams of unknown length. Single server for now; listening across a cluster's peers comes later.
+  - `x-minio-origin-endpoint` from `MINIO_SERVER_URL` (or `BUCKETS_SERVER_URL`), else the listen address, else the local IPv4 address MinIO would pick.
+  - `tests/integration/notify-interop.sh` diffs MinIO and bucketsd (S3 transcript, webhook deliveries, both kinds of listener); `tests/integration/notify-store.sh` hands queue stores between them.
+
+### Fixed
+- Requests with `.` or `..` path segments in a query value (other than `delimiter`), or an invalid or reserved bucket name, are now rejected before authentication and without `BucketName`/`Key` in the error, as MinIO's request validity filter does.
+
 ## [0.6.0] - 2026-09-28
 
 Phase 6: the web console as its own Deployment. Verified here with the

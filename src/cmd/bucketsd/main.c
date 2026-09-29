@@ -3,6 +3,9 @@
 #include <errno.h>
 #include <pthread.h>
 #include <signal.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <ifaddrs.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -135,6 +138,45 @@ static void usage(FILE *f) {
           "  BUCKETS_LOG_LEVEL                            debug|info|warn|error\n"
           "  BUCKETS_API_THREADS                          request handler threads (default: 2 x CPUs, min 8)\n"
           "  BUCKETS_IO_THREADS                           drive I/O threads (default: set size + 2)\n");
+}
+
+/* globalMinioEndpoint, else getAPIEndpoints()[0]: MINIO_SERVER_URL, else the
+ * --address host, else the local IPv4 sortIPs puts first (non-loopback,
+ * highest last octet). */
+static void origin_endpoint(char *out, size_t cap, const char *host, int port, bool tls) {
+  const char *url = getenv("BUCKETS_SERVER_URL");
+  if (!url || !*url) url = getenv("MINIO_SERVER_URL");
+  if (url && *url) {
+    snprintf(out, cap, "%s", url);
+    size_t n = strlen(out);
+    const char *p = strstr(out, "://");
+    char *slash = p ? strchr(p + 3, '/') : NULL;
+    if (slash) *slash = '\0';
+    else if (n && out[n - 1] == '/') out[n - 1] = '\0';
+    return;
+  }
+  char best[INET_ADDRSTRLEN] = "127.0.0.1";
+  if (!host || !*host) {
+    struct ifaddrs *ifs = NULL;
+    int best_octet = -1;
+    if (getifaddrs(&ifs) == 0) {
+      for (struct ifaddrs *i = ifs; i; i = i->ifa_next) {
+        if (!i->ifa_addr || i->ifa_addr->sa_family != AF_INET) continue;
+        struct sockaddr_in sin;
+        memcpy(&sin, i->ifa_addr, sizeof(sin));
+        const uint8_t *b = (const uint8_t *)&sin.sin_addr;
+        if (b[0] == 127) continue;
+        if (b[3] > best_octet) {
+          best_octet = b[3];
+          inet_ntop(AF_INET, &sin.sin_addr, best, sizeof(best));
+        }
+      }
+      freeifaddrs(ifs);
+    }
+    host = best;
+  }
+  bool v6 = strchr(host, ':') != NULL;
+  snprintf(out, cap, "%s://%s%s%s:%d", tls ? "https" : "http", v6 ? "[" : "", host, v6 ? "]" : "", port);
 }
 
 static bool parse_address(const char *addr, char **host, int *port) {
@@ -685,6 +727,7 @@ int main(int argc, char **argv) {
   app_state app = {0};
   app.http = buckets_http_server_start(g_loop, &hcfg, buckets_s3_handle, &s3);
   if (!app.http) return 1;
+  origin_endpoint(s3.endpoint, sizeof(s3.endpoint), host, buckets_http_server_port(app.http), tls != NULL);
   buckets_loop_set_wake(g_loop, on_wake, &app);
   buckets_loop_add_tick(g_loop, on_tick, &app);
 

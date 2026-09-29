@@ -31,6 +31,7 @@ void buckets_bucket_state_release(buckets_bucket_state *st) {
   buckets_policy_free(st->policy);
   buckets_versioning_free(&st->versioning);
   if (st->has_lifecycle) buckets_lifecycle_free(&st->lifecycle);
+  if (st->has_notify) buckets_notify_config_free(&st->notify);
   free(st);
 }
 
@@ -82,6 +83,11 @@ static buckets_bucket_state *build(const char *bucket, buckets_bucket_meta *meta
     if (!st->has_lifecycle) buckets_log_warn("bucket %s: stored lifecycle configuration does not parse: %s", bucket, lerr.msg);
   }
   const buckets_buf *ssex = &st->meta.config[BUCKETS_BCFG_ENCRYPTION];
+  const buckets_buf *nx = &st->meta.config[BUCKETS_BCFG_NOTIFICATION];
+  if (nx->len) {
+    st->has_notify = buckets_notify_config_load(nx->data, nx->len, &st->notify);
+    if (!st->has_notify) buckets_log_warn("bucket %s: stored notification configuration does not parse", bucket);
+  }
   if (ssex->len) {
     char err[256];
     st->has_sse = buckets_sse_config_parse(ssex->data, ssex->len, &st->sse, err, sizeof(err));

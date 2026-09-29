@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 #include "s3/server.h"
+#include "notify/notifier.h"
 
 #include <ctype.h>
 #include <pthread.h>
@@ -323,6 +324,14 @@ static char *oidc_role_policy(void *ud, const char *arn) {
   return r;
 }
 
+static void configure_notify(buckets_s3_server *s) {
+  buckets_config *cfg = buckets_config_sys_snapshot(s->config);
+  char err[512];
+  if (!buckets_notifier_configure(s->notifier, cfg, s->ca_path, err, sizeof(err)))
+    buckets_log_error("notify: %s", err);
+  buckets_config_free(cfg);
+}
+
 static void config_changed(void *ud, const char *subsys, bool local) {
   buckets_s3_server *s = ud;
   if (!*subsys || strcmp(subsys, "identity_openid") == 0) rebuild_openid(s);
@@ -330,6 +339,7 @@ static void config_changed(void *ud, const char *subsys, bool local) {
       strcmp(subsys, "identity_plugin") == 0) {
     rebuild_plugins(s);
   }
+  if (!*subsys || strncmp(subsys, "notify_", 7) == 0) configure_notify(s);
   if (local && s->peers) buckets_peer_notify_iam(s->peers, "config", *subsys ? subsys : "all");
 }
 
@@ -364,6 +374,12 @@ void buckets_s3_server_init(buckets_s3_server *s, buckets_objlayer *layer, const
   buckets_config_register_validator("identity_ldap", validate_ldap);
   buckets_config_register_validator("policy_plugin", validate_plugins);
   buckets_config_register_validator("identity_plugin", validate_plugins);
+  s->notifier = buckets_notifier_new();
+  static const char *const notify_subsys[] = {"notify_webhook", "notify_kafka", "notify_amqp", "notify_mqtt",
+                                              "notify_nats", "notify_nsq", "notify_redis", "notify_postgres",
+                                              "notify_mysql", "notify_elasticsearch"};
+  for (size_t i = 0; i < BUCKETS_ARRAY_LEN(notify_subsys); i++)
+    buckets_config_register_validator(notify_subsys[i], buckets_notifier_validate);
   buckets_iam_set_authz(s->iam, authz_hook, s);
   buckets_iam_openid_hooks hooks = {oidc_claim_name, oidc_role_policy, s};
   buckets_iam_set_openid_hooks(s->iam, &hooks);
@@ -384,6 +400,7 @@ static void *iam_start_main(void *arg) {
   }
   rebuild_openid(s);
   rebuild_plugins(s);
+  configure_notify(s);
   g_ca_path = s->ca_path;
   init_ldap(s);
   delay_ms = 250;
@@ -594,7 +611,7 @@ void buckets_s3_write_rejected(s3_ctx *c) {
 /* Real MinIO sub-resources not implemented yet: NotImplemented rather than
  * falling through to the catch-all bucket routes. */
 static bool pending_subresource(const s3_ctx *c, bool put) {
-  static const char *const put_pending[] = {"notification", "replication", "replication-reset"};
+  static const char *const put_pending[] = {"replication", "replication-reset"};
   static const char *const del_pending[] = {"replication"};
   const char *const *list = put ? put_pending : del_pending;
   size_t n = put ? BUCKETS_ARRAY_LEN(put_pending) : BUCKETS_ARRAY_LEN(del_pending);
@@ -932,6 +949,7 @@ static void create_bucket(s3_ctx *c) {
       buckets_metasys_changed(c->s->meta, c->bucket);
       buckets_http_resp_headerf(c->resp, "Location", "/%s", c->bucket);
       c->resp->status = 200;
+      buckets_s3_send_event(c, BUCKETS_EV_BUCKET_CREATED, c->bucket, "", NULL, NULL);
       return;
     }
     case BUCKETS_OBJ_ERR_BUCKET_EXISTS:
@@ -961,6 +979,7 @@ static void delete_bucket(s3_ctx *c) {
   buckets_bucket_meta_delete(c->s->layer, c->bucket);
   buckets_metasys_changed(c->s->meta, c->bucket);
   c->resp->status = 204;
+  buckets_s3_send_event(c, BUCKETS_EV_BUCKET_REMOVED, c->bucket, "", NULL, NULL);
 }
 
 static void get_bucket_location(s3_ctx *c) {
@@ -1171,6 +1190,7 @@ static bool authorize_bucket_request(s3_ctx *c) {
     else if (buckets_query_has(&c->q, "tagging")) action = "s3:PutBucketTagging";
     else if (buckets_query_has(&c->q, "lifecycle")) action = "s3:PutLifecycleConfiguration";
     else if (buckets_query_has(&c->q, "encryption")) action = "s3:PutEncryptionConfiguration";
+    else if (buckets_query_has(&c->q, "notification")) action = NULL; /* the handler authorizes */
     else if (!pending_subresource(c, true)) action = "s3:CreateBucket"; /* the catch-all PUT route */
   } else if (buckets_str_eq_c(m, "HEAD")) {
     if (buckets_s3_authorize(c, "s3:HeadBucket", c->bucket, NULL, NULL) == BUCKETS_ERR_NONE) return true;
@@ -1191,6 +1211,7 @@ static bool authorize_bucket_request(s3_ctx *c) {
     else if (buckets_query_has(&c->q, "lifecycle")) action = "s3:GetLifecycleConfiguration";
     else if (buckets_query_has(&c->q, "encryption")) action = "s3:GetEncryptionConfiguration";
     else if (buckets_query_has(&c->q, "uploads")) action = "s3:ListBucketMultipartUploads";
+    else if (buckets_query_has(&c->q, "events")) action = NULL; /* the handler authorizes */
     else if (!has_unhandled_subresource(&c->q)) action = "s3:ListBucket";
   }
   /* DeleteObjects and POST policy uploads are authorized per object. */
@@ -1335,6 +1356,10 @@ static void route_bucket(s3_ctx *c) {
       else put_bucket_encryption(c);
       return;
     }
+    if (buckets_query_has(&c->q, "notification")) {
+      buckets_s3_put_notification(c); /* authorizes, then checks the bucket */
+      return;
+    }
     if (pending_subresource(c, true)) {
       buckets_s3_write_error(c, BUCKETS_ERR_NOT_IMPLEMENTED);
       return;
@@ -1343,6 +1368,14 @@ static void route_bucket(s3_ctx *c) {
     return;
   }
 
+  if (buckets_str_eq_c(m, "GET") && buckets_query_has(&c->q, "notification")) {
+    buckets_s3_get_notification(c); /* authorizes, then checks the bucket */
+    return;
+  }
+  if (buckets_str_eq_c(m, "GET") && buckets_query_has(&c->q, "events")) {
+    buckets_s3_listen_notification(c);
+    return;
+  }
   if (buckets_str_eq_c(m, "GET") && buckets_query_has(&c->q, "tagging")) {
     buckets_s3_get_bucket_tagging(c); /* NoSuchTagSet even without the bucket, as MinIO */
     return;
@@ -1398,6 +1431,7 @@ static void route_bucket(s3_ctx *c) {
       get_bucket_encryption(c);
     } else if (buckets_query_has(&c->q, "uploads")) {
       buckets_s3_list_uploads(c);
+
     } else if (has_unhandled_subresource(&c->q)) {
       buckets_s3_write_error(c, BUCKETS_ERR_NOT_IMPLEMENTED);
     } else {
@@ -1548,6 +1582,28 @@ void buckets_s3_handle(const buckets_http_request *req, buckets_http_response *r
     goto fail;
   }
   if ((err = parse_path(&c)) != BUCKETS_ERR_NONE) goto fail;
+  /* setRequestValidityMiddleware: bad components in query values (a
+   * delimiter may be "." or ".."), then the bucket name, before any auth */
+  for (size_t i = 0; i < c.q.n; i++) {
+    if (strcmp(c.q.items[i].key, "delimiter") != 0 && has_bad_component(c.q.items[i].value)) {
+      err = BUCKETS_ERR_INVALID_RESOURCE_NAME;
+      c.err_bucket = buckets_xstrdup("");
+      c.err_object = buckets_xstrdup("");
+      goto fail;
+    }
+  }
+  if (c.bucket && !buckets_str_has_prefix(req->path, "/minio/")) {
+    if (buckets_bucket_name_reserved(c.bucket)) {
+      err = BUCKETS_ERR_ALL_ACCESS_DISABLED;
+    } else if (!buckets_bucket_name_valid(c.bucket)) {
+      err = BUCKETS_ERR_INVALID_BUCKET_NAME;
+    }
+    if (err) { /* reported before the handlers know the bucket or object */
+      c.err_bucket = buckets_xstrdup("");
+      c.err_object = buckets_xstrdup("");
+      goto fail;
+    }
+  }
   if (!buckets_admin_is_admin_path(req->path) && s->freeze_cnt > 0) {
     /* frozen (mc admin service freeze): S3 calls wait for the unfreeze */
     pthread_mutex_lock(&s->freeze_mu);
@@ -1576,7 +1632,9 @@ void buckets_s3_handle(const buckets_http_request *req, buckets_http_response *r
   if ((err = authenticate(&c)) != BUCKETS_ERR_NONE) goto fail;
 
   if (!c.bucket) {
-    if (buckets_str_eq_c(req->method, "GET")) {
+    if (buckets_str_eq_c(req->method, "GET") && buckets_query_has(&c.q, "events")) {
+      buckets_s3_listen_notification(&c); /* ListenNotification: every bucket */
+    } else if (buckets_str_eq_c(req->method, "GET")) {
       list_buckets(&c);
     } else {
       buckets_s3_write_error(&c, buckets_str_eq_c(req->method, "POST") ? BUCKETS_ERR_NOT_IMPLEMENTED

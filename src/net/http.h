@@ -72,6 +72,7 @@ typedef struct {
   buckets_http_body_fn stream; /* optional; replaces `body` */
   void *stream_ud;
   void (*stream_free)(void *ud); /* called once the stream is done or abandoned */
+  bool chunked; /* with a stream of unknown length: Transfer-Encoding: chunked */
 } buckets_http_response;
 
 void buckets_http_resp_header(buckets_http_response *resp, const char *name, const char *value);
