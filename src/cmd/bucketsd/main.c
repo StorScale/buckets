@@ -223,6 +223,8 @@ typedef struct {
   const char *first_local; /* path of a local drive, for spooling */
   buckets_lock_server *lock_server;
   buckets_dsync *dsync;
+  char **cmdlines; /* each pool's command-line argument (MinIO's CmdLine) */
+  bool legacy;     /* drives given without ellipses */
 } topology;
 
 /* The deployment's nodes and drive endpoints, for the admin API. */
@@ -435,6 +437,8 @@ static bool bootstrap(boot_state *b) {
   }
   buckets_objlayer *layer = buckets_objlayer_new(fr, t->npools, t->parity);
   if (t->dsync) buckets_objlayer_set_locker(layer, dsync_lock_fn, dsync_unlock_fn, t->dsync);
+  buckets_objlayer_set_cmdlines(layer, t->cmdlines, t->npools);
+  layer->legacy = t->legacy;
   size_t first = 0, total = 0;
   for (size_t q = 0; q < t->npools; q++) {
     buckets_drive_place pl;
@@ -573,6 +577,19 @@ int main(int argc, char **argv) {
   }
   topology topo = {.port = port};
   topo.npools = nell ? ndrive_args : 1;
+  topo.legacy = nell == 0;
+  topo.cmdlines = buckets_xcalloc(topo.npools, sizeof(char *));
+  if (nell) {
+    for (size_t p = 0; p < topo.npools; p++) topo.cmdlines[p] = buckets_xstrdup(drive_args[p]);
+  } else {
+    buckets_buf joined = BUCKETS_BUF_INIT; /* strings.Join(args, " ") */
+    for (size_t i = 0; i < ndrive_args; i++) {
+      if (i) buckets_buf_append_char(&joined, ' ');
+      buckets_buf_append_c(&joined, drive_args[i]);
+    }
+    buckets_buf_append_char(&joined, '\0');
+    topo.cmdlines[0] = buckets_buf_detach(&joined);
+  }
   topo.layouts = buckets_xcalloc(topo.npools, sizeof(*topo.layouts));
   topo.eps = buckets_xcalloc(topo.npools, sizeof(*topo.eps));
   char lerr[512];
@@ -667,7 +684,8 @@ int main(int argc, char **argv) {
   static buckets_peer_handlers peer_handlers;
   peer_handlers = (buckets_peer_handlers){buckets_s3_peer_iam, buckets_s3_peer_bucket, buckets_s3_peer_server_info,
                                           buckets_s3_peer_metrics, buckets_s3_peer_listen, &s3,
-                                          buckets_s3_peer_tier_stats, buckets_s3_peer_batch_metrics};
+                                          buckets_s3_peer_tier_stats, buckets_s3_peer_batch_metrics,
+                                          buckets_s3_peer_datamove};
   if (topo.distributed) {
     internode_pool = buckets_pool_new((int)BUCKETS_MAX(16L, 2 * ncpu));
     storage_srv = buckets_storage_server_new(topo.local_drives, topo.nlocal);

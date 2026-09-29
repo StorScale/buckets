@@ -237,6 +237,37 @@ bool buckets_mp_read_int(buckets_mp_reader *r, int64_t *v) {
   return true;
 }
 
+void buckets_mp_float64(buckets_buf *b, double v) {
+  uint64_t bits;
+  memcpy(&bits, &v, 8);
+  put_be(b, 0xcb, bits, 8);
+}
+
+bool buckets_mp_read_float64(buckets_mp_reader *r, double *v) {
+  if (!need(r, 1)) return false;
+  uint8_t c = *r->p;
+  if (c == 0xcb || c == 0xca) {
+    size_t n = c == 0xcb ? 8 : 4;
+    if (!need(r, 1 + n)) return false;
+    uint64_t bits = 0;
+    for (size_t i = 0; i < n; i++) bits = bits << 8 | r->p[1 + i];
+    if (n == 8) {
+      memcpy(v, &bits, 8);
+    } else {
+      uint32_t b32 = (uint32_t)bits;
+      float f;
+      memcpy(&f, &b32, 4);
+      *v = f;
+    }
+    r->p += 1 + n;
+    return true;
+  }
+  int64_t i;
+  if (!buckets_mp_read_int(r, &i)) return false;
+  *v = (double)i;
+  return true;
+}
+
 bool buckets_mp_read_uint(buckets_mp_reader *r, uint64_t *v) {
   bool neg;
   uint64_t mag;

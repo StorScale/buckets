@@ -31,3 +31,20 @@ void buckets_uuid_v4(char *out) {
            "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", b[0], b[1], b[2], b[3],
            b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]);
 }
+
+void buckets_shortuuid(char *out) {
+  static const char alphabet[] = "23456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+  uint8_t u[16];
+  buckets_random_bytes(u, sizeof(u));
+  u[6] = (uint8_t)((u[6] & 0x0f) | 0x40); /* version 4 */
+  u[8] = (uint8_t)((u[8] & 0x3f) | 0x80); /* RFC 4122 variant */
+  unsigned __int128 num = 0;
+  for (int i = 0; i < 16; i++) num = num << 8 | u[i];
+  int n = 0; /* least significant digit first, as shortuuid writes them */
+  while ((uint64_t)num > 0 && n < 22) {
+    out[n++] = alphabet[(int)(num % 57)];
+    num /= 57;
+  }
+  while (n < 22) out[n++] = alphabet[0];
+  out[22] = 0;
+}

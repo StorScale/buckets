@@ -48,6 +48,7 @@
 #include "siterepl/siterepl.h"
 #include "s3/tiering.h"
 #include "s3/batch.h"
+#include "s3/datamove.h"
 #include "tier/tier.h"
 #include "s3/sigv2.h"
 #include "s3/xml.h"
@@ -97,6 +98,18 @@ void buckets_s3_peer_iam(void *server, const char *kind, const char *name) {
   }
   if (strcmp(kind, "site-replication") == 0) {
     buckets_sr_reload(s->sr);
+    return;
+  }
+  if (strcmp(kind, "pool-meta") == 0) {
+    if (s->datamove) buckets_datamove_reload_pool_meta(s->datamove);
+    return;
+  }
+  if (strcmp(kind, "rebalance-meta") == 0) {
+    if (s->datamove) buckets_datamove_reload_rebalance(s->datamove, strcmp(name, "start") == 0);
+    return;
+  }
+  if (strcmp(kind, "rebalance-stop") == 0) {
+    if (s->datamove) buckets_datamove_stop_rebalance(s->datamove);
     return;
   }
   if (strcmp(kind, "batch-cancel") == 0) {
@@ -412,6 +425,28 @@ void buckets_s3_peer_bucket(void *server, const char *bucket) {
 
 char *buckets_s3_peer_server_info(void *server) { return buckets_admin_local_server_json(server); }
 
+void buckets_s3_peer_datamove(void *server, const buckets_query *q, int *status, buckets_buf *body) {
+  buckets_s3_server *s = server;
+  const char *op = buckets_query_get(q, "op");
+  if (!s->datamove || !op) {
+    *status = 503;
+    return;
+  }
+  buckets_datamove_result r;
+  buckets_datamove_op(s->datamove, op, q, true, &r);
+  *status = r.status;
+  if (r.status >= 300) {
+    buckets_buf_append_c(body, "{\"Code\":");
+    buckets_json_go_string(body, r.code, strlen(r.code));
+    buckets_buf_append_c(body, ",\"Message\":");
+    buckets_json_go_string(body, r.message, strlen(r.message));
+    buckets_buf_append_c(body, "}");
+  } else {
+    buckets_buf_append(body, r.body.data, r.body.len);
+  }
+  buckets_buf_free(&r.body);
+}
+
 char *buckets_s3_peer_batch_metrics(void *server) {
   buckets_s3_server *s = server;
   buckets_buf b = BUCKETS_BUF_INIT;
@@ -674,6 +709,46 @@ static void scanner_object(void *ud, const char *bucket, const buckets_object_in
     if (!removed[i]) buckets_repl_heal(s, bucket, &v[i], 0);
 }
 
+/* evalActionFromLifecycle for data movement (decommission, rebalance):
+ * which versions of one key (newest first) are due for deletion now. */
+void buckets_s3_lifecycle_due(buckets_s3_server *s, const char *bucket, const buckets_object_info *v, size_t n,
+                              bool *due) {
+  memset(due, 0, n * sizeof(*due));
+  if (!s->meta || !n || strcmp(bucket, BUCKETS_META_BUCKET) == 0) return;
+  buckets_bucket_state *st = buckets_metasys_get(s->meta, bucket);
+  if (!st->has_lifecycle) {
+    buckets_bucket_state_release(st);
+    return;
+  }
+  bool enabled = buckets_versioning_enabled_for(&st->versioning, v[0].name);
+  bool suspended = buckets_versioning_suspended_for(&st->versioning, v[0].name);
+  struct timespec ts;
+  clock_gettime(CLOCK_REALTIME, &ts);
+  int64_t now = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+  buckets_lc_obj *objs = buckets_xcalloc(n, sizeof(*objs));
+  buckets_lc_event *ev = buckets_xcalloc(n, sizeof(*ev));
+  for (size_t i = 0; i < n; i++) {
+    objs[i].name = v[i].name;
+    objs[i].user_tags = buckets_object_meta(&v[i], "X-Amz-Tagging");
+    objs[i].mod_time_ns = v[i].mod_time_ns;
+    objs[i].size = v[i].size;
+    objs[i].version_id = strcmp(v[i].version_id, "null") == 0 && !enabled && !suspended ? "" : v[i].version_id;
+    objs[i].is_latest = i == 0;
+    objs[i].delete_marker = v[i].delete_marker;
+    objs[i].num_versions = n;
+    objs[i].successor_mod_time_ns = i ? v[i - 1].mod_time_ns : 0;
+    objs[i].locked = version_locked(&v[i], now);
+    objs[i].transitioned = buckets_object_tier(&v[i], NULL, NULL) != NULL;
+  }
+  buckets_lifecycle_eval_versions(&st->lifecycle, st->lock_enabled, objs, n, now, ev);
+  for (size_t i = 0; i < n; i++)
+    due[i] = ev[i].action == BUCKETS_LC_DELETE || ev[i].action == BUCKETS_LC_DELETE_VERSION ||
+             ev[i].action == BUCKETS_LC_DELETE_ALL_VERSIONS || ev[i].action == BUCKETS_LC_DELMARKER_DELETE_ALL_VERSIONS;
+  free(objs);
+  free(ev);
+  buckets_bucket_state_release(st);
+}
+
 static void scanner_lifecycle(buckets_s3_server *s, const char *bucket, const buckets_object_info *v, size_t n,
                               bool *removed) {
   buckets_bucket_state *st = buckets_metasys_get(s->meta, bucket);
@@ -827,6 +902,7 @@ void buckets_s3_server_set_layer(buckets_s3_server *s, buckets_objlayer *layer) 
   s->sr = buckets_sr_new(s);
   buckets_sr_start(s->sr); /* loads its state once IAM is up */
   s->batch = buckets_batch_new(s);
+  s->datamove = buckets_datamove_new(s);
   s->iam_thread_started = pthread_create(&s->iam_thread, NULL, iam_start_main, s) == 0;
   s->metrics_thread_started = pthread_create(&s->metrics_thread, NULL, metrics_main, s) == 0;
 }
@@ -845,6 +921,7 @@ void buckets_s3_server_stop(buckets_s3_server *s) {
   if (s->metrics_thread_started) pthread_join(s->metrics_thread, NULL);
   s->metrics_thread_started = false;
   buckets_sr_stop(s->sr);
+  buckets_datamove_stop(s->datamove);
   buckets_batch_stop(s->batch);
   buckets_tiering_stop(s->tiering);
   buckets_repl_stop(s->repl);
@@ -1151,15 +1228,15 @@ static void list_buckets(s3_ctx *c) {
       continue;
     }
     /* Creation time comes from bucket metadata (as in MinIO), else the directory. */
-    time_t created = vols[i].created;
+    int64_t created_ns = (int64_t)vols[i].created * 1000000000LL;
     buckets_bucket_meta bm;
     if (buckets_bucket_meta_load(c->s->layer, vols[i].name, &bm)) {
       int64_t ns = buckets_bucket_meta_created_ns(&bm);
-      if (ns) created = (time_t)(ns / 1000000000LL);
+      if (ns) created_ns = ns; /* milliseconds show, as MinIO's iso8601TimeFormat has them */
       buckets_bucket_meta_free(&bm);
     }
     char ts[BUCKETS_TIME_ISO8601_LEN + 1];
-    buckets_time_iso8601(created, ts);
+    buckets_time_iso8601_ns(created_ns, ts);
     buckets_xml_open(b, "Bucket");
     buckets_xml_elem(b, "Name", vols[i].name);
     buckets_xml_elem(b, "CreationDate", ts);

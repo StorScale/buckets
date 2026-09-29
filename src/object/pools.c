@@ -8,6 +8,7 @@
  *  - buckets exist on every pool; listings merge all pools. */
 #include "core/auditctx.h"
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -147,6 +148,8 @@ void buckets_objlayer_free(buckets_objlayer *L) {
   free(L->pools);
   free(L->all);
   buckets_nslock_free(L->locks);
+  for (size_t p = 0; L->pool_cmdline && p < L->npools; p++) free(L->pool_cmdline[p]);
+  free(L->pool_cmdline);
   free(L);
 }
 
@@ -248,11 +251,21 @@ typedef struct {
 /* getPoolInfoExistingWithOpts: the pool with the newest copy of the object
  * (or of version_id). A pool that sees the object but lacks read quorum is
  * returned too, so writes go where the object visibly lives. */
-static lookup find_pool(buckets_objlayer *L, const char *bucket, const char *object, const char *version_id) {
+static bool pool_moving(const buckets_objlayer *L, size_t p) {
+  uint64_t bit = p < 64 ? 1ULL << p : 0;
+  return ((atomic_load(&((buckets_objlayer *)L)->pool_suspended) | atomic_load(&((buckets_objlayer *)L)->pool_rebalancing)) &
+          bit) != 0;
+}
+
+/* skip: a pool left out (SkipDecommissioned and SkipRebalancing leave out
+ * the pools data moves away from; -2 leaves them all out, -1 none) */
+static lookup find_pool_ex(buckets_objlayer *L, const char *bucket, const char *object, const char *version_id,
+                           int skip) {
   lookup best = {-1, BUCKETS_OBJ_ERR_NO_SUCH_KEY};
   int64_t best_mtime = 0;
   bool other_err = false;
   for (size_t p = 0; p < L->npools; p++) {
+    if ((int)p == skip || (skip != -1 && pool_moving(L, p))) continue;
     buckets_object_info oi;
     buckets_obj_err err = buckets_ep_stat(L->pools[p], bucket, object, version_id, &oi);
     if (err == BUCKETS_OBJ_OK) {
@@ -273,12 +286,20 @@ static lookup find_pool(buckets_objlayer *L, const char *bucket, const char *obj
   return best;
 }
 
+static lookup find_pool(buckets_objlayer *L, const char *bucket, const char *object, const char *version_id) {
+  return find_pool_ex(L, bucket, object, version_id, -1);
+}
+
 /* getAvailablePoolIdx: random, weighted by the free space of the set the
- * object would land in; pools whose set cannot hold it are skipped. */
-static int available_pool(buckets_objlayer *L, const char *object, int64_t size) {
+ * object would land in; pools whose set cannot hold it, pools data moves
+ * away from and exclude are skipped. */
+static int available_pool_ex(buckets_objlayer *L, const char *object, int64_t size, int exclude) {
   uint64_t avail[64] = {0}, total = 0;
   size_t np = BUCKETS_MIN(L->npools, (size_t)64);
+  int fallback = -1;
   for (size_t p = 0; p < np; p++) {
+    if ((int)p == exclude || pool_moving(L, p)) continue;
+    if (fallback < 0) fallback = (int)p;
     buckets_eset *s = buckets_ep_set_for(L->pools[p], object);
     uint64_t sum = 0;
     size_t online = 0;
@@ -296,7 +317,7 @@ static int available_pool(buckets_objlayer *L, const char *object, int64_t size)
     avail[p] = sum;
     total += sum;
   }
-  if (!total) return L->npools ? 0 : -1;
+  if (!total) return fallback;
   uint64_t r;
   buckets_random_bytes(&r, sizeof(r));
   uint64_t choose = r % total, at = 0;
@@ -307,17 +328,24 @@ static int available_pool(buckets_objlayer *L, const char *object, int64_t size)
   return 0;
 }
 
-/* getPoolIdx: where a write of object goes. */
+static int available_pool(buckets_objlayer *L, const char *object, int64_t size) {
+  return available_pool_ex(L, object, size, -1);
+}
+
+/* getPoolIdxNoLock: where a write of object goes (the pools data moves away
+ * from are left out). */
 static int write_pool(buckets_objlayer *L, const char *bucket, const char *object, int64_t size, buckets_obj_err *err) {
   *err = BUCKETS_OBJ_OK;
   if (L->npools == 1) return 0;
-  lookup l = find_pool(L, bucket, object, NULL);
+  lookup l = find_pool_ex(L, bucket, object, NULL, -2);
   if (l.pool >= 0) return l.pool;
   if (l.err != BUCKETS_OBJ_ERR_NO_SUCH_KEY && l.err != BUCKETS_OBJ_ERR_NO_SUCH_VERSION) {
     *err = l.err;
     return -1;
   }
-  return available_pool(L, object, size);
+  int p = available_pool(L, object, size);
+  if (p < 0) *err = BUCKETS_OBJ_ERR_DISK_FULL;
+  return p;
 }
 
 
@@ -897,4 +925,138 @@ buckets_obj_err buckets_obj_delete_free_version(buckets_objlayer *L, const char 
     if (err != BUCKETS_OBJ_ERR_NO_SUCH_VERSION) return err;
   }
   return first;
+}
+
+/* ---- decommission and rebalance ---------------------------------------------------------- */
+
+void buckets_objlayer_set_cmdlines(buckets_objlayer *L, char *const *cmdlines, size_t n) {
+  L->pool_cmdline = buckets_xcalloc(L->npools + 1, sizeof(char *));
+  for (size_t p = 0; p < L->npools; p++) L->pool_cmdline[p] = buckets_xstrdup(p < n && cmdlines[p] ? cmdlines[p] : "");
+}
+
+const char *buckets_objlayer_pool_cmdline(const buckets_objlayer *L, size_t pool) {
+  return L->pool_cmdline && pool < L->npools ? L->pool_cmdline[pool] : "";
+}
+
+void buckets_objlayer_set_pool_state(buckets_objlayer *L, size_t pool, bool suspended, bool rebalancing) {
+  if (pool >= 64) return;
+  uint64_t bit = 1ULL << pool;
+  if (suspended) atomic_fetch_or(&L->pool_suspended, bit);
+  else atomic_fetch_and(&L->pool_suspended, ~bit);
+  if (rebalancing) atomic_fetch_or(&L->pool_rebalancing, bit);
+  else atomic_fetch_and(&L->pool_rebalancing, ~bit);
+}
+
+bool buckets_objlayer_pool_suspended(const buckets_objlayer *L, size_t pool) {
+  return pool < 64 && (atomic_load(&((buckets_objlayer *)L)->pool_suspended) & (1ULL << pool)) != 0;
+}
+
+void buckets_objlayer_pool_space(buckets_objlayer *L, size_t pool, uint64_t *usable_total, uint64_t *usable_free,
+                                 uint64_t *raw_total, uint64_t *raw_free) {
+  uint64_t ut = 0, uf = 0, rt = 0, rf = 0;
+  if (pool < L->npools) {
+    buckets_epool *P = L->pools[pool];
+    for (size_t k = 0; k < P->nsets; k++) {
+      buckets_eset *s = &P->sets[k];
+      int data = (int)s->n - s->parity;
+      for (size_t i = 0; i < s->n; i++) {
+        uint64_t t, f;
+        if (!s->drives[i] || buckets_drive_disk_info(s->drives[i], &t, &f) != BUCKETS_DRIVE_OK) continue;
+        rt += t, rf += f;
+        if ((int)i < data) ut += t, uf += f; /* the drives below the data count, as MinIO counts them */
+      }
+    }
+  }
+  if (usable_total) *usable_total = ut;
+  if (usable_free) *usable_free = uf;
+  if (raw_total) *raw_total = rt;
+  if (raw_free) *raw_free = rf;
+}
+
+buckets_obj_err buckets_obj_pool_list_versions(buckets_objlayer *L, size_t pool, const char *bucket, const char *prefix,
+                                               const char *key_marker, const char *version_marker, int max_keys,
+                                               buckets_obj_listing *out) {
+  if (pool >= L->npools) return BUCKETS_OBJ_ERR_NO_SUCH_BUCKET;
+  return buckets_ep_list_versions(L->pools[pool], bucket, prefix, key_marker, version_marker, NULL, max_keys, false,
+                                  out);
+}
+
+buckets_obj_err buckets_obj_move_version(buckets_objlayer *L, size_t src, const char *bucket, const char *object,
+                                         const char *version_id, int64_t *bytes) {
+  if (bytes) *bytes = 0;
+  if (src >= L->npools || L->npools < 2) return BUCKETS_OBJ_ERR_DATA_MOVEMENT;
+  buckets_xl_object rec;
+  buckets_obj_err err = buckets_ep_version_record(L->pools[src], bucket, object, version_id, &rec);
+  if (err) return err;
+  /* where the object lives elsewhere, else where a new one would go */
+  lookup l = find_pool_ex(L, bucket, object, NULL, (int)src);
+  int dst = l.pool;
+  if (dst >= 0 && pool_moving(L, (size_t)dst)) dst = -1;
+  if (dst < 0) dst = available_pool_ex(L, object, rec.size, (int)src);
+  if (dst < 0) {
+    buckets_xl_object_free(&rec);
+    return BUCKETS_OBJ_ERR_DISK_FULL;
+  }
+  if ((size_t)dst == src) {
+    buckets_xl_object_free(&rec);
+    return BUCKETS_OBJ_ERR_DATA_MOVEMENT;
+  }
+  buckets_obj_reader *r = NULL;
+  bool has_data = rec.type == BUCKETS_XL_TYPE_OBJECT && buckets_xl_object_uses_data_dir(&rec);
+  if (has_data) {
+    buckets_object_info oi;
+    err = buckets_ep_open(L->pools[src], bucket, object, version_id, 0, rec.size, &r, &oi);
+    if (!err) buckets_object_info_free(&oi);
+  }
+  if (!err) {
+    audit_op(L, "DecomCopyData", bucket, object, dst);
+    err = buckets_ep_import_version(L->pools[dst], bucket, object, &rec, r ? (buckets_read_fn)buckets_obj_read : NULL, r);
+    if (!err && bytes) *bytes = has_data ? rec.size : 0;
+  }
+  if (r) buckets_obj_reader_free(r);
+  buckets_xl_object_free(&rec);
+  return err;
+}
+
+buckets_obj_err buckets_obj_pool_delete_object(buckets_objlayer *L, size_t pool, const char *bucket,
+                                               const char *object) {
+  if (pool >= L->npools) return BUCKETS_OBJ_ERR_NO_SUCH_BUCKET;
+  return buckets_ep_delete_object_all(L->pools[pool], bucket, object);
+}
+
+static long cfg_read(void *ud, void *buf, size_t n) {
+  buckets_str *s = ud;
+  size_t take = BUCKETS_MIN(n, s->n);
+  memcpy(buf, s->p, take);
+  s->p += take;
+  s->n -= take;
+  return (long)take;
+}
+
+buckets_obj_err buckets_obj_pool_config_write(buckets_objlayer *L, size_t pool, const char *path, const void *data,
+                                              size_t n) {
+  if (pool >= L->npools) return BUCKETS_OBJ_ERR_NO_SUCH_BUCKET;
+  buckets_str src = {data, n};
+  buckets_object_info oi;
+  buckets_obj_err err = buckets_ep_put(L->pools[pool], BUCKETS_META_BUCKET, path, cfg_read, &src, (int64_t)n, NULL, &oi);
+  if (!err) buckets_object_info_free(&oi);
+  return err;
+}
+
+buckets_obj_err buckets_obj_pool_config_read(buckets_objlayer *L, size_t pool, const char *path, buckets_buf *out) {
+  if (pool >= L->npools) return BUCKETS_OBJ_ERR_NO_SUCH_BUCKET;
+  buckets_obj_reader *r;
+  buckets_object_info oi;
+  buckets_obj_err err = buckets_ep_open(L->pools[pool], BUCKETS_META_BUCKET, path, NULL, 0, INT64_MAX, &r, &oi);
+  if (err) return err;
+  bool dm = oi.delete_marker;
+  buckets_object_info_free(&oi);
+  buckets_buf_reset(out);
+  char tmp[16384];
+  long k;
+  while ((k = buckets_obj_read(r, tmp, sizeof(tmp))) > 0) buckets_buf_append(out, tmp, (size_t)k);
+  buckets_obj_reader_free(r);
+  if (k < 0) return BUCKETS_OBJ_ERR_CORRUPT;
+  if (dm || !out->len) return BUCKETS_OBJ_ERR_NO_SUCH_KEY;
+  return BUCKETS_OBJ_OK;
 }

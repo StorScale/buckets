@@ -52,6 +52,8 @@ typedef enum {
   BUCKETS_OBJ_ERR_TIMEOUT, /* a namespace lock was not granted in time */
   BUCKETS_OBJ_ERR_METHOD_NOT_ALLOWED, /* a delete marker asked for by its version ID */
   BUCKETS_OBJ_ERR_TIER,               /* the remote tier holding a transitioned version failed */
+  BUCKETS_OBJ_ERR_DISK_FULL,          /* no pool can take the object */
+  BUCKETS_OBJ_ERR_DATA_MOVEMENT,      /* data movement would write into its own source pool */
 } buckets_obj_err;
 
 const char *buckets_obj_strerror(buckets_obj_err e);
@@ -83,6 +85,11 @@ typedef struct buckets_objlayer {
   bool (*tier_open)(void *ud, const char *tier, const char *remote, const char *remote_version, int64_t off,
                     int64_t len, long (**rd)(void *, void *, size_t), void (**rd_free)(void *), void **rd_ud);
   void *tier_ud;
+  /* Pools new data avoids (MinIO's IsSuspended and IsPoolRebalancing, as
+   * bit masks), and each pool's command-line argument (its CmdLine). */
+  _Atomic uint64_t pool_suspended, pool_rebalancing;
+  char **pool_cmdline;
+  bool legacy; /* drives given without ellipses (globalEndpoints.Legacy()) */
 } buckets_objlayer;
 
 /* Called (from any thread) for objects found or left short of a drive: reads
@@ -98,6 +105,7 @@ void buckets_objlayer_set_degraded_hook(buckets_objlayer *L, buckets_degraded_fn
  * pool's set size. */
 buckets_objlayer *buckets_objlayer_new(buckets_format_result *pools, size_t npools, int parity);
 void buckets_objlayer_free(buckets_objlayer *L);
+
 /* An online drive to use for local scratch space (spooling). */
 buckets_drive *buckets_objlayer_scratch(const buckets_objlayer *L);
 size_t buckets_objlayer_online(const buckets_objlayer *L);
@@ -444,5 +452,34 @@ buckets_obj_err buckets_obj_mpu_stat(buckets_objlayer *L, const char *bucket, co
 buckets_obj_err buckets_obj_mpu_list_uploads(buckets_objlayer *L, const char *bucket, const char *object,
                                              buckets_upload_info **uploads, size_t *n);
 void buckets_upload_info_free(buckets_upload_info *u, size_t n);
+
+/* ---- pools: decommission and rebalance ---- */
+/* The pools' command-line arguments (copied). */
+void buckets_objlayer_set_cmdlines(buckets_objlayer *L, char *const *cmdlines, size_t n);
+const char *buckets_objlayer_pool_cmdline(const buckets_objlayer *L, size_t pool);
+/* Whether new objects stay off a pool (decommissioned or rebalancing out). */
+void buckets_objlayer_set_pool_state(buckets_objlayer *L, size_t pool, bool suspended, bool rebalancing);
+bool buckets_objlayer_pool_suspended(const buckets_objlayer *L, size_t pool);
+/* A pool's usable capacity and free space (drives holding data shards, as
+ * GetTotalUsableCapacity counts them), and raw totals over all its drives. */
+void buckets_objlayer_pool_space(buckets_objlayer *L, size_t pool, uint64_t *usable_total, uint64_t *usable_free,
+                                 uint64_t *raw_total, uint64_t *raw_free);
+/* ListObjectVersions over one pool only (free versions not included). */
+buckets_obj_err buckets_obj_pool_list_versions(buckets_objlayer *L, size_t pool, const char *bucket, const char *prefix,
+                                               const char *key_marker, const char *version_marker, int max_keys,
+                                               buckets_obj_listing *out);
+/* Moves one version out of pool src (DataMovement with SrcPoolIdx): to the
+ * pool the object already lives in elsewhere, else to where a new object
+ * would go; never to src or a pool new data avoids. *bytes gets what was
+ * stored. DATA_MOVEMENT when no other pool can take it. */
+buckets_obj_err buckets_obj_move_version(buckets_objlayer *L, size_t src, const char *bucket, const char *object,
+                                         const char *version_id, int64_t *bytes);
+/* Removes an object, every version, from one pool (DeletePrefixObject). */
+buckets_obj_err buckets_obj_pool_delete_object(buckets_objlayer *L, size_t pool, const char *bucket,
+                                               const char *object);
+/* A configuration object in one pool's .minio.sys (pool.bin is kept in each). */
+buckets_obj_err buckets_obj_pool_config_write(buckets_objlayer *L, size_t pool, const char *path, const void *data,
+                                              size_t n);
+buckets_obj_err buckets_obj_pool_config_read(buckets_objlayer *L, size_t pool, const char *path, buckets_buf *out);
 
 #endif

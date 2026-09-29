@@ -61,6 +61,14 @@ void buckets_admin_batch_status(s3_ctx *c);
 void buckets_admin_batch_describe(s3_ctx *c);
 void buckets_admin_batch_cancel(s3_ctx *c);
 void buckets_admin_metrics(s3_ctx *c);
+/* pool decommission and rebalance (pools.c) */
+void buckets_admin_pools_list(s3_ctx *c);
+void buckets_admin_pools_status(s3_ctx *c);
+void buckets_admin_decommission(s3_ctx *c);
+void buckets_admin_decommission_cancel(s3_ctx *c);
+void buckets_admin_rebalance_start(s3_ctx *c);
+void buckets_admin_rebalance_status(s3_ctx *c);
+void buckets_admin_rebalance_stop(s3_ctx *c);
 /* site replication (siterepl.c) */
 void buckets_admin_sr_add(s3_ctx *c);
 void buckets_admin_sr_remove(s3_ctx *c);
@@ -88,6 +96,8 @@ void buckets_admin_kms_create_key_v3(s3_ctx *c);
 /* Shared helpers (admin.c): validateAdminReq for one action (answers the
  * request itself when it fails), custom-coded errors, IAM store errors. */
 bool buckets_admin_authorize(s3_ctx *c, const char *action);
+/* The first allowed of several actions (validateAdminReq with many). */
+bool buckets_admin_authorize_any(s3_ctx *c, const char *const *actions, size_t n);
 void buckets_admin_custom_error(s3_ctx *c, int status, const char *code, const char *message);
 void buckets_admin_iam_error(s3_ctx *c, buckets_iam_err e, const char *detail);
 

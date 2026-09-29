@@ -2298,6 +2298,13 @@ static const route k_routes[] = {
     {"GET", "/describe-job", buckets_admin_batch_describe, "DescribeBatchJob"},
     {"DELETE", "/cancel-job", buckets_admin_batch_cancel, "CancelBatchJob"},
     {"GET", "/metrics", buckets_admin_metrics, "Metrics"},
+    {"GET", "/pools/list", buckets_admin_pools_list, "ListPools"},
+    {"GET", "/pools/status", buckets_admin_pools_status, "StatusPool"},
+    {"POST", "/pools/decommission", buckets_admin_decommission, "StartDecommission"},
+    {"POST", "/pools/cancel", buckets_admin_decommission_cancel, "CancelDecommission"},
+    {"POST", "/rebalance/start", buckets_admin_rebalance_start, "RebalanceStart"},
+    {"GET", "/rebalance/status", buckets_admin_rebalance_status, "RebalanceStatus"},
+    {"POST", "/rebalance/stop", buckets_admin_rebalance_stop, "RebalanceStop"},
     {"PUT", "/site-replication/add", buckets_admin_sr_add, "SiteReplicationAdd"},
     {"PUT", "/site-replication/remove", buckets_admin_sr_remove, "SiteReplicationRemove"},
     {"GET", "/site-replication/info", buckets_admin_sr_info, "SiteReplicationInfo"},
@@ -2357,6 +2364,7 @@ void buckets_admin_handle(s3_ctx *c) {
 /* ---- shared with the other admin handler files -------------------------------------------- */
 
 bool buckets_admin_authorize(s3_ctx *c, const char *action) { return admin_req1(c, action); }
+bool buckets_admin_authorize_any(s3_ctx *c, const char *const *actions, size_t n) { return admin_req(c, actions, n); }
 
 void buckets_admin_custom_error(s3_ctx *c, int status, const char *code, const char *message) {
   custom_error(c, status, code, message);

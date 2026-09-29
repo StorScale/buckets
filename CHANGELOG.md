@@ -47,9 +47,18 @@ All notable changes to this project are documented here. The format follows
   - `PutObjectExtract`: snowball archives (tar, plain or S2) are unpacked into objects, as MinIO's batch replication and `mc` send them;
   - `tests/integration/batch.sh` runs every scenario on MinIO and bucketsd and compares them, replicate in every MinIO/Buckets pairing both ways.
 
+- Pool decommission and rebalance (Phase 8), compatible with MinIO's API and files:
+  - `mc admin decommission start|status|cancel` (`/pools/list`, `/pools/status`, `/pools/decommission`, `/pools/cancel`) and `mc admin rebalance start|status|stop`, with MinIO's checks and errors; pools are named by their command-line argument as MinIO names them;
+  - a decommission moves every version of every object (and the configuration under `.minio.sys`) out of the pool, oldest first, keeping version IDs, times, ETags, metadata, delete markers and part layouts; lifecycle-expired versions and lone delete markers are left behind as MinIO leaves them; the pool is then checked, and marked complete or failed; new objects stay off it from the start;
+  - a rebalance moves objects out of pools fuller than the cluster's free-space goal, until they are within 5% of it;
+  - progress in MinIO's `.minio.sys/pool.bin` (every pool) and `.minio.sys/rebalance.bin`, so either server reports and resumes what the other started; a decommission resumes after a restart (after three minutes, as in MinIO), a rebalance at once; operations are forwarded to the node that runs them;
+  - decommission and rebalance trace records and audit events;
+  - `tests/integration/decom.sh`: decommissions by each server read back by the other, errors as MinIO answers them, cancel and restart, and rebalances between pools on disk images.
+
 ### Fixed
 - Completing an SSE-S3 multipart upload compared part ETags using the wrong state (the completion hook's user data), so uploads with small parts, such as `mc pipe --enc-s3`, could fail with `InvalidPart`.
 - Objects whose drives' erasure indexes no longer follow their distribution (MinIO's metadata-only rewrites, such as its key rotation, renumber them) are read by the distribution, as MinIO reads them.
+- `ListBuckets` gives bucket creation times with milliseconds, as MinIO does.
 - `GET` of a `null` delete marker in a versioning-suspended bucket carries `x-amz-version-id: null` and `x-amz-delete-marker: true`, as MinIO's does.
 - Peers' last-day tier statistics lost their update times when merged.
 - `GetBucketLifecycle`'s `X-Minio-LifecycleConfig-UpdatedAt` is in MinIO's `20060102T150405Z` form (mc failed to parse it when adding a second rule).

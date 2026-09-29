@@ -24,6 +24,7 @@
 #include "core/log.h"
 #include "core/timefmt.h"
 #include "core/uuid.h"
+#include "core/wpool.h"
 #include "crypto/base64.h"
 #include "dist/peer.h"
 #include "kms/kms.h"
@@ -279,89 +280,6 @@ static void trace(int m, const char *job, int64_t start, int attempts, const cha
   buckets_buf_free(&b);
   buckets_buf_free(&f);
   buckets_buf_free(&p);
-}
-
-/* ---- per-job workers (minio/pkg workers: Take/Give/Wait) ------------------------------------------------- */
-
-typedef struct task {
-  struct task *next;
-  void (*fn)(void *);
-  void *arg;
-} task;
-
-typedef struct {
-  pthread_mutex_t mu;
-  pthread_cond_t cv;
-  task *head, *tail;
-  int busy, nthreads, queued, limit;
-  bool closing;
-  pthread_t *threads;
-} wpool;
-
-static void *wpool_main(void *arg) {
-  wpool *p = arg;
-  pthread_mutex_lock(&p->mu);
-  for (;;) {
-    while (!p->head && !p->closing) pthread_cond_wait(&p->cv, &p->mu);
-    if (!p->head) break;
-    task *t = p->head;
-    p->head = t->next;
-    if (!p->head) p->tail = NULL;
-    p->queued--;
-    p->busy++;
-    pthread_cond_broadcast(&p->cv);
-    pthread_mutex_unlock(&p->mu);
-    t->fn(t->arg);
-    free(t);
-    pthread_mutex_lock(&p->mu);
-    p->busy--;
-    pthread_cond_broadcast(&p->cv);
-  }
-  pthread_mutex_unlock(&p->mu);
-  return NULL;
-}
-
-static void wpool_init(wpool *p, int n) {
-  memset(p, 0, sizeof(*p));
-  if (n < 1) n = 1;
-  pthread_mutex_init(&p->mu, NULL);
-  pthread_cond_init(&p->cv, NULL);
-  p->limit = n;
-  p->threads = buckets_xcalloc((size_t)n, sizeof(pthread_t));
-  for (int i = 0; i < n; i++)
-    if (pthread_create(&p->threads[i], NULL, wpool_main, p) == 0) p->nthreads++;
-}
-
-/* Take: waits for a free worker, then runs fn(arg) on it. */
-static void wpool_go(wpool *p, void (*fn)(void *), void *arg) {
-  task *t = buckets_xcalloc(1, sizeof(*t));
-  t->fn = fn;
-  t->arg = arg;
-  pthread_mutex_lock(&p->mu);
-  while (p->busy + p->queued >= p->limit) pthread_cond_wait(&p->cv, &p->mu);
-  if (p->tail) p->tail->next = t;
-  else p->head = t;
-  p->tail = t;
-  p->queued++;
-  pthread_cond_broadcast(&p->cv);
-  pthread_mutex_unlock(&p->mu);
-}
-
-static void wpool_wait(wpool *p) {
-  pthread_mutex_lock(&p->mu);
-  while (p->busy || p->queued) pthread_cond_wait(&p->cv, &p->mu);
-  pthread_mutex_unlock(&p->mu);
-}
-
-static void wpool_close(wpool *p) {
-  pthread_mutex_lock(&p->mu);
-  p->closing = true;
-  pthread_cond_broadcast(&p->cv);
-  pthread_mutex_unlock(&p->mu);
-  for (int i = 0; i < p->nthreads; i++) pthread_join(p->threads[i], NULL);
-  free(p->threads);
-  pthread_mutex_destroy(&p->mu);
-  pthread_cond_destroy(&p->cv);
 }
 
 /* _MINIO_BATCH_*_WORKERS, default GOMAXPROCS/2 */
@@ -698,7 +616,7 @@ static void exp_batch_run(void *arg) {
 typedef struct {
   run *r;
   int64_t now;
-  wpool *wk;
+  buckets_wpool *wk;
   int retries;
   int64_t delay_ns, wait_ns;
   int batches;
@@ -732,7 +650,7 @@ static void exp_push(exp_walk *w, bool final) {
     eb->delay_ns = w->delay_ns;
     w->todel = NULL;
     w->ntodel = w->cap = 0;
-    wpool_go(w->wk, exp_batch_run, eb);
+    buckets_wpool_go(w->wk, exp_batch_run, eb);
   }
 }
 
@@ -802,8 +720,8 @@ static void run_expire(run *r) {
   buckets_batch_expire *e = r->job.expire;
   int retries = e->retry.attempts > 0 ? (int)e->retry.attempts : 3;
   int64_t delay = e->retry.delay_ns > 0 ? e->retry.delay_ns : 250000000LL;
-  wpool wk;
-  wpool_init(&wk, worker_count("_MINIO_BATCH_EXPIRATION_WORKERS"));
+  buckets_wpool wk;
+  buckets_wpool_init(&wk, worker_count("_MINIO_BATCH_EXPIRATION_WORKERS"));
   exp_walk w = {.r = r, .now = now_ns(), .wk = &wk, .retries = retries, .delay_ns = delay,
                 .wait_ns = config_wait(r->b, "expiration_workers_wait")};
   char *marker = dupz(r->ri.object);
@@ -819,8 +737,8 @@ static void run_expire(run *r) {
   }
   free(marker);
   if (!cancelled(r)) exp_push(&w, true);
-  wpool_wait(&wk);
-  wpool_close(&wk);
+  buckets_wpool_wait(&wk);
+  buckets_wpool_close(&wk);
   for (size_t i = 0; i < w.ntodel; i++) free(w.todel[i].name);
   free(w.todel);
   free(w.prev);
@@ -956,7 +874,7 @@ static void rot_run(void *arg) {
 
 typedef struct {
   run *r;
-  wpool *wk;
+  buckets_wpool *wk;
   int64_t now;
   int retries;
   int64_t delay_ns, wait_ns;
@@ -975,7 +893,7 @@ static bool rot_visit(void *ud, item *it) {
   t->retries = w->retries;
   t->delay_ns = w->delay_ns;
   t->wait_ns = w->wait_ns;
-  wpool_go(w->wk, rot_run, t);
+  buckets_wpool_go(w->wk, rot_run, t);
   return true;
 }
 
@@ -983,16 +901,16 @@ static void run_keyrotate(run *r) {
   buckets_batch_keyrotate *k = r->job.keyrotate;
   int retries = k->flags.retry.attempts > 0 ? (int)k->flags.retry.attempts : 3;
   int64_t delay = k->flags.retry.delay_ns > 0 ? k->flags.retry.delay_ns : 25000000LL;
-  wpool wk;
-  wpool_init(&wk, worker_count("_MINIO_BATCH_KEYROTATION_WORKERS"));
+  buckets_wpool wk;
+  buckets_wpool_init(&wk, worker_count("_MINIO_BATCH_KEYROTATION_WORKERS"));
   rot_walk w = {r, &wk, now_ns(), retries, delay, config_wait(r->b, "keyrotation_workers_wait")};
   char *marker = dupz(r->ri.object);
   char err[256];
   bool failed = !walk(r, k->bucket, k->prefix, marker, true, rot_visit, &w, err, sizeof(err));
   if (failed) buckets_log_warn("batch: %s: walking %s: %s", r->ri.job_id, k->bucket, err);
   free(marker);
-  wpool_wait(&wk);
-  wpool_close(&wk);
+  buckets_wpool_wait(&wk);
+  buckets_wpool_close(&wk);
   if (cancelled(r)) return;
   pthread_mutex_lock(&r->mu);
   r->ri.complete = !failed && r->ri.objects_failed == 0;
@@ -1092,7 +1010,7 @@ static void push_run(void *arg) {
 typedef struct {
   run *r;
   buckets_s3c *c;
-  wpool *wk;
+  buckets_wpool *wk;
   int64_t now, wait_ns;
   int attempt;
   bool retry, s3type;
@@ -1118,7 +1036,7 @@ static bool push_visit(void *ud, item *it) {
   t->attempt = w->attempt;
   t->retry = w->retry;
   t->wait_ns = w->wait_ns;
-  wpool_go(w->wk, push_run, t);
+  buckets_wpool_go(w->wk, push_run, t);
   return true;
 }
 
@@ -1137,8 +1055,8 @@ static void run_push(run *r) {
   char *marker = dupz(r->ri.object);
   bool retry = false;
   for (int attempts = 1; attempts <= retries && !cancelled(r); attempts++) {
-    wpool wk;
-    wpool_init(&wk, worker_count("_MINIO_BATCH_REPLICATION_WORKERS"));
+    buckets_wpool wk;
+    buckets_wpool_init(&wk, worker_count("_MINIO_BATCH_REPLICATION_WORKERS"));
     push_walk w = {r, c, &wk, now_ns(), config_wait(r->b, "replication_workers_wait"), attempts, retry, is_s3_type(rp),
                    NULL, false};
     bool walk_failed = false;
@@ -1151,8 +1069,8 @@ static void run_push(run *r) {
         break;
       }
     }
-    wpool_wait(&wk);
-    wpool_close(&wk);
+    buckets_wpool_wait(&wk);
+    buckets_wpool_close(&wk);
     free(w.prev);
     if (cancelled(r) || walk_failed) break;
     pthread_mutex_lock(&r->mu);
@@ -1454,7 +1372,7 @@ static bool pull_skip(const buckets_batch_replicate *rp, const remote_obj *o, in
 }
 
 /* Lists the remote bucket (versions from MinIO sources), handing each entry to the workers. */
-static bool pull_list(run *r, buckets_s3c *c, const char *prefix, wpool *wk, int attempt, int64_t wait_ns,
+static bool pull_list(run *r, buckets_s3c *c, const char *prefix, buckets_wpool *wk, int attempt, int64_t wait_ns,
                       char **prev, bool *skip_key, char *err, size_t errlen) {
   buckets_batch_replicate *rp = r->job.replicate;
   bool minio_src = strcmp(rp->source.type ? rp->source.type : "", "minio") == 0;
@@ -1531,7 +1449,7 @@ static bool pull_list(run *r, buckets_s3c *c, const char *prefix, wpool *wk, int
       t->o = o;
       t->attempt = attempt;
       t->wait_ns = wait_ns;
-      wpool_go(wk, pull_run, t);
+      buckets_wpool_go(wk, pull_run, t);
     }
     char *trunc = xml_child_text(&d, 0, "IsTruncated");
     bool more = trunc && strcmp(trunc, "true") == 0;
@@ -1562,8 +1480,8 @@ static void run_pull(run *r) {
     return;
   }
   for (int attempts = 1; attempts <= retries && !cancelled(r); attempts++) {
-    wpool wk;
-    wpool_init(&wk, worker_count("_MINIO_BATCH_REPLICATION_WORKERS"));
+    buckets_wpool wk;
+    buckets_wpool_init(&wk, worker_count("_MINIO_BATCH_REPLICATION_WORKERS"));
     char *prev = NULL;
     bool skip_key = false;
     size_t np = rp->source.prefix.n ? rp->source.prefix.n : 1;
@@ -1571,8 +1489,8 @@ static void run_pull(run *r) {
       if (!pull_list(r, c, rp->source.prefix.n ? rp->source.prefix.v[i] : "", &wk, attempts,
                      config_wait(r->b, "replication_workers_wait"), &prev, &skip_key, err, sizeof(err)))
         buckets_log_warn("batch: %s: listing %s: %s", r->ri.job_id, rp->source.bucket, err);
-    wpool_wait(&wk);
-    wpool_close(&wk);
+    buckets_wpool_wait(&wk);
+    buckets_wpool_close(&wk);
     free(prev);
     if (cancelled(r)) break;
     pthread_mutex_lock(&r->mu);
@@ -1742,24 +1660,6 @@ static int token_node(const char *id) {
   char *end;
   long v = strtol(c + 1, &end, 10);
   return *end ? -1 : (int)v;
-}
-
-/* shortuuid.New(): a random UUID in 22 base-57 digits, least significant first */
-static void shortuuid(char out[23]) {
-  static const char alphabet[] = "23456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-  uint8_t u[16];
-  buckets_random_bytes(u, sizeof(u));
-  u[6] = (uint8_t)((u[6] & 0x0f) | 0x40); /* version 4 */
-  u[8] = (uint8_t)((u[8] & 0x3f) | 0x80); /* RFC 4122 variant */
-  unsigned __int128 num = 0;
-  for (int i = 0; i < 16; i++) num = num << 8 | u[i];
-  int n = 0;
-  while ((uint64_t)num > 0 && n < 22) {
-    out[n++] = alphabet[(int)(num % 57)];
-    num /= 57;
-  }
-  while (n < 22) out[n++] = alphabet[0];
-  out[22] = 0;
 }
 
 /* ---- validation (BatchJobRequest.Validate) --------------------------------------------------------------------------- */
@@ -1969,7 +1869,7 @@ bool buckets_batch_start(buckets_batch *b, buckets_batch_job *job, const char *u
   buckets_batch_job_defaults(job);
   if (!validate(b, job, e)) return false;
   char su[23];
-  shortuuid(su);
+  buckets_shortuuid(su);
   char id[128];
   snprintf(id, sizeof(id), "%s-%s:%d", buckets_batch_job_type(job), su, local_index(b->s));
   free(job->id);

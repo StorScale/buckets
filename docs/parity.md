@@ -90,7 +90,7 @@ Source: `cmd/api-router.go`
 | ⬜ | `SelectObjectContentHandler` |  |
 | ⬜ | `ValidateBucketReplicationCredsHandler` |  |
 
-## Admin API (madmin / mc admin) (82/123)
+## Admin API (madmin / mc admin) (89/123)
 
 Source: `cmd/admin-router.go`
 
@@ -108,7 +108,7 @@ Source: `cmd/admin-router.go`
 | ⬜ | `BackgroundHealStatusHandler` |  |
 | ✅ | `BatchJobStatus` |  |
 | ✅ | `CancelBatchJob` | broadcast to every node |
-| ⬜ | `CancelDecommission` |  |
+| ✅ | `CancelDecommission` |  |
 | ✅ | `ClearConfigHistoryKVHandler` |  |
 | ⬜ | `ClientDevNull` |  |
 | ⬜ | `ClientDevNullExtraTime` |  |
@@ -156,7 +156,7 @@ Source: `cmd/admin-router.go`
 | ✅ | `ListIdentityProviderCfg` |  |
 | ✅ | `ListLDAPPolicyMappingEntities` |  |
 | ✅ | `ListPolicyMappingEntities` |  |
-| ⬜ | `ListPools` |  |
+| ✅ | `ListPools` |  |
 | ⬜ | `ListRemoteTargetsHandler` |  |
 | ✅ | `ListServiceAccounts` |  |
 | ✅ | `ListTierHandler` |  |
@@ -166,9 +166,9 @@ Source: `cmd/admin-router.go`
 | ⬜ | `ObjectSpeedTestHandler` |  |
 | ⬜ | `ProfileHandler` |  |
 | ✅ | `PutBucketQuotaConfigHandler` |  |
-| ⬜ | `RebalanceStart` |  |
-| ⬜ | `RebalanceStatus` |  |
-| ⬜ | `RebalanceStop` |  |
+| ✅ | `RebalanceStart` |  |
+| ✅ | `RebalanceStatus` |  |
+| ✅ | `RebalanceStop` |  |
 | ✅ | `RemoveCannedPolicy` |  |
 | ⬜ | `RemoveRemoteTargetHandler` |  |
 | ✅ | `RemoveTierHandler` |  |
@@ -207,9 +207,9 @@ Source: `cmd/admin-router.go`
 | ✅ | `SiteReplicationResyncOp` | Phase 8 |
 | ✅ | `SiteReplicationStatus` | Phase 8 |
 | ✅ | `StartBatchJob` | replicate (push, pull), keyrotate, expire |
-| ⬜ | `StartDecommission` |  |
+| ✅ | `StartDecommission` | run on the node holding the pool's first drive |
 | ⬜ | `StartProfilingHandler` |  |
-| ⬜ | `StatusPool` |  |
+| ✅ | `StatusPool` |  |
 | ⬜ | `StorageInfoHandler` |  |
 | ✅ | `TemporaryAccountInfo` |  |
 | ✅ | `TierStatsHandler` | scanner per-tier usage and every node's last-day transitions |
@@ -278,10 +278,11 @@ Subsystems with no single handler, tracked by phase in `docs/architecture.md`.
 Done: erasure coding and bitrot, xl.meta v2, pools, distributed locking, healing, the scanner with data
 usage and lifecycle expiry, SSE-S3/KMS/C with the builtin KMS, S2 compression, IAM (LDAP, OpenID,
 plugins, OPA), notifications (10 targets), audit, metrics v2/v3, bucket and site replication, ILM
-transitions and tiering (S3, MinIO, Azure, GCS), batch jobs (replicate, keyrotate, expire), the operator
+transitions and tiering (S3, MinIO, Azure, GCS), batch jobs (replicate, keyrotate, expire), pool
+decommission and rebalance, the operator
 and the console (their kind gates are still to be run).
 
-Open: decommission and rebalance, KES/MinIO KMS backends, S3 Select, SFTP/FTP.
+Open: KES/MinIO KMS backends, S3 Select, SFTP/FTP.
 
 Known deviations from MinIO, kept on purpose:
 - batch keyrotate keeps the version's modification time (MinIO's metadata-only copy sets it to now,
@@ -292,4 +293,6 @@ Known deviations from MinIO, kept on purpose:
   archives); both servers accept either;
 - batch metadata filters match standard headers case-insensitively (MinIO compares them exactly, so
   `content-type` never matches there);
-- jobs are resumed seconds after a restart (MinIO waits up to an hour per drive).
+- jobs are resumed seconds after a restart (MinIO waits up to an hour per drive);
+- decommission and rebalance keep every ETag (MinIO's own moves give SSE multipart objects new ones), and
+  move versions as stored, re-encoded for the destination set, rather than through PutObject.

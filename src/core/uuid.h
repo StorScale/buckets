@@ -11,4 +11,7 @@ void buckets_random_bytes(void *buf, size_t n);
 /* Random (v4) UUID in canonical lowercase form; out holds 37 bytes. */
 void buckets_uuid_v4(char *out);
 
+/* shortuuid.New(): a random UUID in 22 base-57 digits (out: 23 bytes). */
+void buckets_shortuuid(char *out);
+
 #endif

@@ -81,4 +81,15 @@ buckets_obj_err buckets_ep_expire_restored(buckets_epool *P, const char *bucket,
 buckets_obj_err buckets_ep_delete_free_version(buckets_epool *P, const char *bucket, const char *object,
                                                const char *version_id);
 
+/* Moving versions between pools (decommission, rebalance). The version's
+ * full record; a version recorded elsewhere written here (its stored bytes
+ * from rd, parts back to back, re-encoded for this pool; none for delete
+ * markers and remote versions), keeping its ID, time and metadata; and an
+ * object removed from this pool, every version at once. */
+buckets_obj_err buckets_ep_version_record(buckets_epool *P, const char *bucket, const char *object,
+                                          const char *version_id, buckets_xl_object *out);
+buckets_obj_err buckets_ep_import_version(buckets_epool *P, const char *bucket, const char *object,
+                                          const buckets_xl_object *src, buckets_read_fn rd, void *rd_ud);
+buckets_obj_err buckets_ep_delete_object_all(buckets_epool *P, const char *bucket, const char *object);
+
 #endif

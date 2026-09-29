@@ -24,6 +24,8 @@ void buckets_mp_time(buckets_buf *b, int64_t unix_ns);
 /* Same with explicit seconds, which also covers Go's zero time (year 1). */
 void buckets_mp_time_sec(buckets_buf *b, int64_t sec, int32_t nsec);
 #define BUCKETS_GO_ZERO_TIME_SEC (-62135596800LL)
+/* msgp.AppendFloat64: 0xcb and the big-endian IEEE 754 bits. */
+void buckets_mp_float64(buckets_buf *b, double v);
 
 /* ---- reader (cursor over an input slice) ---- */
 typedef struct {
@@ -55,6 +57,7 @@ bool buckets_mp_read_nil(buckets_mp_reader *r); /* true if a nil was consumed */
 bool buckets_mp_read_bool(buckets_mp_reader *r, bool *v);
 bool buckets_mp_read_int(buckets_mp_reader *r, int64_t *v);   /* accepts uint encodings that fit */
 bool buckets_mp_read_uint(buckets_mp_reader *r, uint64_t *v); /* accepts non-negative int encodings */
+bool buckets_mp_read_float64(buckets_mp_reader *r, double *v); /* also float32 and integers */
 /* Zero-copy: *out points into the input. read_str also accepts bin and vice
  * versa, matching msgp's ReadMapKeyZC / ReadBytesZC leniency. */
 bool buckets_mp_read_str(buckets_mp_reader *r, buckets_str *out);

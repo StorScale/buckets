@@ -39,6 +39,9 @@ buckets_http_client *const *buckets_peer_clients(buckets_peer_sys *p, size_t *n)
 buckets_peer_info *buckets_peer_metrics(buckets_peer_sys *p, size_t *n);
 /* Each peer's last-day tier stats (GetLastDayTierStats), NULL where unreachable. */
 buckets_peer_info *buckets_peer_tier_stats(buckets_peer_sys *p, size_t *n);
+/* A request to one node ("host:port"), POSTed and signed; false when it
+ * could not be reached. */
+bool buckets_peer_call(buckets_peer_sys *p, const char *node, const char *target, int *status, buckets_buf *body);
 /* Each peer's batch job metrics, NULL where unreachable. */
 buckets_peer_info *buckets_peer_batch_metrics(buckets_peer_sys *p, size_t *n);
 
@@ -54,6 +57,9 @@ typedef struct {
   void *ud;
   char *(*tier_stats)(void *ud); /* this node's last-day transitions (JSON), malloc'd */
   char *(*batch_metrics)(void *ud); /* this node's batch job metrics (JSON object by job ID), malloc'd */
+  /* a decommission or rebalance operation this node runs (q: op and its
+   * arguments): the admin API's answer, status and JSON body */
+  void (*datamove)(void *ud, const buckets_query *q, int *status, buckets_buf *body);
 } buckets_peer_handlers;
 void buckets_peer_server_handle(const buckets_http_request *req, buckets_http_response *resp, void *ud);
 

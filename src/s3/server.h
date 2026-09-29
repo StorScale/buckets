@@ -44,6 +44,7 @@ typedef struct buckets_s3_server {
   struct buckets_tiering *tiering;     /* transitions and remote reads, once the layer is up */
   struct buckets_tiers *tiers;         /* remote tiers (tier-config.bin), once the layer is up */
   struct buckets_batch *batch;         /* batch jobs, once the layer is up */
+  struct buckets_datamove *datamove;   /* decommission and rebalance, once the layer is up */
   struct buckets_sr *sr;               /* site replication (always set; enabled by its state) */
   /* Background threads (IAM start and refresh, LDAP sync), stopped and
    * joined by buckets_s3_server_stop before the object layer is freed. */
@@ -89,6 +90,10 @@ void buckets_s3_peer_bucket(void *server, const char *bucket);
 char *buckets_s3_peer_server_info(void *server);
 char *buckets_s3_peer_tier_stats(void *server);
 char *buckets_s3_peer_batch_metrics(void *server);
+void buckets_s3_peer_datamove(void *server, const buckets_query *q, int *status, buckets_buf *body);
+/* Which versions of one key (newest first) lifecycle would delete now. */
+void buckets_s3_lifecycle_due(buckets_s3_server *s, const char *bucket, const buckets_object_info *v, size_t n,
+                              bool *due);
 /* This node's contribution to the cluster metrics (Prometheus text). */
 char *buckets_s3_peer_metrics(void *server);
 /* A peer's listener on this node's events (see buckets_peer_handlers.listen). */

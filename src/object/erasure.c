@@ -46,7 +46,8 @@ const char *buckets_obj_strerror(buckets_obj_err e) {
       "content-sha256 mismatch", "incomplete body", "data source failed", "corrupt data", "I/O error",
       "no such upload", "invalid part", "parts out of order", "part too small", "checksum mismatch",
       "read quorum not met", "write quorum not met", "bucket exists", "bucket not empty",
-      "namespace lock timed out", "method not allowed on a delete marker", "remote tier failure"};
+      "namespace lock timed out", "method not allowed on a delete marker", "remote tier failure",
+      "storage full", "data movement would overwrite the source pool"};
   return (size_t)e < BUCKETS_ARRAY_LEN(names) ? names[e] : "unknown";
 }
 
@@ -2382,6 +2383,146 @@ buckets_obj_err buckets_ep_rehydrate(buckets_epool *L, const char *bucket, const
   buckets_buf_free(&tmp_dir);
   buckets_xl_object_free(&o);
   return err;
+}
+
+/* ---- moving versions between pools (decommission, rebalance) ---------------------------- */
+
+buckets_obj_err buckets_ep_version_record(buckets_epool *L, const char *bucket, const char *object,
+                                          const char *version_id, buckets_xl_object *out) {
+  buckets_eset *s;
+  dmeta m[MAX_SET];
+  long vidx[MAX_SET];
+  buckets_obj_err err = resolve(L, bucket, object, version_id, &s, m, vidx, out);
+  if (err) return err;
+  free_metas(m, s->n);
+  return BUCKETS_OBJ_OK;
+}
+
+static void remove_kv_xl(buckets_xl_kv **kv, size_t *n, const char *key) {
+  size_t k = 0;
+  for (size_t i = 0; i < *n; i++) {
+    if (strcmp((*kv)[i].key, key) == 0) {
+      free((*kv)[i].key);
+      free((*kv)[i].value);
+      continue;
+    }
+    (*kv)[k++] = (*kv)[i];
+  }
+  *n = k;
+}
+
+static void copy_record(const buckets_xl_object *src, buckets_xl_object *dst) {
+  *dst = *src;
+  dst->meta_user = NULL, dst->nmeta_user = 0;
+  dst->meta_sys = NULL, dst->nmeta_sys = 0;
+  kvs_copy(src->meta_user, src->nmeta_user, &dst->meta_user, &dst->nmeta_user);
+  kvs_copy(src->meta_sys, src->nmeta_sys, &dst->meta_sys, &dst->nmeta_sys);
+  dst->parts = src->nparts ? buckets_xcalloc(src->nparts, sizeof(*dst->parts)) : NULL;
+  for (size_t i = 0; i < src->nparts; i++) {
+    dst->parts[i] = src->parts[i];
+    dst->parts[i].etag = src->parts[i].etag ? buckets_xstrdup(src->parts[i].etag) : NULL;
+    dst->parts[i].index = NULL, dst->parts[i].index_len = 0;
+    if (src->parts[i].index) buckets_xl_part_set_index(&dst->parts[i], src->parts[i].index, src->parts[i].index_len);
+  }
+}
+
+buckets_obj_err buckets_ep_import_version(buckets_epool *L, const char *bucket, const char *object,
+                                          const buckets_xl_object *src, buckets_read_fn rd, void *rd_ud) {
+  buckets_obj_err err = buckets_ep_stat_bucket(L, bucket);
+  if (err) return err;
+  if ((err = buckets_obj_check_name(object)) != BUCKETS_OBJ_OK) return err;
+  buckets_eset *s = buckets_ep_set_for(L, object);
+  buckets_xl_object o;
+  copy_record(src, &o);
+  encoder e = {.set = s, .parity = s->parity, .data = set_data(s)};
+  char *key = join(bucket, object);
+  buckets_hash_order(key, (int)s->n, e.dist);
+  free(key);
+  /* the data moves unless the version has none here (markers, remote tiers) */
+  bool has_data = o.type == BUCKETS_XL_TYPE_OBJECT && buckets_xl_object_uses_data_dir(&o) && rd;
+  e.inline_mode = has_data && o.nparts == 1 && shard_file_size(o.size, e.data) <= BUCKETS_INLINE_THRESHOLD;
+  if (o.type == BUCKETS_XL_TYPE_OBJECT) {
+    o.ec_m = e.data;
+    o.ec_n = e.parity;
+    o.ec_block_size = BUCKETS_BLOCK_SIZE;
+    for (size_t i = 0; i < s->n; i++) o.ec_dist[i] = (uint8_t)e.dist[i];
+    o.ec_dist_n = s->n;
+  }
+  remove_kv_xl(&o.meta_sys, &o.nmeta_sys, BUCKETS_XL_META_INLINE);
+  char *tmp_id = buckets_drive_tmp_name();
+  buckets_buf tmp_dir = BUCKETS_BUF_INIT;
+  buckets_buf_appendf(&tmp_dir, "tmp/%s", tmp_id);
+  free(tmp_id);
+  bool alive_all[MAX_SET];
+  for (size_t i = 0; i < s->n; i++) alive_all[i] = s->drives[i] != NULL;
+  if (has_data) {
+    uint8_t data_dir[16];
+    char data_dir_s[37];
+    new_uuid_bytes(data_dir, data_dir_s);
+    memcpy(o.data_dir, data_dir, 16);
+    for (size_t p = 0; p < o.nparts && !err; p++) {
+      buckets_buf file = BUCKETS_BUF_INIT;
+      buckets_buf_appendf(&file, "%s/%s/part.%d", tmp_dir.data, data_dir_s, o.parts[p].number);
+      part_src ps = {rd, rd_ud, o.parts[p].size};
+      source srcr = {.rd = part_read, .ud = &ps, .remaining = o.parts[p].size};
+      buckets_md5_init(&srcr.md5);
+      buckets_sha256_init(&srcr.sha);
+      buckets_cksum_hasher_init(&srcr.cks, 0);
+      err = encode_stream(&e, &srcr, o.parts[p].size, file.data);
+      if (!err && srcr.total != o.parts[p].size) err = BUCKETS_OBJ_ERR_INCOMPLETE_BODY;
+      for (size_t i = 0; i < s->n; i++) alive_all[i] &= e.alive[i];
+      buckets_buf_free(&file);
+    }
+    if (!err && e.inline_mode) buckets_xl_kv_set(&o.meta_sys, &o.nmeta_sys, BUCKETS_XL_META_INLINE, "true", 4);
+  } else if (o.type == BUCKETS_XL_TYPE_OBJECT) {
+    memset(o.data_dir, 0, 16);
+  }
+  if (!err) {
+    buckets_nslock_entry *lk = lock_ns(L, bucket, object, true);
+    size_t committed = 0;
+    int q = o.type == BUCKETS_XL_TYPE_OBJECT ? write_quorum(e.data, e.parity) : write_quorum(set_data(s), s->parity);
+    err = !lk ? BUCKETS_OBJ_ERR_TIMEOUT
+              : commit_version(s, bucket, object, &o, e.dist, alive_all, e.inline_mode ? e.ibuf : NULL, tmp_dir.data,
+                               has_data && !e.inline_mode, q, &committed);
+    buckets_nslock_unlock(lk);
+    if (!err) report_partial(L, s, bucket, object, &o, committed);
+  }
+  if (!has_data || !e.inline_mode || err) cleanup_tmp(s, tmp_dir.data);
+  encoder_free(&e);
+  buckets_buf_free(&tmp_dir);
+  buckets_xl_object_free(&o);
+  return err;
+}
+
+typedef struct {
+  buckets_eset *s;
+  const char *bucket, *op;
+  bool ok[MAX_SET];
+} purge_all_ctx;
+
+static void purge_all_one(void *ctx, size_t i) {
+  purge_all_ctx *c = ctx;
+  c->ok[i] = c->s->drives[i] &&
+             buckets_drive_delete(c->s->drives[i], c->bucket, c->op, true, true) == BUCKETS_DRIVE_OK;
+}
+
+buckets_obj_err buckets_ep_delete_object_all(buckets_epool *L, const char *bucket, const char *object) {
+  buckets_obj_err err = buckets_ep_stat_bucket(L, bucket);
+  if (err) return err;
+  buckets_eset *s = buckets_ep_set_for(L, object);
+  char *op = obj_path(object);
+  buckets_nslock_entry *lk = lock_ns(L, bucket, object, true);
+  if (!lk) {
+    free(op);
+    return BUCKETS_OBJ_ERR_TIMEOUT;
+  }
+  purge_all_ctx c = {.s = s, .bucket = bucket, .op = op};
+  buckets_io_parallel(s->n, purge_all_one, &c);
+  buckets_nslock_unlock(lk);
+  free(op);
+  int ok = 0;
+  for (size_t i = 0; i < s->n; i++) ok += c.ok[i];
+  return ok >= write_quorum(set_data(s), s->parity) ? BUCKETS_OBJ_OK : BUCKETS_OBJ_ERR_WRITE_QUORUM;
 }
 
 /* x-amz-restore and its companions (RemoveRestoreHdrs) */

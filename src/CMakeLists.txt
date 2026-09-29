@@ -13,6 +13,7 @@ add_library(buckets STATIC
   core/log.c
   core/timefmt.c
   core/yaml.c
+  core/wpool.c
   batch/job.c
   core/zip.c
   core/query.c
@@ -81,6 +82,7 @@ add_library(buckets STATIC
   s3/replstats.c
   s3/tiering.c
   s3/batch.c
+  s3/datamove.c
   s3/replhandlers.c
   s3/sigv4.c
   s3/sign.c
@@ -148,6 +150,7 @@ add_library(buckets STATIC
   admin/siterepl.c
   admin/tier.c
   admin/batch.c
+  admin/pools.c
   siterepl/siterepl.c
   siterepl/srstatus.c
   tier/tier.c

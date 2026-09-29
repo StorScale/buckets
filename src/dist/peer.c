@@ -207,6 +207,25 @@ buckets_peer_info *buckets_peer_tier_stats(buckets_peer_sys *p, size_t *n) {
   return fetch_all(p, BUCKETS_INTERNODE_PREFIX "peer/tier-stats", n);
 }
 
+bool buckets_peer_call(buckets_peer_sys *p, const char *node, const char *target, int *status, buckets_buf *body) {
+  if (!p) return false;
+  for (size_t i = 0; i < p->n; i++) {
+    char key[300];
+    snprintf(key, sizeof(key), "%s:%d", buckets_http_client_host(p->peers[i]), buckets_http_client_port(p->peers[i]));
+    if (strcmp(key, node) != 0) continue;
+    char auth[96];
+    buckets_internode_sign("POST", target, auth);
+    buckets_http_kv h[] = {{BUCKETS_INTERNODE_AUTH, auth}};
+    buckets_http_result r;
+    if (!buckets_http_client_do(p->peers[i], "POST", target, h, 1, NULL, 0, &r)) return false;
+    *status = r.status;
+    buckets_buf_append(body, r.body.data, r.body.len);
+    buckets_http_result_free(&r);
+    return true;
+  }
+  return false;
+}
+
 buckets_peer_info *buckets_peer_batch_metrics(buckets_peer_sys *p, size_t *n) {
   return fetch_all(p, BUCKETS_INTERNODE_PREFIX "peer/batch-metrics", n);
 }
@@ -266,6 +285,11 @@ void buckets_peer_server_handle(const buckets_http_request *req, buckets_http_re
     buckets_http_resp_header(resp, "Content-Type", "application/json");
     buckets_buf_append_c(&resp->body, json);
     free(json);
+  } else if (buckets_str_eq_c(path, BUCKETS_INTERNODE_PREFIX "peer/datamove") && h->datamove) {
+    int st = 200;
+    h->datamove(h->ud, &q, &st, &resp->body);
+    resp->status = st;
+    buckets_http_resp_header(resp, "Content-Type", "application/json");
   } else if (buckets_str_eq_c(path, BUCKETS_INTERNODE_PREFIX "peer/batch-metrics") && h->batch_metrics) {
     char *json = h->batch_metrics(h->ud);
     buckets_http_resp_header(resp, "Content-Type", "application/json");
