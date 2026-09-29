@@ -4,6 +4,7 @@
 
 #include "net/client.h"
 #include "net/http.h"
+#include "core/query.h"
 
 /* Peer notifications (MinIO's NotificationSys for IAM and bucket
  * metadata): after a change, every other server is told to reload the
@@ -43,6 +44,9 @@ typedef struct {
   void (*bucket)(void *ud, const char *bucket);
   char *(*server_info)(void *ud); /* JSON, malloc'd */
   char *(*metrics)(void *ud);     /* this node's metrics as Prometheus text, malloc'd */
+  /* this node's events for a listener (bucket, prefix, suffix, events in
+   * q), streamed into resp; false: a bad request */
+  bool (*listen)(void *ud, const buckets_query *q, buckets_http_response *resp);
   void *ud;
 } buckets_peer_handlers;
 void buckets_peer_server_handle(const buckets_http_request *req, buckets_http_response *resp, void *ud);

@@ -265,6 +265,9 @@ void buckets_peer_server_handle(const buckets_http_request *req, buckets_http_re
       resp->stream_ud = buckets_trace_subscribe(&o);
       resp->stream_free = buckets_trace_sub_free;
     }
+  } else if (buckets_str_eq_c(path, BUCKETS_INTERNODE_PREFIX "peer/listen") && h->listen) {
+    if (h->listen(h->ud, &q, resp)) stream_headers(resp);
+    else resp->status = 400;
   } else if (buckets_str_eq_c(path, BUCKETS_INTERNODE_PREFIX "peer/log")) {
     const char *m = buckets_query_get(&q, "mask");
     uint32_t mask = m ? (uint32_t)strtoul(m, NULL, 10) : 0;

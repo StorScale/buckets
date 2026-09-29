@@ -9,6 +9,9 @@
 #include "admin/info.h"
 #include "bucket/metasys.h"
 #include "bucket/notification.h"
+#include "dist/internode.h"
+#include "dist/peer.h"
+#include "dist/peerstream.h"
 #include "notify/notifier.h"
 #include "s3/internal.h"
 #include "s3/xml.h"
@@ -200,6 +203,61 @@ static const char *query_one(const buckets_query *q, const char *key, bool *many
 
 /* ListenNotificationHandler: GET /?events=... (every bucket) or
  * GET /bucket?events=...; a stream of {"Records":[...]} lines. */
+/* The listener's filter from the query (ListenNotificationHandler's and the
+ * peer ListenHandler's checks); 0 or an error code. */
+typedef struct {
+  const char *prefix, *suffix;
+  uint64_t mask;
+} listen_filter;
+
+static int listen_filter_parse(const buckets_query *q, listen_filter *f) {
+  bool many;
+  memset(f, 0, sizeof(*f));
+  f->prefix = query_one(q, "prefix", &many);
+  if (many) return BUCKETS_ERR_FILTER_NAME_PREFIX;
+  if (f->prefix && !filter_value_ok(f->prefix)) return BUCKETS_ERR_FILTER_VALUE_INVALID;
+  f->suffix = query_one(q, "suffix", &many);
+  if (many) return BUCKETS_ERR_FILTER_NAME_SUFFIX;
+  if (f->suffix && !filter_value_ok(f->suffix)) return BUCKETS_ERR_FILTER_VALUE_INVALID;
+  for (size_t i = 0; i < q->n; i++) {
+    if (strcmp(q->items[i].key, "events") != 0) continue;
+    buckets_event_name ev = buckets_event_name_parse(q->items[i].value);
+    if (!ev) return BUCKETS_ERR_EVENT_NOTIFICATION;
+    f->mask |= buckets_event_name_mask(ev);
+  }
+  return 0;
+}
+
+bool buckets_s3_peer_listen(void *server, const buckets_query *q, buckets_http_response *resp) {
+  buckets_s3_server *s = server;
+  listen_filter f;
+  if (!s->notifier || listen_filter_parse(q, &f)) return false;
+  const char *bucket = buckets_query_get(q, "bucket");
+  /* spaces keep the stream alive for the relay */
+  resp->stream = buckets_listener_read;
+  resp->stream_ud = buckets_notifier_listen(s->notifier, bucket && *bucket ? bucket : NULL, f.mask, f.prefix, f.suffix, 0);
+  resp->stream_free = buckets_listener_free;
+  return true;
+}
+
+typedef struct {
+  buckets_listener *l;
+  buckets_peer_relay *relay;
+} merged_listener;
+
+static long merged_read(void *ud, char *buf, size_t cap) { return buckets_listener_read(((merged_listener *)ud)->l, buf, cap); }
+
+static void merged_push(void *ud, const char *line, size_t n) {
+  if (n > 1 && line[0] == '{') buckets_listener_push(((merged_listener *)ud)->l, line, n);
+}
+
+static void merged_free(void *ud) {
+  merged_listener *m = ud;
+  buckets_peer_relay_stop(m->relay); /* before the listener it pushes into */
+  buckets_listener_free(m->l);
+  free(m);
+}
+
 void buckets_s3_listen_notification(s3_ctx *c) {
   bool all = !c->bucket || !*c->bucket;
   if (!buckets_s3_require(c, all ? "s3:ListenNotification" : "s3:ListenBucketNotification", all ? "" : c->bucket, NULL,
@@ -209,34 +267,11 @@ void buckets_s3_listen_notification(s3_ctx *c) {
     buckets_s3_write_error(c, BUCKETS_ERR_SERVER_NOT_INITIALIZED);
     return;
   }
-  bool many;
-  const char *prefix = query_one(&c->q, "prefix", &many);
-  if (many) {
-    buckets_s3_write_error(c, BUCKETS_ERR_FILTER_NAME_PREFIX);
+  listen_filter f;
+  int code = listen_filter_parse(&c->q, &f);
+  if (code) {
+    buckets_s3_write_error(c, code);
     return;
-  }
-  if (prefix && !filter_value_ok(prefix)) {
-    buckets_s3_write_error(c, BUCKETS_ERR_FILTER_VALUE_INVALID);
-    return;
-  }
-  const char *suffix = query_one(&c->q, "suffix", &many);
-  if (many) {
-    buckets_s3_write_error(c, BUCKETS_ERR_FILTER_NAME_SUFFIX);
-    return;
-  }
-  if (suffix && !filter_value_ok(suffix)) {
-    buckets_s3_write_error(c, BUCKETS_ERR_FILTER_VALUE_INVALID);
-    return;
-  }
-  uint64_t mask = 0;
-  for (size_t i = 0; i < c->q.n; i++) {
-    if (strcmp(c->q.items[i].key, "events") != 0) continue;
-    buckets_event_name ev = buckets_event_name_parse(c->q.items[i].value);
-    if (!ev) {
-      buckets_s3_write_error(c, BUCKETS_ERR_EVENT_NOTIFICATION);
-      return;
-    }
-    mask |= buckets_event_name_mask(ev);
   }
   if (!all) {
     buckets_obj_err oe = buckets_obj_stat_bucket(c->s->layer, c->bucket);
@@ -256,15 +291,31 @@ void buckets_s3_listen_notification(s3_ctx *c) {
     }
     ping_ms = (int)v * 1000;
   }
-  buckets_listener *l = buckets_notifier_listen(c->s->notifier, all ? NULL : c->bucket, mask, prefix, suffix, ping_ms);
+  merged_listener *m = buckets_xcalloc(1, sizeof(*m));
+  m->l = buckets_notifier_listen(c->s->notifier, all ? NULL : c->bucket, f.mask, f.prefix, f.suffix, ping_ms);
+  /* and every peer's events (MinIO's peer.Listen) */
+  size_t np = 0;
+  buckets_http_client *const *peers = buckets_peer_clients(c->s->peers, &np);
+  if (np) {
+    buckets_buf t = BUCKETS_BUF_INIT;
+    buckets_buf_append_c(&t, BUCKETS_INTERNODE_PREFIX "peer/listen?");
+    buckets_buf_append(&t, c->req->query.p, c->req->query.n);
+    if (!all) {
+      buckets_buf_append_c(&t, "&bucket="); /* bucket names need no escaping */
+      buckets_buf_append_c(&t, c->bucket);
+    }
+    buckets_buf_append_char(&t, '\0');
+    m->relay = buckets_peer_relay_start(peers, np, t.data, merged_push, m);
+    buckets_buf_free(&t);
+  }
   buckets_http_resp_header(c->resp, "Content-Type", "text/event-stream");
   buckets_http_resp_header(c->resp, "Cache-Control", "no-cache");
   buckets_http_resp_header(c->resp, "X-Accel-Buffering", "no");
   c->resp->status = 200;
   c->resp->chunked = true;
-  c->resp->stream = buckets_listener_read;
-  c->resp->stream_ud = l;
-  c->resp->stream_free = buckets_listener_free;
+  c->resp->stream = merged_read;
+  c->resp->stream_ud = m;
+  c->resp->stream_free = merged_free;
 }
 
 void buckets_s3_send_internal_event(buckets_s3_server *s, int event_name, const char *bucket, const char *object,

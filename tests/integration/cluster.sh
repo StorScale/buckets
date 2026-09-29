@@ -69,7 +69,7 @@ expect "one deployment across all drives" "$ids" 1
 expect "cluster health" "$(curl -s -o /dev/null -w '%{http_code}' ${CURLTLS[@]+"${CURLTLS[@]}"} "$(ep 3)/minio/health/cluster")" 200
 
 if [[ -z "${TLS:-}" ]]; then
-  echo "== trace and logs from every node (mc admin trace, mc admin logs)"
+  echo "== trace, logs and events from every node (mc admin trace, mc admin logs, mc event listen)"
   HERE=$(cd "$(dirname "$0")" && pwd)
   python3 "$HERE/listen.py" "$(ep 1)" "$AK" "$SK" /minio/admin/v3/trace "s3=true&err=false&threshold=0s" >"$WORK/trace.raw" &
   LT=$!
@@ -85,6 +85,19 @@ if [[ -z "${TLS:-}" ]]; then
   expect "trace records from all four nodes" "$(grep -c '"funcname":"s3.PutBucket"' "$WORK/trace.raw")/$(nodes nodename "$WORK/trace.raw")" 4/4
   expect "log records from all four nodes" "$(nodes node "$WORK/log.raw")" 4
   expect "log records from the named node only" "$(grep -o '"node":"[^"]*"' "$WORK/log3.raw" | sort -u)" "\"node\":\"127.0.0.1:$((BASE + 3))\""
+  python3 "$HERE/listen.py" "$(ep 1)" "$AK" "$SK" / "events=s3:ObjectCreated:*" >"$WORK/listen.raw" &
+  LT=$!
+  python3 "$HERE/listen.py" "$(ep 1)" "$AK" "$SK" /tracebucket3 "events=s3:ObjectCreated:*&suffix=.txt&ping=1" >"$WORK/listen3.raw" &
+  LA=$!
+  sleep 1.5
+  for n in 1 2 3 4; do status -T "$WORK/small" "$(ep "$n")/tracebucket$n/o$n.txt" >/dev/null; done
+  status -T "$WORK/small" "$(ep 4)/tracebucket3/other.bin" >/dev/null
+  sleep 1.5
+  kill $LT $LA 2>/dev/null || true; wait $LT $LA 2>/dev/null || true
+  expect "events put through every node reach a listener on node 1" "$(grep -o '"key":"[^"]*"' "$WORK/listen.raw" | sort | tr '\n' ' ')" '"key":"o1.txt" "key":"o2.txt" "key":"o3.txt" "key":"o4.txt" "key":"other.bin" '
+  expect "a bucket listener gets its bucket's matching events only" "$(grep -o '"key":"[^"]*"' "$WORK/listen3.raw" | tr '\n' ' ')" '"key":"o3.txt" '
+  for n in 1 2 3 4; do status -X DELETE "$(ep "$n")/tracebucket$n/o$n.txt" >/dev/null; done
+  status -X DELETE "$(ep 1)/tracebucket3/other.bin" >/dev/null
   for n in 1 2 3 4; do status -X DELETE "$(ep "$n")/tracebucket$n" >/dev/null; done
 fi
 

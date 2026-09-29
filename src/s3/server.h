@@ -5,6 +5,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 
+#include "core/query.h"
 #include "iam/iam.h"
 #include "net/http.h"
 #include "object/object.h"
@@ -80,6 +81,8 @@ void buckets_s3_peer_bucket(void *server, const char *bucket);
 char *buckets_s3_peer_server_info(void *server);
 /* This node's contribution to the cluster metrics (Prometheus text). */
 char *buckets_s3_peer_metrics(void *server);
+/* A peer's listener on this node's events (see buckets_peer_handlers.listen). */
+bool buckets_s3_peer_listen(void *server, const buckets_query *q, buckets_http_response *resp);
 /* The current OpenID providers (a reference to release), or NULL. */
 struct buckets_openid *buckets_s3_openid(buckets_s3_server *s);
 /* The current plugins (a reference to release), or NULL. */

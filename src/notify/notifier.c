@@ -251,6 +251,17 @@ void buckets_listener_free(void *ud) {
   free(l);
 }
 
+void buckets_listener_push(buckets_listener *l, const char *line, size_t n) {
+  pthread_mutex_lock(&l->mu);
+  if (l->queued < LISTENER_QUEUE) {
+    buckets_buf_append(&l->pending, line, n);
+    buckets_buf_append_char(&l->pending, '\n');
+    l->queued++;
+    pthread_cond_broadcast(&l->cv);
+  }
+  pthread_mutex_unlock(&l->mu);
+}
+
 static void publish(buckets_notifier *n, const buckets_event_args *a, int64_t now) {
   pthread_mutex_lock(&n->lmu);
   if (!n->listeners) {

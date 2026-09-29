@@ -52,5 +52,7 @@ buckets_listener *buckets_notifier_listen(buckets_notifier *n, const char *bucke
                                           const char *suffix, int ping_ms);
 long buckets_listener_read(void *l, char *buf, size_t cap);
 void buckets_listener_free(void *l);
+/* Adds a record line received from a peer ({"Records":[...]}, no newline). */
+void buckets_listener_push(buckets_listener *l, const char *line, size_t n);
 
 #endif
