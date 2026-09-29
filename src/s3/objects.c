@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later */
 #include <ctype.h>
 #include <openssl/crypto.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,6 +29,8 @@
 #include "s3/replicate.h"
 #include "s3/xml.h"
 #include "object/sysconfig.h"
+#include "s3/tiering.h"
+#include "tier/tier.h"
 
 /* ---- error mapping -------------------------------------------------------- */
 
@@ -2867,6 +2870,227 @@ static bool refuse_sse(s3_ctx *c) {
   return false;
 }
 
+/* ---- PostRestoreObject ----------------------------------------------------------------- */
+
+typedef struct {
+  buckets_s3_server *s;
+  char *bucket, *object, *version_id, *restore_hdr;
+  char *tier, *remote, *remote_version;
+  buckets_object_info oi; /* for the events */
+  char *user_agent, *source;
+} restore_job;
+
+static void restore_job_free(restore_job *j) {
+  free(j->bucket);
+  free(j->object);
+  free(j->version_id);
+  free(j->restore_hdr);
+  free(j->tier);
+  free(j->remote);
+  free(j->remote_version);
+  buckets_object_info_free(&j->oi);
+  free(j->user_agent);
+  free(j->source);
+  free(j);
+}
+
+typedef struct {
+  buckets_warm_stream *st;
+} restore_src;
+
+static long restore_read(void *ud, void *buf, size_t n) { return buckets_warm_stream_read(((restore_src *)ud)->st, buf, n); }
+
+/* updateRestoreMetadata on failure: x-amz-restore goes, so the restore can be retried. */
+static buckets_obj_err drop_restore_header(void *ud, const buckets_object_info *cur, buckets_xl_kv **user, size_t *nuser,
+                                           buckets_xl_kv **sys, size_t *nsys) {
+  (void)ud, (void)cur, (void)sys, (void)nsys;
+  buckets_xl_kv *kept = NULL;
+  size_t nk = 0;
+  for (size_t i = 0; i < *nuser; i++) {
+    if (strcasecmp((*user)[i].key, "x-amz-restore") != 0)
+      buckets_xl_kv_set(&kept, &nk, (*user)[i].key, (*user)[i].value, (*user)[i].value_len);
+  }
+  free_kvs(*user, *nuser);
+  *user = kept;
+  *nuser = nk;
+  return BUCKETS_OBJ_OK;
+}
+
+static void *restore_main(void *arg) {
+  restore_job *j = arg;
+  char err[512];
+  buckets_warm *w = buckets_tiers_driver(j->s->tiers, j->tier, err, sizeof(err));
+  buckets_warm_stream *st = NULL;
+  buckets_obj_err oe = BUCKETS_OBJ_ERR_TIER;
+  if (w && buckets_warm_get(w, j->remote, j->remote_version, 0, -1, &st, err, sizeof(err)) == BUCKETS_WARM_OK) {
+    restore_src src = {st};
+    oe = buckets_obj_rehydrate(j->s->layer, j->bucket, j->object, j->version_id, restore_read, &src, j->restore_hdr);
+  }
+  buckets_warm_stream_free(st);
+  if (w) buckets_warm_release(w);
+  if (oe) {
+    buckets_log_warn("Unable to restore transitioned bucket/object %s/%s: %s", j->bucket, j->object,
+                     oe == BUCKETS_OBJ_ERR_TIER ? err : buckets_obj_strerror(oe));
+    buckets_obj_update_meta(j->s->layer, j->bucket, j->object, j->version_id, drop_restore_header, NULL, NULL);
+  } else {
+    buckets_s3_send_internal_event(j->s, BUCKETS_EV_OBJECT_RESTORE_COMPLETED, j->bucket, j->object, &j->oi,
+                                   j->oi.version_id, j->user_agent);
+  }
+  restore_job_free(j);
+  return NULL;
+}
+
+typedef struct {
+  const char *days, *request_date, *restore, *tier;
+} restore_meta;
+
+static buckets_obj_err set_restore_meta(void *ud, const buckets_object_info *cur, buckets_xl_kv **user, size_t *nuser,
+                                        buckets_xl_kv **sys, size_t *nsys) {
+  (void)cur, (void)sys, (void)nsys;
+  restore_meta *rm = ud;
+  buckets_xl_kv_set(user, nuser, "X-Amz-Restore-Expiry-Days", rm->days, strlen(rm->days));
+  buckets_xl_kv_set(user, nuser, "X-Amz-Restore-Request-Date", rm->request_date, strlen(rm->request_date));
+  /* the key as MinIO keeps it (xhttp.AmzRestore) */
+  for (size_t i = 0; i < *nuser; i++) {
+    if (strcasecmp((*user)[i].key, "x-amz-restore") == 0 && strcmp((*user)[i].key, "x-amz-restore") != 0) {
+      free((*user)[i].key);
+      (*user)[i].key = buckets_xstrdup("x-amz-restore");
+    }
+  }
+  buckets_xl_kv_set(user, nuser, "x-amz-restore", rm->restore, strlen(rm->restore));
+  /* putRestoreOpts: the restored copy keeps the tier as its storage class */
+  if (!buckets_xl_kv_get(*user, *nuser, "x-amz-storage-class"))
+    buckets_xl_kv_set(user, nuser, "x-amz-storage-class", rm->tier, strlen(rm->tier));
+  return BUCKETS_OBJ_OK;
+}
+
+static char *xml_child_text(const buckets_xml_doc *doc, size_t parent, const char *name) {
+  size_t k = parent == (size_t)-1 ? 0 : buckets_xml_child(doc, parent, name);
+  if (!k) return NULL;
+  buckets_buf b = BUCKETS_BUF_INIT;
+  buckets_xml_unescape(doc->nodes[k].text, &b);
+  return buckets_buf_detach(&b);
+}
+
+static void restore_object(s3_ctx *c) {
+  if (c->req->body_len <= 0) {
+    buckets_s3_write_error(c, BUCKETS_ERR_EMPTY_REQUEST_BODY);
+    return;
+  }
+  /* postRestoreOpts */
+  bool enabled, suspended;
+  buckets_s3_versioning(c, c->object, &enabled, &suspended);
+  const char *vid = buckets_query_get(&c->q, "versionId");
+  if (vid && *vid && strcmp(vid, "null") != 0 && !enabled && !suspended) {
+    buckets_s3_write_error(c, BUCKETS_ERR_INVALID_ARGUMENT);
+    return;
+  }
+  buckets_object_info oi;
+  buckets_obj_err err = buckets_obj_stat(c->s->layer, c->bucket, c->object, vid && *vid ? vid : NULL, &oi);
+  if (!err && oi.delete_marker) {
+    buckets_object_info_free(&oi);
+    err = vid && *vid ? BUCKETS_OBJ_ERR_METHOD_NOT_ALLOWED : BUCKETS_OBJ_ERR_NO_SUCH_KEY;
+  }
+  if (err) {
+    buckets_s3_write_error(c, buckets_s3_obj_error(err));
+    return;
+  }
+  const char *remote, *rver, *tier = buckets_object_tier(&oi, &remote, &rver);
+  if (!tier) {
+    buckets_object_info_free(&oi);
+    buckets_s3_write_error(c, BUCKETS_ERR_INVALID_OBJECT_STATE);
+    return;
+  }
+  buckets_s3_error de = buckets_s3_read_doc(c);
+  if (de) {
+    buckets_object_info_free(&oi);
+    buckets_s3_write_error(c, de);
+    return;
+  }
+  buckets_xml_doc doc = {0};
+  char *days_s = NULL, *type = NULL;
+  const char *why = NULL;
+  bool select_params = false, output = false;
+  if (!buckets_xml_parse(buckets_buf_str(&c->doc), &doc) || !buckets_str_eq_c(doc.nodes[0].name, "RestoreRequest")) {
+    why = "XML syntax error";
+  } else {
+    days_s = xml_child_text(&doc, 0, "Days");
+    type = xml_child_text(&doc, 0, "Type");
+    select_params = buckets_xml_child(&doc, 0, "SelectParameters") != 0;
+    output = buckets_xml_child(&doc, 0, "OutputLocation") != 0;
+  }
+  long days = days_s ? strtol(days_s, NULL, 10) : 0;
+  bool is_select = type && strcmp(type, "SELECT") == 0;
+  /* RestoreObjectRequest.validate */
+  if (!why && !is_select && select_params) why = "Select parameters can only be specified with SELECT request type";
+  else if (!why && is_select && !select_params) why = "SELECT restore request requires select parameters to be specified";
+  else if (!why && !is_select && output) why = "OutputLocation required only for SELECT request type";
+  else if (!why && is_select && !output) why = "OutputLocation required for SELECT requests";
+  else if (!why && days != 0 && is_select) why = "Days cannot be specified with SELECT restore request";
+  else if (!why && days == 0 && !is_select) why = "restoration days should be at least 1";
+  if (doc.nodes) buckets_xml_doc_free(&doc);
+  free(days_s);
+  free(type);
+  if (why) {
+    buckets_object_info_free(&oi);
+    buckets_s3_write_error_msg(c, BUCKETS_ERR_MALFORMED_XML, why);
+    return;
+  }
+  if (is_select) { /* restores through S3 Select arrive with S3 Select */
+    buckets_object_info_free(&oi);
+    buckets_s3_write_error(c, BUCKETS_ERR_NOT_IMPLEMENTED);
+    return;
+  }
+  bool ongoing;
+  int64_t expires;
+  buckets_object_restore_state(&oi, &ongoing, &expires);
+  if (ongoing) {
+    buckets_object_info_free(&oi);
+    buckets_s3_write_error(c, BUCKETS_ERR_OBJECT_RESTORE_ALREADY_IN_PROGRESS);
+    return;
+  }
+  bool already = expires != 0;
+  struct timespec ts;
+  clock_gettime(CLOCK_REALTIME, &ts);
+  int64_t exp_ns = buckets_lc_expected_expiry((int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec, days);
+  char exp_http[BUCKETS_TIME_HTTP_LEN + 1], now_http[BUCKETS_TIME_HTTP_LEN + 1], days_str[32], completed[128];
+  buckets_time_http((time_t)(exp_ns / 1000000000LL), exp_http);
+  buckets_time_http(ts.tv_sec, now_http);
+  snprintf(days_str, sizeof(days_str), "%ld", days);
+  snprintf(completed, sizeof(completed), "ongoing-request=\"false\", expiry-date=\"%s\"", exp_http);
+  restore_meta rm = {days_str, now_http, already ? completed : "ongoing-request=\"true\"", tier};
+  err = buckets_obj_update_meta(c->s->layer, c->bucket, c->object, oi.version_id, set_restore_meta, &rm, NULL);
+  if (err) {
+    buckets_object_info_free(&oi);
+    buckets_s3_write_error(c, BUCKETS_ERR_INVALID_OBJECT_STATE);
+    return;
+  }
+  c->resp->status = already ? 202 : 200;
+  if (already) {
+    buckets_object_info_free(&oi);
+    return;
+  }
+  buckets_s3_send_event(c, BUCKETS_EV_OBJECT_RESTORE_POST, c->bucket, c->object, &oi, NULL);
+  restore_job *j = buckets_xcalloc(1, sizeof(*j));
+  j->s = c->s;
+  j->bucket = buckets_xstrdup(c->bucket);
+  j->object = buckets_xstrdup(c->object);
+  j->version_id = buckets_xstrdup(oi.version_id);
+  j->restore_hdr = buckets_xstrdup(completed);
+  j->tier = buckets_xstrdup(tier);
+  j->remote = buckets_xstrdup(remote);
+  j->remote_version = buckets_xstrdup(rver);
+  buckets_str ua = buckets_http_header_get(c->req, "User-Agent");
+  j->user_agent = ua.p ? buckets_str_dup(ua) : buckets_xstrdup("");
+  j->oi = oi; /* taken over */
+  pthread_t th;
+  pthread_attr_t attr;
+  pthread_attr_init(&attr);
+  pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+  if (pthread_create(&th, &attr, restore_main, j) != 0) restore_main(j);
+  pthread_attr_destroy(&attr);
+}
+
 /* The policy action of an object-level request (MinIO's router + handlers). */
 static bool authorize_object_request(s3_ctx *c) {
   buckets_str m = c->req->method;
@@ -2900,6 +3124,8 @@ static bool authorize_object_request(s3_ctx *c) {
     if (buckets_str_eq_c(m, "GET")) action = "s3:GetObjectTagging";
     else if (buckets_str_eq_c(m, "PUT")) action = "s3:PutObjectTagging";
     else if (buckets_str_eq_c(m, "DELETE")) action = "s3:DeleteObjectTagging";
+  } else if (buckets_str_eq_c(m, "POST") && buckets_query_has(&c->q, "restore")) {
+    action = "s3:RestoreObject";
   } else if (buckets_str_eq_c(m, "PUT")) {
     action = "s3:PutObject"; /* plus s3:GetObject on a copy source, checked by the handler */
   } else if (buckets_str_eq_c(m, "GET") || buckets_str_eq_c(m, "HEAD")) {
@@ -2975,6 +3201,10 @@ void buckets_s3_route_object(s3_ctx *c) {
     if (buckets_str_eq_c(m, "GET")) buckets_s3_write_private_acl(c);
     else if (buckets_str_eq_c(m, "PUT")) buckets_s3_put_acl(c);
     else buckets_s3_write_error(c, BUCKETS_ERR_METHOD_NOT_ALLOWED);
+    return;
+  }
+  if (buckets_str_eq_c(m, "POST") && buckets_query_has(&c->q, "restore")) {
+    restore_object(c);
     return;
   }
   static const char *const unsupported[] = {"select", "restore", "torrent"};

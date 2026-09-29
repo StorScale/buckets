@@ -29,6 +29,14 @@ All notable changes to this project are documented here. The format follows
   - `DeleteBucket` honours `X-Minio-Force-Delete`;
   - `tests/integration/siterepl.sh` runs mixed three-site groups set up from a MinIO site and from a Buckets site (changes from every site, a site catching up after downtime, `replicate status` from each), and a MinIO→Buckets handover (a Buckets site joins a MinIO group, is resynced, and the MinIO sites leave).
 
+- Tiering (Phase 8), compatible with MinIO's on-disk and wire formats:
+  - remote tiers: `mc admin tier add|ls|edit|rm|check` with MinIO's validation (probe object put, read and removed; bucket, credential and in-use checks), stored in `.minio.sys/config/tier-config.bin` (msgp, SSE-S3-sealed when a KMS is configured), reloaded across nodes; S3 and MinIO warm backends;
+  - lifecycle transitions and noncurrent-version transitions, by the scanner and right after writes (`enqueueTransitionImmediate`), through a pool of transition workers; the stored bytes move as they are (encrypted and compressed data stay so) under MinIO's remote names, and the version keeps its metadata (`x-minio-internal-transition-*`);
+  - reads of transitioned versions (ranges included) from the tier; the tier is the storage class in HEAD/GET and listings;
+  - `PostRestoreObject`: the bytes come back to the drives in their original part layout, with `x-amz-restore` (`202` for a repeated restore, `RestoreAlreadyInProgress`, MinIO's validation errors); restored copies expire (`DeleteRestored`);
+  - free versions: a deleted or overwritten transitioned version leaves a free version that the scanner sweeps (remote copy first); expiry removes remote copies directly; free versions are hidden from reads, listings and version counts, and heal treats transitioned versions as metadata only;
+  - MinIO reads what bucketsd transitioned and restored, and bucketsd reads (and deletes, and restores) what MinIO transitioned; `tests/integration/tier.sh`.
+
 ### Fixed
 - `GetBucketLifecycle`'s `X-Minio-LifecycleConfig-UpdatedAt` is in MinIO's `20060102T150405Z` form (mc failed to parse it when adding a second rule).
 - Resync of replication targets without a reset time no longer overflows computing the reset boundary.
