@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Optional servers for tests/integration/notify-targets.sh: PG_BIN (PostgreSQL's bin), MYSQL_DIR (a MySQL 8
+# installation) and KFAKE_BIN (tests/integration/targets/kfake built with Go); each adds its target.
 # The full CI gate, runnable locally and from any CI host:
 #   1. release build + unit tests + fuzz corpus replay
 #   2. ASan/UBSan build + unit tests + end-to-end smoke test

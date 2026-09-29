@@ -6,7 +6,8 @@
 #   MINIO_BIN=/path/to/minio MC_BIN=/path/to/mc [PG_BIN=/path/to/postgres/bin] \
 #     tests/integration/notify-targets.sh [bucketsd]
 # PG_BIN (initdb, pg_ctl, postgres) adds the PostgreSQL target against a real server, MYSQL_DIR (a
-# MySQL 8 installation: bin/mysqld, bin/mysql) the MySQL target.
+# MySQL 8 installation: bin/mysqld, bin/mysql) the MySQL target, KFAKE_BIN (targets/kfake, built with Go)
+# the Kafka target.
 set -euo pipefail
 BIN=${1:-build/src/bucketsd}
 if [[ -z "${MINIO_BIN:-}" || -z "${MC_BIN:-}" ]]; then
@@ -280,6 +281,73 @@ done
 compare amqp
 compare amqp-config
 
+if [[ -n "${KFAKE_BIN:-}" ]]; then
+  echo "== kafka"
+  for kind in minio buckets; do
+    : >"$WORK/kafka.raw"
+    "$KFAKE_BIN" -port "$MOCK_PORT" -out "$WORK/kafka.raw" -topics events,stored,audit &
+    MOCK=$!
+    for _ in $(seq 50); do nc -z 127.0.0.1 "$MOCK_PORT" 2>/dev/null && break; sleep 0.1; done
+    MINIO_NOTIFY_KAFKA_ENABLE_k1=on MINIO_NOTIFY_KAFKA_BROKERS_k1="127.0.0.1:$MOCK_PORT" MINIO_NOTIFY_KAFKA_TOPIC_k1=events \
+      MINIO_NOTIFY_KAFKA_ENABLE_k2=on MINIO_NOTIFY_KAFKA_BROKERS_k2="127.0.0.1:$MOCK_PORT" MINIO_NOTIFY_KAFKA_TOPIC_k2=stored \
+      MINIO_NOTIFY_KAFKA_QUEUE_DIR_k2="$WORK/$kind-kafkaq" \
+      MINIO_AUDIT_KAFKA_ENABLE_ak=on MINIO_AUDIT_KAFKA_BROKERS_ak="127.0.0.1:$MOCK_PORT" MINIO_AUDIT_KAFKA_TOPIC_ak=audit \
+      start "$kind" "$WORK/$kind-kafka"
+    curl -s -o /dev/null "${S3[@]}" -X PUT "$EP/tbucket"
+    notification arn:minio:sqs::k1:kafka arn:minio:sqs::k2:kafka
+    workload
+    sleep 3
+    for kv in "notify_kafka:c1 brokers=127.0.0.1:1 topic=t" "notify_kafka:c2 brokers=127.0.0.1:x topic=t" \
+      "notify_kafka:c3 brokers=127.0.0.1:$MOCK_PORT topic=t version=bogus" \
+      "notify_kafka:c4 brokers=127.0.0.1:$MOCK_PORT topic=t batch_size=10" \
+      "notify_kafka:c5 brokers=127.0.0.1:$MOCK_PORT topic=t queue_dir=/tmp/q batch_commit_timeout=1s"; do
+      # shellcheck disable=SC2086
+      config_set $kv >>"$WORK/$kind.kafka-config"
+    done
+    stop
+    mock_stop
+    # each topic's requests in order (the two targets run at once)
+    python3 - "$WORK/kafka.raw" "$HERE/audit" >"$WORK/$kind.kafka" <<'PY'
+import json, re, sys
+sys.argv, audit_dir = sys.argv[:2], sys.argv[2]
+sys.path.insert(0, audit_dir)
+import importlib.util
+spec = importlib.util.spec_from_file_location("auditnorm", audit_dir + "/normalize.py")
+groups = {}
+for line in open(sys.argv[1]):
+    r = json.loads(line)
+    if r[0] == "Produce" and len(r) > 4 and r[4][0] == "audit":  # audit entries: normalized as audit-interop does
+        for rec in r[4][10:]:
+            e = json.loads(rec[2])
+            for k in ("time", "requestID", "deploymentid"):
+                e.pop(k, None)
+            for k in ("timeToFirstByte", "timeToFirstByteInNS", "timeToResponse", "timeToResponseInNS", "txHeaders"):
+                e.get("api", {}).pop(k, None)
+            for k in ("Authorization", "X-Amz-Date", "X-Amz-Content-Sha256", "User-Agent"):
+                e.get("requestHeader", {}).pop(k, None)
+            for k in ("X-Amz-Request-Id", "X-Amz-Id-2", "Server", "Date", "X-Ratelimit-Limit", "X-Ratelimit-Remaining", "Last-Modified"):
+                e.get("responseHeader", {}).pop(k, None)
+            e.pop("tags", None)
+            e.pop("remotehost", None)
+            e.pop("userAgent", None)
+            if "bucket" in e.get("api", {}) and e["api"]["bucket"].startswith("probe-bsign-"):
+                e["api"]["bucket"] = "probe-bsign-(v)"
+                e["requestPath"] = "/probe-bsign-(v)/"
+            rec[2] = json.dumps(e, sort_keys=True)
+    s = re.sub(r'\\"(eventTime|sequencer|x-amz-request-id|x-amz-id-2|x-minio-deployment-id)\\":\\"[^\\]*\\"', r'\\"\1\\":\\"(v)\\"', json.dumps(r))
+    topic = r[4][0] if r[0] == "Produce" and len(r) > 4 and isinstance(r[4], list) else "(metadata)"
+    groups.setdefault(topic, []).append(s)
+for t in sorted(groups):
+    lines = groups[t]
+    if t == "(metadata)":  # how often each client refreshes is not behavior
+        lines = sorted(set(lines))
+    print("== " + t); print("\n".join(lines))
+PY
+  done
+  compare kafka
+  compare kafka-config
+fi
+
 if [[ -n "${PG_BIN:-}" ]]; then
   echo "== postgresql"
   # a real server (SCRAM auth, a database per kind), its statement log and the tables compared
@@ -299,7 +367,7 @@ if [[ -n "${PG_BIN:-}" ]]; then
     curl -s -o /dev/null "${S3[@]}" -X PUT "$EP/tbucket"
     notification arn:minio:sqs::p1:postgresql arn:minio:sqs::p2:postgresql
     workload
-    sleep 3
+    sleep 5 # store deliveries included (slower under sanitizers)
     for kv in "notify_postgres:c1 connection_string=host=127.0.0.1\ port=1\ sslmode=disable table=t format=namespace" \
       "notify_postgres:c2 connection_string=x table=bad-name format=namespace" \
       "notify_postgres:c3 connection_string=x table=t format=weird" \
@@ -366,7 +434,7 @@ if [[ -n "${MYSQL_DIR:-}" ]]; then
     curl -s -o /dev/null "${S3[@]}" -X PUT "$EP/tbucket"
     notification arn:minio:sqs::y1:mysql arn:minio:sqs::y2:mysql
     workload
-    sleep 3
+    sleep 5 # store deliveries included (slower under sanitizers)
     for kv in "notify_mysql:c1 dsn_string=u:p@tcp(127.0.0.1:1)/d table=t format=namespace" \
       "notify_mysql:c2 dsn_string=u:p@tcp(127.0.0.1:1 table=t format=namespace" \
       "notify_mysql:c3 dsn_string=nodb table=t format=namespace" \

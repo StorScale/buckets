@@ -101,14 +101,14 @@ void buckets_s3_audit(s3_ctx *c, int api, int64_t ttfb_ns, int64_t ttr_ns, uint6
   buckets_buf_appendf(&b, ",\"time\":\"%s\",\"event\":\"\",\"trigger\":\"incoming\",\"api\":{", when);
   bool first = true;
 #define FIELD(name) buckets_buf_appendf(&b, "%s\"" name "\":", first ? "" : ","), first = false
-  const char *name = buckets_api_handler_name(api);
+  const char *name = api >= 0 ? buckets_api_handler_name(api) : c->op_name ? c->op_name : ""; /* admin: the handler */
   if (*name) FIELD("name"), jstr(&b, name);
   /* what the request was last authorized for (MinIO's checkRequestAuthType
    * rewrites the request info, e.g. to a copy source) */
   const char *ab = c->err_bucket && *c->err_bucket ? c->err_bucket : c->bucket;
   const char *ao = c->err_object && *c->err_object ? c->err_object : c->object;
-  if (ab && *ab) FIELD("bucket"), jstr(&b, ab);
-  if (ao && *ao) FIELD("object"), jstr(&b, ao);
+  if (api >= 0 && ab && *ab) FIELD("bucket"), jstr(&b, ab); /* admin calls have neither */
+  if (api >= 0 && ao && *ao) FIELD("object"), jstr(&b, ao);
   if (c->audit_objects.len) FIELD("objects"), buckets_buf_appendf(&b, "[%.*s]", (int)c->audit_objects.len, c->audit_objects.data);
   if (resp->status) {
     FIELD("status"), jstr(&b, status_text(resp->status));

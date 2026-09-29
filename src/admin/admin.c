@@ -3,6 +3,7 @@
  * canned policies, policy mappings and service accounts.
  * Replaces MinIO's cmd/admin-handlers-users.go. */
 #include "admin/admin.h"
+#include "notify/event.h"
 #include "core/timefmt.h"
 #include "logger/console.h"
 #include "trace/trace.h"
@@ -30,49 +31,50 @@
 
 /* ---- responses -------------------------------------------------------------------- */
 
-void buckets_admin_error_msg(s3_ctx *c, buckets_s3_error e, const char *message) {
-  const buckets_s3_error_info *info = buckets_s3_error_get(e);
-  yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
-  yyjson_mut_val *root = yyjson_mut_obj(d);
-  yyjson_mut_doc_set_root(d, root);
-  yyjson_mut_obj_add_str(d, root, "Code", info->code);
-  yyjson_mut_obj_add_strcpy(d, root, "Message", message ? message : info->message);
-  /* reqInfo's bucket and key, when a handler named them (APIErrorResponse omitempty) */
-  if (c->err_object && *c->err_object) yyjson_mut_obj_add_strcpy(d, root, "Key", c->err_object);
-  if (c->err_bucket && *c->err_bucket) yyjson_mut_obj_add_strcpy(d, root, "BucketName", c->err_bucket);
-  yyjson_mut_obj_add_strcpy(d, root, "Resource", c->path ? c->path : "/");
-  yyjson_mut_obj_add_str(d, root, "RequestId", c->request_id);
-  yyjson_mut_obj_add_str(d, root, "HostId", c->s->host_id);
-  size_t len;
-  char *json = yyjson_mut_write(d, 0, &len);
-  c->resp->status = info->status;
+/* writeErrorResponseJSON: APIErrorResponse as json.Encoder writes it (Go's
+ * escaping, a trailing newline), the deployment as its HostId. */
+void buckets_admin_json_error(s3_ctx *c, int status, const char *code, const char *message, const char *key,
+                              const char *bucket) {
+  buckets_buf b = BUCKETS_BUF_INIT;
+  const char *host = c->s->layer ? c->s->layer->deployment_id_str : "";
+  const char *res = c->path ? c->path : "/";
+  buckets_buf_append_c(&b, "{\"Code\":");
+  buckets_json_go_string(&b, code, strlen(code));
+  buckets_buf_append_c(&b, ",\"Message\":");
+  buckets_json_go_string(&b, message, strlen(message));
+  if (key && *key) { /* omitempty */
+    buckets_buf_append_c(&b, ",\"Key\":");
+    buckets_json_go_string(&b, key, strlen(key));
+  }
+  if (bucket && *bucket) {
+    buckets_buf_append_c(&b, ",\"BucketName\":");
+    buckets_json_go_string(&b, bucket, strlen(bucket));
+  }
+  buckets_buf_append_c(&b, ",\"Resource\":");
+  buckets_json_go_string(&b, res, strlen(res));
+  buckets_buf_append_c(&b, ",\"RequestId\":");
+  buckets_json_go_string(&b, c->request_id, strlen(c->request_id));
+  buckets_buf_append_c(&b, ",\"HostId\":");
+  buckets_json_go_string(&b, host, strlen(host));
+  buckets_buf_append_c(&b, "}\n");
+  c->resp->status = status;
   buckets_http_resp_header(c->resp, "Content-Type", "application/json");
   buckets_buf_reset(&c->resp->body);
-  buckets_buf_append(&c->resp->body, json, len);
-  free(json);
-  yyjson_mut_doc_free(d);
+  buckets_buf_append(&c->resp->body, b.data, b.len);
+  buckets_buf_free(&b);
+}
+
+void buckets_admin_error_msg(s3_ctx *c, buckets_s3_error e, const char *message) {
+  const buckets_s3_error_info *info = buckets_s3_error_get(e);
+  /* reqInfo's bucket and key, when a handler named them (APIErrorResponse omitempty) */
+  buckets_admin_json_error(c, info->status, info->code, message ? message : info->message, c->err_object, c->err_bucket);
 }
 
 void buckets_admin_error(s3_ctx *c, buckets_s3_error e) { buckets_admin_error_msg(c, e, NULL); }
 
 /* A custom-coded admin error (AdminError / APIError literals in MinIO). */
 static void custom_error(s3_ctx *c, int status, const char *code, const char *message) {
-  yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
-  yyjson_mut_val *root = yyjson_mut_obj(d);
-  yyjson_mut_doc_set_root(d, root);
-  yyjson_mut_obj_add_strcpy(d, root, "Code", code);
-  yyjson_mut_obj_add_strcpy(d, root, "Message", message);
-  yyjson_mut_obj_add_strcpy(d, root, "Resource", c->path ? c->path : "/");
-  yyjson_mut_obj_add_str(d, root, "RequestId", c->request_id);
-  yyjson_mut_obj_add_str(d, root, "HostId", c->s->host_id);
-  size_t len;
-  char *json = yyjson_mut_write(d, 0, &len);
-  c->resp->status = status;
-  buckets_http_resp_header(c->resp, "Content-Type", "application/json");
-  buckets_buf_reset(&c->resp->body);
-  buckets_buf_append(&c->resp->body, json, len);
-  free(json);
-  yyjson_mut_doc_free(d);
+  buckets_admin_json_error(c, status, code, message, NULL, NULL);
 }
 
 /* toAdminAPIErr for IAM store errors. */

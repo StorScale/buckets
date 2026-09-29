@@ -323,8 +323,8 @@ static void ttfb_rows(mctx *m, const char *name, const buckets_api_stats *api, c
 static const char *logger_stats_id(const buckets_logger_target_info *lt, size_t n, size_t i) {
   static _Thread_local char id[64];
   size_t k = 0;
-  for (size_t j = 0; j < i && j < n; j++) k += lt[j].audit == lt[i].audit;
-  snprintf(id, sizeof(id), "%s_http_%zu", lt[i].audit ? "audit" : "sys", k);
+  for (size_t j = 0; j < i && j < n; j++) k += lt[j].audit == lt[i].audit && lt[j].kafka == lt[i].kafka;
+  snprintf(id, sizeof(id), "%s_%s_%zu", lt[i].audit ? "audit" : "sys", lt[i].kafka ? "kafka" : "http", k);
   return id;
 }
 

@@ -382,7 +382,8 @@ static void config_changed(void *ud, const char *subsys, bool local) {
     rebuild_plugins(s);
   }
   if (!*subsys || strncmp(subsys, "notify_", 7) == 0) configure_notify(s);
-  if (!*subsys || strcmp(subsys, "logger_webhook") == 0 || strcmp(subsys, "audit_webhook") == 0)
+  if (!*subsys || strcmp(subsys, "logger_webhook") == 0 || strcmp(subsys, "audit_webhook") == 0 ||
+      strcmp(subsys, "audit_kafka") == 0)
     configure_logger(s, subsys);
   if (local && s->peers) buckets_peer_notify_iam(s->peers, "config", *subsys ? subsys : "all");
 }
@@ -424,6 +425,7 @@ void buckets_s3_server_init(buckets_s3_server *s, buckets_objlayer *layer, const
   buckets_audit_internal_set(buckets_s3_audit_internal, s);
   buckets_config_register_validator("logger_webhook", buckets_logger_validate);
   buckets_config_register_validator("audit_webhook", buckets_logger_validate);
+  buckets_config_register_validator("audit_kafka", buckets_logger_validate_kafka);
   static const char *const notify_subsys[] = {"notify_webhook", "notify_kafka", "notify_amqp", "notify_mqtt",
                                               "notify_nats", "notify_nsq", "notify_redis", "notify_postgres",
                                               "notify_mysql", "notify_elasticsearch"};
@@ -1825,8 +1827,19 @@ void buckets_s3_handle(const buckets_http_request *req, buckets_http_response *r
     pthread_mutex_unlock(&s->freeze_mu);
   }
   if (buckets_admin_is_admin_path(req->path)) {
+    if (buckets_logger_audit_enabled(s->logger)) { /* adminMiddleware audits every admin call */
+      c.audited = true;
+      buckets_audit_tags_set(&c.tags);
+    }
     if ((err = authenticate(&c)) != BUCKETS_ERR_NONE) buckets_admin_error(&c, err);
     else buckets_admin_handle(&c);
+    if (c.audited && c.op_name) {
+      struct timespec t1;
+      clock_gettime(CLOCK_MONOTONIC, &t1);
+      double ttfb = (double)(t1.tv_sec - t0.tv_sec) + (double)(t1.tv_nsec - t0.tv_nsec) / 1e9;
+      uint64_t tx = resp->content_length >= 0 ? (uint64_t)resp->content_length : (uint64_t)resp->body.len;
+      buckets_s3_audit(&c, -1, (int64_t)(ttfb * 1e9), (int64_t)(ttfb * 1e9), tx);
+    }
     goto done;
   }
   if (buckets_admin_is_kms_path(req->path)) {

@@ -46,6 +46,7 @@ add_library(buckets STATIC
   notify/postgres.c
   notify/mysql.c
   notify/amqp.c
+  notify/kafka.c
   notify/nkeys.c
   notify/xnet.c
   notify/notifier.c
@@ -57,6 +58,7 @@ add_library(buckets STATIC
   s3/tracehttp.c
   trace/trace.c
   logger/httptarget.c
+  logger/kafkatarget.c
   logger/logger.c
   logger/console.c
   core/auditctx.c
@@ -66,6 +68,7 @@ add_library(buckets STATIC
   net/tls.c
   net/client.c
   net/conn.c
+  net/kafka.c
   net/fetch.c
   net/ldap.c
   s3/errors.c

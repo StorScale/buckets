@@ -9,6 +9,9 @@
  * admin: actions and answer with JSON (madmin-encrypted where MinIO does). */
 bool buckets_admin_is_admin_path(buckets_str path);
 void buckets_admin_handle(s3_ctx *c);
+/* A JSON error response as MinIO's writeErrorResponseJSON writes it. */
+void buckets_admin_json_error(s3_ctx *c, int status, const char *code, const char *message, const char *key,
+                              const char *bucket);
 
 /* ServerInfo (info.c). */
 void buckets_admin_server_info(s3_ctx *c);

@@ -2,6 +2,7 @@
 /* A port of MinIO's internal/config (config.go, help.go): parsing,
  * validation, environment resolution and formatting of sub-system configs. */
 #include "config/config.h"
+#include "core/log.h"
 
 #include <ctype.h>
 #include <stdarg.h>
@@ -933,7 +934,7 @@ typedef struct {
   const char *subsys;
   buckets_config_validator fn;
 } validator_ent;
-static validator_ent g_validators[16];
+static validator_ent g_validators[64];
 static size_t g_nvalidators;
 
 void buckets_config_register_validator(const char *subsys, buckets_config_validator fn) {
@@ -943,7 +944,11 @@ void buckets_config_register_validator(const char *subsys, buckets_config_valida
       return;
     }
   }
-  if (g_nvalidators < BUCKETS_ARRAY_LEN(g_validators)) g_validators[g_nvalidators++] = (validator_ent){subsys, fn};
+  if (g_nvalidators == BUCKETS_ARRAY_LEN(g_validators)) { /* a programming error: never drop one silently */
+    buckets_log_error("config: too many validators (registering %s)", subsys);
+    abort();
+  }
+  g_validators[g_nvalidators++] = (validator_ent){subsys, fn};
 }
 
 bool buckets_config_validate(const buckets_config *c, const char *subsys, char *err, size_t errlen) {

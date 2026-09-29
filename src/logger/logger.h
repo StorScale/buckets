@@ -23,6 +23,8 @@ bool buckets_logger_configure(buckets_logger *l, const buckets_config *cfg, cons
                               const char *deployment_id, char *err, size_t errlen);
 /* The config validators of logger_webhook and audit_webhook. */
 bool buckets_logger_validate(const buckets_config *cfg, char *err, size_t errlen);
+/* audit_kafka: the targets built and connected (then closed). */
+bool buckets_logger_validate_kafka(const buckets_config *cfg, char *err, size_t errlen);
 
 bool buckets_logger_audit_enabled(buckets_logger *l);
 /* An audit entry (JSON) to every audit target. */
@@ -35,7 +37,7 @@ void buckets_logger_entry_json(const char *deployment_id, buckets_log_level leve
 
 typedef struct {
   char name[160], endpoint[512];
-  bool audit;
+  bool audit, kafka; /* kafka: an audit_kafka target (else HTTP) */
   buckets_http_target_stats st;
 } buckets_logger_target_info;
 /* The targets, logger ones first (SystemTargets, then AuditTargets). */

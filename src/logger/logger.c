@@ -12,12 +12,16 @@
 #include "core/log.h"
 #include "core/timefmt.h"
 #include "notify/event.h"
+#include "notify/xnet.h"
+#include "logger/kafkatarget.h"
 #include <time.h>
 
 struct buckets_logger {
   pthread_rwlock_t lock;
   buckets_http_target **log, **audit;
   size_t nlog, naudit;
+  buckets_kafka_target **kafka; /* audit_kafka */
+  size_t nkafka;
 };
 
 buckets_logger *buckets_logger_new(void) {
@@ -31,10 +35,16 @@ static void free_targets(buckets_http_target **t, size_t n) {
   free(t);
 }
 
+static void free_kafka(buckets_kafka_target **t, size_t n) {
+  for (size_t i = 0; i < n; i++) buckets_kafka_target_free(t[i]);
+  free(t);
+}
+
 void buckets_logger_free(buckets_logger *l) {
   if (!l) return;
   free_targets(l->log, l->nlog);
   free_targets(l->audit, l->naudit);
+  free_kafka(l->kafka, l->nkafka);
   pthread_rwlock_destroy(&l->lock);
   free(l);
 }
@@ -152,23 +162,139 @@ static bool build(const buckets_config *cfg, const char *subsys, const char *pre
   return ok;
 }
 
+/* lookupAuditKafkaConfig and the target's validate/Init: the enabled
+ * audit_kafka targets, built (connected) into *out when out is not NULL. */
+static bool build_kafka(const buckets_config *cfg, const char *ca_file, buckets_kafka_target ***out, size_t *nout,
+                        bool strict, char *err, size_t errlen) {
+  if (!buckets_config_check_valid_keys(cfg, "audit_kafka", err, errlen)) return false;
+  char **names;
+  size_t nn = buckets_config_targets(cfg, "audit_kafka", &names);
+  bool ok = true;
+  for (size_t j = 0; j < nn && ok; j++) {
+    const char *tg = names[j];
+    char *en = get(cfg, "audit_kafka", tg, "enable");
+    int on = buckets_config_parse_bool(en);
+    free(en);
+    if (on < 0) {
+      snprintf(err, errlen, "audit_kafka:%s: invalid value for enable", tg);
+      ok = false;
+    }
+    if (on != 1) continue;
+    static const char *const keys[] = {"brokers", "topic", "sasl_username", "sasl_password", "sasl_mechanism",
+                                       "client_tls_cert", "client_tls_key", "tls_client_auth", "sasl", "tls",
+                                       "tls_skip_verify", "version", "queue_size", "queue_dir"};
+    enum { BROKERS, TOPIC, USER, PASS, MECH, CERT, KEY, CLIENTAUTH, SASL, TLS, SKIP, VERSION, QSIZE, QDIR, NK };
+    char *v[NK];
+    for (int i = 0; i < NK; i++) v[i] = get(cfg, "audit_kafka", tg, keys[i]);
+    char **brokers = NULL;
+    size_t nb = 0;
+    if (!*v[BROKERS]) {
+      snprintf(err, errlen, "kafka 'brokers' cannot be empty");
+      ok = false;
+    }
+    for (char *p = v[BROKERS]; ok && *p;) {
+      size_t l = strcspn(p, ",");
+      char one[512];
+      snprintf(one, sizeof(one), "%.*s", (int)l, p);
+      buckets_xnet_host h;
+      if (!buckets_xnet_parse_host(one, &h, err, errlen)) ok = false;
+      else {
+        char hs[300];
+        buckets_xnet_host_string(&h, hs, sizeof(hs));
+        brokers = buckets_xrealloc(brokers, (nb + 1) * sizeof(char *));
+        brokers[nb++] = buckets_xstrdup(hs);
+      }
+      p += l + (p[l] == ',');
+    }
+    char *end;
+    long qsize = 0;
+    if (ok) {
+      strtol(v[CLIENTAUTH], &end, 10);
+      if (!*v[CLIENTAUTH] || *end) {
+        snprintf(err, errlen, "strconv.Atoi: parsing \"%s\": invalid syntax", v[CLIENTAUTH]);
+        ok = false;
+      }
+    }
+    if (ok) {
+      qsize = strtol(v[QSIZE], &end, 10);
+      if (!*v[QSIZE] || *end) {
+        snprintf(err, errlen, "strconv.Atoi: parsing \"%s\": invalid syntax", v[QSIZE]);
+        ok = false;
+      } else if (qsize <= 0) {
+        snprintf(err, errlen, "invalid queue_size value");
+        ok = false;
+      }
+    }
+    int ver[4];
+    if (ok && *v[VERSION] && !buckets_kafka_parse_version(v[VERSION], ver, err, errlen)) ok = false;
+    if (ok && out) {
+      char name[160];
+      snprintf(name, sizeof(name), "audit-kafka-%s", tg);
+      buckets_kafka_target_cfg kc = {
+          .name = name,
+          .kafka = {.brokers = (const char *const *)brokers,
+                    .nbrokers = nb,
+                    .version = v[VERSION],
+                    .tls = strcmp(v[TLS], "on") == 0,
+                    .tls_skip_verify = strcmp(v[SKIP], "on") == 0,
+                    .ca_dir = ca_file,
+                    .client_cert = v[CERT],
+                    .client_key = v[KEY],
+                    .sasl = strcmp(v[SASL], "on") == 0,
+                    .sasl_user = v[USER],
+                    .sasl_pass = v[PASS],
+                    .sasl_mechanism = v[MECH]},
+          .topic = v[TOPIC],
+          .queue_size = (int)qsize,
+          .queue_dir = v[QDIR],
+      };
+      buckets_kafka_target *t = buckets_kafka_target_new(&kc, err, errlen);
+      if (!t && strict) ok = false;
+      else if (!t) buckets_log_warn("audit_kafka:%s: %s", tg, err); /* the other targets still start */
+      else {
+        *out = buckets_xrealloc(*out, (*nout + 1) * sizeof(**out));
+        (*out)[(*nout)++] = t;
+      }
+    }
+    for (size_t i = 0; i < nb; i++) free(brokers[i]);
+    free(brokers);
+    for (int i = 0; i < NK; i++) free(v[i]);
+  }
+  for (size_t j = 0; j < nn; j++) free(names[j]);
+  free(names);
+  return ok;
+}
+
+bool buckets_logger_validate_kafka(const buckets_config *cfg, char *err, size_t errlen) {
+  buckets_kafka_target **t = NULL;
+  size_t n = 0;
+  bool ok = build_kafka(cfg, NULL, &t, &n, true, err, errlen); /* Init connects, as MinIO's validation does */
+  free_kafka(t, n);
+  return ok;
+}
+
 bool buckets_logger_validate(const buckets_config *cfg, char *err, size_t errlen) {
   return build(cfg, "logger_webhook", "logger-", NULL, NULL, NULL, NULL, err, errlen) &&
-         build(cfg, "audit_webhook", "audit-", NULL, NULL, NULL, NULL, err, errlen);
+         build(cfg, "audit_webhook", "audit-", NULL, NULL, NULL, NULL, err, errlen) &&
+         build_kafka(cfg, NULL, NULL, NULL, true, err, errlen);
 }
 
 bool buckets_logger_configure(buckets_logger *l, const buckets_config *cfg, const char *subsys, const char *ca_file,
                               const char *deployment_id, char *err, size_t errlen) {
   bool do_log = !subsys || !*subsys || strcmp(subsys, "logger_webhook") == 0;
   bool do_audit = !subsys || !*subsys || strcmp(subsys, "audit_webhook") == 0;
+  bool do_kafka = !subsys || !*subsys || strcmp(subsys, "audit_kafka") == 0;
   buckets_http_target **nl = NULL, **na = NULL;
-  size_t nnl = 0, nna = 0;
+  buckets_kafka_target **nk = NULL;
+  size_t nnl = 0, nna = 0, nnk = 0;
   bool ok = true;
   if (do_log) ok = build(cfg, "logger_webhook", "logger-", ca_file, deployment_id, &nl, &nnl, err, errlen);
   if (ok && do_audit) ok = build(cfg, "audit_webhook", "audit-", ca_file, deployment_id, &na, &nna, err, errlen);
+  if (ok && do_kafka) ok = build_kafka(cfg, ca_file, &nk, &nnk, false, err, errlen);
   if (!ok) {
     free_targets(nl, nnl);
     free_targets(na, nna);
+    free_kafka(nk, nnk);
     return false;
   }
   pthread_rwlock_wrlock(&l->lock);
@@ -182,16 +308,23 @@ bool buckets_logger_configure(buckets_logger *l, const buckets_config *cfg, cons
     oa = l->audit, noa = l->naudit;
     l->audit = na, l->naudit = nna;
   }
+  buckets_kafka_target **ok_old = NULL;
+  size_t nok = 0;
+  if (do_kafka) {
+    ok_old = l->kafka, nok = l->nkafka;
+    l->kafka = nk, l->nkafka = nnk;
+  }
   pthread_rwlock_unlock(&l->lock);
   free_targets(ol, nol);
   free_targets(oa, noa);
+  free_kafka(ok_old, nok);
   return true;
 }
 
 bool buckets_logger_audit_enabled(buckets_logger *l) {
   if (!l) return false;
   pthread_rwlock_rdlock(&l->lock);
-  bool on = l->naudit > 0;
+  bool on = l->naudit > 0 || l->nkafka > 0;
   pthread_rwlock_unlock(&l->lock);
   return on;
 }
@@ -202,6 +335,7 @@ static void send_all(buckets_logger *l, bool audit, const char *json, size_t n) 
   buckets_http_target **t = audit ? l->audit : l->log;
   size_t k = audit ? l->naudit : l->nlog;
   for (size_t i = 0; i < k; i++) buckets_http_target_send(t[i], json, n);
+  for (size_t i = 0; audit && i < l->nkafka; i++) buckets_kafka_target_send(l->kafka[i], json, n);
   pthread_rwlock_unlock(&l->lock);
 }
 
@@ -212,14 +346,20 @@ size_t buckets_logger_targets(buckets_logger *l, buckets_logger_target_info **ou
   *out = NULL;
   if (!l) return 0;
   pthread_rwlock_rdlock(&l->lock);
-  size_t n = l->nlog + l->naudit;
+  size_t nh = l->nlog + l->naudit, n = nh + l->nkafka;
   buckets_logger_target_info *v = buckets_xcalloc(n ? n : 1, sizeof(*v));
-  for (size_t i = 0; i < n; i++) {
+  for (size_t i = 0; i < nh; i++) {
     buckets_http_target *t = i < l->nlog ? l->log[i] : l->audit[i - l->nlog];
     snprintf(v[i].name, sizeof(v[i].name), "%s", buckets_http_target_name(t));
     snprintf(v[i].endpoint, sizeof(v[i].endpoint), "%s", buckets_http_target_endpoint(t));
     v[i].audit = i >= l->nlog;
     buckets_http_target_stats_get(t, &v[i].st);
+  }
+  for (size_t i = 0; i < l->nkafka; i++) { /* Name() and Endpoint() of MinIO's Kafka audit target */
+    snprintf(v[nh + i].name, sizeof(v[nh + i].name), "minio-kafka-audit");
+    snprintf(v[nh + i].endpoint, sizeof(v[nh + i].endpoint), "kafka");
+    v[nh + i].audit = v[nh + i].kafka = true;
+    buckets_kafka_target_stats_get(l->kafka[i], &v[nh + i].st);
   }
   pthread_rwlock_unlock(&l->lock);
   *out = v;

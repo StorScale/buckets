@@ -17,22 +17,7 @@
 #define MAX_ECONFIG_JSON 262272
 
 static void json_error(s3_ctx *c, int status, const char *code, const char *message) {
-  yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
-  yyjson_mut_val *root = yyjson_mut_obj(d);
-  yyjson_mut_doc_set_root(d, root);
-  yyjson_mut_obj_add_strcpy(d, root, "Code", code);
-  yyjson_mut_obj_add_strcpy(d, root, "Message", message);
-  yyjson_mut_obj_add_strcpy(d, root, "Resource", c->path ? c->path : "/");
-  yyjson_mut_obj_add_str(d, root, "RequestId", c->request_id);
-  yyjson_mut_obj_add_str(d, root, "HostId", c->s->host_id);
-  size_t len;
-  char *json = yyjson_mut_write(d, 0, &len);
-  c->resp->status = status;
-  buckets_http_resp_header(c->resp, "Content-Type", "application/json");
-  buckets_buf_reset(&c->resp->body);
-  buckets_buf_append(&c->resp->body, json, len);
-  free(json);
-  yyjson_mut_doc_free(d);
+  buckets_admin_json_error(c, status, code, message, NULL, NULL);
 }
 
 /* ErrConfigGeneric: 400 XMinioConfigError. */
