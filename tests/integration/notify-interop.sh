@@ -25,6 +25,7 @@ cleanup() {
 }
 trap cleanup EXIT
 export MINIO_ROOT_USER=rootadmin MINIO_ROOT_PASSWORD=rootsecret123
+export MINIO_SCANNER_SPEED=fastest # lifecycle expiry events
 export MINIO_NOTIFY_WEBHOOK_ENABLE_primary=on
 export MINIO_NOTIFY_WEBHOOK_ENDPOINT_primary="http://127.0.0.1:$SINK_PORT/hook"
 export MINIO_NOTIFY_WEBHOOK_AUTH_TOKEN_primary=sinktoken
@@ -50,21 +51,7 @@ start() { # minio|buckets drives-dir
 stop() { kill "$PID"; wait "$PID" 2>/dev/null || true; PID=; }
 
 # Volatile values out; the rest (key order, escaping, spacing) stays as sent.
-normalize() {
-  python3 -c '
-import re, sys
-ids = {}
-def nid(m):
-    ids.setdefault(m.group(0), "V%d" % (len(ids) + 1))
-    return ids[m.group(0)]
-for line in sys.stdin:
-    line = re.sub(r"\"eventTime\":\"[^\"]*\"", "\"eventTime\":\"(t)\"", line)
-    line = re.sub(r"\"sequencer\":\"[0-9A-F]+\"", "\"sequencer\":\"(seq)\"", line)
-    line = re.sub(r"\"(x-amz-request-id|x-amz-id-2|x-minio-deployment-id)\":\"[^\"]*\"", r"\"\1\":\"(v)\"", line)
-    line = re.sub(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", nid, line)
-    sys.stdout.write(line)
-'
-}
+normalize() { python3 "$HERE/notify/normalize.py"; }
 
 EVENTS="events=s3:ObjectCreated:*&events=s3:ObjectRemoved:*&events=s3:ObjectAccessed:*&events=s3:BucketCreated:*&events=s3:BucketRemoved:*"
 for kind in minio buckets; do

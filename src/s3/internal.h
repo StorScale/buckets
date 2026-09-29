@@ -79,6 +79,10 @@ void buckets_s3_send_event(s3_ctx *c, int event_name, const char *bucket, const 
  * (PutObject, a no-op delete): no content-length element. */
 void buckets_s3_send_event_early(s3_ctx *c, int event_name, const char *bucket, const char *object,
                                  const buckets_object_info *oi, const char *version_id);
+/* An event without a request (lifecycle expiry): no request parameters,
+ * this node as the source host. */
+void buckets_s3_send_internal_event(buckets_s3_server *s, int event_name, const char *bucket, const char *object,
+                                    const buckets_object_info *oi, const char *version_id, const char *user_agent);
 
 /* The bucket's versioning as it applies to object (PrefixEnabled / PrefixSuspended). */
 void buckets_s3_versioning(s3_ctx *c, const char *object, bool *enabled, bool *suspended);

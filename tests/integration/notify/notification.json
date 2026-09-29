@@ -313,6 +313,46 @@
   "label": "get attributes"
  },
  {
+  "method": "PUT",
+  "path": "/nilm",
+  "label": "ilm bucket"
+ },
+ {
+  "method": "PUT",
+  "path": "/nilm",
+  "query": "notification",
+  "body": "<NotificationConfiguration><QueueConfiguration><Queue>arn:minio:sqs::primary:webhook</Queue><Event>s3:ObjectRemoved:*</Event></QueueConfiguration></NotificationConfiguration>",
+  "label": "ilm config"
+ },
+ {
+  "method": "PUT",
+  "path": "/nilm/old/x.txt",
+  "body": "expire me",
+  "label": "ilm put"
+ },
+ {
+  "method": "PUT",
+  "path": "/nilm/new/y.txt",
+  "body": "keep me",
+  "label": "ilm put kept"
+ },
+ {
+  "method": "PUT",
+  "path": "/nilm",
+  "query": "lifecycle",
+  "md5": true,
+  "body": "<LifecycleConfiguration><Rule><ID>x</ID><Status>Enabled</Status><Filter><Prefix>old/</Prefix></Filter><Expiration><Date>2020-01-01T00:00:00Z</Date></Expiration></Rule></LifecycleConfiguration>",
+  "label": "ilm lifecycle"
+ },
+ {
+  "sleep": 20
+ },
+ {
+  "method": "GET",
+  "path": "/nilm",
+  "label": "ilm listing"
+ },
+ {
   "sleep": 1
  }
 ]

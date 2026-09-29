@@ -132,12 +132,14 @@ size_t buckets_notifier_arns(buckets_notifier *n, const char *region, char ***ou
   return k;
 }
 
-size_t buckets_notifier_target_info_get(buckets_notifier *n, const char *region, buckets_notifier_target_info **out) {
+size_t buckets_notifier_target_info_get(buckets_notifier *n, const char *region, bool check,
+                                        buckets_notifier_target_info **out) {
   pthread_rwlock_rdlock(&n->lock);
   buckets_notifier_target_info *v = buckets_xcalloc(n->ntargets ? n->ntargets : 1, sizeof(*v));
   for (size_t i = 0; i < n->ntargets; i++) {
     const buckets_target_id *id = buckets_target_id_of(n->targets[i]);
     snprintf(v[i].arn, sizeof(v[i].arn), "arn:minio:sqs:%s:%s:%s", region ? region : "", id->id, id->type);
+    if (check) buckets_target_is_active(n->targets[i]);
     buckets_target_stats_get(n->targets[i], &v[i].st);
   }
   size_t k = n->ntargets;

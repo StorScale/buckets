@@ -26,7 +26,9 @@ typedef struct {
   const buckets_event_kv *user_meta; /* user-defined metadata, internal keys removed */
   size_t nuser_meta;
   int64_t mod_time_ns;      /* 0: the sequencer uses the event time */
-  /* request parameters (extractReqParams) */
+  /* request parameters (extractReqParams); none for internal events
+   * (lifecycle expiry), which MinIO sends as null */
+  bool no_request;
   const char *region, *principal, *source_ip, *range;
   /* response elements (extractRespElements) and the server */
   const char *request_id, *host_id, *content_length;
@@ -40,9 +42,9 @@ typedef struct {
  * time. */
 void buckets_event_json(const buckets_event_args *a, bool escape_key, int64_t now_ns, buckets_buf *out);
 
-/* Go's json string encoding (HTML-safe, invalid UTF-8 as U+FFFD), quoted. */
 /* utf8.ValidString */
 bool buckets_utf8_valid(const char *s, size_t n);
+/* Go's json string encoding (HTML-safe, invalid UTF-8 as U+FFFD), quoted. */
 void buckets_json_go_string(buckets_buf *out, const char *s, size_t n);
 
 /* url.QueryEscape */

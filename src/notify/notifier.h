@@ -32,7 +32,9 @@ typedef struct {
   char arn[256];
   buckets_target_stats st;
 } buckets_notifier_target_info;
-size_t buckets_notifier_target_info_get(buckets_notifier *n, const char *region, buckets_notifier_target_info **out);
+/* check: probe each target (IsActive) rather than report the last delivery. */
+size_t buckets_notifier_target_info_get(buckets_notifier *n, const char *region, bool check,
+                                        buckets_notifier_target_info **out);
 
 /* sendEvent: to the listeners, and to the targets bucket_cfg selects (may
  * be NULL: listeners only). */

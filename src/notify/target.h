@@ -21,6 +21,8 @@ typedef struct {
   buckets_send_result (*send)(void *impl, const char *record, size_t n, const char *event_name, const char *key, char *err,
                               size_t errlen);
   void (*free)(void *impl);
+  /* Target.IsActive: a live check (NULL: assumed up). */
+  bool (*is_active)(void *impl);
 } buckets_target_ops;
 
 typedef struct buckets_target buckets_target;
@@ -41,5 +43,7 @@ typedef struct {
   bool online;
 } buckets_target_stats;
 void buckets_target_stats_get(buckets_target *t, buckets_target_stats *out);
+/* Checks the target now (may block for seconds). */
+bool buckets_target_is_active(buckets_target *t);
 
 #endif

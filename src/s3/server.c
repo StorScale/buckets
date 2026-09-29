@@ -462,13 +462,24 @@ static bool version_locked(const buckets_object_info *oi, int64_t now_ns) {
   return false;
 }
 
-static void expire(buckets_s3_server *s, const char *bucket, const char *object, const char *version_id,
-                   bool enabled, bool suspended) {
+static bool expire(buckets_s3_server *s, const char *bucket, const char *object, const char *version_id,
+                   bool enabled, bool suspended, buckets_delete_result *r) {
   buckets_delete_opts o = {.version_id = version_id, .versioned = enabled, .suspended = suspended};
-  buckets_delete_result r;
-  buckets_obj_err err = buckets_obj_delete_ex(s->layer, bucket, object, &o, &r);
+  buckets_obj_err err = buckets_obj_delete_ex(s->layer, bucket, object, &o, r);
   if (err && err != BUCKETS_OBJ_ERR_NO_SUCH_KEY && err != BUCKETS_OBJ_ERR_NO_SUCH_VERSION)
     buckets_log_warn("lifecycle: expiring %s/%s: %s", bucket, object, buckets_obj_strerror(err));
+  return !err;
+}
+
+#define ILM_EXPIRY_UA "Internal: [ILM-Expiry]"
+
+/* applyExpiryOnNonTransitionedObjects' event: named after the version the
+ * rule matched (so an expired latest version in a versioned bucket reports
+ * Delete, though a marker was made), about what the delete returned. */
+static void expiry_event(buckets_s3_server *s, const char *bucket, const buckets_object_info *matched,
+                         const buckets_delete_result *r) {
+  int ev = matched->delete_marker ? BUCKETS_EV_OBJECT_REMOVED_DELETE_MARKER_CREATED : BUCKETS_EV_OBJECT_REMOVED_DELETE;
+  buckets_s3_send_internal_event(s, ev, bucket, matched->name, NULL, r->version_id, ILM_EXPIRY_UA);
 }
 
 /* The scanner's lifecycle step (scannerItem.applyActions): evaluate every
@@ -506,21 +517,35 @@ static void scanner_object(void *ud, const char *bucket, const buckets_object_in
   for (size_t i = 0; i < n; i++) {
     switch (ev[i].action) {
     case BUCKETS_LC_DELETE_ALL_VERSIONS:
-    case BUCKETS_LC_DELMARKER_DELETE_ALL_VERSIONS:
+    case BUCKETS_LC_DELMARKER_DELETE_ALL_VERSIONS: {
+      buckets_delete_result r;
+      bool any = false;
       for (size_t j = 0; j < n; j++) {
-        expire(s, bucket, name, v[j].version_id, false, false);
+        any |= expire(s, bucket, name, v[j].version_id, false, false, &r);
         removed[j] = true;
       }
+      /* one event, about the version the rule matched */
+      if (any)
+        buckets_s3_send_internal_event(s,
+                                       ev[i].action == BUCKETS_LC_DELETE_ALL_VERSIONS
+                                           ? BUCKETS_EV_OBJECT_REMOVED_DELETE_ALL_VERSIONS
+                                           : BUCKETS_EV_ILM_DEL_MARKER_EXPIRATION_DELETE,
+                                       bucket, name, &v[i], v[i].version_id, ILM_EXPIRY_UA);
       i = n;
       break;
-    case BUCKETS_LC_DELETE:
+    }
+    case BUCKETS_LC_DELETE: {
+      buckets_delete_result r;
       if (!enabled) removed[i] = true; /* a versioned bucket only gains a marker */
-      expire(s, bucket, name, NULL, enabled, suspended);
+      if (expire(s, bucket, name, NULL, enabled, suspended, &r)) expiry_event(s, bucket, &v[i], &r);
       break;
-    case BUCKETS_LC_DELETE_VERSION:
-      expire(s, bucket, name, v[i].version_id, false, false);
+    }
+    case BUCKETS_LC_DELETE_VERSION: {
+      buckets_delete_result r;
+      if (expire(s, bucket, name, v[i].version_id, false, false, &r)) expiry_event(s, bucket, &v[i], &r);
       removed[i] = true;
       break;
+    }
     default: break;
     }
   }

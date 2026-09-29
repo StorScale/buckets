@@ -136,13 +136,17 @@ void buckets_event_json(const buckets_event_args *a, bool escape_key, int64_t no
   buckets_buf_append_c(out, ",\"userIdentity\":{\"principalId\":");
   jstr(out, a->principal);
   buckets_buf_append_c(out, "},\"requestParameters\":");
-  buckets_event_kv req[4];
-  size_t nreq = 0;
-  req[nreq++] = (buckets_event_kv){"principalId", a->principal ? a->principal : ""};
-  req[nreq++] = (buckets_event_kv){"region", a->region ? a->region : ""};
-  req[nreq++] = (buckets_event_kv){"sourceIPAddress", a->source_ip ? a->source_ip : ""};
-  if (a->range && *a->range) req[nreq++] = (buckets_event_kv){"range", a->range};
-  jmap(out, req, nreq);
+  if (a->no_request) {
+    buckets_buf_append_c(out, "null");
+  } else {
+    buckets_event_kv req[4];
+    size_t nreq = 0;
+    req[nreq++] = (buckets_event_kv){"principalId", a->principal ? a->principal : ""};
+    req[nreq++] = (buckets_event_kv){"region", a->region ? a->region : ""};
+    req[nreq++] = (buckets_event_kv){"sourceIPAddress", a->source_ip ? a->source_ip : ""};
+    if (a->range && *a->range) req[nreq++] = (buckets_event_kv){"range", a->range};
+    jmap(out, req, nreq);
+  }
   buckets_buf_append_c(out, ",\"responseElements\":");
   buckets_event_kv resp[5];
   size_t nresp = 0;

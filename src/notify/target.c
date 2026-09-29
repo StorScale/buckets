@@ -359,3 +359,11 @@ void buckets_target_stats_get(buckets_target *t, buckets_target_stats *out) {
   pthread_mutex_unlock(&t->mu);
   if (t->store_dir) out->queued = store_count(t->store_dir);
 }
+
+bool buckets_target_is_active(buckets_target *t) {
+  bool up = !t->ops->is_active || t->ops->is_active(t->impl);
+  pthread_mutex_lock(&t->mu);
+  t->st.online = up;
+  pthread_mutex_unlock(&t->mu);
+  return up;
+}

@@ -6,6 +6,7 @@
 #include <string.h>
 #include <strings.h>
 
+#include "admin/info.h"
 #include "bucket/metasys.h"
 #include "bucket/notification.h"
 #include "notify/notifier.h"
@@ -84,11 +85,11 @@ static bool reserved(const char *k, const char *v) {
 }
 
 static void send_event(s3_ctx *c, int event_name, const char *bucket, const char *object, const buckets_object_info *oi,
-                       const char *version_id, bool written) {
+                       const char *version_id, bool written, const char *internal_ua) {
   buckets_notifier *n = c->s->notifier;
   if (!n || !c->s->meta) return;
   /* no events for replica writes (sendEvent) */
-  if (buckets_http_header_get(c->req, "X-Minio-Source-Replication-Request").p) return;
+  if (c->req && buckets_http_header_get(c->req, "X-Minio-Source-Replication-Request").p) return;
   /* a bucket just created or removed has no rules: only listeners hear it */
   bool bucket_ev = event_name == BUCKETS_EV_BUCKET_CREATED || event_name == BUCKETS_EV_BUCKET_REMOVED;
   buckets_bucket_state *st = bucket_ev ? NULL : buckets_metasys_get(c->s->meta, bucket);
@@ -97,10 +98,14 @@ static void send_event(s3_ctx *c, int event_name, const char *bucket, const char
     buckets_bucket_state_release(st);
     return;
   }
-  char ip[128];
-  buckets_s3_source_ip(c->req, ip, sizeof(ip));
-  buckets_str range = buckets_http_header_get(c->req, "Range"), ua = buckets_http_header_get(c->req, "User-Agent");
-  char *range_s = range.p ? buckets_str_dup(range) : NULL, *ua_s = ua.p ? buckets_str_dup(ua) : NULL;
+  char ip[128] = "";
+  char *range_s = NULL, *ua_s = NULL;
+  if (c->req) {
+    buckets_s3_source_ip(c->req, ip, sizeof(ip));
+    buckets_str range = buckets_http_header_get(c->req, "Range"), ua = buckets_http_header_get(c->req, "User-Agent");
+    range_s = range.p ? buckets_str_dup(range) : NULL;
+    ua_s = ua.p ? buckets_str_dup(ua) : NULL;
+  }
   buckets_event_kv *meta = NULL;
   size_t nmeta = 0;
   char etag[128] = "", vid[64] = "", clen[32] = "";
@@ -121,7 +126,7 @@ static void send_event(s3_ctx *c, int event_name, const char *bucket, const char
   }
   if (version_id && *version_id && strcmp(version_id, "null") != 0) snprintf(vid, sizeof(vid), "%s", version_id);
   /* the Content-Length written (writeResponse sets "0" on empty bodies) */
-  if (written)
+  if (written && c->resp)
     snprintf(clen, sizeof(clen), "%lld",
              c->resp->content_length >= 0 ? (long long)c->resp->content_length : (long long)c->resp->body.len);
   buckets_objlayer *L = c->s->layer;
@@ -136,17 +141,19 @@ static void send_event(s3_ctx *c, int event_name, const char *bucket, const char
       .user_meta = meta,
       .nuser_meta = nmeta,
       .mod_time_ns = mod,
-      .region = c->s->region,
-      .principal = principal(c),
+      .no_request = internal_ua != NULL,
+      .region = internal_ua ? "" : c->s->region,
+      .principal = internal_ua ? "" : principal(c),
       .source_ip = ip,
       .range = range_s,
       .request_id = c->request_id,
-      .host_id = c->s->host_id,
+      .host_id = internal_ua ? "" : c->s->host_id,
       .content_length = clen,
       .origin_endpoint = c->s->endpoint,
       .deployment_id = L ? L->deployment_id_str : "",
-      .host = ip,
-      .user_agent = ua_s ? ua_s : "",
+      /* internal events: globalLocalNodeName */
+      .host = internal_ua ? (c->s->cluster && c->s->cluster->self ? c->s->cluster->self : "") : ip,
+      .user_agent = internal_ua ? internal_ua : ua_s ? ua_s : "",
   };
   buckets_notifier_send(n, cfg, &a);
   buckets_bucket_state_release(st);
@@ -157,12 +164,12 @@ static void send_event(s3_ctx *c, int event_name, const char *bucket, const char
 
 void buckets_s3_send_event(s3_ctx *c, int event_name, const char *bucket, const char *object, const buckets_object_info *oi,
                            const char *version_id) {
-  send_event(c, event_name, bucket, object, oi, version_id, true);
+  send_event(c, event_name, bucket, object, oi, version_id, true, NULL);
 }
 
 void buckets_s3_send_event_early(s3_ctx *c, int event_name, const char *bucket, const char *object,
                                  const buckets_object_info *oi, const char *version_id) {
-  send_event(c, event_name, bucket, object, oi, version_id, false);
+  send_event(c, event_name, bucket, object, oi, version_id, false, NULL);
 }
 
 /* event.ValidateFilterRuleValue */
@@ -258,4 +265,10 @@ void buckets_s3_listen_notification(s3_ctx *c) {
   c->resp->stream = buckets_listener_read;
   c->resp->stream_ud = l;
   c->resp->stream_free = buckets_listener_free;
+}
+
+void buckets_s3_send_internal_event(buckets_s3_server *s, int event_name, const char *bucket, const char *object,
+                                    const buckets_object_info *oi, const char *version_id, const char *user_agent) {
+  s3_ctx c = {.s = s};
+  send_event(&c, event_name, bucket, object, oi, version_id, false, user_agent);
 }

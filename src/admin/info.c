@@ -3,6 +3,7 @@
  * plus every peer's ServerProperties. Replaces MinIO's getServerInfo and
  * getLocalServerProperty (cmd/admin-handlers.go, cmd/admin-server-info.go). */
 #include "admin/info.h"
+#include "notify/notifier.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -156,6 +157,13 @@ void buckets_admin_server_info(s3_ctx *c) {
   yyjson_mut_doc_set_root(d, root);
   yyjson_mut_obj_add_str(d, root, "mode", L ? "online" : "initializing");
   if (*s->region) yyjson_mut_obj_add_str(d, root, "region", s->region);
+  /* sqsARN: the notification targets */
+  buckets_notifier_target_info *tinfo = NULL;
+  size_t ntinfo = s->notifier ? buckets_notifier_target_info_get(s->notifier, s->region, true, &tinfo) : 0;
+  if (ntinfo) {
+    yyjson_mut_val *arns = yyjson_mut_obj_add_arr(d, root, "sqsARN");
+    for (size_t i = 0; i < ntinfo; i++) yyjson_mut_arr_add_strcpy(d, arns, tinfo[i].arn);
+  }
   if (L) yyjson_mut_obj_add_str(d, root, "deploymentID", L->deployment_id_str);
 
   /* Servers: the peers' own reports (or offline stand-ins), then ours. */
@@ -186,7 +194,35 @@ void buckets_admin_server_info(s3_ctx *c) {
   yyjson_mut_obj_add_obj(d, root, "versions");
   yyjson_mut_obj_add_obj(d, root, "deletemarkers");
   yyjson_mut_obj_add_obj(d, root, "usage");
-  yyjson_mut_obj_add_obj(d, root, "services");
+  yyjson_mut_val *services = yyjson_mut_obj_add_obj(d, root, "services");
+  /* notifications: [{"<type>": [{"<id>": {"status": "online"}}, ...]}, ...] (fetchLambdaInfo) */
+  if (ntinfo) {
+    yyjson_mut_val *notif = yyjson_mut_obj_add_arr(d, services, "notifications");
+    for (size_t i = 0; i < ntinfo; i++) {
+      /* arn:minio:sqs:<region>:<id>:<type> */
+      char *type = strrchr(tinfo[i].arn, ':');
+      if (!type) continue;
+      char *id_end = type, *id = id_end - 1;
+      while (id > tinfo[i].arn && *(id - 1) != ':') id--;
+      char tid[256];
+      snprintf(tid, sizeof(tid), "%.*s", (int)(id_end - id), id);
+      yyjson_mut_val *group = NULL;
+      size_t gi, gmax;
+      yyjson_mut_val *gv;
+      yyjson_mut_arr_foreach(notif, gi, gmax, gv) {
+        if (yyjson_mut_obj_get(gv, type + 1)) group = yyjson_mut_obj_get(gv, type + 1);
+      }
+      if (!group) {
+        group = yyjson_mut_arr(d);
+        yyjson_mut_obj_add(yyjson_mut_arr_add_obj(d, notif), yyjson_mut_strcpy(d, type + 1), group);
+      }
+      yyjson_mut_val *st = yyjson_mut_obj(d);
+      yyjson_mut_obj_add_str(d, st, "status", tinfo[i].st.online ? "online" : "offline");
+      yyjson_mut_val *entry = yyjson_mut_arr_add_obj(d, group);
+      yyjson_mut_obj_add(entry, yyjson_mut_strcpy(d, tid), st);
+    }
+  }
+  free(tinfo);
 
   /* Backend: drives by state, and each pool's shape. */
   size_t online = 0, offline = 0;
