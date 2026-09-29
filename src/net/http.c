@@ -1111,7 +1111,12 @@ int buckets_http_server_port(const buckets_http_server *srv) { return srv->port;
 
 void buckets_http_server_free(buckets_http_server *srv) {
   if (!srv) return;
-  while (srv->conns) conn_close(srv->conns);
+  /* The worker pools are gone by now: a fill still marked in flight will
+   * never come back (its completion is never run), so close regardless. */
+  while (srv->conns) {
+    srv->conns->fill_inflight = false;
+    conn_close(srv->conns);
+  }
   if (srv->listen_fd >= 0) close(srv->listen_fd);
   free(srv);
 }

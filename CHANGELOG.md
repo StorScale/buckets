@@ -73,6 +73,7 @@ All notable changes to this project are documented here. The format follows
 - Response headers MinIO writes in lowercase (`x-amz-version-id`, `x-amz-delete-marker`, `x-amz-mp-parts-count`, `x-amz-copy-source-version-id`) are written that way, `Vary` comes as separate headers as MinIO sends it, and S3 responses carry MinIO's `X-Ratelimit-Limit` and `X-Ratelimit-Remaining` (the API workers and how many are free).
 
 ### Fixed
+- The server could spin forever while stopping when a streamed reply (trace, logs, event listening) was being refilled at that moment; it now closes such connections.
 - Admin JSON errors are written as MinIO's writeErrorResponseJSON writes them: Go's escaping (`>` as `\u003e`), a trailing newline, and the deployment ID as `HostId`.
 - The configuration's validators could be dropped silently once more than 16 were registered (notify_elasticsearch's was); the limit is higher and exceeding it now fails loudly.
 - `tests/integration/notify-interop.sh` no longer fails now and then on the order of one DeleteObjects request's events: both servers hand events to several send workers, so the records of one request are compared in key order.
