@@ -73,7 +73,7 @@ All notable changes to this project are documented here. The format follows
 ### Fixed
 - Admin JSON errors are written as MinIO's writeErrorResponseJSON writes them: Go's escaping (`>` as `\u003e`), a trailing newline, and the deployment ID as `HostId`.
 - The configuration's validators could be dropped silently once more than 16 were registered (notify_elasticsearch's was); the limit is higher and exceeding it now fails loudly.
-- `tests/integration/notify-targets.sh` no longer fails now and then on the order of one DeleteObjects request's events: both servers hand events to several send workers, so the records of one request are compared in key order.
+- `tests/integration/notify-interop.sh` no longer fails now and then on the order of one DeleteObjects request's events: both servers hand events to several send workers, so the records of one request are compared in key order.
 - A log message at exit (after the server's log targets were freed) no longer touches them.
 - CopyObject now gives the copy a checksum as MinIO does: the algorithm asked for with `x-amz-checksum-algorithm` (an unknown one is ignored), else the source's (a composite multipart one is computed again whole), else a CRC64NVME computed on the way; the response carries the ETag and the checksum. CompleteMultipartUpload's response carries the ETag header. New s3diff scenario `copy`.
 - MRF healing no longer drops an object healed while one of its drives is still offline, which left that drive's copy unwritten once it came back: such entries, and ones that fail with a passing error, are retried with backoff (up to 20 times, about a quarter of an hour) instead of three times at once.
