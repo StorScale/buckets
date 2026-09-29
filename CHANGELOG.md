@@ -18,6 +18,13 @@ All notable changes to this project are documented here. The format follows
 - Streaming decompression (`src/compress/stream.c`: zlib, bzip2, zstd, LZ4 built from source) shared by S3 Select and snowball uploads.
 - Snowball uploads (PutObjectExtract) of gzip, bzip2, zstd and LZ4 archives, as well as S2 and plain tar; `tests/integration/snowball.sh`.
 - Files inside zip objects (`x-minio-extract: true`): GET and HEAD of `archive.zip/path/in/zip` and ListObjectsV2 under such a prefix, from MinIO's zipindex of the archive's central directory (zip64, stored/deflate/zstd entries, data descriptors, CRCs checked), kept in `x-minio-internal-archive-info` in all four of zipindex's forms and sealed for SSE-S3/KMS objects as MinIO seals it, so each server reads the other's; indexed at upload with the header too. Content types as Go's `mime` table and `net/http` sniffing give them. `tests/integration/zip.sh` compares with MinIO and swaps the servers' drives.
+- `mc admin heal` (`POST /minio/admin/v3/heal/[bucket[/prefix]]`): heal sequences as MinIO's admin-heal-ops runs them -- the config prefix and the buckets newest first, one result item per bucket and object version with each drive's state before and after, dry runs, deep scans, pool/set filters, collected by client token (a sequence waits once 1000 items are uncollected), force start/stop, already-running and overlapping-path errors; in a cluster the token names the node running the sequence and other nodes forward status requests there.
+- StorageInfo and BackgroundHealStatus, with MinIO's per-drive `apiCalls`/`lastMinute` metrics and the heal tracker of a drive being healed; ServerInfo returns drive metrics with `?metrics=true`.
+- `mc admin top locks` and `mc admin unlock` in distributed setups: lock servers record who holds what (owner, quorum, source, time), and one node holds the cluster leader lock (`.minio.sys/leader.lock`) as MinIO's does.
+- `tests/integration/adminops.sh` (single node) and `adminops-dist.sh` (4 nodes) compare these admin APIs with MinIO.
+
+### Changed
+- Unknown admin API routes, and known routes with another method, answer 426 XMinioAdminVersionMismatch as MinIO does.
 
 ### Fixed
 - ListObjects (V1 and V2) elements are in MinIO's order (NextContinuationToken before KeyCount, NextMarker after Marker, EncodingType last).

@@ -15,6 +15,18 @@ void buckets_admin_json_error(s3_ctx *c, int status, const char *code, const cha
 
 /* ServerInfo (info.c). */
 void buckets_admin_server_info(s3_ctx *c);
+void buckets_admin_storage_info(s3_ctx *c);
+void buckets_admin_background_heal_status(s3_ctx *c);
+/* mc admin heal (heal.c); the peer side of a status request forwarded to
+ * the node running a sequence; stopping every sequence at shutdown. */
+void buckets_admin_heal(s3_ctx *c);
+void buckets_admin_heal_peer(buckets_s3_server *s, const buckets_query *q, int *status, buckets_buf *out);
+void buckets_admin_heal_shutdown(void);
+/* mc admin top locks, mc admin unlock (locks.c; distributed setups only). */
+void buckets_admin_top_locks(s3_ctx *c);
+void buckets_admin_force_unlock(s3_ctx *c);
+/* The answer to an admin API this setup does not serve (XMinioAdminVersionMismatch). */
+void buckets_admin_unsupported(s3_ctx *c);
 
 /* mc admin config (config.c). */
 void buckets_admin_config_get_kv(s3_ctx *c);

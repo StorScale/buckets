@@ -101,6 +101,11 @@ STATUS = {
     "SetConfigHandler": (DONE, ""),
     "ServerInfoHandler": (PARTIAL, "usage figures wait for the scanner"),
     "ServiceHandler": (DONE, ""),
+    "HealHandler": (DONE, ""),
+    "BackgroundHealStatusHandler": (DONE, ""),
+    "StorageInfoHandler": (DONE, ""),
+    "TopLocksHandler": (DONE, ""),
+    "ForceUnlockHandler": (DONE, ""),
     "ServiceV2Handler": (DONE, ""),
     # STS
     "AssumeRole": (DONE, ""),

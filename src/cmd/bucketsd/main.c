@@ -23,6 +23,7 @@
 #include "dist/endpoint.h"
 #include "dist/internode.h"
 #include "dist/peer.h"
+#include "admin/admin.h"
 #include "admin/info.h"
 #include "dist/storage_server.h"
 #include "storage/remote.h"
@@ -391,6 +392,47 @@ typedef struct {
   atomic_bool stop;
 } boot_state;
 
+/* The cluster's leader lock (MinIO's globalLeaderLock, a sharedLock on
+ * .minio.sys/leader.lock): one node holds it for good, and another takes
+ * it over if that node goes away and its lock expires. */
+typedef struct {
+  buckets_dsync *d;
+  atomic_bool stop, held;
+  pthread_t thread;
+  bool started;
+} leader_lock;
+static leader_lock g_leader;
+
+static void *leader_run(void *arg) {
+  leader_lock *l = arg;
+  while (!atomic_load(&l->stop)) {
+    void *h = buckets_dsync_lock_src(l->d, BUCKETS_META_BUCKET "/leader.lock", true, 2000,
+                                     "[shared-lock.go:38:sharedLock.backgroundRoutine()]");
+    if (!h) continue;
+    atomic_store(&l->held, true);
+    while (!atomic_load(&l->stop)) {
+      struct timespec ts = {0, 100000000L};
+      nanosleep(&ts, NULL);
+    }
+    atomic_store(&l->held, false);
+    buckets_dsync_unlock(l->d, h);
+  }
+  return NULL;
+}
+
+static void leader_start(leader_lock *l, buckets_dsync *d) {
+  l->d = d;
+  if (pthread_create(&l->thread, NULL, leader_run, l) != 0) buckets_fatal("start leader lock");
+  l->started = true;
+}
+
+static void leader_stop(leader_lock *l) {
+  if (!l->started) return;
+  atomic_store(&l->stop, true);
+  pthread_join(l->thread, NULL);
+  l->started = false;
+}
+
 static void *dsync_lock_fn(void *ud, const char *res, bool write, int timeout_ms) {
   return buckets_dsync_lock(ud, res, write, timeout_ms);
 }
@@ -685,7 +727,7 @@ int main(int argc, char **argv) {
   peer_handlers = (buckets_peer_handlers){buckets_s3_peer_iam, buckets_s3_peer_bucket, buckets_s3_peer_server_info,
                                           buckets_s3_peer_metrics, buckets_s3_peer_listen, &s3,
                                           buckets_s3_peer_tier_stats, buckets_s3_peer_batch_metrics,
-                                          buckets_s3_peer_datamove};
+                                          buckets_s3_peer_datamove, buckets_s3_peer_admin};
   if (topo.distributed) {
     internode_pool = buckets_pool_new((int)BUCKETS_MAX(16L, 2 * ncpu));
     storage_srv = buckets_storage_server_new(topo.local_drives, topo.nlocal);
@@ -743,6 +785,8 @@ int main(int argc, char **argv) {
   buckets_trace_set_node(s3.cluster->self);
   if (topo.distributed) {
     topology_connect(&topo);
+    buckets_dsync_set_owner(topo.dsync, s3.cluster->self); /* globalLocalNodeName */
+    leader_start(&g_leader, topo.dsync);
     buckets_http_client **pc = buckets_xcalloc(topo.npeers ? topo.npeers : 1, sizeof(*pc));
     for (size_t i = 0; i < topo.npeers; i++) pc[i] = topo.peers[i].client;
     s3.peers = buckets_peer_sys_new(pc, topo.npeers);
@@ -787,6 +831,8 @@ int main(int argc, char **argv) {
   buckets_pool_free(api_pool); /* finishes in-flight handlers before their connections go */
   buckets_pool_free(control_pool);
   buckets_pool_free(internode_pool);
+  buckets_admin_heal_shutdown(); /* heal sequences use the object layer */
+  leader_stop(&g_leader);
   buckets_s3_server_stop(&s3); /* its background threads use the object layer */
   buckets_http_server_free(app.http);
   buckets_tls_free(tls);

@@ -25,6 +25,7 @@ typedef struct {
 typedef struct buckets_drive_stats {
   pthread_mutex_t mu;
   slot win[BUCKETS_DOP__N][60];
+  uint64_t total[BUCKETS_DOP__N]; /* calls since start */
   _Atomic uint64_t err_avail, err_timeout;
   _Atomic int64_t waiting;
 } dstats;
@@ -75,6 +76,7 @@ void buckets_drive_stats_end(buckets_drive *d, buckets_drive_op op, int64_t ns, 
   if (sl->sec != sec) *sl = (slot){sec, 0, 0};
   sl->n++;
   sl->ns += ns > 0 ? (uint64_t)ns : 0;
+  s->total[op]++;
   pthread_mutex_unlock(&s->mu);
 }
 
@@ -109,6 +111,8 @@ void buckets_drive_stats_get(buckets_drive *d, buckets_drive_stats_view *out) {
       if (sl->n && sec - sl->sec < 60) n += sl->n, ns += sl->ns;
     }
     out->count[op] = n;
+    out->total[op] = s->total[op];
+    out->acc_ns[op] = ns;
     out->avg_us[op] = n ? (double)ns / (double)n / 1000.0 : 0;
   }
   pthread_mutex_unlock(&s->mu);

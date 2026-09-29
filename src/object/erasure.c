@@ -4129,6 +4129,11 @@ buckets_obj_err buckets_ep_heal(buckets_epool *L, const char *bucket, const char
     err = heal_version(L, s, bucket, object, ids[j], opts, &one);
     heal_report(L, s, bucket, object, ids[j], opts, &one, err, start);
     res->ndrives = one.ndrives;
+    res->pool = L->index;
+    res->set = (size_t)(s - L->sets);
+    /* a delete marker's quorum is the set's default (objectQuorumFromMeta) */
+    res->data_blocks = one.data_blocks ? one.data_blocks : (int)s->n - s->parity;
+    res->parity_blocks = one.data_blocks ? one.parity_blocks : s->parity;
     res->versions += one.versions;
     res->healed += one.healed;
     res->dangling += one.dangling;

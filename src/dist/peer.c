@@ -290,6 +290,11 @@ void buckets_peer_server_handle(const buckets_http_request *req, buckets_http_re
     h->datamove(h->ud, &q, &st, &resp->body);
     resp->status = st;
     buckets_http_resp_header(resp, "Content-Type", "application/json");
+  } else if (buckets_str_eq_c(path, BUCKETS_INTERNODE_PREFIX "peer/admin") && h->admin) {
+    int st = 200;
+    h->admin(h->ud, &q, &st, &resp->body);
+    resp->status = st;
+    buckets_http_resp_header(resp, "Content-Type", "application/json");
   } else if (buckets_str_eq_c(path, BUCKETS_INTERNODE_PREFIX "peer/batch-metrics") && h->batch_metrics) {
     char *json = h->batch_metrics(h->ud);
     buckets_http_resp_header(resp, "Content-Type", "application/json");

@@ -2128,6 +2128,12 @@ typedef struct {
 static void h_server_info(s3_ctx *c) {
   if (admin_req1(c, "admin:ServerInfo")) buckets_admin_server_info(c);
 }
+static void h_storage_info(s3_ctx *c) {
+  if (admin_req1(c, "admin:StorageInfo")) buckets_admin_storage_info(c);
+}
+static void h_bg_heal_status(s3_ctx *c) {
+  if (admin_req1(c, "admin:Heal")) buckets_admin_background_heal_status(c);
+}
 
 /* TraceHandler: madmin.TraceInfo records as they happen, as JSON lines */
 /* A stream of this node's records merged with the peers' (MinIO's trace and
@@ -2229,6 +2235,11 @@ static void h_ldap_detach(s3_ctx *c) { attach_detach(c, false, true); }
 
 static const route k_routes[] = {
     {"GET", "/info", h_server_info, "ServerInfo"},
+    {"GET", "/storageinfo", h_storage_info, "StorageInfo"},
+    {"POST", "/background-heal/status", h_bg_heal_status, "BackgroundHealStatus"},
+    {"POST", "/heal/**", buckets_admin_heal, "Heal"},
+    {"GET", "/top/locks", buckets_admin_top_locks, "TopLocks"},
+    {"POST", "/force-unlock", buckets_admin_force_unlock, "ForceUnlock"},
     {"GET", "/trace", h_trace, "Trace"},
     {"GET", "/log", h_console_log, "ConsoleLog"},
     {"GET", "/get-config-kv", buckets_admin_config_get_kv, "GetConfigKV"},
@@ -2339,9 +2350,11 @@ void buckets_admin_handle(s3_ctx *c) {
   for (size_t i = 0; i < BUCKETS_ARRAY_LEN(k_routes); i++) {
     const char *rp = k_routes[i].path;
     size_t rl = strlen(rp);
-    bool match = rl && rp[rl - 1] == '*' ? rest.n >= rl && memcmp(rest.p, rp, rl - 1) == 0 &&
+    bool deep = rl > 1 && rp[rl - 1] == '*' && rp[rl - 2] == '*'; /* any rest, slashes too */
+    bool match = deep                        ? rest.n >= rl - 2 && memcmp(rest.p, rp, rl - 2) == 0
+                 : rl && rp[rl - 1] == '*' ? rest.n >= rl && memcmp(rest.p, rp, rl - 1) == 0 &&
                                                !memchr(rest.p + rl - 1, '/', rest.n - (rl - 1))
-                                         : buckets_str_eq_c(rest, rp);
+                                           : buckets_str_eq_c(rest, rp);
     if (!match) continue;
     path_known = true;
     if (!buckets_str_eq_c(c->req->method, k_routes[i].method)) continue;
@@ -2353,12 +2366,20 @@ void buckets_admin_handle(s3_ctx *c) {
     k_routes[i].fn(c);
     return;
   }
-  if (path_known) {
-    buckets_admin_error(c, BUCKETS_ERR_METHOD_NOT_ALLOWED);
-    return;
-  }
-  /* Not (yet) implemented admin APIs answer like an unknown route. */
-  buckets_admin_error_msg(c, BUCKETS_ERR_NOT_IMPLEMENTED, "This admin API is not implemented");
+  (void)path_known;
+  buckets_admin_unsupported(c);
+}
+
+/* errorResponseHandler: an unknown admin route, or a known one with
+ * another method (or one this setup does not register). */
+void buckets_admin_unsupported(s3_ctx *c) {
+  const buckets_cluster_info *ci = c->s->cluster;
+  const char *mode = ci && ci->distributed                   ? "mode-server-distributed-xl"
+                     : c->s->layer && c->s->layer->nall == 1 ? "mode-server-xl-single"
+                                                             : "mode-server-xl";
+  char msg[128];
+  snprintf(msg, sizeof(msg), "This 'admin' API is not supported by server in '%s'", mode);
+  buckets_admin_json_error(c, 426, "XMinioAdminVersionMismatch", msg, NULL, NULL);
 }
 
 /* ---- shared with the other admin handler files -------------------------------------------- */

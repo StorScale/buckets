@@ -43,6 +43,8 @@ typedef struct {
   int64_t waiting;
   uint64_t count[BUCKETS_DOP__N];  /* calls in the last minute */
   double avg_us[BUCKETS_DOP__N];   /* their mean latency */
+  uint64_t acc_ns[BUCKETS_DOP__N]; /* their summed latency */
+  uint64_t total[BUCKETS_DOP__N];  /* calls since start */
 } buckets_drive_stats_view;
 void buckets_drive_stats_get(buckets_drive *d, buckets_drive_stats_view *out);
 

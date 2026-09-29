@@ -370,6 +370,7 @@ typedef struct {
   size_t dangling;      /* versions removed as dangling */
   int64_t size;         /* of the latest version examined */
   int data_blocks, parity_blocks;
+  size_t pool, set;     /* where the object lives (its drives are that set's, in order) */
 } buckets_heal_result;
 
 /* Heals one version, or with version_id NULL every version found on any

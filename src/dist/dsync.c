@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <yyjson.h>
 
 #include "core/buf.h"
 #include "core/log.h"
@@ -31,7 +32,24 @@ static int64_t now_ms(void) {
 typedef struct {
   char uid[BUCKETS_UUID_STR_LEN + 1];
   int64_t refreshed_ms;
+  int64_t granted_ns; /* wall clock, for top locks */
+  char owner[80];     /* the node that asked */
+  char source[96];
+  int quorum;
+  bool write;
 } holder;
+
+/* Who asks for a lock, for top locks (MinIO's lockRequesterInfo). */
+typedef struct {
+  const char *owner, *source;
+  int quorum;
+} lock_meta;
+
+static int64_t wall_ns(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_REALTIME, &ts);
+  return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
 
 typedef struct lentry {
   struct lentry *next;
@@ -104,7 +122,7 @@ static lentry *lookup(buckets_lock_server *s, const char *res, bool create) {
   return e;
 }
 
-static bool srv_lock(buckets_lock_server *s, const char *res, const char *uid, bool write) {
+static bool srv_lock(buckets_lock_server *s, const char *res, const char *uid, bool write, const lock_meta *lm) {
   pthread_mutex_lock(&s->mu);
   lentry *e = lookup(s, res, true);
   bool ok = false;
@@ -113,8 +131,17 @@ static bool srv_lock(buckets_lock_server *s, const char *res, const char *uid, b
   }
   if (!ok && (e->n == 0 || (!write && !e->write))) {
     e->h = buckets_xrealloc(e->h, (e->n + 1) * sizeof(holder));
-    snprintf(e->h[e->n].uid, sizeof(e->h[e->n].uid), "%s", uid);
-    e->h[e->n].refreshed_ms = now_ms();
+    holder *h = &e->h[e->n];
+    memset(h, 0, sizeof(*h));
+    snprintf(h->uid, sizeof(h->uid), "%s", uid);
+    h->refreshed_ms = now_ms();
+    h->granted_ns = wall_ns();
+    h->write = write;
+    if (lm) {
+      snprintf(h->owner, sizeof(h->owner), "%s", lm->owner ? lm->owner : "");
+      snprintf(h->source, sizeof(h->source), "%s", lm->source ? lm->source : "");
+      h->quorum = lm->quorum;
+    }
     e->n++;
     e->write = write;
     ok = true;
@@ -139,6 +166,49 @@ static bool srv_touch(buckets_lock_server *s, const char *res, const char *uid, 
   if (e && e->n == 0) lookup(s, res, false);
   pthread_mutex_unlock(&s->mu);
   return held;
+}
+
+/* ForceUnlock: every holder of res goes. */
+static void srv_force_unlock(buckets_lock_server *s, const char *res) {
+  pthread_mutex_lock(&s->mu);
+  lentry *e = lookup(s, res, false);
+  if (e) {
+    e->n = 0;
+    lookup(s, res, false);
+  }
+  pthread_mutex_unlock(&s->mu);
+}
+
+void buckets_lock_server_force_unlock(buckets_lock_server *s, const char *resource) { srv_force_unlock(s, resource); }
+
+void buckets_lock_server_dump(buckets_lock_server *s, buckets_buf *out) {
+  yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
+  yyjson_mut_val *root = yyjson_mut_obj(d);
+  yyjson_mut_doc_set_root(d, root);
+  pthread_mutex_lock(&s->mu);
+  for (size_t i = 0; i < NBUCKETS; i++) {
+    for (lentry *e = s->tab[i]; e; e = e->next) {
+      if (!e->n) continue;
+      yyjson_mut_val *arr = yyjson_mut_arr(d);
+      yyjson_mut_obj_add(root, yyjson_mut_strcpy(d, e->resource), arr);
+      for (size_t k = 0; k < e->n; k++) {
+        const holder *h = &e->h[k];
+        yyjson_mut_val *o = yyjson_mut_arr_add_obj(d, arr);
+        yyjson_mut_obj_add_strcpy(d, o, "uid", h->uid);
+        yyjson_mut_obj_add_bool(d, o, "writer", h->write);
+        yyjson_mut_obj_add_int(d, o, "ts", h->granted_ns);
+        yyjson_mut_obj_add_int(d, o, "quorum", h->quorum);
+        yyjson_mut_obj_add_strcpy(d, o, "owner", h->owner);
+        yyjson_mut_obj_add_strcpy(d, o, "source", h->source);
+      }
+    }
+  }
+  pthread_mutex_unlock(&s->mu);
+  size_t n;
+  char *json = yyjson_mut_write(d, 0, &n);
+  buckets_buf_append(out, json, n);
+  free(json);
+  yyjson_mut_doc_free(d);
 }
 
 size_t buckets_lock_server_held(buckets_lock_server *s) {
@@ -178,9 +248,22 @@ void buckets_lock_server_handle(const buckets_http_request *req, buckets_http_re
   buckets_query_parse(req->query, &q);
   const char *res = buckets_query_get(&q, "res"), *uid = buckets_query_get(&q, "uid");
   const char *w = buckets_query_get(&q, "write");
+  const char *qs = buckets_query_get(&q, "quorum");
+  lock_meta lm = {buckets_query_get(&q, "owner"), buckets_query_get(&q, "src"), qs ? atoi(qs) : 0};
   bool ok = false;
+  if (strcmp(op, "dump") == 0) {
+    buckets_lock_server_dump(s, &resp->body);
+    buckets_http_resp_header(resp, "Content-Type", "application/json");
+    buckets_query_free(&q);
+    return;
+  }
+  if (strcmp(op, "force-unlock") == 0 && res) {
+    srv_force_unlock(s, res);
+    buckets_query_free(&q);
+    return;
+  }
   if (!res || !uid) resp->status = 400;
-  else if (strcmp(op, "lock") == 0) ok = srv_lock(s, res, uid, w && strcmp(w, "1") == 0);
+  else if (strcmp(op, "lock") == 0) ok = srv_lock(s, res, uid, w && strcmp(w, "1") == 0, &lm);
   else if (strcmp(op, "unlock") == 0) ok = srv_touch(s, res, uid, true) || true;
   else if (strcmp(op, "refresh") == 0) ok = srv_touch(s, res, uid, false);
   else resp->status = 400;
@@ -198,6 +281,7 @@ typedef struct dlock {
 } dlock;
 
 struct buckets_dsync {
+  char owner[80];
   buckets_http_client **peers;
   size_t npeers;
   _Atomic int64_t *peer_down_until;
@@ -211,18 +295,21 @@ struct buckets_dsync {
 
 typedef struct {
   buckets_dsync *d;
-  const char *op, *resource, *uid;
+  const char *op, *resource, *uid, *source;
   bool write;
   bool ok[64];
   bool down[64]; /* no answer: the node is unreachable */
 } fan;
 
+static size_t quorum(const buckets_dsync *d, bool write);
+
 /* Node 0 is this node's own lock server; 1..npeers are the peers. */
 static void fan_one(void *ctx, size_t i) {
   fan *f = ctx;
   buckets_dsync *d = f->d;
+  lock_meta lm = {d->owner, f->source ? f->source : "", (int)quorum(d, f->write)};
   if (i == 0) {
-    if (strcmp(f->op, "lock") == 0) f->ok[0] = srv_lock(d->local, f->resource, f->uid, f->write);
+    if (strcmp(f->op, "lock") == 0) f->ok[0] = srv_lock(d->local, f->resource, f->uid, f->write, &lm);
     else f->ok[0] = srv_touch(d->local, f->resource, f->uid, strcmp(f->op, "unlock") == 0);
     return;
   }
@@ -237,6 +324,12 @@ static void fan_one(void *ctx, size_t i) {
   buckets_buf_appendf(&t, BUCKETS_INTERNODE_PREFIX "lock/%s?res=", f->op);
   buckets_url_encode(&t, f->resource, false);
   buckets_buf_appendf(&t, "&uid=%s&write=%d", f->uid, f->write ? 1 : 0);
+  if (strcmp(f->op, "lock") == 0) {
+    buckets_buf_appendf(&t, "&quorum=%d&owner=", lm.quorum);
+    buckets_url_encode(&t, d->owner, false);
+    buckets_buf_append_c(&t, "&src=");
+    buckets_url_encode(&t, lm.source, false);
+  }
   char auth[96];
   buckets_internode_sign("POST", t.data, auth);
   buckets_http_kv h[] = {{BUCKETS_INTERNODE_AUTH, auth}};
@@ -334,7 +427,15 @@ void buckets_dsync_free(buckets_dsync *d) {
   free(d);
 }
 
+void buckets_dsync_set_owner(buckets_dsync *d, const char *owner) {
+  snprintf(d->owner, sizeof(d->owner), "%s", owner);
+}
+
 void *buckets_dsync_lock(buckets_dsync *d, const char *resource, bool write, int timeout_ms) {
+  return buckets_dsync_lock_src(d, resource, write, timeout_ms, "");
+}
+
+void *buckets_dsync_lock_src(buckets_dsync *d, const char *resource, bool write, int timeout_ms, const char *source) {
   dlock *l = buckets_xcalloc(1, sizeof(*l));
   l->resource = buckets_xstrdup(resource);
   l->write = write;
@@ -342,7 +443,7 @@ void *buckets_dsync_lock(buckets_dsync *d, const char *resource, bool write, int
   int64_t deadline = now_ms() + timeout_ms;
   size_t need = quorum(d, write);
   for (unsigned attempt = 0;; attempt++) {
-    fan f = {.d = d, .op = "lock", .resource = resource, .uid = l->uid, .write = write};
+    fan f = {.d = d, .op = "lock", .resource = resource, .uid = l->uid, .write = write, .source = source};
     if (run(d, &f) >= need) break;
     size_t reachable = 0;
     for (size_t i = 0; i < nodes(d); i++) reachable += !f.down[i];

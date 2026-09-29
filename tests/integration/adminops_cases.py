@@ -1,0 +1,266 @@
+#!/usr/bin/env python3
+"""The remaining admin APIs, MinIO against bucketsd (see adminops.sh).
+
+usage: adminops_cases.py MINIO_URL BUCKETS_URL ACCESS SECRET MINIO_DRIVES BUCKETS_DRIVES
+
+Each server's drives are <DRIVES>/d1..d4, so both can be damaged the same
+way. Answers are compared after removing what differs by nature (tokens,
+times, drive paths, disk usage figures).
+"""
+import glob
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.parse
+
+MINIO, BUCKETS, AK, SK, MDRIVES, BDRIVES = sys.argv[1:7]
+MDRIVES, BDRIVES = os.path.normpath(MDRIVES), os.path.normpath(BDRIVES)
+SERVERS = ((MINIO, MDRIVES), (BUCKETS, BDRIVES))
+
+from adminlib import (ADMIN, Score, admin, compare, curl, disk_view, err_view, heal_run, jbody,  # noqa: E402
+                      setup)
+
+setup(AK, SK)
+
+
+def put(base, bucket, key, data):
+    curl(f"{base}/{bucket}/{urllib.parse.quote(key)}", "PUT", data)
+
+
+# ---- heal -----------------------------------------------------------------------------------------
+
+def heal_case(name, path, opts, query="", prep=None, meta=False):
+    res = []
+    for base, root in SERVERS:
+        if prep:
+            prep(base, root)
+        r = heal_run(base, root, path, opts, query)
+        if meta and isinstance(r, tuple) and len(r) == 6:
+            # the config objects themselves differ: compare their presence
+            items = r[5]
+            m = [i for i in items if i["type"] == "bucket-metadata"]
+            rest = [i for i in items if i["type"] != "bucket-metadata"]
+            base_id = rest[0]["resultId"] if rest else 0
+            rest = [dict(i, resultId=i["resultId"] - base_id) for i in rest]
+            r = r[:5] + (bool(m), all(i["detail"] == "" for i in m), rest)
+        res.append(r)
+    compare(f"heal {name}", *res)
+
+
+def drive_obj(root, n, bucket, key):
+    return os.path.join(root, f"d{n}", bucket, key)
+
+
+def rm(p):
+    if os.path.isdir(p):
+        shutil.rmtree(p)
+    elif os.path.exists(p):
+        os.remove(p)
+
+
+def part_files(root, bucket, key):
+    return sorted(glob.glob(os.path.join(root, "d*", bucket, key, "*", "part.1")))
+
+
+R = {"recursive": True, "dryRun": False, "remove": False, "scanMode": 1}
+BIG = os.urandom(1200000)
+
+for base, root in SERVERS:
+    curl(f"{base}/healb", "PUT")
+    put(base, "healb", "a/x.txt", b"hi")
+    put(base, "healb", "a/y/z.txt", b"deep")
+    put(base, "healb", "b.txt", b"yo")
+    put(base, "healb", "big.bin", BIG)
+    put(base, "healb", "rot.bin", BIG)
+    put(base, "healb", "trunc.bin", BIG)
+
+heal_case("healthy bucket", "healb", R)
+heal_case("missing object on a drive", "healb", R, prep=lambda b, r: rm(drive_obj(r, 2, "healb", "b.txt")))
+heal_case("missing xl.meta", "healb", R, prep=lambda b, r: rm(drive_obj(r, 3, "healb", "a/x.txt/xl.meta")))
+
+
+def truncate(b, r):
+    p = part_files(r, "healb", "trunc.bin")[0]
+    with open(p, "r+b") as f:
+        f.truncate(1000)
+
+
+heal_case("truncated part", "healb", R, prep=truncate)
+
+
+def rot(b, r):
+    p = part_files(r, "healb", "rot.bin")[1]
+    with open(p, "r+b") as f:
+        f.seek(5000)
+        f.write(b"X" * 64)
+
+
+heal_case("bitrot, normal scan", "healb", R, prep=rot)
+heal_case("bitrot, deep scan", "healb", dict(R, scanMode=2))
+heal_case("missing bucket on a drive", "healb", R, prep=lambda b, r: rm(os.path.join(r, "d4", "healb")))
+heal_case("dry run", "healb", dict(R, dryRun=True), prep=lambda b, r: rm(drive_obj(r, 1, "healb", "b.txt")))
+heal_case("after the dry run", "healb", R)
+heal_case("prefix", "healb/a/", R)
+heal_case("prefix without slash", "healb/a", R)
+heal_case("not recursive", "healb", dict(R, recursive=False))
+heal_case("not recursive, prefix", "healb/a/", dict(R, recursive=False))
+heal_case("object path", "healb/b.txt", R)
+heal_case("no such bucket", "nosuchbucket", R)
+heal_case("empty settings", "healb", {})
+heal_case("pool and set", "healb", dict(R, pool=0, set=0))
+
+for base, root in SERVERS:
+    curl(f"{base}/healv", "PUT")
+    curl(f"{base}/healv?versioning", "PUT",
+         b'<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Status>Enabled</Status>'
+         b'</VersioningConfiguration>')
+    for i in range(3):
+        put(base, "healv", "v.txt", b"version %d" % i)
+    curl(f"{base}/healv/v.txt", "DELETE")
+    put(base, "healv", "w.txt", b"w")
+
+
+def versions_view(r):
+    # version IDs differ by nature: keep their order and shape
+    if not isinstance(r, tuple) or len(r) != 6:
+        return r
+    items = []
+    for it in r[5]:
+        it = dict(it)
+        if it["versionId"] not in ("", "null"):
+            it["versionId"] = "<uuid>"
+        items.append(it)
+    return r[:5] + (items,)
+
+
+res = []
+for base, root in SERVERS:
+    rm(drive_obj(root, 1, "healv", "v.txt"))
+    res.append(versions_view(heal_run(base, root, "healv", R)))
+compare("heal versions and a delete marker", *res)
+
+# many objects: the sequence waits for its items to be collected
+for base, root in SERVERS:
+    curl(f"{base}/healmany", "PUT")
+src = tempfile.mkdtemp()
+for i in range(1010):
+    with open(os.path.join(src, f"o{i:04d}"), "wb") as f:
+        f.write(b"x")
+MC = os.environ.get("MC", "mc")
+cfg = tempfile.mkdtemp()
+for alias, (base, _) in zip(("m", "b"), SERVERS):
+    subprocess.run([MC, "--config-dir", cfg, "alias", "set", alias, base, AK, SK], capture_output=True)
+    subprocess.run([MC, "--config-dir", cfg, "cp", "--recursive", "--quiet", src + "/", f"{alias}/healmany/"],
+                   capture_output=True)
+shutil.rmtree(src)
+
+res = []
+for base, root in SERVERS:
+    out = []
+    code, _, body = admin(base, "POST", "/heal/healmany", json.dumps(R))
+    tok = json.loads(body)["clientToken"]
+    time.sleep(1.5)  # it fills its buffer and waits
+    # a second start on the same path, and on an overlapping one
+    c2, _, b2 = admin(base, "POST", "/heal/healmany", json.dumps(R))
+    j2 = jbody(b2)
+    out.append(("again", c2, j2.get("clientToken") == tok if isinstance(j2, dict) and "clientToken" in j2 else j2))
+    c3, _, b3 = admin(base, "POST", "/heal/healmany/o00", json.dumps(R))
+    out.append(("overlap", err_view(c3, b3)))
+    c3, _, b3 = admin(base, "POST", "/heal/", json.dumps(R))  # "." never overlaps
+    out.append(("cluster-wide beside it", c3, sorted(jbody(b3).keys())))
+    admin(base, "POST", "/heal/?forceStop", "{}")
+    c4, _, b4 = admin(base, "POST", "/heal/healmany?clientToken=nosuchtoken")
+    out.append(("bad token", err_view(c4, b4)))
+    c5, _, b5 = admin(base, "POST", f"/heal/healmany?clientToken={tok}")
+    st = json.loads(b5)
+    out.append(("first batch", st["Summary"], len(st["Items"] or []), [i["resultId"] for i in st["Items"][:3]]))
+    time.sleep(0.5)
+    c5, _, b5 = admin(base, "POST", f"/heal/healmany?clientToken={tok}")
+    st = json.loads(b5)
+    out.append(("second batch", len(st["Items"] or []), (st["Items"] or [{}])[0].get("resultId")))
+    c6, _, b6 = admin(base, "POST", "/heal/healmany?forceStart", json.dumps(R))
+    j6 = jbody(b6)
+    out.append(("force start", c6, sorted(j6.keys()) if isinstance(j6, dict) else j6, j6.get("clientToken") != tok))
+    time.sleep(1.5)
+    c7, _, b7 = admin(base, "POST", "/heal/healmany?forceStop", "{}")
+    j7 = jbody(b7)
+    out.append(("force stop", c7, sorted(j7.keys()), j7.get("clientToken") == j6.get("clientToken")))
+    c8, _, b8 = admin(base, "POST", f"/heal/healmany?clientToken={j6['clientToken']}")
+    out.append(("after stop", c8, jbody(b8)))
+    res.append(out)
+compare("heal sequence lifecycle", *res)
+
+for name, path, data, query in [
+    ("bad body", "healb", "not json", ""),
+    ("empty body", "healb", "", ""),
+    ("wrong type", "healb", '{"recursive":"yes"}', ""),
+    ("start and stop", "healb", "{}", "?forceStart&forceStop"),
+    ("token and start", "healb", "{}", "?clientToken=x&forceStart"),
+    ("short bucket", "ab", "{}", ""),
+    ("reserved bucket", "minio", "{}", ""),
+    ("meta bucket", ".minio.sys", "{}", ""),
+    ("bad prefix", "healb/a/../b", "{}", ""),
+    ("double slash", "healb/a//b", "{}", ""),
+    ("stop nothing", "healb", "{}", "?forceStop"),
+    ("stop without a body", "healb", None, "?forceStop"),
+    ("status nothing", "healb", None, "?clientToken=abc"),
+]:
+    res = []
+    for base, root in SERVERS:
+        c, _, b = admin(base, "POST", f"/heal/{path}{query}", data)
+        j = jbody(b)
+        if isinstance(j, dict) and "clientToken" in j:
+            j = (j["clientToken"] == "unknown", j["clientAddress"])
+        elif isinstance(j, dict) and "Summary" in j:
+            j = (j["Summary"], j["StartTime"], j["Settings"], j["Items"])
+        elif isinstance(j, dict):
+            j = (j.get("Code"), j.get("Message"), j.get("BucketName"))
+        res.append((c, j))
+    compare(f"heal {name}", *res)
+
+heal_case("the whole cluster", "", R, meta=True)
+
+# ---- storage info and background heal status ------------------------------------------------------
+
+res = []
+for base, root in SERVERS:
+    c, h, b = admin(base, "GET", "/storageinfo")
+    j = json.loads(b)
+    res.append((c, h.get("content-type"), sorted(j), [disk_view(d, root) for d in j["Disks"]], j["Backend"]))
+compare("storage info", *res)
+
+res = []
+for base, root in SERVERS:
+    c, h, b = admin(base, "POST", "/background-heal/status")
+    j = json.loads(b)
+    sets = [dict(st, disks=[disk_view(d, root) for d in st["disks"]]) for st in j["sets"]]
+    res.append((c, h.get("content-type"), list(j), j["offline_nodes"], j["HealDisks"], sets, j["mrf"], j["sc_parity"]))
+compare("background heal status", *res)
+
+res = []
+for base, root in SERVERS:
+    c, h, b = admin(base, "GET", "/info")
+    j = json.loads(b)
+    res.append([sorted(d.get("metrics", {"none": 1})) for s in j["servers"] for d in s["drives"]])
+    c, h, b = admin(base, "GET", "/info?metrics=true")
+    j = json.loads(b)
+    res[-1].append([sorted(d.get("metrics", {})) for s in j["servers"] for d in s["drives"]])
+compare("server info drive metrics", *res)
+
+for name, method, path in [("storage info by POST", "POST", "/storageinfo"),
+                           ("top locks on one node", "GET", "/top/locks"),
+                           ("force unlock on one node", "POST", "/force-unlock?paths=a/b"),
+                           ("unknown admin API", "GET", "/no-such-api"),
+                           ("heal status by GET", "GET", "/background-heal/status")]:
+    res = []
+    for base, root in SERVERS:
+        c, _, b = admin(base, method, path)
+        res.append(err_view(c, b))
+    compare(name, *res)
+
+print(f"adminops: {Score.passed} passed, {Score.failed} failed")
+sys.exit(1 if Score.failed else 0)

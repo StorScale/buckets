@@ -153,7 +153,9 @@ add_library(buckets STATIC
   s3/compress.c
   s3/notification.c
   admin/admin.c
+  admin/heal.c
   admin/info.c
+  admin/locks.c
   admin/config.c
   admin/iamxfer.c
   admin/bucket.c
