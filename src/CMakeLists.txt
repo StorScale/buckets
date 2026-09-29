@@ -159,6 +159,8 @@ add_library(buckets STATIC
   admin/heal.c
   admin/info.c
   admin/inspect.c
+  admin/jobstream.c
+  admin/perf.c
   admin/locks.c
   admin/config.c
   admin/iamxfer.c

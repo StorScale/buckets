@@ -2239,6 +2239,9 @@ static const route k_routes[] = {
     {"POST", "/background-heal/status", h_bg_heal_status, "BackgroundHealStatus"},
     {"POST", "/heal/**", buckets_admin_heal, "Heal"},
     {"GET", "/top/locks", buckets_admin_top_locks, "TopLocks"},
+    {"POST", "/speedtest", buckets_admin_object_speedtest, "ObjectSpeedTest"},
+    {"POST", "/speedtest/object", buckets_admin_object_speedtest, "ObjectSpeedTest"},
+    {"POST", "/speedtest/drive", buckets_admin_drive_speedtest, "DriveSpeedtest"},
     {"GET", "/inspect-data", buckets_admin_inspect_data, "InspectData"},
     {"POST", "/inspect-data", buckets_admin_inspect_data, "InspectData"},
     {"GET", "/export-bucket-metadata", buckets_admin_export_bucket_metadata, "ExportBucketMetadata"},
@@ -2372,6 +2375,20 @@ void buckets_admin_handle(s3_ctx *c) {
   }
   (void)path_known;
   buckets_admin_unsupported(c);
+}
+
+void buckets_admin_peer(buckets_s3_server *s, const buckets_query *q, buckets_http_response *resp) {
+  const char *op = buckets_query_get(q, "op");
+  buckets_http_resp_header(resp, "Content-Type", "application/json");
+  if (op && strcmp(op, "heal-status") == 0) {
+    int status = 200;
+    buckets_admin_heal_peer(s, q, &status, &resp->body);
+    resp->status = status;
+  } else if (op && buckets_admin_perf_peer(s, op, q, resp)) {
+    /* a speedtest */
+  } else {
+    resp->status = 400;
+  }
 }
 
 /* errorResponseHandler: an unknown admin route, or a known one with

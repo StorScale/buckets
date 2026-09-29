@@ -425,8 +425,8 @@ void buckets_s3_peer_bucket(void *server, const char *bucket) {
 
 char *buckets_s3_peer_server_info(void *server) { return buckets_admin_local_server_json(server); }
 
-void buckets_s3_peer_admin(void *server, const buckets_query *q, int *status, buckets_buf *body) {
-  buckets_admin_heal_peer(server, q, status, body);
+void buckets_s3_peer_admin(void *server, const buckets_query *q, buckets_http_response *resp) {
+  buckets_admin_peer(server, q, resp);
 }
 
 void buckets_s3_peer_datamove(void *server, const buckets_query *q, int *status, buckets_buf *body) {

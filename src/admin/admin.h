@@ -30,6 +30,13 @@ void buckets_admin_inspect_data(s3_ctx *c);
 /* mc admin top locks, mc admin unlock (locks.c; distributed setups only). */
 void buckets_admin_top_locks(s3_ctx *c);
 void buckets_admin_force_unlock(s3_ctx *c);
+/* mc admin speedtest, mc support perf object|drive (perf.c); the peer side. */
+void buckets_admin_object_speedtest(s3_ctx *c);
+void buckets_admin_drive_speedtest(s3_ctx *c);
+bool buckets_admin_perf_peer(buckets_s3_server *s, const char *op, const buckets_query *q, buckets_http_response *resp);
+/* Admin work a peer asks of this node (peer/admin?op=...): heal sequence
+ * status, speedtests. */
+void buckets_admin_peer(buckets_s3_server *s, const buckets_query *q, buckets_http_response *resp);
 /* The answer to an admin API this setup does not serve (XMinioAdminVersionMismatch). */
 void buckets_admin_unsupported(s3_ctx *c);
 

@@ -109,6 +109,8 @@ STATUS = {
     "ExportBucketMetadataHandler": (DONE, ""),
     "ImportBucketMetadataHandler": (DONE, ""),
     "InspectDataHandler": (DONE, ""),
+    "ObjectSpeedTestHandler": (DONE, "PUTs and GETs through the object layer rather than a loopback S3 client"),
+    "DriveSpeedtestHandler": (DONE, "dperf's O_DIRECT test on Linux, \"not implemented\" elsewhere, as dperf"),
     "ServiceV2Handler": (DONE, ""),
     # STS
     "AssumeRole": (DONE, ""),

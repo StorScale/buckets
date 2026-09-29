@@ -185,5 +185,32 @@ if DEC:
         res.append((c, j["format"], j.get("error"), names))
     compare("inspect across nodes", *res)
 
+# ---- speedtests across nodes ----------------------------------------------------------------------------
+res = []
+for side, root in SIDES:
+    c, h, b = admin(node(side, 1), "POST", "/speedtest?size=262144&concurrent=2&duration=1s")
+    lines = [json.loads(x) for x in b.decode().splitlines() if x.strip()]
+    last = lines[-1]
+    v = (c, last["servers"], last["disks"], [(x["endpoint"], x["err"], x["throughputPerSec"] > 0)
+                                              for x in last["PUTStats"]["servers"]],
+         [(x["endpoint"], x["err"], x["throughputPerSec"] > 0) for x in last["GETStats"]["servers"]])
+    res.append(port_view(side, v))
+compare("speedtest across nodes", *res)
+
+res = []
+for side, root in SIDES:
+    c, h, b = admin(node(side, 1), "POST", "/speedtest/drive?filesize=1048576&blocksize=65536")
+    out = []
+    for x in b.decode().splitlines():
+        if not x.strip():
+            continue
+        j = json.loads(x)
+        if not j.get("endpoint"):
+            continue  # a keepalive
+        drives = [(d["path"].replace(root, ""), d.get("error")) for d in j.get("drivePerf") or []]
+        out.append((j["endpoint"], drives, j.get("string")))
+    res.append(port_view(side, (c, sorted(out))))
+compare("drive speedtest across nodes", *res)
+
 print(f"adminops-dist: {Score.passed} passed, {Score.failed} failed")
 sys.exit(1 if Score.failed else 0)

@@ -435,5 +435,64 @@ for name, q in [("no volume", "file=x"), ("no file", "volume=healb"), ("a parent
         res.append(v)
     compare(f"inspect {name}", *res)
 
+# ---- speedtests ---------------------------------------------------------------------------------------
+
+def speed_view(body):
+    """Each streamed line's shape; the last one's servers, errors and counts."""
+    lines = [json.loads(x) for x in body.decode().splitlines() if x.strip()]
+    if not lines:
+        return body[:200]
+    last = lines[-1]
+    def stats(st):
+        return (sorted(st), sorted(st["responseTime"]), st["throughputPerSec"] > 0,
+                [(x["endpoint"], x["err"], x["throughputPerSec"] > 0) for x in st["servers"] or []])
+    return (lines[0]["version"] == "", sorted(last), last["servers"], last["disks"], last["size"],
+            stats(last["PUTStats"]), stats(last["GETStats"]))
+
+
+def endpoint_view(v, base):
+    return json.loads(json.dumps(v).replace(base.split("//")[1], "<node>"))
+
+
+for name, q in [("object", "/speedtest?size=262144&concurrent=2&duration=1s"),
+                ("object, path", "/speedtest/object?size=262144&concurrent=2&duration=1s"),
+                ("object, autotune", "/speedtest?size=262144&concurrent=2&duration=1s&autotune=true"),
+                ("object, custom bucket", "/speedtest?size=262144&concurrent=2&duration=1s&bucket=healb")]:
+    res = []
+    for base, root in SERVERS:
+        c, h, b = admin(base, "POST", q)
+        v = speed_view(b) if c == 200 else err_view(c, b)
+        if "autotune" in q and c == 200:
+            v = v[:4] + v[5:]  # how far autotuning goes depends on the machine
+        res.append((c, h.get("content-type"), endpoint_view(v, base)))
+    compare(f"speedtest {name}", *res)
+
+res = []
+for base, root in SERVERS:
+    c, h, b = admin(base, "POST", "/speedtest?size=999999999999999&concurrent=64")
+    v = err_view(c, b)
+    res.append((v[0], v[1], re.sub(r"[0-9.]+ [KMGTPE]?i?B", "<n>", v[2] or "")))
+compare("speedtest without enough space", *res)
+
+res = []
+for base, root in SERVERS:
+    c1, _, _ = curl(f"{base}/minio-perf-test-tmp-bucket")
+    c2, _, b = curl(f"{base}/healb?list-type=2&prefix=speedtest/")
+    res.append((c1, c2, b.count(b"<Key>")))
+compare("speedtest cleans up", *res)
+
+res = []
+for base, root in SERVERS:
+    c, h, b = admin(base, "POST", "/speedtest/drive?filesize=1048576&blocksize=65536")
+    lines = [json.loads(x) for x in b.decode().splitlines() if x.strip()]
+    last = lines[-1] if lines else {}
+    for d in last.get("drivePerf") or []:
+        d["path"] = os.path.relpath(d["path"], root)
+        d["readThroughput"] = d["readThroughput"] > 0
+        d["writeThroughput"] = d["writeThroughput"] > 0
+    last.pop("version", None)
+    res.append((c, h.get("content-type"), endpoint_view(last, base)))
+compare("drive speedtest", *res)
+
 print(f"adminops: {Score.passed} passed, {Score.failed} failed")
 sys.exit(1 if Score.failed else 0)

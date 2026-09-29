@@ -60,9 +60,10 @@ typedef struct {
   /* a decommission or rebalance operation this node runs (q: op and its
    * arguments): the admin API's answer, status and JSON body */
   void (*datamove)(void *ud, const buckets_query *q, int *status, buckets_buf *body);
-  /* an admin operation on state this node holds (q: op and its arguments,
-   * e.g. a heal sequence's status): status and JSON body */
-  void (*admin)(void *ud, const buckets_query *q, int *status, buckets_buf *body);
+  /* an admin operation on state this node holds or work it does (q: op and
+   * its arguments, e.g. a heal sequence's status, a speedtest): the answer,
+   * which may stream (long tests send whitespace until their JSON is ready) */
+  void (*admin)(void *ud, const buckets_query *q, buckets_http_response *resp);
 } buckets_peer_handlers;
 void buckets_peer_server_handle(const buckets_http_request *req, buckets_http_response *resp, void *ud);
 
