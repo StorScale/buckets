@@ -161,6 +161,8 @@ bool buckets_s3_is_local_endpoint(buckets_s3_server *s, const char *endpoint);
 void buckets_s3_put_bucket_replication(s3_ctx *c);
 void buckets_s3_get_bucket_replication(s3_ctx *c);
 void buckets_s3_delete_bucket_replication(s3_ctx *c);
+void buckets_s3_reset_bucket_replication_start(s3_ctx *c);
+void buckets_s3_reset_bucket_replication_status(s3_ctx *c);
 
 /* ---- lifecycle (lifecycle.c) ---- */
 void buckets_s3_put_bucket_lifecycle(s3_ctx *c);

@@ -21,6 +21,9 @@
 #include "bucket/tags.h"
 #include "core/auditctx.h"
 #include "core/log.h"
+#include "core/msgpack.h"
+#include "notify/event.h"
+#include "object/sysconfig.h"
 #include "core/strmap.h"
 #include "core/timefmt.h"
 #include "crypto/base64.h"
@@ -1544,15 +1547,20 @@ static void replicate_delete(buckets_repl *r, job *j) {
   tinfo *ti = NULL;
   size_t nti = 0;
   {
-    /* walk "arn=STATUS;" */
-    const char *p = src ? src : "";
-    while (*p) {
-      const char *eq = strchr(p, '='), *semi = eq ? strchr(eq, ';') : NULL;
-      if (!eq || !semi) break;
+    /* the targets in "arn=STATUS;", or just the one being resynced */
+    const char *p = j->target_arn ? "" : (src ? src : "");
+    bool one = j->target_arn != NULL;
+    while (*p || one) {
       char arn[256];
-      snprintf(arn, sizeof(arn), "%.*s", (int)(eq - p), p);
-      p = semi + 1;
-      if (j->target_arn && strcmp(j->target_arn, arn) != 0) continue;
+      if (one) {
+        snprintf(arn, sizeof(arn), "%s", j->target_arn);
+        one = false;
+      } else {
+        const char *eq = strchr(p, '='), *semi = eq ? strchr(eq, ';') : NULL;
+        if (!eq || !semi) break;
+        snprintf(arn, sizeof(arn), "%.*s", (int)(eq - p), p);
+        p = semi + 1;
+      }
       buckets_repl_target *t = buckets_repl_target_get(r, j->bucket, arn);
       if (!t) continue;
       ti = buckets_xrealloc(ti, (nti + 1) * sizeof(*ti));
@@ -1863,4 +1871,525 @@ void buckets_repl_proxy_close(buckets_repl_proxy *p) {
   buckets_s3c_result_free(&p->res);
   if (p->t) buckets_repl_target_put(p->t);
   memset(p, 0, sizeof(*p));
+}
+
+/* ---- existing objects: heal decisions and resync ---------------------------------------
+ * getHealReplicateObjectInfo, replicationConfig.Resync / resyncTarget and the
+ * replicationResyncer (resyncBucket, its status in
+ * .minio.sys/buckets/<bucket>/.replication/resync.bin). */
+
+/* resyncTarget: whether a version must go (again) to arn for its reset. */
+static bool resync_target(const buckets_object_info *oi, const buckets_bucket_target *t, const char *tgt_status) {
+  char key[400];
+  snprintf(key, sizeof(key), "%s-%s", BUCKETS_META_REPL_RESET, t->arn);
+  const char *rs = sys_str(oi, key);
+  if (!rs) rs = meta_fold(oi, "X-Minio-Replication-Reset-Status"); /* older releases */
+  int64_t before = t->reset_before_sec * 1000000000LL + t->reset_before_nsec;
+  bool has_before = t->reset_before_sec != BUCKETS_GO_ZERO_SEC;
+  if (!rs) {
+    if (*t->reset_id && has_before && oi->mod_time_ns < before) return true;
+    return !tgt_status || !*tgt_status;
+  }
+  if (!*t->reset_id || (t->reset_before_sec == 0 && t->reset_before_nsec == 0)) return false;
+  const char *semi = strchr(rs, ';');
+  if (!semi) return false;
+  bool new_reset = strcmp(semi + 1, t->reset_id) != 0;
+  if (!new_reset && tgt_status && strcmp(tgt_status, BUCKETS_RS_COMPLETED) == 0) return false;
+  return new_reset && has_before && oi->mod_time_ns < before;
+}
+
+/* For one version and one target: does the target's existing-object resync
+ * want it (rcfg.Resync), and is it replicated there at all (dsc)? */
+static bool version_needs_resync(buckets_s3_server *s, const char *bucket, const buckets_object_info *oi,
+                                 const buckets_bucket_target *t) {
+  buckets_bucket_state *st = buckets_metasys_get(s->meta, bucket);
+  bool want = false;
+  const char *ps = sys_str(oi, BUCKETS_META_PURGE_STATUS);
+  bool purge = ps && *ps;
+  if (st->has_replication) {
+    buckets_repl_obj o = {.name = oi->name, .target_arn = t->arn};
+    if (oi->delete_marker && !purge) {
+      o.delete_marker = true;
+      o.version_id = oi->version_id;
+      o.op = BUCKETS_REPL_DELETE;
+      o.existing = true;
+    } else {
+      o.user_tags = buckets_object_meta(oi, "X-Amz-Tagging");
+      o.ssec = sys_ssec(oi->meta_sys, oi->nmeta_sys);
+      o.existing = true;
+    }
+    char **arns = NULL;
+    size_t na = buckets_replication_target_arns(&st->replication, &o, &arns);
+    for (size_t i = 0; i < na && !want; i++)
+      if (strcmp(arns[i], t->arn) == 0) want = buckets_replication_replicate(&st->replication, &o);
+    buckets_replication_arns_free(arns, na);
+  }
+  buckets_bucket_state_release(st);
+  if (!want) return false;
+  char tst[32];
+  buckets_repl_target_status(sys_str(oi, BUCKETS_META_REPL_STATUS), t->arn, tst, sizeof(tst));
+  return resync_target(oi, t, tst);
+}
+
+/* The resync status of a bucket's targets (BucketReplicationResyncStatus). */
+typedef enum { RS_NONE = 0, RS_PENDING, RS_CANCELED, RS_STARTED, RS_COMPLETED, RS_FAILED } rs_state;
+
+static const char *rs_state_name(int st) {
+  switch (st) {
+  case RS_STARTED: return "Ongoing";
+  case RS_COMPLETED: return "Completed";
+  case RS_FAILED: return "Failed";
+  case RS_PENDING: return "Pending";
+  case RS_CANCELED: return "Canceled";
+  }
+  return "";
+}
+
+typedef struct {
+  char *arn;
+  int64_t start_sec, lu_sec, before_sec;
+  int32_t start_nsec, lu_nsec, before_nsec;
+  char *id;
+  int64_t status;
+  int64_t failed_size, failed_count, repl_size, repl_count;
+  char *bucket, *object;
+} rs_tgt;
+
+typedef struct {
+  int64_t version, id;
+  int64_t lu_sec;
+  int32_t lu_nsec;
+  rs_tgt *t;
+  size_t n;
+} rs_bucket;
+
+static void rs_bucket_free(rs_bucket *b) {
+  for (size_t i = 0; i < b->n; i++) {
+    free(b->t[i].arn);
+    free(b->t[i].id);
+    free(b->t[i].bucket);
+    free(b->t[i].object);
+  }
+  free(b->t);
+  memset(b, 0, sizeof(*b));
+}
+
+static void rs_now(int64_t *sec, int32_t *nsec) {
+  int64_t ns = now_ns();
+  *sec = ns / 1000000000LL;
+  *nsec = (int32_t)(ns % 1000000000LL);
+}
+
+static rs_tgt *rs_find(rs_bucket *b, const char *arn, bool add) {
+  for (size_t i = 0; i < b->n; i++)
+    if (strcmp(b->t[i].arn, arn) == 0) return &b->t[i];
+  if (!add) return NULL;
+  b->t = buckets_xrealloc(b->t, (b->n + 1) * sizeof(*b->t));
+  rs_tgt *t = &b->t[b->n++];
+  memset(t, 0, sizeof(*t));
+  t->arn = buckets_xstrdup(arn);
+  t->id = buckets_xstrdup("");
+  t->bucket = buckets_xstrdup("");
+  t->object = buckets_xstrdup("");
+  t->start_sec = t->lu_sec = t->before_sec = BUCKETS_GO_ZERO_SEC;
+  return t;
+}
+
+static void rs_encode(const rs_bucket *b, buckets_buf *out) {
+  uint8_t hdr[4] = {1, 0, 1, 0}; /* resyncMetaFormat, resyncMetaVersion (LE) */
+  buckets_buf_append(out, hdr, 4);
+  buckets_mp_map(out, 4);
+  buckets_mp_cstr(out, "v");
+  buckets_mp_int(out, b->version ? b->version : 1);
+  buckets_mp_cstr(out, "brs");
+  buckets_mp_map(out, (uint32_t)b->n);
+  for (size_t i = 0; i < b->n; i++) {
+    const rs_tgt *t = &b->t[i];
+    buckets_mp_cstr(out, t->arn);
+    buckets_mp_map(out, 11);
+    buckets_mp_cstr(out, "st");
+    buckets_mp_time_sec(out, t->start_sec, t->start_nsec);
+    buckets_mp_cstr(out, "lst");
+    buckets_mp_time_sec(out, t->lu_sec, t->lu_nsec);
+    buckets_mp_cstr(out, "id");
+    buckets_mp_cstr(out, t->id);
+    buckets_mp_cstr(out, "rdt");
+    buckets_mp_time_sec(out, t->before_sec, t->before_nsec);
+    buckets_mp_cstr(out, "rst");
+    buckets_mp_int(out, t->status);
+    buckets_mp_cstr(out, "fs");
+    buckets_mp_int(out, t->failed_size);
+    buckets_mp_cstr(out, "frc");
+    buckets_mp_int(out, t->failed_count);
+    buckets_mp_cstr(out, "rs");
+    buckets_mp_int(out, t->repl_size);
+    buckets_mp_cstr(out, "rrc");
+    buckets_mp_int(out, t->repl_count);
+    buckets_mp_cstr(out, "bkt");
+    buckets_mp_cstr(out, t->bucket);
+    buckets_mp_cstr(out, "obj");
+    buckets_mp_cstr(out, t->object);
+  }
+  buckets_mp_cstr(out, "id");
+  buckets_mp_int(out, b->id);
+  buckets_mp_cstr(out, "lu");
+  buckets_mp_time_sec(out, b->lu_sec, b->lu_nsec);
+}
+
+static char *mp_strdup(buckets_mp_reader *r, bool *ok) {
+  buckets_str s;
+  if (buckets_mp_read_nil(r)) return buckets_xstrdup("");
+  if (!buckets_mp_read_str(r, &s)) {
+    *ok = false;
+    return buckets_xstrdup("");
+  }
+  return buckets_str_dup(s);
+}
+
+static bool rs_decode(const void *data, size_t n, rs_bucket *b) {
+  memset(b, 0, sizeof(*b));
+  b->lu_sec = BUCKETS_GO_ZERO_SEC;
+  const uint8_t *p = data;
+  if (n <= 4 || p[0] != 1 || p[1] != 0 || p[2] != 1 || p[3] != 0) return false;
+  buckets_mp_reader r = buckets_mp_reader_init(p + 4, n - 4);
+  uint32_t nf;
+  if (!buckets_mp_read_map(&r, &nf)) return false;
+  bool ok = true;
+  for (uint32_t i = 0; i < nf && ok; i++) {
+    buckets_str k;
+    if (!buckets_mp_read_str(&r, &k)) return false;
+    if (buckets_str_eq_c(k, "v")) ok = buckets_mp_read_int(&r, &b->version);
+    else if (buckets_str_eq_c(k, "id")) ok = buckets_mp_read_int(&r, &b->id);
+    else if (buckets_str_eq_c(k, "lu")) ok = buckets_mp_read_time_sec(&r, &b->lu_sec, &b->lu_nsec);
+    else if (buckets_str_eq_c(k, "brs")) {
+      uint32_t nt;
+      if (buckets_mp_read_nil(&r)) continue;
+      if (!buckets_mp_read_map(&r, &nt)) return false;
+      for (uint32_t j = 0; j < nt && ok; j++) {
+        buckets_str arn;
+        if (!buckets_mp_read_str(&r, &arn)) return false;
+        char *a = buckets_str_dup(arn);
+        rs_tgt *t = rs_find(b, a, true);
+        free(a);
+        uint32_t tf;
+        if (!buckets_mp_read_map(&r, &tf)) return false;
+        for (uint32_t m = 0; m < tf && ok; m++) {
+          buckets_str f;
+          if (!buckets_mp_read_str(&r, &f)) return false;
+          if (buckets_str_eq_c(f, "st")) ok = buckets_mp_read_time_sec(&r, &t->start_sec, &t->start_nsec);
+          else if (buckets_str_eq_c(f, "lst")) ok = buckets_mp_read_time_sec(&r, &t->lu_sec, &t->lu_nsec);
+          else if (buckets_str_eq_c(f, "rdt")) ok = buckets_mp_read_time_sec(&r, &t->before_sec, &t->before_nsec);
+          else if (buckets_str_eq_c(f, "id")) {
+            free(t->id);
+            t->id = mp_strdup(&r, &ok);
+          } else if (buckets_str_eq_c(f, "rst")) ok = buckets_mp_read_int(&r, &t->status);
+          else if (buckets_str_eq_c(f, "fs")) ok = buckets_mp_read_int(&r, &t->failed_size);
+          else if (buckets_str_eq_c(f, "frc")) ok = buckets_mp_read_int(&r, &t->failed_count);
+          else if (buckets_str_eq_c(f, "rs")) ok = buckets_mp_read_int(&r, &t->repl_size);
+          else if (buckets_str_eq_c(f, "rrc")) ok = buckets_mp_read_int(&r, &t->repl_count);
+          else if (buckets_str_eq_c(f, "bkt")) {
+            free(t->bucket);
+            t->bucket = mp_strdup(&r, &ok);
+          } else if (buckets_str_eq_c(f, "obj")) {
+            free(t->object);
+            t->object = mp_strdup(&r, &ok);
+          } else ok = buckets_mp_skip(&r);
+        }
+      }
+    } else ok = buckets_mp_skip(&r);
+  }
+  if (!ok) rs_bucket_free(b);
+  return ok;
+}
+
+static void rs_path(const char *bucket, char *out, size_t cap) {
+  snprintf(out, cap, "buckets/%s/.replication/resync.bin", bucket);
+}
+
+static bool rs_load(buckets_s3_server *s, const char *bucket, rs_bucket *b) {
+  char path[1200];
+  rs_path(bucket, path, sizeof(path));
+  buckets_buf data = BUCKETS_BUF_INIT;
+  buckets_obj_err err = buckets_sysconfig_read(s->layer, path, &data, NULL);
+  bool ok = true;
+  if (err == BUCKETS_OBJ_OK) ok = rs_decode(data.data, data.len, b);
+  else {
+    memset(b, 0, sizeof(*b));
+    b->version = 1;
+    b->lu_sec = BUCKETS_GO_ZERO_SEC;
+    ok = err == BUCKETS_OBJ_ERR_NO_SUCH_KEY;
+  }
+  buckets_buf_free(&data);
+  return ok;
+}
+
+static void rs_save(buckets_s3_server *s, const char *bucket, const rs_bucket *b) {
+  char path[1200];
+  rs_path(bucket, path, sizeof(path));
+  buckets_buf data = BUCKETS_BUF_INIT;
+  rs_encode(b, &data);
+  buckets_sysconfig_write(s->layer, path, data.data, data.len);
+  buckets_buf_free(&data);
+}
+
+/* The status of one resync (in memory while it runs, saved as it goes). */
+typedef struct {
+  buckets_repl *r;
+  char *bucket, *arn;
+  bool heal; /* resuming after a restart: from the last object */
+} rs_run;
+
+static pthread_mutex_t g_rs_mu = PTHREAD_MUTEX_INITIALIZER;
+
+/* Updates arn's status in the bucket's saved resync status. */
+static void rs_update(buckets_s3_server *s, const char *bucket, const char *arn, int status, const char *object,
+                      int64_t ok_size, int64_t ok_count, int64_t fail_size, int64_t fail_count) {
+  pthread_mutex_lock(&g_rs_mu);
+  rs_bucket b;
+  if (rs_load(s, bucket, &b)) {
+    rs_tgt *t = rs_find(&b, arn, true);
+    if (status >= 0) t->status = status;
+    if (object) {
+      free(t->object);
+      t->object = buckets_xstrdup(object);
+      free(t->bucket);
+      t->bucket = buckets_xstrdup(bucket);
+    }
+    t->repl_size += ok_size;
+    t->repl_count += ok_count;
+    t->failed_size += fail_size;
+    t->failed_count += fail_count;
+    rs_now(&t->lu_sec, &t->lu_nsec);
+    rs_now(&b.lu_sec, &b.lu_nsec);
+    rs_save(s, bucket, &b);
+    rs_bucket_free(&b);
+  }
+  pthread_mutex_unlock(&g_rs_mu);
+}
+
+static void *rs_main(void *arg) {
+  rs_run *run = arg;
+  buckets_repl *r = run->r;
+  buckets_s3_server *s = r->s;
+  int final = RS_FAILED;
+  buckets_repl_target *t = buckets_repl_target_get(r, run->bucket, run->arn);
+  if (!t) goto done;
+  rs_update(s, run->bucket, run->arn, RS_STARTED, NULL, 0, 0, 0, 0);
+  char *checkpoint = NULL;
+  if (run->heal) {
+    rs_bucket b;
+    pthread_mutex_lock(&g_rs_mu);
+    if (rs_load(s, run->bucket, &b)) {
+      rs_tgt *rt = rs_find(&b, run->arn, false);
+      if (rt && rt->object && *rt->object) checkpoint = buckets_xstrdup(rt->object);
+      rs_bucket_free(&b);
+    }
+    pthread_mutex_unlock(&g_rs_mu);
+  }
+  char *km = NULL, *vm = NULL;
+  final = RS_COMPLETED;
+  for (;;) {
+    if (atomic_load(&r->stop)) {
+      final = RS_FAILED;
+      break;
+    }
+    buckets_obj_listing l;
+    if (buckets_obj_list_versions(s->layer, run->bucket, "", km, vm, NULL, 1000, &l)) {
+      final = RS_FAILED;
+      break;
+    }
+    for (size_t i = 0; i < l.nobjects && !atomic_load(&r->stop); i++) {
+      buckets_object_info *oi = &l.objects[i];
+      if (checkpoint) {
+        if (strcmp(checkpoint, oi->name) != 0) continue;
+        free(checkpoint);
+        checkpoint = NULL;
+      }
+      /* the listing's entry lacks the version's full metadata */
+      buckets_object_info full;
+      if (buckets_obj_stat(s->layer, run->bucket, oi->name, oi->version_id, &full)) continue;
+      if (!version_needs_resync(s, run->bucket, &full, &t->t)) {
+        buckets_object_info_free(&full);
+        continue;
+      }
+      const char *ps = sys_str(&full, BUCKETS_META_PURGE_STATUS);
+      bool purge = ps && *ps;
+      job j = {.bucket = run->bucket, .object = full.name, .op = BUCKETS_REPL_EXISTING, .target_arn = run->arn,
+               .event = full.delete_marker ? "replicate:existing:delete" : "replicate:existing", .retry = MRF_RETRY_LIMIT};
+      snprintf(j.version_id, sizeof(j.version_id), "%s", full.version_id);
+      if (full.delete_marker) {
+        j.kind = JOB_DELETE;
+        j.dm = !purge;
+        j.dm_mtime = full.mod_time_ns;
+        const char *rs = sys_str(&full, BUCKETS_META_REPL_STATUS);
+        j.repl_status = (char *)(rs ? rs : "");
+        j.purge_status = (char *)(purge ? ps : "");
+        replicate_delete(r, &j);
+      } else {
+        j.kind = JOB_OBJECT;
+        replicate_object(r, &j);
+      }
+      /* count it by what the target has now */
+      char q[128];
+      query_vid(q, sizeof(q), full.version_id);
+      hdrs sh = {0};
+      hset(&sh, BUCKETS_H_SRC_PROXY, "false");
+      buckets_s3c_result res;
+      bool there = buckets_s3c_do(t->c, "HEAD", t->t.target_bucket, full.name, q, sh.kv, sh.n, NULL, 0, &res);
+      hfree(&sh);
+      bool counted = there || (full.delete_marker && res.status == 405);
+      int64_t sz = there ? full.size : 0;
+      rs_update(s, run->bucket, run->arn, -1, full.name, counted ? sz : 0, counted, 0, !counted);
+      buckets_s3c_result_free(&res);
+      buckets_object_info_free(&full);
+    }
+    bool more = l.truncated;
+    free(km);
+    free(vm);
+    km = more && l.next_marker ? buckets_xstrdup(l.next_marker) : NULL;
+    vm = more && l.next_version_marker ? buckets_xstrdup(l.next_version_marker) : NULL;
+    buckets_obj_list_free(&l);
+    if (!more) break;
+  }
+  free(km);
+  free(vm);
+  free(checkpoint);
+done:
+  if (t) buckets_repl_target_put(t);
+  rs_update(s, run->bucket, run->arn, final, NULL, 0, 0, 0, 0);
+  free(run->bucket);
+  free(run->arn);
+  free(run);
+  return NULL;
+}
+
+static void rs_spawn(buckets_repl *r, const char *bucket, const char *arn, bool heal) {
+  rs_run *run = buckets_xcalloc(1, sizeof(*run));
+  run->r = r;
+  run->bucket = buckets_xstrdup(bucket);
+  run->arn = buckets_xstrdup(arn);
+  run->heal = heal;
+  pthread_t th;
+  if (pthread_create(&th, NULL, rs_main, run) == 0) pthread_detach(th);
+  else {
+    free(run->bucket);
+    free(run->arn);
+    free(run);
+  }
+}
+
+int buckets_repl_resync_start(buckets_repl *r, const char *bucket, const char *arn, const char *reset_id,
+                              int64_t before_ns, char *err, size_t errlen) {
+  buckets_s3_server *s = r->s;
+  pthread_mutex_lock(&g_rs_mu);
+  rs_bucket b;
+  if (!rs_load(s, bucket, &b)) {
+    pthread_mutex_unlock(&g_rs_mu);
+    snprintf(err, errlen, "resyncMeta: unreadable");
+    return -1;
+  }
+  rs_tgt *t = rs_find(&b, arn, false);
+  if (t && (t->status == RS_STARTED || t->status == RS_PENDING)) {
+    snprintf(err, errlen, "Resync of bucket %s is already in progress for remote bucket %s", bucket, arn);
+    rs_bucket_free(&b);
+    pthread_mutex_unlock(&g_rs_mu);
+    return -1;
+  }
+  /* a fresh status for this target */
+  if (t) {
+    free(t->id);
+    free(t->bucket);
+    free(t->object);
+    char *a = t->arn;
+    memset(t, 0, sizeof(*t));
+    t->arn = a;
+  } else {
+    t = rs_find(&b, arn, true);
+    free(t->id);
+    free(t->bucket);
+    free(t->object);
+  }
+  t->id = buckets_xstrdup(reset_id);
+  t->bucket = buckets_xstrdup(bucket);
+  t->object = buckets_xstrdup("");
+  t->before_sec = before_ns / 1000000000LL;
+  t->before_nsec = (int32_t)(before_ns % 1000000000LL);
+  rs_now(&t->start_sec, &t->start_nsec);
+  t->lu_sec = BUCKETS_GO_ZERO_SEC;
+  t->lu_nsec = 0;
+  t->status = RS_PENDING;
+  rs_save(s, bucket, &b);
+  rs_bucket_free(&b);
+  pthread_mutex_unlock(&g_rs_mu);
+  rs_spawn(r, bucket, arn, false);
+  return 0;
+}
+
+/* ResyncTargetsInfo JSON of a bucket's resync status (arn "" for all). */
+bool buckets_repl_resync_status(buckets_repl *r, const char *bucket, const char *arn, buckets_buf *out, char *err,
+                                size_t errlen) {
+  rs_bucket b;
+  pthread_mutex_lock(&g_rs_mu);
+  bool ok = rs_load(r->s, bucket, &b);
+  pthread_mutex_unlock(&g_rs_mu);
+  if (!ok) {
+    snprintf(err, errlen, "resyncMeta: unreadable");
+    return false;
+  }
+  buckets_buf_append_c(out, "{");
+  bool any = false;
+  for (size_t i = 0; i < b.n; i++) {
+    rs_tgt *t = &b.t[i];
+    if (arn && *arn && strcmp(arn, t->arn) != 0) continue;
+    buckets_buf_append_c(out, any ? "," : "\"target\":[");
+    any = true;
+    char st[BUCKETS_TIME_RFC3339_NANO_LEN + 1], et[BUCKETS_TIME_RFC3339_NANO_LEN + 1];
+    buckets_time_rfc3339_nano(t->start_sec, t->start_nsec, st);
+    buckets_time_rfc3339_nano(t->lu_sec, t->lu_nsec, et);
+    buckets_buf_append_c(out, "{\"arn\":");
+    buckets_json_go_string(out, t->arn, strlen(t->arn));
+    buckets_buf_append_c(out, ",\"resetid\":");
+    buckets_json_go_string(out, t->id, strlen(t->id));
+    buckets_buf_appendf(out, ",\"startTime\":\"%s\",\"endTime\":\"%s\"", st, et);
+    const char *sn = rs_state_name((int)t->status);
+    if (*sn) buckets_buf_appendf(out, ",\"resyncStatus\":\"%s\"", sn);
+    buckets_buf_appendf(out,
+                        ",\"completedReplicationSize\":%lld,\"failedReplicationSize\":%lld,\"failedReplicationCount\":%lld,"
+                        "\"replicationCount\":%lld",
+                        (long long)t->repl_size, (long long)t->failed_size, (long long)t->failed_count,
+                        (long long)t->repl_count);
+    if (*t->bucket) {
+      buckets_buf_append_c(out, ",\"bucket\":");
+      buckets_json_go_string(out, t->bucket, strlen(t->bucket));
+    }
+    if (*t->object) {
+      buckets_buf_append_c(out, ",\"object\":");
+      buckets_json_go_string(out, t->object, strlen(t->object));
+    }
+    buckets_buf_append_char(out, '}');
+  }
+  buckets_buf_append_c(out, any ? "]}" : "}");
+  rs_bucket_free(&b);
+  return true;
+}
+
+/* loadResync: resumes the resyncs that did not finish. */
+void buckets_repl_resync_resume(buckets_repl *r) {
+  buckets_s3_server *s = r->s;
+  buckets_bucket_info *bl = NULL;
+  size_t nb = 0;
+  if (buckets_obj_list_buckets(s->layer, &bl, &nb)) return;
+  for (size_t i = 0; i < nb; i++) {
+    rs_bucket b;
+    pthread_mutex_lock(&g_rs_mu);
+    bool ok = rs_load(s, bl[i].name, &b);
+    pthread_mutex_unlock(&g_rs_mu);
+    if (!ok) continue;
+    for (size_t k = 0; k < b.n; k++) {
+      int st = (int)b.t[k].status;
+      if (st == RS_FAILED || st == RS_STARTED || st == RS_PENDING) rs_spawn(r, bl[i].name, b.t[k].arn, true);
+    }
+    rs_bucket_free(&b);
+  }
+  buckets_bucket_info_free(bl, nb);
 }

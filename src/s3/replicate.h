@@ -63,6 +63,16 @@ void buckets_repl_schedule_delete(struct buckets_s3_server *s, const char *bucke
  * clients see), or NULL. */
 const char *buckets_repl_version_status(const buckets_object_info *oi, char *buf, size_t cap);
 
+/* ---- existing objects ---- */
+/* ResetBucketReplicationStart's resync (resyncer.start): 0, or -1 with err. */
+int buckets_repl_resync_start(buckets_repl *r, const char *bucket, const char *arn, const char *reset_id,
+                              int64_t before_ns, char *err, size_t errlen);
+/* ResetBucketReplicationStatus: ResyncTargetsInfo JSON. */
+bool buckets_repl_resync_status(buckets_repl *r, const char *bucket, const char *arn, buckets_buf *out, char *err,
+                                size_t errlen);
+/* Resumes unfinished resyncs (after startup). */
+void buckets_repl_resync_resume(buckets_repl *r);
+
 /* ---- remote targets ---- */
 /* A client for a bucket's target, or NULL; release with buckets_repl_target_put. */
 typedef struct buckets_repl_target buckets_repl_target;

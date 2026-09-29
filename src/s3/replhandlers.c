@@ -15,6 +15,9 @@
 
 #include "bucket/metasys.h"
 #include "core/timefmt.h"
+#include "core/uuid.h"
+#include "admin/admin.h"
+#include "notify/event.h"
 #include "s3/internal.h"
 #include "s3/replicate.h"
 #include "s3/xml.h"
@@ -367,5 +370,138 @@ void buckets_s3_delete_bucket_replication(s3_ctx *c) {
     buckets_s3_write_error(c, BUCKETS_ERR_INTERNAL_ERROR);
     return;
   }
+  c->resp->status = 200;
+}
+
+/* ---- ResetBucketReplicationStart / Status ---- */
+
+static void bad_request(s3_ctx *c, const char *detail) {
+  char msg[1200];
+  snprintf(msg, sizeof(msg), "%s (%s)", buckets_s3_error_get(BUCKETS_ERR_BAD_REQUEST)->message, detail);
+  /* writeErrorResponseJSON */
+  buckets_admin_json_error(c, 400, buckets_s3_error_get(BUCKETS_ERR_BAD_REQUEST)->code, msg, NULL, NULL);
+}
+
+void buckets_s3_reset_bucket_replication_start(s3_ctx *c) {
+  const char *dur = buckets_query_get(&c->q, "older-than");
+  const char *arn = buckets_query_get(&c->q, "arn");
+  const char *reset_id = buckets_query_get(&c->q, "reset-id");
+  char rid[BUCKETS_UUID_STR_LEN + 1];
+  if (!reset_id || !*reset_id) {
+    buckets_uuid_v4(rid);
+    reset_id = rid;
+  }
+  if (!arn) arn = "";
+  int64_t days_ns = 0;
+  if (dur && *dur && !buckets_go_duration_parse(dur, &days_ns)) {
+    char e[300], msg[600];
+    buckets_go_duration_error(dur, e, sizeof(e));
+    snprintf(msg, sizeof(msg), "invalid query parameter older-than %s for %s : %s", dur, c->bucket, e);
+    buckets_s3_write_custom_error(c, 400, "InvalidArgument", msg);
+    return;
+  }
+  /* UTCNow().AddDate(0, 0, -days) */
+  int64_t days = days_ns / (24LL * 3600 * 1000000000LL);
+  int64_t before = now_ns() - days * 24LL * 3600 * 1000000000LL;
+  buckets_bucket_state *st = buckets_metasys_get(c->s->meta, c->bucket);
+  if (!st->has_replication) {
+    buckets_bucket_state_release(st);
+    buckets_s3_write_error(c, BUCKETS_ERR_REPLICATION_CONFIGURATION_NOT_FOUND_ERROR);
+    return;
+  }
+  bool has_arn, enabled;
+  buckets_replication_has_existing(&st->replication, arn, &has_arn, &enabled);
+  if (!has_arn) {
+    buckets_bucket_state_release(st);
+    buckets_s3_write_error(c, BUCKETS_ERR_REMOTE_TARGET_NOT_FOUND_ERROR);
+    return;
+  }
+  if (!enabled) {
+    buckets_bucket_state_release(st);
+    buckets_s3_write_error(c, BUCKETS_ERR_REPLICATION_NO_EXISTING_OBJECTS);
+    return;
+  }
+  buckets_repl_obj o = {.op = BUCKETS_REPL_RESYNC, .target_arn = arn};
+  char **arns = NULL;
+  size_t na = buckets_replication_target_arns(&st->replication, &o, &arns);
+  if (na == 0 || (na > 1 && !*arn)) {
+    buckets_replication_arns_free(arns, na);
+    buckets_bucket_state_release(st);
+    char d[600];
+    if (na == 0) snprintf(d, sizeof(d), "Remote target ARN %s missing or ineligible for replication resync", arn);
+    else snprintf(d, sizeof(d), "ARN should be specified for replication reset");
+    bad_request(c, d);
+    return;
+  }
+  /* the target gets its reset ID and date */
+  buckets_bucket_targets ts = {0};
+  ts.t = buckets_xcalloc(st->targets.n + 1, sizeof(*ts.t));
+  bool found = false;
+  for (size_t i = 0; i < st->targets.n; i++) {
+    buckets_bucket_target_copy(&ts.t[ts.n], &st->targets.t[i]);
+    if (strcmp(ts.t[ts.n].arn, arns[0]) == 0) {
+      found = true;
+      free(ts.t[ts.n].reset_id);
+      ts.t[ts.n].reset_id = buckets_xstrdup(reset_id);
+      ts.t[ts.n].reset_before_sec = before / 1000000000LL;
+      ts.t[ts.n].reset_before_nsec = (int32_t)(before % 1000000000LL);
+    }
+    ts.n++;
+  }
+  buckets_bucket_state_release(st);
+  char tarn[512];
+  snprintf(tarn, sizeof(tarn), "%s", arns[0]);
+  buckets_replication_arns_free(arns, na);
+  if (!found) {
+    buckets_bucket_targets_free(&ts);
+    buckets_admin_json_error(c, 404, buckets_s3_error_get(BUCKETS_ERR_REMOTE_TARGET_NOT_FOUND_ERROR)->code,
+                             buckets_s3_error_get(BUCKETS_ERR_REMOTE_TARGET_NOT_FOUND_ERROR)->message, NULL, NULL);
+    return;
+  }
+  buckets_buf j = BUCKETS_BUF_INIT;
+  buckets_bucket_targets_json(&ts, &j);
+  buckets_bucket_targets_free(&ts);
+  bool ok = buckets_metasys_update_targets(c->s->meta, c->bucket, j.data, j.len);
+  buckets_buf_free(&j);
+  if (!ok) {
+    buckets_s3_write_error(c, BUCKETS_ERR_INTERNAL_ERROR);
+    return;
+  }
+  char err[600];
+  if (buckets_repl_resync_start(c->s->repl, c->bucket, tarn, reset_id, before, err, sizeof(err)) != 0) {
+    bad_request(c, err);
+    return;
+  }
+  buckets_buf *b = &c->resp->body;
+  buckets_buf_append_c(b, "{\"target\":[{\"arn\":");
+  buckets_json_go_string(b, tarn, strlen(tarn));
+  buckets_buf_append_c(b, ",\"resetid\":");
+  buckets_json_go_string(b, reset_id, strlen(reset_id));
+  buckets_buf_append_c(b, ",\"startTime\":\"0001-01-01T00:00:00Z\",\"endTime\":\"0001-01-01T00:00:00Z\","
+                          "\"completedReplicationSize\":0,\"failedReplicationSize\":0,\"failedReplicationCount\":0,"
+                          "\"replicationCount\":0}]}");
+  buckets_http_resp_header(c->resp, "Content-Type", "application/json");
+  c->resp->status = 200;
+}
+
+void buckets_s3_reset_bucket_replication_status(s3_ctx *c) {
+  const char *arn = buckets_query_get(&c->q, "arn");
+  buckets_bucket_state *st = buckets_metasys_get(c->s->meta, c->bucket);
+  bool has = st->has_replication;
+  buckets_bucket_state_release(st);
+  if (!has) {
+    buckets_s3_write_error(c, BUCKETS_ERR_REPLICATION_CONFIGURATION_NOT_FOUND_ERROR);
+    return;
+  }
+  char err[300];
+  if (!buckets_repl_resync_status(c->s->repl, c->bucket, arn, &c->resp->body, err, sizeof(err))) {
+    char d[600];
+    snprintf(d, sizeof(d), "replication resync status not available for %s (%s)", arn ? arn : "", err);
+    char msg[800];
+    snprintf(msg, sizeof(msg), "%s (%s)", buckets_s3_error_get(BUCKETS_ERR_BAD_REQUEST)->message, d);
+    buckets_s3_write_error_msg(c, BUCKETS_ERR_BAD_REQUEST, msg);
+    return;
+  }
+  buckets_http_resp_header(c->resp, "Content-Type", "application/json");
   c->resp->status = 200;
 }

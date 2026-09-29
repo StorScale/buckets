@@ -272,6 +272,9 @@ static long reader_source(void *ud, void *buf, size_t n) { return buckets_obj_re
 
 static void copy_object(s3_ctx *c);
 
+/* The upload's version ID for a replicated upload (removed at completion). */
+#define MPU_VID_META "x-minio-internal-buckets-replication-version-id"
+
 /* The request body as a decoded data source: plain, or aws-chunked. */
 typedef struct {
   buckets_read_fn rd;
@@ -1819,6 +1822,19 @@ static void mpu_create(s3_ctx *c) {
     return;
   }
   if (!serr) serr = buckets_s3_lock_put_meta(c, c->object, &meta, &nmeta);
+  buckets_s3_repl_in ri;
+  if (!serr && !buckets_s3_repl_in_parse(c, c->object, true, &ri)) {
+    free_kvs(meta, nmeta);
+    return;
+  }
+  if (!serr) {
+    buckets_s3_repl_in_meta(c, &ri, &meta, &nmeta);
+    buckets_repl_dsc dsc;
+    buckets_s3_repl_out_meta(c, c->object, &meta, &nmeta, ri.request, &dsc);
+    buckets_repl_dsc_free(&dsc);
+    /* a replicated upload completes as the source's version */
+    if (ri.has_vid) buckets_xl_kv_set(&meta, &nmeta, MPU_VID_META, ri.version_id, strlen(ri.version_id));
+  }
   uint32_t ctype = 0;
   buckets_str alg = buckets_http_header_get(c->req, "X-Amz-Checksum-Algorithm");
   buckets_str ot = buckets_http_header_get(c->req, "X-Amz-Checksum-Type");
@@ -2262,9 +2278,23 @@ static void mpu_client_etag(void *ud, const char *stored, char out[128]) {
   sse_part_etag(cs->have_key ? cs->key : NULL, cs->sse_s3, stored, out);
 }
 
-static buckets_obj_err mpu_seal_checksum(void *ud, buckets_xl_object *o) {
-  mpu_sse *cs = ud;
-  if (cs->have_key) seal_checksum_meta(cs->key, o);
+
+
+typedef struct {
+  mpu_sse *cs; /* encrypted uploads */
+  int64_t mtime_ns;
+} mpu_commit;
+
+static buckets_obj_err mpu_pre_commit(void *ud, buckets_xl_object *o) {
+  mpu_commit *mc = ud;
+  if (mc->cs && mc->cs->have_key) seal_checksum_meta(mc->cs->key, o);
+  const buckets_xl_kv *v = buckets_xl_kv_get(o->meta_sys, o->nmeta_sys, MPU_VID_META);
+  if (v) {
+    uint8_t id[16];
+    if (buckets_xl_version_id_parse((const char *)v->value, id)) memcpy(o->version_id, id, 16);
+    remove_kv(o->meta_sys, &o->nmeta_sys, MPU_VID_META);
+  }
+  if (mc->mtime_ns) o->mod_time = mc->mtime_ns;
   return BUCKETS_OBJ_OK;
 }
 
@@ -2340,11 +2370,21 @@ static void mpu_complete(s3_ctx *c, const char *upload_id) {
     buckets_s3_write_error(c, cerr);
     return;
   }
+  buckets_s3_repl_in ri;
+  if (!buckets_s3_repl_in_parse(c, c->object, false, &ri)) {
+    for (size_t i = 0; i < n; i++) {
+      free(etags[i]);
+      free(cksums[i]);
+    }
+    free(etags), free(cksums), free(parts);
+    return;
+  }
   buckets_object_info oi;
   bool versioned, suspended;
   buckets_s3_versioning(c, c->object, &versioned, &suspended);
   mpu_sse cs = {0};
-  buckets_complete_opts co = {.versioned = versioned};
+  mpu_commit mc = {.mtime_ns = ri.mtime_ns};
+  buckets_complete_opts co = {.versioned = versioned, .pre_commit = mpu_pre_commit, .ud = &mc};
   buckets_object_info ui;
   c->tags.paused = true; /* a lookup of our own: MinIO's handler tags only the completion */
   buckets_obj_err ui_err = buckets_obj_mpu_stat(c->s->layer, c->bucket, c->object, upload_id, &ui);
@@ -2363,8 +2403,7 @@ static void mpu_complete(s3_ctx *c, const char *upload_id) {
         return;
       }
       co.client_etag = mpu_client_etag;
-      co.pre_commit = mpu_seal_checksum;
-      co.ud = &cs;
+      mc.cs = &cs;
     }
     buckets_object_info_free(&ui);
   }
@@ -2427,6 +2466,13 @@ static void mpu_complete(s3_ctx *c, const char *upload_id) {
   buckets_xml_close(b, "CompleteMultipartUploadResult");
   buckets_s3_write_xml(c, 200);
   buckets_s3_send_event(c, BUCKETS_EV_OBJECT_CREATED_COMPLETE_MULTIPART_UPLOAD, c->bucket, c->object, &oi, NULL);
+  if (!ri.request) {
+    buckets_repl_dsc dsc;
+    buckets_repl_must(c->s, c->bucket, c->object, oi.meta, oi.nmeta, oi.meta_sys, oi.nmeta_sys, NULL,
+                      BUCKETS_REPL_OBJECT, false, &dsc);
+    buckets_repl_schedule(c->s, c->bucket, &oi, &dsc, BUCKETS_REPL_OBJECT, "replicate:incoming");
+    buckets_repl_dsc_free(&dsc);
+  }
   buckets_object_info_free(&oi);
 }
 
