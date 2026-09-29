@@ -407,6 +407,16 @@ void buckets_s3_peer_bucket(void *server, const char *bucket) {
 
 char *buckets_s3_peer_server_info(void *server) { return buckets_admin_local_server_json(server); }
 
+char *buckets_s3_peer_tier_stats(void *server) {
+  buckets_s3_server *s = server;
+  buckets_tier_day *d;
+  size_t n = buckets_tiering_day_stats(s->tiering, &d);
+  buckets_buf b = BUCKETS_BUF_INIT;
+  buckets_tier_days_json(d, n, &b);
+  free(d);
+  return buckets_buf_detach(&b);
+}
+
 void buckets_s3_server_init(buckets_s3_server *s, buckets_objlayer *layer, const char *root_user,
                             const char *root_password, const char *region) {
   memset(s, 0, sizeof(*s));
@@ -756,6 +766,12 @@ static void scanner_free_version(void *ud, const char *bucket, const buckets_obj
   }
 }
 
+static size_t scanner_tier_names(void *ud, char ***names) {
+  buckets_s3_server *s = ud;
+  *names = NULL;
+  return s->tiers ? buckets_tiers_names(s->tiers, names) : 0;
+}
+
 void buckets_s3_scanner_hooks(buckets_s3_server *s, void *hooks) {
   buckets_scanner_hooks *h = hooks;
   memset(h, 0, sizeof(*h));
@@ -764,6 +780,7 @@ void buckets_s3_scanner_hooks(buckets_s3_server *s, void *hooks) {
   h->actual_size = scanner_actual_size;
   h->object = scanner_object;
   h->free_version = scanner_free_version;
+  h->tier_names = scanner_tier_names;
   h->ud = s;
 }
 

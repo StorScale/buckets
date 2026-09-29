@@ -34,6 +34,8 @@
 #include "metrics/sys.h"
 #include "notify/notifier.h"
 #include "s3/replicate.h"
+#include "s3/tiering.h"
+#include "tier/tier.h"
 #include "object/epool.h"
 #include "s3/internal.h"
 #include "s3/metrics.h"
@@ -233,6 +235,37 @@ static void histogram_range(mctx *m, const char *name, const uint64_t *v, size_t
 }
 
 /* getClusterUsageMetrics */
+/* getClusterTierMetrics: the stored usage's tierStats, while tiers exist */
+static void cluster_tier(mctx *m) {
+  if (buckets_tiers_empty(m->s->tiers)) return;
+  buckets_data_usage u;
+  if (!usage_of(m->s, &u)) return;
+  for (size_t i = 0; i < u.ntiers; i++) {
+    ADD1(m, "minio_cluster_ilm_transitioned_bytes", (double)u.tiers[i].size, "tier", u.tiers[i].name);
+    ADD1(m, "minio_cluster_ilm_transitioned_objects", (double)u.tiers[i].objects, "tier", u.tiers[i].name);
+    ADD1(m, "minio_cluster_ilm_transitioned_versions", (double)u.tiers[i].versions, "tier", u.tiers[i].name);
+  }
+  buckets_data_usage_free(&u);
+}
+
+/* getTierMetrics (tierMetrics.Report): reads served from each tier */
+static void tier_node_metrics(mctx *m) {
+  static const double bounds[10] = {0.01, 0.1, 1, 2, 5, 10, 60, 300, 900, 1800};
+  buckets_tier_request_stats *st;
+  size_t n = buckets_tiering_request_stats(&st);
+  for (size_t i = 0; i < n; i++) {
+    for (int b = 0; b <= 10; b++) {
+      char le[16];
+      if (b < 10) snprintf(le, sizeof(le), "%.3f", bounds[b]);
+      else snprintf(le, sizeof(le), "+Inf");
+      ADD2(m, "minio_node_tier_ttlb_seconds_distribution", (double)st[i].ttlb_buckets[b], "tier", st[i].tier, "le", le);
+    }
+    ADD1(m, "minio_node_tier_requests_success", (double)st[i].success, "tier", st[i].tier);
+    ADD1(m, "minio_node_tier_requests_failure", (double)st[i].failure, "tier", st[i].tier);
+  }
+  free(st);
+}
+
 static void cluster_usage(mctx *m) {
   buckets_data_usage u;
   if (!usage_of(m->s, &u)) return;
@@ -447,9 +480,11 @@ static void ilm_scanner_metrics(mctx *m) {
   ADD0(m, "minio_node_ilm_expiry_missed_freeversions", 0);
   ADD0(m, "minio_node_ilm_expiry_missed_tierjournal_tasks", 0);
   ADD0(m, "minio_node_ilm_expiry_num_workers", 0);
-  ADD0(m, "minio_node_ilm_transition_pending_tasks", 0);
-  ADD0(m, "minio_node_ilm_transition_active_tasks", 0);
-  ADD0(m, "minio_node_ilm_transition_missed_immediate_tasks", 0);
+  buckets_tiering_stats ts;
+  buckets_tiering_stats_get(m->s->tiering, &ts);
+  ADD0(m, "minio_node_ilm_transition_pending_tasks", (double)ts.pending);
+  ADD0(m, "minio_node_ilm_transition_active_tasks", (double)ts.active);
+  ADD0(m, "minio_node_ilm_transition_missed_immediate_tasks", (double)ts.missed_immediate);
   buckets_scanner_stats sc = {0};
   buckets_scanner *scn = atomic_load(&m->s->scanner);
   if (scn) buckets_scanner_stats_get(scn, &sc);
@@ -918,6 +953,7 @@ static void peer_groups(mctx *m, const buckets_stats_snapshot *st, const buckets
   iam_node_metrics(m);
   healing_metrics(m);
   webhook_metrics(m);
+  tier_node_metrics(m);
 }
 
 /* A peer's samples (Prometheus text) into e. */
@@ -1002,6 +1038,7 @@ bool buckets_metrics_v2(buckets_s3_server *s, const char *which, buckets_buf *ou
     if (cluster) {
       /* clusterMetricsGroups, then peerMetricsGroups from this node and every peer */
       cluster_storage(&m, dv, nd);
+      cluster_tier(&m);
       cluster_usage(&m);
       kms_metrics(&m);
       cluster_health(&m, dv, nd);
@@ -1016,6 +1053,7 @@ bool buckets_metrics_v2(buckets_s3_server *s, const char *which, buckets_buf *ou
       network_metrics(&m, &st);
       version_metrics(&m);
       ttfb_rows(&m, "minio_s3_requests_ttfb_seconds_distribution", st.api, NULL);
+      tier_node_metrics(&m);
       notification_metrics(&m);
       lock_metrics(&m);
       iam_node_metrics(&m);
@@ -1403,9 +1441,11 @@ static void v3_usage_buckets(m3ctx *m, const char *bucket) {
 static void v3_ilm(m3ctx *m, const char *bucket) {
   (void)bucket;
   SET0(m, "minio_ilm_expiry_pending_tasks", 0);
-  SET0(m, "minio_ilm_transition_active_tasks", 0);
-  SET0(m, "minio_ilm_transition_pending_tasks", 0);
-  SET0(m, "minio_ilm_transition_missed_immediate_tasks", 0);
+  buckets_tiering_stats ts;
+  buckets_tiering_stats_get(m->s->tiering, &ts);
+  SET0(m, "minio_ilm_transition_active_tasks", (double)ts.active);
+  SET0(m, "minio_ilm_transition_pending_tasks", (double)ts.pending);
+  SET0(m, "minio_ilm_transition_missed_immediate_tasks", (double)ts.missed_immediate);
   buckets_scanner_stats sc = {0};
   buckets_scanner *scn = atomic_load(&m->s->scanner);
   if (scn) buckets_scanner_stats_get(scn, &sc);

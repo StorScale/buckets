@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <yyjson.h>
 
 #include "core/auditctx.h"
 #include "core/log.h"
@@ -39,6 +40,8 @@ struct buckets_tiering {
   bool stop;
   pthread_t *threads;
   int nthreads;
+  buckets_tier_day *days; /* under mu */
+  size_t ndays;
 };
 
 static void task_free(task *t) {
@@ -93,6 +96,116 @@ size_t buckets_tiering_request_stats(buckets_tier_request_stats **out) {
   size_t n = g_nstats;
   pthread_mutex_unlock(&g_stats_mu);
   return n;
+}
+
+/* ---- last day's transitions ---------------------------------------------------------------- */
+
+#define HOUR_NS 3600000000000LL
+
+static int hour_of(int64_t ns) {
+  time_t t = (time_t)(ns / 1000000000LL);
+  struct tm tm;
+  localtime_r(&t, &tm);
+  return tm.tm_hour;
+}
+
+/* lastDayTierStats.forwardTo: clears the bins between the last update and t. */
+static void day_forward(buckets_tier_day *d, int64_t t) {
+  int64_t since = t - d->updated_ns;
+  if (since < HOUR_NS) return;
+  int idx = hour_of(t), last = hour_of(d->updated_ns);
+  d->updated_ns = t;
+  if (since >= 24 * HOUR_NS) {
+    memset(d->bins, 0, sizeof(d->bins));
+    return;
+  }
+  while (last != idx) {
+    last = (last + 1) % 24;
+    memset(&d->bins[last], 0, sizeof(d->bins[last]));
+  }
+}
+
+static buckets_tier_day *day_find(buckets_tier_day **d, size_t *n, const char *tier) {
+  for (size_t i = 0; i < *n; i++)
+    if (!strcmp((*d)[i].tier, tier)) return &(*d)[i];
+  *d = buckets_xrealloc(*d, (*n + 1) * sizeof(**d));
+  buckets_tier_day *e = &(*d)[(*n)++];
+  memset(e, 0, sizeof(*e));
+  snprintf(e->tier, sizeof(e->tier), "%s", tier);
+  return e;
+}
+
+static int64_t wall_ns(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_REALTIME, &ts);
+  return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
+
+static void add_day_stats(buckets_tiering *tg, const char *tier, const task *t) {
+  int64_t now = wall_ns();
+  pthread_mutex_lock(&tg->mu);
+  buckets_tier_day *d = day_find(&tg->days, &tg->ndays, tier);
+  day_forward(d, now);
+  buckets_tier_stat *b = &d->bins[hour_of(now)];
+  b->size += t->size > 0 ? (uint64_t)t->size : 0;
+  b->versions++;
+  b->objects += t->is_latest;
+  pthread_mutex_unlock(&tg->mu);
+}
+
+size_t buckets_tiering_day_stats(buckets_tiering *tg, buckets_tier_day **out) {
+  *out = NULL;
+  if (!tg) return 0;
+  pthread_mutex_lock(&tg->mu);
+  size_t n = tg->ndays;
+  *out = buckets_xcalloc(n + 1, sizeof(**out));
+  memcpy(*out, tg->days, n * sizeof(**out));
+  pthread_mutex_unlock(&tg->mu);
+  return n;
+}
+
+void buckets_tier_days_json(const buckets_tier_day *d, size_t n, buckets_buf *out) {
+  buckets_buf_append_c(out, "{");
+  for (size_t i = 0; i < n; i++) {
+    buckets_buf_appendf(out, "%s\"%s\":{\"updated\":%lld,\"bins\":[", i ? "," : "", d[i].tier,
+                        (long long)d[i].updated_ns);
+    for (int h = 0; h < 24; h++)
+      buckets_buf_appendf(out, "%s[%llu,%llu,%llu]", h ? "," : "", (unsigned long long)d[i].bins[h].size,
+                          (unsigned long long)d[i].bins[h].versions, (unsigned long long)d[i].bins[h].objects);
+    buckets_buf_append_c(out, "]}");
+  }
+  buckets_buf_append_c(out, "}");
+}
+
+/* lastDayTierStats.merge: both forwarded to the later update, then summed. */
+void buckets_tier_days_merge_json(buckets_tier_day **d, size_t *n, const char *json) {
+  yyjson_doc *doc = json ? yyjson_read(json, strlen(json), 0) : NULL;
+  yyjson_val *root = doc ? yyjson_doc_get_root(doc) : NULL;
+  yyjson_obj_iter it = yyjson_obj_iter_with(root);
+  yyjson_val *k;
+  while (yyjson_is_obj(root) && (k = yyjson_obj_iter_next(&it))) {
+    yyjson_val *v = yyjson_obj_iter_get_val(k), *bins = yyjson_obj_get(v, "bins");
+    const char *tier = yyjson_get_str(k);
+    if (!tier || strlen(tier) >= sizeof((*d)->tier)) continue;
+    buckets_tier_day m = {0};
+    m.updated_ns = yyjson_get_sint(yyjson_obj_get(v, "updated"));
+    for (int h = 0; h < 24 && yyjson_is_arr(bins); h++) {
+      yyjson_val *b = yyjson_arr_get(bins, (size_t)h);
+      m.bins[h].size = yyjson_get_uint(yyjson_arr_get(b, 0));
+      m.bins[h].versions = yyjson_get_uint(yyjson_arr_get(b, 1));
+      m.bins[h].objects = yyjson_get_uint(yyjson_arr_get(b, 2));
+    }
+    buckets_tier_day *l = day_find(d, n, tier);
+    if (l->updated_ns > m.updated_ns) day_forward(&m, l->updated_ns);
+    else day_forward(l, m.updated_ns);
+    if (m.updated_ns > l->updated_ns) l->updated_ns = m.updated_ns;
+    for (int h = 0; h < 24; h++) {
+      l->bins[h].size += m.bins[h].size;
+      l->bins[h].versions += m.bins[h].versions;
+      l->bins[h].objects += m.bins[h].objects;
+    }
+  }
+  yyjson_doc_free(doc);
 }
 
 static double mono_secs(void) {
@@ -217,6 +330,7 @@ static void run_transition(buckets_tiering *tg, task *t) {
                                                t->tier, upload, &u, &oi);
   if (err == BUCKETS_OBJ_ERR_NO_SUCH_KEY || err == BUCKETS_OBJ_ERR_NO_SUCH_VERSION) return; /* gone or replaced */
   if (!err) {
+    add_day_stats(tg, t->tier, t);
     buckets_s3_send_internal_event(s, BUCKETS_EV_OBJECT_TRANSITION_COMPLETE, t->bucket, t->object, &oi,
                                    oi.version_id, ILM_TRANSITION_UA);
   } else {
@@ -362,4 +476,9 @@ void buckets_tiering_stop(buckets_tiering *tg) {
     task_free(t);
   }
   tg->tail = NULL;
+  pthread_mutex_lock(&tg->mu);
+  free(tg->days);
+  tg->days = NULL;
+  tg->ndays = 0;
+  pthread_mutex_unlock(&tg->mu);
 }

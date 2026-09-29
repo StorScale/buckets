@@ -66,7 +66,7 @@ Source: `cmd/api-router.go`
 | ⬜ | `ListenNotificationHandler` |  |
 | ✅ | `NewMultipartUploadHandler` |  |
 | ✅ | `PostPolicyBucketHandler` |  |
-| ⬜ | `PostRestoreObjectHandler` |  |
+| 🟡 | `PostRestoreObjectHandler` | restores from any tier; SELECT restores return NotImplemented |
 | ✅ | `PutBucketACLHandler` | canned private, as MinIO |
 | ✅ | `PutBucketCorsHandler` | dummy, as MinIO |
 | ✅ | `PutBucketEncryptionHandler` |  |
@@ -90,7 +90,7 @@ Source: `cmd/api-router.go`
 | ⬜ | `SelectObjectContentHandler` |  |
 | ⬜ | `ValidateBucketReplicationCredsHandler` |  |
 
-## Admin API (madmin / mc admin) (56/123)
+## Admin API (madmin / mc admin) (77/123)
 
 Source: `cmd/admin-router.go`
 
@@ -101,7 +101,7 @@ Source: `cmd/admin-router.go`
 | ✅ | `AddIdentityProviderCfg` |  |
 | ✅ | `AddServiceAccount` |  |
 | ✅ | `AddServiceAccountLDAP` |  |
-| ⬜ | `AddTierHandler` |  |
+| ✅ | `AddTierHandler` | S3, MinIO, Azure, GCS |
 | ✅ | `AddUser` |  |
 | ✅ | `AttachDetachPolicyBuiltin` |  |
 | ✅ | `AttachDetachPolicyLDAP` |  |
@@ -120,7 +120,7 @@ Source: `cmd/admin-router.go`
 | ⬜ | `DescribeBatchJob` |  |
 | ⬜ | `DownloadProfilingHandler` |  |
 | ⬜ | `DriveSpeedtestHandler` |  |
-| ⬜ | `EditTierHandler` |  |
+| ✅ | `EditTierHandler` |  |
 | ⬜ | `ExportBucketMetadataHandler` |  |
 | ✅ | `ExportIAM` |  |
 | ⬜ | `ForceUnlockHandler` |  |
@@ -159,7 +159,7 @@ Source: `cmd/admin-router.go`
 | ⬜ | `ListPools` |  |
 | ⬜ | `ListRemoteTargetsHandler` |  |
 | ✅ | `ListServiceAccounts` |  |
-| ⬜ | `ListTierHandler` |  |
+| ✅ | `ListTierHandler` |  |
 | ✅ | `ListUsers` |  |
 | ⬜ | `MetricsHandler` |  |
 | ⬜ | `NetperfHandler` |  |
@@ -171,7 +171,7 @@ Source: `cmd/admin-router.go`
 | ⬜ | `RebalanceStop` |  |
 | ✅ | `RemoveCannedPolicy` |  |
 | ⬜ | `RemoveRemoteTargetHandler` |  |
-| ⬜ | `RemoveTierHandler` |  |
+| ✅ | `RemoveTierHandler` |  |
 | ✅ | `RemoveUser` |  |
 | ⬜ | `ReplicationDiffHandler` |  |
 | ⬜ | `ReplicationMRFHandler` |  |
@@ -212,13 +212,13 @@ Source: `cmd/admin-router.go`
 | ⬜ | `StatusPool` |  |
 | ⬜ | `StorageInfoHandler` |  |
 | ✅ | `TemporaryAccountInfo` |  |
-| ⬜ | `TierStatsHandler` |  |
+| ✅ | `TierStatsHandler` | scanner per-tier usage and every node's last-day transitions |
 | ⬜ | `TopLocksHandler` |  |
 | ⬜ | `TraceHandler` |  |
 | ✅ | `UpdateGroupMembers` |  |
 | ✅ | `UpdateIdentityProviderCfg` |  |
 | ✅ | `UpdateServiceAccount` |  |
-| ⬜ | `VerifyTierHandler` |  |
+| ✅ | `VerifyTierHandler` |  |
 
 ## STS (7/7)
 
@@ -275,6 +275,6 @@ Source: `cmd/healthcheck-router.go`
 
 Subsystems with no single handler, tracked by phase in `docs/architecture.md`:
 erasure coding + bitrot, xl.meta v2, pools, distributed locking, healing, the scanner with data usage and
-lifecycle expiry, SSE-S3/KMS/C with the builtin KMS, and S2 compression (done); ILM transitions/tiering,
-bucket + site replication, notifications (10 targets), audit, KES/MinIO KMS backends, S3 Select, SFTP/FTP,
+lifecycle expiry, SSE-S3/KMS/C with the builtin KMS, and S2 compression (done); ILM transitions/tiering
+(S3, MinIO, Azure, GCS), bucket + site replication (done); notifications (10 targets), audit, KES/MinIO KMS backends, S3 Select, SFTP/FTP,
 batch jobs, decommission/rebalance, operator, console (IAM with LDAP, OpenID, plugins and OPA is done).

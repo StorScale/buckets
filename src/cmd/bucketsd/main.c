@@ -666,7 +666,8 @@ int main(int argc, char **argv) {
   buckets_storage_server *storage_srv = NULL;
   static buckets_peer_handlers peer_handlers;
   peer_handlers = (buckets_peer_handlers){buckets_s3_peer_iam, buckets_s3_peer_bucket, buckets_s3_peer_server_info,
-                                          buckets_s3_peer_metrics, buckets_s3_peer_listen, &s3};
+                                          buckets_s3_peer_metrics, buckets_s3_peer_listen, &s3,
+                                          buckets_s3_peer_tier_stats};
   if (topo.distributed) {
     internode_pool = buckets_pool_new((int)BUCKETS_MAX(16L, 2 * ncpu));
     storage_srv = buckets_storage_server_new(topo.local_drives, topo.nlocal);

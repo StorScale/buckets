@@ -5,6 +5,9 @@
 #  - transitions (immediate and by the scanner) of plain, multipart,
 #    SSE-S3 and compressed objects; reads (and ranges) from the tier;
 #  - RestoreObject, repeated and invalid restores;
+#  - Azure (Azurite) and GCS (fake-gcs-server) tiers, when AZURITE_BIN and
+#    FAKE_GCS_BIN are set;
+#  - mc admin tier info (per-tier usage, last-day transitions), tier metrics;
 #  - deletes, overwrites and expiry of transitioned versions: the remote
 #    copies go (free versions swept by the scanner);
 #  - compatibility: MinIO reads what bucketsd transitioned and restored,
@@ -21,6 +24,7 @@ BIN=$(cd "$(dirname "$BIN")" && pwd)/$(basename "$BIN")
 PORT=${PORT:-19840}
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/buckets-tier-XXXXXX")
 export MC_CONFIG_DIR="$WORK/mc" MINIO_ROOT_USER=rootadmin MINIO_ROOT_PASSWORD=rootsecret123
+export MINIO_PROMETHEUS_AUTH_TYPE=public
 export MINIO_KMS_SECRET_KEY="my-minio-key:OSMM+vkKUTCvQs9YL/CVMIMt43HFhkUpqJxTmGl6rYw="
 PIDS=()
 pass=0 fail=0
@@ -145,6 +149,21 @@ run_hot_buckets() { # warm kind
   lc_import hot/later "$TRANSITION"
   wait_for 60 is_tier hot/later/old WARM1 || bad "scanner did not transition later/old"
 
+  # tier info: the scanner's per-tier usage and the last day's transitions;
+  # the tier metrics
+  tier_info_ok() { MC admin tier info hot --json | python3 -c 'import json,sys
+t = {x["Name"]: x for x in json.load(sys.stdin)["tiers"]}
+w = t["WARM1"]
+assert w["API"] == "minio" and w["Type"] == "warm" and w["Stats"]["numVersions"] == 6, w["Stats"]
+assert t["STANDARD"]["API"] == "internal" and "REDUCED_REDUNDANCY" in t
+assert sum(b["numVersions"] for b in w["DailyStats"]["Bins"]) == 6'; }
+  wait_for 60 tier_info_ok || bad "tier info: $(MC admin tier info hot --json 2>&1 | head -c 600)"
+  local metrics
+  metrics=$(curl -s "http://127.0.0.1:$PORT/minio/v2/metrics/cluster")
+  contains "transitioned metric" "$metrics" 'minio_cluster_ilm_transitioned_versions{server="127.0.0.1:'"$PORT"'",tier="WARM1"} 6'
+  contains "tier requests metric" "$metrics" 'minio_node_tier_requests_success{server="127.0.0.1:'"$PORT"'",tier="WARM1"}'
+  contains "tier ttlb metric" "$metrics" 'minio_node_tier_ttlb_seconds_distribution{le="+Inf"'
+
   # restore
   out=$(curl_s3 -s -o /dev/null -w '%{http_code}' -X POST \
     --data '<RestoreRequest xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Days>2</Days></RestoreRequest>' \
@@ -258,7 +277,95 @@ run_hot_minio() { # MinIO transitions, bucketsd reads (and deletes)
   stop_all
 }
 
+# Azure Blob (Azurite) and GCS (fake-gcs-server) warm tiers, when the
+# emulators are given: AZURITE_BIN (azurite-blob), FAKE_GCS_BIN.
+cloud_count() { # kind port: the objects under p/ in the tier's container or bucket
+  python3 - "$@" <<'PY'
+import base64, email.utils, hashlib, hmac, json, re, sys, urllib.request
+kind, port = sys.argv[1], sys.argv[2]
+if kind == "gcs":
+    d = json.load(urllib.request.urlopen(f"http://127.0.0.1:{port}/storage/v1/b/tierg/o?prefix=p/"))
+    print(len(d.get("items", [])))
+    sys.exit()
+acct, key = "devstoreaccount1", "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
+date = email.utils.formatdate(usegmt=True)
+sts = ("GET\n" + "\n" * 11 + f"x-ms-date:{date}\nx-ms-version:2021-08-06\n"
+       f"/{acct}/{acct}/tierc\ncomp:list\nprefix:p/\nrestype:container")
+sig = base64.b64encode(hmac.new(base64.b64decode(key), sts.encode(), hashlib.sha256).digest()).decode()
+req = urllib.request.Request(f"http://127.0.0.1:{port}/{acct}/tierc?restype=container&comp=list&prefix=p/",
+                             headers={"x-ms-date": date, "x-ms-version": "2021-08-06", "Authorization": f"SharedKey {acct}:{sig}"})
+print(len(re.findall(r"<Blob>", urllib.request.urlopen(req).read().decode())))
+PY
+}
+cloud_is() { [[ $(cloud_count "$1" "$2" 2>/dev/null) == "$3" ]]; }
+make_container() { # port
+  python3 - "$1" <<'PY'
+import base64, email.utils, hashlib, hmac, sys, urllib.request
+port, acct = sys.argv[1], "devstoreaccount1"
+key = "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
+date = email.utils.formatdate(usegmt=True)
+sts = "PUT\n" + "\n" * 11 + f"x-ms-date:{date}\nx-ms-version:2021-08-06\n/{acct}/{acct}/tierc\nrestype:container"
+sig = base64.b64encode(hmac.new(base64.b64decode(key), sts.encode(), hashlib.sha256).digest()).decode()
+urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{port}/{acct}/tierc?restype=container", method="PUT",
+    headers={"x-ms-date": date, "x-ms-version": "2021-08-06", "Authorization": f"SharedKey {acct}:{sig}", "Content-Length": "0"}))
+PY
+}
+run_hot_cloud() { # azure|gcs
+  CASE="hot=buckets warm=$1"
+  local dir="$WORK/c_$1" ep=$((PORT + 5)) out
+  mkdir -p "$dir"
+  if [[ $1 == azure ]]; then
+    "$AZURITE_BIN" --blobHost 127.0.0.1 --blobPort "$ep" --location "$dir/az" --silent --skipApiVersionCheck >"$dir/az.log" 2>&1 &
+  else
+    "$FAKE_GCS_BIN" -scheme http -host 127.0.0.1 -port "$ep" -backend memory >"$dir/gcs.log" 2>&1 &
+  fi
+  PIDS+=($!)
+  for _ in $(seq 100); do curl -s -o /dev/null "http://127.0.0.1:$ep/" && break; sleep 0.1; done
+  if [[ $1 == azure ]]; then
+    make_container "$ep"
+    start buckets "$PORT" hot "$dir/hot"
+    out=$(MC admin tier add azure hot CLOUD1 --endpoint "http://127.0.0.1:$ep/devstoreaccount1" --account-name devstoreaccount1 \
+      --account-key "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==" \
+      --bucket tierc --prefix p/ 2>&1)
+  else
+    curl -s -o /dev/null -X POST -H 'Content-Type: application/json' -d '{"name":"tierg"}' "http://127.0.0.1:$ep/storage/v1/b"
+    STORAGE_EMULATOR_HOST="127.0.0.1:$ep" start buckets "$PORT" hot "$dir/hot"
+    echo '{"type":"service_account","client_email":"x@y","private_key":"none"}' >"$dir/creds.json"
+    out=$(MC admin tier add gcs hot CLOUD1 --credentials-file "$dir/creds.json" --bucket tierg --prefix p/ 2>&1)
+  fi
+  check "tier add" "$out" "Added remote tier CLOUD1 of type $1"
+  MC admin config set hot scanner speed=fastest >/dev/null 2>&1
+  MC mb hot/data >/dev/null
+  lc_import hot/data '{"Rules":[{"ID":"t1","Status":"Enabled","Filter":{"Prefix":""},"Transition":{"Date":"2024-01-01T00:00:00Z","StorageClass":"CLOUD1"}}]}'
+  echo small >"$dir/small"
+  head -c 3000000 /dev/urandom >"$dir/big"
+  head -c $((12 * 1024 * 1024)) /dev/urandom >"$dir/mp"
+  MC cp "$dir/small" hot/data/small >/dev/null
+  MC cp "$dir/big" hot/data/big >/dev/null
+  MC cp "$dir/mp" hot/data/mp >/dev/null
+  for k in small big mp; do
+    wait_for 20 is_tier "hot/data/$k" CLOUD1 || bad "$k not transitioned: '$(sclass hot/data/$k)'"
+  done
+  check "remote objects" "$(cloud_count "$1" "$ep")" 3
+  check "small data" "$(MC cat hot/data/small)" small
+  check "big data" "$(MC cat hot/data/big | md5)" "$(md5 <"$dir/big")"
+  check "mp data" "$(MC cat hot/data/mp | md5)" "$(md5 <"$dir/mp")"
+  check "range" "$(curl_s3 -r 1000-1015 "http://127.0.0.1:$PORT/data/big" | md5)" "$(dd if="$dir/big" bs=1 skip=1000 count=16 2>/dev/null | md5)"
+  out=$(curl_s3 -s -o /dev/null -w '%{http_code}' -X POST \
+    --data '<RestoreRequest xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Days>1</Days></RestoreRequest>' \
+    "http://127.0.0.1:$PORT/data/big?restore")
+  check "restore" "$out" 200
+  wait_for 20 restored data/big || bad "restore did not complete"
+  check "restored data" "$(MC cat hot/data/big | md5)" "$(md5 <"$dir/big")"
+  MC rm hot/data/small >/dev/null
+  wait_for 30 cloud_is "$1" "$ep" 2 || bad "remote copy after delete: $(cloud_count "$1" "$ep") want 2"
+  contains "tier rm in use" "$(MC admin tier rm hot CLOUD1 2>&1)" "Specified remote backend is not empty"
+  stop_all
+}
+
 for w in ${WARM:-minio buckets}; do run_hot_buckets "$w"; done
+[[ -n "${AZURITE_BIN:-}" ]] && run_hot_cloud azure
+[[ -n "${FAKE_GCS_BIN:-}" ]] && run_hot_cloud gcs
 [[ -z "${NO_MINIO_HOT:-}" ]] && run_hot_minio
 echo "tier: $pass passed, $fail failed"
 [[ $fail -eq 0 ]]

@@ -86,6 +86,7 @@ void buckets_s3_scanner_hooks(buckets_s3_server *s, void *hooks /* buckets_scann
 void buckets_s3_peer_iam(void *server, const char *kind, const char *name);
 void buckets_s3_peer_bucket(void *server, const char *bucket);
 char *buckets_s3_peer_server_info(void *server);
+char *buckets_s3_peer_tier_stats(void *server);
 /* This node's contribution to the cluster metrics (Prometheus text). */
 char *buckets_s3_peer_metrics(void *server);
 /* A peer's listener on this node's events (see buckets_peer_handlers.listen). */

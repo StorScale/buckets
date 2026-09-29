@@ -37,6 +37,8 @@ buckets_http_client *const *buckets_peer_clients(buckets_peer_sys *p, size_t *n)
 /* Each peer's node metrics (MinIO's peerMetricsGroups) as Prometheus text
  * in json, NULL where unreachable. */
 buckets_peer_info *buckets_peer_metrics(buckets_peer_sys *p, size_t *n);
+/* Each peer's last-day tier stats (GetLastDayTierStats), NULL where unreachable. */
+buckets_peer_info *buckets_peer_tier_stats(buckets_peer_sys *p, size_t *n);
 
 /* The receiving side, under BUCKETS_INTERNODE_PREFIX "peer/". */
 typedef struct {
@@ -48,6 +50,7 @@ typedef struct {
    * q), streamed into resp; false: a bad request */
   bool (*listen)(void *ud, const buckets_query *q, buckets_http_response *resp);
   void *ud;
+  char *(*tier_stats)(void *ud); /* this node's last-day transitions (JSON), malloc'd */
 } buckets_peer_handlers;
 void buckets_peer_server_handle(const buckets_http_request *req, buckets_http_response *resp, void *ud);
 

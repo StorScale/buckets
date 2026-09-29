@@ -35,7 +35,8 @@ All notable changes to this project are documented here. The format follows
   - reads of transitioned versions (ranges included) from the tier; the tier is the storage class in HEAD/GET and listings;
   - `PostRestoreObject`: the bytes come back to the drives in their original part layout, with `x-amz-restore` (`202` for a repeated restore, `RestoreAlreadyInProgress`, MinIO's validation errors); restored copies expire (`DeleteRestored`);
   - free versions: a deleted or overwritten transitioned version leaves a free version that the scanner sweeps (remote copy first); expiry removes remote copies directly; overwriting or deleting a transitioned version in an unversioned or suspended bucket, or deleting one by version ID, removes its remote copy right away (MinIO's objSweeper); free versions are hidden from reads, listings and version counts, and heal treats transitioned versions as metadata only;
-  - MinIO reads what bucketsd transitioned and restored, and bucketsd reads (and deletes, and restores) what MinIO transitioned; `tests/integration/tier.sh`.
+  - `mc admin tier info` (`/tier-stats`): the scanner keeps MinIO's per-tier usage (`tierStats` in `.usage.json`: remote tiers, `STANDARD` and `REDUCED_REDUNDANCY`), merged with every node's hourly transitions of the last day; the tier metrics (`minio_cluster_ilm_transitioned_*`, `minio_node_tier_requests_*`, `minio_node_tier_ttlb_seconds_distribution`) and live transition queue gauges (v2 and v3);
+  - MinIO reads what bucketsd transitioned and restored, and bucketsd reads (and deletes, and restores) what MinIO transitioned; `tests/integration/tier.sh` (with Azurite and fake-gcs-server when `AZURITE_BIN` / `FAKE_GCS_BIN` are set).
 
 ### Fixed
 - `GetBucketLifecycle`'s `X-Minio-LifecycleConfig-UpdatedAt` is in MinIO's `20060102T150405Z` form (mc failed to parse it when adding a second rule).

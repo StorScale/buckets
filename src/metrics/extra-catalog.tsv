@@ -151,3 +151,11 @@ X	resource	minio_node_cpu_avg_load5_perc_max	gaugeMetric	"CPU load average 5min 
 X	resource	minio_node_cpu_avg_load15_perc	gaugeMetric	"CPU load average 15min (percentage)"
 X	resource	minio_node_cpu_avg_load15_perc_avg	gaugeMetric	"CPU load average 15min (percentage) (avg)"
 X	resource	minio_node_cpu_avg_load15_perc_max	gaugeMetric	"CPU load average 15min (percentage) (max)"
+# Tier metrics: package-level descriptions in tier.go and metrics-v2.go that
+# the dump misses (getTierMetrics, getClusterTierMetrics).
+X	node	minio_node_tier_ttlb_seconds_distribution	gaugeMetric	"Distribution of time to last byte for objects downloaded from warm tier"
+X	node	minio_node_tier_requests_success	counterMetric	"Number of requests to download object from warm tier that were successful"
+X	node	minio_node_tier_requests_failure	counterMetric	"Number of requests to download object from warm tier that failed"
+X	cluster	minio_cluster_ilm_transitioned_bytes	gaugeMetric	"Total bytes transitioned to a tier"
+X	cluster	minio_cluster_ilm_transitioned_objects	gaugeMetric	"Total number of objects transitioned to a tier"
+X	cluster	minio_cluster_ilm_transitioned_versions	gaugeMetric	"Total number of versions transitioned to a tier"

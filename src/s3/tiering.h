@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "core/buf.h"
 #include "object/object.h"
 
 /* Lifecycle transitions and the rest of tiering on the server side (MinIO's
@@ -43,5 +44,20 @@ typedef struct {
   double ttlb_sum;
 } buckets_tier_request_stats;
 size_t buckets_tiering_request_stats(buckets_tier_request_stats **out);
+
+/* The last day's transitions per tier, in hourly bins (lastDayTierStats):
+ * this node's, and merged with the peers'. */
+typedef struct {
+  uint64_t size, versions, objects;
+} buckets_tier_stat;
+typedef struct {
+  char tier[128];
+  buckets_tier_stat bins[24];
+  int64_t updated_ns;
+} buckets_tier_day;
+size_t buckets_tiering_day_stats(buckets_tiering *t, buckets_tier_day **out);
+/* The internode form, and a peer's merged into a list (DailyAllTierStats.merge). */
+void buckets_tier_days_json(const buckets_tier_day *d, size_t n, buckets_buf *out);
+void buckets_tier_days_merge_json(buckets_tier_day **d, size_t *n, const char *json);
 
 #endif

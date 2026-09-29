@@ -6,6 +6,12 @@
 #include <time.h>
 
 #include "admin/admin.h"
+#include "core/timefmt.h"
+#include "dist/peer.h"
+#include "notify/event.h"
+#include "object/sysconfig.h"
+#include "s3/tiering.h"
+#include "scanner/usage.h"
 #include "crypto/madmin.h"
 #include "tier/tier.h"
 
@@ -107,10 +113,78 @@ void buckets_admin_tier_verify(s3_ctx *c) {
 
 /* TierStats: the tiers' usage from the scanner's data usage (step in progress:
  * configured tiers with the transitioned data counted so far). */
+typedef struct {
+  const char *name, *type;
+  const buckets_tier_usage *u;
+  const buckets_tier_day *day;
+} tier_info;
+
+/* internal (the hot tier's classes) first, then by name */
+static int cmp_info(const void *a, const void *b) {
+  const tier_info *x = a, *y = b;
+  bool xi = !strcmp(x->type, "internal"), yi = !strcmp(y->type, "internal");
+  if (xi != yi) return xi ? -1 : 1;
+  return strcmp(x->name, y->name);
+}
+
+static void stats_json(buckets_buf *b, uint64_t size, uint64_t versions, uint64_t objects) {
+  buckets_buf_appendf(b, "{\"totalSize\":%llu,\"numVersions\":%llu,\"numObjects\":%llu}", (unsigned long long)size,
+                      (unsigned long long)versions, (unsigned long long)objects);
+}
+
+/* TierStatsHandler: the stored usage's tierStats (as []madmin.TierInfo)
+ * with every node's last-day transitions. */
 void buckets_admin_tier_stats(s3_ctx *c) {
   if (!buckets_admin_authorize(c, "admin:ListTier")) return;
-  buckets_buf_reset(&c->resp->body);
-  buckets_buf_append_c(&c->resp->body, "null");
+  buckets_s3_server *s = c->s;
+  buckets_data_usage u = {0};
+  buckets_buf raw = BUCKETS_BUF_INIT;
+  if (buckets_sysconfig_read(s->layer, BUCKETS_USAGE_PATH, &raw, NULL) == BUCKETS_OBJ_OK)
+    buckets_data_usage_parse(raw.data, raw.len, &u);
+  buckets_buf_free(&raw);
+  buckets_tier_day *days;
+  size_t ndays = buckets_tiering_day_stats(s->tiering, &days);
+  size_t np = 0;
+  buckets_peer_info *pi = buckets_peer_tier_stats(s->peers, &np);
+  for (size_t i = 0; i < np; i++)
+    if (pi[i].json) buckets_tier_days_merge_json(&days, &ndays, pi[i].json);
+  buckets_peer_info_free(pi, np);
+
+  buckets_buf *b = &c->resp->body;
+  buckets_buf_reset(b);
+  if (!u.ntiers || buckets_tiers_empty(s->tiers)) {
+    buckets_buf_append_c(b, "null");
+  } else {
+    tier_info *ti = buckets_xcalloc(u.ntiers, sizeof(*ti));
+    for (size_t i = 0; i < u.ntiers; i++) {
+      ti[i] = (tier_info){u.tiers[i].name, buckets_tiers_type(s->tiers, u.tiers[i].name), &u.tiers[i], NULL};
+      for (size_t d = 0; d < ndays; d++)
+        if (!strcmp(days[d].tier, ti[i].name)) ti[i].day = &days[d];
+    }
+    qsort(ti, u.ntiers, sizeof(*ti), cmp_info);
+    buckets_buf_append_c(b, "[");
+    for (size_t i = 0; i < u.ntiers; i++) {
+      buckets_buf_append_c(b, i ? ",{\"Name\":" : "{\"Name\":");
+      buckets_json_go_string(b, ti[i].name, strlen(ti[i].name));
+      buckets_buf_appendf(b, ",\"Type\":\"%s\",\"Stats\":", ti[i].type);
+      stats_json(b, ti[i].u->size, ti[i].u->versions, ti[i].u->objects);
+      buckets_buf_append_c(b, ",\"DailyStats\":{\"Bins\":[");
+      for (int h = 0; h < 24; h++) {
+        if (h) buckets_buf_append_c(b, ",");
+        const buckets_tier_stat *st = ti[i].day ? &ti[i].day->bins[h] : NULL;
+        stats_json(b, st ? st->size : 0, st ? st->versions : 0, st ? st->objects : 0);
+      }
+      char ts[64] = "0001-01-01T00:00:00Z";
+      if (ti[i].day && ti[i].day->updated_ns)
+        buckets_time_rfc3339_nano(ti[i].day->updated_ns / 1000000000LL, (long)(ti[i].day->updated_ns % 1000000000LL),
+                                  ts);
+      buckets_buf_appendf(b, "],\"UpdatedAt\":\"%s\"}}", ts);
+    }
+    buckets_buf_append_c(b, "]");
+    free(ti);
+  }
+  free(days);
+  buckets_data_usage_free(&u);
   buckets_http_resp_header(c->resp, "Content-Type", "application/json");
   c->resp->status = 200;
 }

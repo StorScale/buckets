@@ -32,6 +32,9 @@ typedef struct {
   /* A free version (a deleted transitioned version's remnant), to sweep:
    * its remote copy and then itself. NULL: left alone. */
   void (*free_version)(void *ud, const char *bucket, const buckets_object_info *fv);
+  /* The configured remote tiers' names (strings and array to free), for the
+   * per-tier usage; none: no tierStats. */
+  size_t (*tier_names)(void *ud, char ***names);
   void *ud;
 } buckets_scanner_hooks;
 

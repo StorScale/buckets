@@ -28,6 +28,9 @@ struct buckets_scanner {
   buckets_scanner_stats st;
   buckets_scantrace *trace;
   bool tracing; /* the bucket being walked is traced */
+  buckets_data_usage *usage; /* the leader's cycle's usage */
+  char **tiers;              /* the remote tiers this cycle (tierStats wanted when any) */
+  size_t ntiers;
 };
 
 static int64_t now_ns(void) {
@@ -92,6 +95,23 @@ static void heal_bucket(buckets_scanner *s, const char *bucket) {
 }
 
 /* The versions of one key: lifecycle, healing, then usage. */
+/* sizeSummary.tiers: every version but delete markers, under its remote tier
+ * or storage class, counted only for the tiers configured when the cycle
+ * began (and STANDARD and RRS). */
+static void tier_usage(buckets_scanner *s, const buckets_object_info *v) {
+  if (!s->ntiers || !s->usage || v->delete_marker) return;
+  const char *tier = buckets_object_tier(v, NULL, NULL);
+  if (!tier) tier = buckets_object_meta(v, "x-amz-storage-class");
+  if (!tier || !*tier) tier = "STANDARD";
+  bool known = !strcmp(tier, "STANDARD") || !strcmp(tier, "REDUCED_REDUNDANCY");
+  for (size_t i = 0; i < s->ntiers && !known; i++) known = !strcmp(s->tiers[i], tier);
+  if (!known) return;
+  buckets_tier_usage *t = buckets_data_usage_tier(s->usage, tier, true);
+  t->size += v->size > 0 ? (uint64_t)v->size : 0;
+  t->versions++;
+  t->objects += v->is_latest;
+}
+
 static void scan_key(buckets_scanner *s, const char *bucket, buckets_object_info *v, size_t n, buckets_bucket_usage *bu) {
   int64_t start = now_ns();
   uint64_t trace_size = 0, trace_versions = 0; /* sizeSummary: stored sizes; versions as MinIO counts them */
@@ -114,6 +134,7 @@ static void scan_key(buckets_scanner *s, const char *bucket, buckets_object_info
         if (sz > 0) size += (uint64_t)sz;
       }
       markers += v[i].delete_marker;
+      tier_usage(s, &v[i]);
       /* ToObjectInfo leaves VersionID empty for a null version when the
        * bucket is not versioned; those are not counted as versions. */
       bool has_id = versioned || strcmp(v[i].version_id, "null") != 0;
@@ -126,6 +147,11 @@ static void scan_key(buckets_scanner *s, const char *bucket, buckets_object_info
       }
     }
     buckets_bucket_usage_add_object(bu, size, versions, markers);
+    if (s->ntiers && s->usage) { /* every object's summary carries the configured tiers */
+      for (size_t i = 0; i < s->ntiers; i++) buckets_data_usage_tier(s->usage, s->tiers[i], true);
+      buckets_data_usage_tier(s->usage, "STANDARD", true);
+      buckets_data_usage_tier(s->usage, "REDUCED_REDUNDANCY", true);
+    }
   }
   if (s->tracing) buckets_scantrace_key(s->trace, v[0].name, start, trace_size, trace_versions);
   free(removed);
@@ -210,6 +236,8 @@ static void scan_cycle(buckets_scanner *s) {
   if (buckets_obj_list_buckets(L, &bk, &nb) != BUCKETS_OBJ_OK) return;
   buckets_data_usage u = {0};
   bool complete = true;
+  if (leader && s->hooks.tier_names) s->ntiers = s->hooks.tier_names(s->hooks.ud, &s->tiers);
+  s->usage = leader ? &u : NULL;
   for (size_t b = 0; b < nb && !stopping(s); b++) {
     buckets_obj_heal_bucket(L, bk[b].name);
     buckets_buf meta = BUCKETS_BUF_INIT;
@@ -240,6 +268,11 @@ static void scan_cycle(buckets_scanner *s) {
     s->next_cycle++;
     save_cycle(s);
   }
+  s->usage = NULL;
+  for (size_t i = 0; i < s->ntiers; i++) free(s->tiers[i]);
+  free(s->tiers);
+  s->tiers = NULL;
+  s->ntiers = 0;
   buckets_data_usage_free(&u);
   buckets_bucket_info_free(bk, nb);
   pthread_mutex_lock(&s->mu);

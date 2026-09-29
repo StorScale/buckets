@@ -53,6 +53,8 @@ const char *buckets_usage_version_bin_name(size_t i) {
 void buckets_data_usage_free(buckets_data_usage *u) {
   for (size_t i = 0; i < u->nbuckets; i++) free(u->buckets[i].name);
   free(u->buckets);
+  for (size_t i = 0; i < u->ntiers; i++) free(u->tiers[i].name);
+  free(u->tiers);
   memset(u, 0, sizeof(*u));
 }
 
@@ -93,6 +95,22 @@ void buckets_bucket_usage_add_object(buckets_bucket_usage *b, uint64_t size, uin
       break;
     }
   }
+}
+
+buckets_tier_usage *buckets_data_usage_tier(buckets_data_usage *u, const char *tier, bool create) {
+  size_t i = 0;
+  for (; i < u->ntiers; i++) {
+    int c = strcmp(u->tiers[i].name, tier);
+    if (!c) return &u->tiers[i];
+    if (c > 0) break;
+  }
+  if (!create) return NULL;
+  u->tiers = buckets_xrealloc(u->tiers, (u->ntiers + 1) * sizeof(*u->tiers));
+  memmove(&u->tiers[i + 1], &u->tiers[i], (u->ntiers - i) * sizeof(*u->tiers));
+  u->ntiers++;
+  memset(&u->tiers[i], 0, sizeof(u->tiers[i]));
+  u->tiers[i].name = buckets_xstrdup(tier);
+  return &u->tiers[i];
 }
 
 void buckets_data_usage_total(buckets_data_usage *u) {
@@ -171,7 +189,20 @@ void buckets_data_usage_json(const buckets_data_usage *u, buckets_buf *out) {
     json_str(out, u->buckets[i].name);
     buckets_buf_appendf(out, ":%llu", (unsigned long long)u->buckets[i].size);
   }
-  buckets_buf_append_c(out, "}}");
+  buckets_buf_append_c(out, "}");
+  /* TierStats *allTierStats `json:"tierStats,omitempty"`: Go field names */
+  if (u->ntiers) {
+    buckets_buf_append_c(out, ",\"tierStats\":{\"Tiers\":{");
+    for (size_t i = 0; i < u->ntiers; i++) {
+      if (i) buckets_buf_append_c(out, ",");
+      json_str(out, u->tiers[i].name);
+      buckets_buf_appendf(out, ":{\"TotalSize\":%llu,\"NumVersions\":%llu,\"NumObjects\":%llu}",
+                          (unsigned long long)u->tiers[i].size, (unsigned long long)u->tiers[i].versions,
+                          (unsigned long long)u->tiers[i].objects);
+    }
+    buckets_buf_append_c(out, "}}");
+  }
+  buckets_buf_append_c(out, "}");
 }
 
 static uint64_t u64(yyjson_val *o, const char *key) {
@@ -220,6 +251,17 @@ bool buckets_data_usage_parse(const char *json, size_t len, buckets_data_usage *
   if (!out->nbuckets && yyjson_is_obj(bs)) {
     it = yyjson_obj_iter_with(bs);
     while ((k = yyjson_obj_iter_next(&it))) buckets_data_usage_add_bucket(out, yyjson_get_str(k))->size = yyjson_get_uint(yyjson_obj_iter_get_val(k));
+  }
+  yyjson_val *ts = yyjson_obj_get(yyjson_obj_get(root, "tierStats"), "Tiers");
+  if (yyjson_is_obj(ts)) {
+    it = yyjson_obj_iter_with(ts);
+    while ((k = yyjson_obj_iter_next(&it))) {
+      yyjson_val *v = yyjson_obj_iter_get_val(k);
+      buckets_tier_usage *t = buckets_data_usage_tier(out, yyjson_get_str(k), true);
+      t->size = u64(v, "TotalSize");
+      t->versions = u64(v, "NumVersions");
+      t->objects = u64(v, "NumObjects");
+    }
   }
   if (out->nbuckets) qsort(out->buckets, out->nbuckets, sizeof(*out->buckets), cmp_bucket);
   yyjson_doc_free(d);
@@ -283,6 +325,11 @@ bool buckets_usage_cache_get(buckets_usage_cache *c, buckets_data_usage *out) {
     for (size_t i = 0; i < c->u.nbuckets; i++) {
       out->buckets[i] = c->u.buckets[i];
       out->buckets[i].name = buckets_xstrdup(c->u.buckets[i].name);
+    }
+    out->tiers = c->u.ntiers ? buckets_xcalloc(c->u.ntiers, sizeof(*out->tiers)) : NULL;
+    for (size_t i = 0; i < c->u.ntiers; i++) {
+      out->tiers[i] = c->u.tiers[i];
+      out->tiers[i].name = buckets_xstrdup(c->u.tiers[i].name);
     }
   }
   pthread_mutex_unlock(&c->mu);
