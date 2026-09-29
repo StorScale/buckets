@@ -3,7 +3,9 @@
 # bucketsd deliver the same events to protocol mocks that log every command
 # they receive, and the logs are diffed (normalized). Also checks config set
 # validation for each target type.
-#   MINIO_BIN=/path/to/minio tests/integration/notify-targets.sh [bucketsd]
+#   MINIO_BIN=/path/to/minio MC_BIN=/path/to/mc [PG_BIN=/path/to/postgres/bin] \
+#     tests/integration/notify-targets.sh [bucketsd]
+# PG_BIN (initdb, pg_ctl, postgres) adds the PostgreSQL target against a real server.
 set -euo pipefail
 BIN=${1:-build/src/bucketsd}
 if [[ -z "${MINIO_BIN:-}" || -z "${MC_BIN:-}" ]]; then
@@ -250,6 +252,69 @@ PY
 done
 compare es
 compare es-config
+
+if [[ -n "${PG_BIN:-}" ]]; then
+  echo "== postgresql"
+  # a real server (SCRAM auth, a database per kind), its statement log and the tables compared
+  PG_PORT=$((PORT + 2))
+  PGDATA="$WORK/pgdata"
+  echo secretpw >"$WORK/pgpw"
+  "$PG_BIN/initdb" -D "$PGDATA" -U pguser --pwfile="$WORK/pgpw" --auth=scram-sha-256 >/dev/null 2>&1
+  for db in minio_db buckets_db; do echo "CREATE DATABASE $db;" | "$PG_BIN/postgres" --single -D "$PGDATA" postgres >/dev/null 2>&1; done
+  "$PG_BIN/pg_ctl" -D "$PGDATA" -l "$WORK/pg.log" -o "-p $PG_PORT -c unix_socket_directories='' -c listen_addresses=127.0.0.1 -c log_statement=all -c log_line_prefix='%d|%c|'" start >/dev/null
+  for kind in minio buckets; do
+    CS="host=127.0.0.1 port=$PG_PORT user=pguser password=secretpw dbname=${kind}_db sslmode=disable"
+    MINIO_NOTIFY_POSTGRES_ENABLE_p1=on MINIO_NOTIFY_POSTGRES_CONNECTION_STRING_p1="$CS" MINIO_NOTIFY_POSTGRES_TABLE_p1=nsevents \
+      MINIO_NOTIFY_POSTGRES_FORMAT_p1=namespace \
+      MINIO_NOTIFY_POSTGRES_ENABLE_p2=on MINIO_NOTIFY_POSTGRES_CONNECTION_STRING_p2="postgres://pguser:secretpw@127.0.0.1:$PG_PORT/${kind}_db?sslmode=disable" \
+      MINIO_NOTIFY_POSTGRES_TABLE_p2=accevents MINIO_NOTIFY_POSTGRES_FORMAT_p2=access MINIO_NOTIFY_POSTGRES_QUEUE_DIR_p2="$WORK/$kind-pgq" \
+      start "$kind" "$WORK/$kind-pg"
+    curl -s -o /dev/null "${S3[@]}" -X PUT "$EP/tbucket"
+    notification arn:minio:sqs::p1:postgresql arn:minio:sqs::p2:postgresql
+    workload
+    sleep 3
+    for kv in "notify_postgres:c1 connection_string=host=127.0.0.1\ port=1\ sslmode=disable table=t format=namespace" \
+      "notify_postgres:c2 connection_string=x table=bad-name format=namespace" \
+      "notify_postgres:c3 connection_string=x table=t format=weird" \
+      "notify_postgres:c4 table=t format=namespace" \
+      "notify_postgres:c5 connection_string=host=127.0.0.1\ port=$PG_PORT\ user=pguser\ password=wrong\ dbname=postgres\ sslmode=disable table=t format=namespace" \
+      "notify_postgres:c6 connection_string=host=127.0.0.1\ port=$PG_PORT table=t format=namespace"; do
+      # shellcheck disable=SC2086
+      eval config_set $kv >>"$WORK/$kind.pg-config"
+    done
+    stop
+  done
+  "$PG_BIN/pg_ctl" -D "$PGDATA" stop >/dev/null
+  for kind in minio buckets; do
+    # each table's statements in order: which pooled session runs them is timing
+    # (MinIO's concurrent sends open more connections), so sessions and pings are dropped
+    python3 - "$WORK/pg.log" "${kind}_db" >"$WORK/$kind.pg" <<'PY'
+import re, sys
+groups, last = {}, {}
+for line in open(sys.argv[1], errors="replace"):
+    m = re.match(r"([^|]*)\|([^|]*)\|(.*)", line.rstrip("\n"))
+    if not m or m.group(1) != sys.argv[2]:
+        continue
+    text = re.sub(r"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(\.\d+)?([Z+-][0-9:]*)?", "(t)", m.group(3))
+    text = re.sub(r'"(eventTime|sequencer|x-amz-request-id|x-amz-id-2|x-minio-deployment-id)": ?"[^"]*"', r'"\1":"(v)"', text)
+    if text == "LOG:  statement: ;":
+        continue
+    t = re.search(r"\b(nsevents|accevents)\b", text)
+    table = t.group(1) if t else last.get(m.group(2), "")
+    last[m.group(2)] = table
+    groups.setdefault(table, []).append(text)
+for table in sorted(groups):
+    print("== " + table); print("\n".join(groups[table]))
+PY
+    for tbl in nsevents accevents; do
+      echo "SELECT * FROM $tbl ORDER BY 1;" | "$PG_BIN/postgres" --single -D "$PGDATA" "${kind}_db" 2>/dev/null |
+        sed -E 's/"(eventTime|sequencer|x-amz-request-id|x-amz-id-2|x-minio-deployment-id)": "[^"]*"/"\1": "(v)"/g; s/event_time = "[^"]*"/event_time = (t)/'
+    done >"$WORK/$kind.pg-rows"
+  done
+  compare pg
+  compare pg-rows
+  compare pg-config
+fi
 
 echo "notify-targets: $pass passed, $fails failed"
 [[ $fails -eq 0 ]]

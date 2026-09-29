@@ -43,6 +43,7 @@ add_library(buckets STATIC
   notify/nats.c
   notify/mqtt.c
   notify/elasticsearch.c
+  notify/postgres.c
   notify/nkeys.c
   notify/xnet.c
   notify/notifier.c
