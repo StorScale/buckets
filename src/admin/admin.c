@@ -3,6 +3,11 @@
  * canned policies, policy mappings and service accounts.
  * Replaces MinIO's cmd/admin-handlers-users.go. */
 #include "admin/admin.h"
+#include "bucket/metadata.h"
+#include "bucket/metasys.h"
+#include "bucket/quota.h"
+#include "scanner/usage.h"
+#include "object/sysconfig.h"
 #include "siterepl/siterepl.h"
 #include "notify/event.h"
 #include "core/timefmt.h"
@@ -1635,6 +1640,17 @@ static void h_account_info(s3_ctx *c) {
   yyjson_mut_obj_add_val(d, root, "Policy", yyjson_val_mut_copy(d, yyjson_doc_get_root(pd)));
   yyjson_doc_free(pd);
   free(policy);
+  /* GetBucketUsageInfo: the scanner's data usage */
+  buckets_data_usage du;
+  memset(&du, 0, sizeof(du));
+  bool have_du = false;
+  {
+    buckets_buf raw = BUCKETS_BUF_INIT;
+    if (buckets_sysconfig_read(c->s->layer, BUCKETS_USAGE_PATH, &raw, NULL) == BUCKETS_OBJ_OK ||
+        buckets_sysconfig_read(c->s->layer, BUCKETS_USAGE_PATH ".bkp", &raw, NULL) == BUCKETS_OBJ_OK)
+      have_du = buckets_data_usage_parse(raw.data, raw.len, &du);
+    buckets_buf_free(&raw);
+  }
   yyjson_mut_val *arr = NULL;
   for (size_t i = 0; i < nb; i++) {
     bool rd = buckets_s3_allowed(c, "s3:ListBucket", bk[i].name, "", false) ||
@@ -1642,25 +1658,72 @@ static void h_account_info(s3_ctx *c) {
     bool wr = buckets_s3_allowed(c, "s3:PutObject", bk[i].name, "", false);
     if (!rd && !wr) continue;
     if (!arr) arr = yyjson_mut_obj_add_arr(d, root, "Buckets");
+    const buckets_bucket_usage *bu = have_du ? buckets_data_usage_bucket(&du, bk[i].name) : NULL;
+    buckets_bucket_state *st = buckets_metasys_get(c->s->meta, bk[i].name);
     yyjson_mut_val *b = yyjson_mut_arr_add_obj(d, arr);
     yyjson_mut_obj_add_strcpy(d, b, "name", bk[i].name);
-    yyjson_mut_obj_add_uint(d, b, "size", 0);
-    yyjson_mut_obj_add_uint(d, b, "objects", 0);
-    yyjson_mut_obj_add_null(d, b, "objectHistogram");
-    yyjson_mut_obj_add_null(d, b, "objectsVersionsHistogram");
+    yyjson_mut_obj_add_uint(d, b, "size", bu ? bu->size : 0);
+    yyjson_mut_obj_add_uint(d, b, "objects", bu ? bu->objects : 0);
+    /* the histograms, keys sorted as Go writes a map */
+    for (int h = 0; h < 2; h++) {
+      const char *key = h ? "objectsVersionsHistogram" : "objectHistogram";
+      if (!bu) {
+        yyjson_mut_obj_add_null(d, b, key);
+        continue;
+      }
+      size_t nbins = h ? BUCKETS_USAGE_VERSION_BINS : BUCKETS_USAGE_SIZE_BINS;
+      size_t order[16];
+      for (size_t k = 0; k < nbins; k++) order[k] = k;
+      for (size_t x = 1; x < nbins; x++)
+        for (size_t y = x; y > 0; y--) {
+          const char *a = h ? buckets_usage_version_bin_name(order[y - 1]) : buckets_usage_size_bin_name(order[y - 1]);
+          const char *z = h ? buckets_usage_version_bin_name(order[y]) : buckets_usage_size_bin_name(order[y]);
+          if (strcmp(a, z) <= 0) break;
+          size_t t = order[y];
+          order[y] = order[y - 1];
+          order[y - 1] = t;
+        }
+      yyjson_mut_val *hist = yyjson_mut_obj_add_obj(d, b, key);
+      for (size_t k = 0; k < nbins; k++) {
+        size_t bin = order[k];
+        const char *name = h ? buckets_usage_version_bin_name(bin) : buckets_usage_size_bin_name(bin);
+        yyjson_mut_obj_add_uint(d, hist, name, h ? bu->version_counts[bin] : bu->sizes[bin]);
+      }
+    }
     yyjson_mut_val *det = yyjson_mut_obj_add_obj(d, b, "details");
-    yyjson_mut_obj_add_bool(d, det, "versioning", false);
-    yyjson_mut_obj_add_bool(d, det, "versioningSuspended", false);
-    yyjson_mut_obj_add_bool(d, det, "locking", false);
-    yyjson_mut_obj_add_bool(d, det, "replication", false);
-    yyjson_mut_obj_add_null(d, det, "tags");
-    yyjson_mut_obj_add_null(d, det, "quota");
+    yyjson_mut_obj_add_bool(d, det, "versioning", st->versioning.status == BUCKETS_VERSIONING_ENABLED);
+    yyjson_mut_obj_add_bool(d, det, "versioningSuspended", st->versioning.status == BUCKETS_VERSIONING_SUSPENDED);
+    yyjson_mut_obj_add_bool(d, det, "locking", st->lock_enabled);
+    yyjson_mut_obj_add_bool(d, det, "replication", st->has_replication);
+    /* json.Marshal of tags.Tags: its tag map is not exported */
+    if (st->meta.config[BUCKETS_BCFG_TAGGING].len) {
+      yyjson_mut_val *t = yyjson_mut_obj_add_obj(d, det, "tags");
+      yyjson_mut_val *xn = yyjson_mut_obj_add_obj(d, t, "XMLName");
+      yyjson_mut_obj_add_str(d, xn, "Space", "");
+      yyjson_mut_obj_add_str(d, xn, "Local", "Tagging");
+      yyjson_mut_obj_add_obj(d, t, "TagSet");
+    } else {
+      yyjson_mut_obj_add_null(d, det, "tags");
+    }
+    buckets_quota q;
+    memset(&q, 0, sizeof(q));
+    if (st->has_quota) q = st->quota;
+    buckets_buf qj = BUCKETS_BUF_INIT;
+    buckets_quota_json(&q, &qj);
+    yyjson_doc *qd = yyjson_read(qj.data, qj.len, 0);
+    yyjson_mut_obj_add_val(d, det, "quota", yyjson_val_mut_copy(d, yyjson_doc_get_root(qd)));
+    yyjson_doc_free(qd);
+    buckets_buf_free(&qj);
     yyjson_mut_obj_add_null(d, b, "prefixUsage");
-    add_time(d, b, "created", (buckets_iam_time){(long long)bk[i].created, 0});
+    int64_t cns = st->exists ? buckets_bucket_meta_created_ns(&st->meta) : 0;
+    if (!cns) cns = (int64_t)bk[i].created * 1000000000LL;
+    add_time(d, b, "created", (buckets_iam_time){cns / 1000000000LL, (long)(cns % 1000000000LL)});
+    buckets_bucket_state_release(st);
     yyjson_mut_val *acc = yyjson_mut_obj_add_obj(d, b, "access");
     yyjson_mut_obj_add_bool(d, acc, "read", rd);
     yyjson_mut_obj_add_bool(d, acc, "write", wr);
   }
+  if (have_du) buckets_data_usage_free(&du);
   if (!arr) yyjson_mut_obj_add_null(d, root, "Buckets");
   write_json(c, d, false);
   yyjson_mut_doc_free(d);

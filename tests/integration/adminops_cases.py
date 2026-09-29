@@ -657,5 +657,35 @@ if DEC:
             res.append((c, sorted(json.loads(b)) if c == 200 else err_view(c, b)))
         compare(f"list policies {q}", *res)
 
+# ---- account info (mc admin accountinfo / the console's bucket list) -----------------------------------
+for base, root in SERVERS:
+    for bk in ("acctv", "acctq"):
+        curl(f"{base}/{bk}", "PUT")
+    curl(f"{base}/acctv?versioning", "PUT", b'<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>')
+    curl(f"{base}/acctv?tagging", "PUT", b"<Tagging><TagSet><Tag><Key>a</Key><Value>b</Value></Tag></TagSet></Tagging>")
+    admin(base, "PUT", "/set-bucket-quota?bucket=acctq", b'{"quota":1048576,"quotatype":"hard"}')
+    put(base, "acctq", "x", b"hello")
+res = []
+for base, root in SERVERS:
+    c, h, b = admin(base, "GET", "/accountinfo")
+    j = json.loads(b)
+    bks = []
+    for bk in j.get("Buckets") or []:
+        if not bk["name"].startswith(("acct", "imp")):
+            continue
+        bk["created"] = bool(re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d{1,9})?Z", bk["created"]))
+        for k in ("size", "objects", "objectHistogram", "objectsVersionsHistogram"):
+            bk[k] = "<usage>"  # the scanner's timing (checked below)
+        bks.append(bk)
+    res.append((c, h.get("content-type"), j.get("AccountName"), j.get("Server"), bks))
+compare("account info", *res)
+res = []
+for base, root in SERVERS:
+    c, h, b = admin(base, "GET", "/accountinfo")
+    hs = [sorted(bk["objectHistogram"] or {}) for bk in json.loads(b).get("Buckets") or [] if bk["objectHistogram"]]
+    res.append(hs[:1])
+if res[0] and res[1]:
+    compare("account info histogram bins", *res)
+
 print(f"adminops: {Score.passed} passed, {Score.failed} failed")
 sys.exit(1 if Score.failed else 0)

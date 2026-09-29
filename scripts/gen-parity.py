@@ -75,7 +75,7 @@ STATUS = {
     "InfoAccessKey": (DONE, ""),
     "TemporaryAccountInfo": (DONE, ""),
     "RevokeTokens": (DONE, ""),
-    "AccountInfoHandler": (PARTIAL, "usage and bucket feature details wait for the scanner and bucket metadata"),
+    "AccountInfoHandler": (DONE, ""),
     "ExportIAM": (DONE, ""),
     "ImportIAM": (DONE, ""),
     "ImportIAMV2": (DONE, ""),
