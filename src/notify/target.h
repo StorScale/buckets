@@ -21,8 +21,15 @@ typedef struct {
   buckets_send_result (*send)(void *impl, const char *record, size_t n, const char *event_name, const char *key, char *err,
                               size_t errlen);
   void (*free)(void *impl);
-  /* Target.IsActive: a live check (NULL: assumed up). */
-  bool (*is_active)(void *impl);
+  /* Target.IsActive: a live check (NULL: assumed up); err says why not
+   * (Go's error, as config set reports it). */
+  bool (*is_active)(void *impl, char *err, size_t errlen);
+  /* Called about once a second while the target is idle (keep-alives:
+   * NSQ heartbeats, MQTT pings); NULL: none. */
+  void (*tick)(void *impl);
+  /* SendFromStore, where a target's calls differ from Save's (NULL: send). */
+  buckets_send_result (*send_from_store)(void *impl, const char *record, size_t n, const char *event_name,
+                                         const char *key, char *err, size_t errlen);
 } buckets_target_ops;
 
 typedef struct buckets_target buckets_target;

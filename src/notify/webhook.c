@@ -105,14 +105,17 @@ static void webhook_free(void *impl) {
 }
 
 /* isActive: any response to a HEAD means the endpoint is up. */
-static bool is_active(void *impl) {
+static bool is_active(void *impl, char *err, size_t errlen) {
   webhook *w = impl;
   buckets_http_result res;
   char ferr[256];
-  if (!buckets_fetch("HEAD", w->endpoint, w->ca_file, NULL, 0, NULL, 0, 5000, &res, ferr, sizeof(ferr))) return false;
+  if (!buckets_fetch("HEAD", w->endpoint, w->ca_file, NULL, 0, NULL, 0, 5000, &res, ferr, sizeof(ferr))) {
+    snprintf(err, errlen, "%s", ferr);
+    return false;
+  }
   buckets_http_result_free(&res);
   return true;
 }
 
-static const buckets_target_ops k_ops = {"webhook", send_event, webhook_free, is_active};
+static const buckets_target_ops k_ops = {.type = "webhook", .send = send_event, .free = webhook_free, .is_active = is_active};
 const buckets_target_kind buckets_target_webhook = {"notify_webhook", &k_ops, create};

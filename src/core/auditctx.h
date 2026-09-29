@@ -23,4 +23,15 @@ buckets_audit_tags *buckets_audit_tags_current(void);
 void buckets_audit_tag(const char *key, const char *value);
 void buckets_audit_tags_free(buckets_audit_tags *t);
 
+/* Entries for what the server does on its own (MinIO's auditLogInternal:
+ * healing, lifecycle expiry): event (also the trigger), the API name (may
+ * be empty), the object and its version, an error (NULL: none) and tags. */
+typedef void (*buckets_audit_internal_fn)(void *ud, const char *event, const char *api_name, const char *bucket,
+                                          const char *object, const char *version_id, const char *error,
+                                          const char *const *keys, const char *const *values, size_t ntags);
+void buckets_audit_internal_set(buckets_audit_internal_fn fn, void *ud);
+void buckets_audit_internal(const char *event, const char *api_name, const char *bucket, const char *object,
+                            const char *version_id, const char *error, const char *const *keys,
+                            const char *const *values, size_t ntags);
+
 #endif

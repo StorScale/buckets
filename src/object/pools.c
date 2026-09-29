@@ -595,6 +595,10 @@ buckets_obj_err buckets_obj_heal(buckets_objlayer *L, const char *bucket, const 
   return result;
 }
 
+const char *buckets_obj_scan_drive(buckets_objlayer *L, const char *bucket, const char *object, int64_t *meta_size) {
+  return buckets_ep_scan_drive(L->pools[0], object, bucket, meta_size);
+}
+
 /* ---- multipart ------------------------------------------------------------------- */
 
 buckets_obj_err buckets_obj_mpu_new(buckets_objlayer *L, const char *bucket, const char *object, const buckets_xl_kv *meta,

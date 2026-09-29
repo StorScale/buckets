@@ -220,3 +220,67 @@ void buckets_s3_audit(s3_ctx *c, int api, int64_t ttfb_ns, int64_t ttr_ns, uint6
   buckets_logger_audit(lg, b.data, b.len);
   buckets_buf_free(&b);
 }
+
+/* auditLogInternal: an audit.Entry for what the server did on its own */
+void buckets_s3_audit_internal(void *ud, const char *event, const char *api_name, const char *bucket, const char *object,
+                               const char *version_id, const char *error, const char *const *keys,
+                               const char *const *values, size_t ntags) {
+  buckets_s3_server *s = ud;
+  if (!buckets_logger_audit_enabled(s->logger)) return;
+  buckets_buf b = BUCKETS_BUF_INIT;
+  struct timespec now;
+  clock_gettime(CLOCK_REALTIME, &now);
+  char when[64];
+  buckets_time_rfc3339_nano((long long)now.tv_sec, now.tv_nsec, when);
+  buckets_buf_append_c(&b, "{\"version\":\"1\"");
+  if (s->layer && *s->layer->deployment_id_str) {
+    buckets_buf_append_c(&b, ",\"deploymentid\":");
+    jstr(&b, s->layer->deployment_id_str);
+  }
+  buckets_buf_appendf(&b, ",\"time\":\"%s\",\"event\":", when);
+  jstr(&b, event);
+  buckets_buf_append_c(&b, ",\"trigger\":");
+  jstr(&b, event);
+  buckets_buf_append_c(&b, ",\"api\":{");
+  if (api_name && *api_name) {
+    buckets_buf_append_c(&b, "\"name\":");
+    jstr(&b, api_name);
+    buckets_buf_append_char(&b, ',');
+  }
+  if (bucket && *bucket) {
+    buckets_buf_append_c(&b, "\"bucket\":");
+    jstr(&b, bucket);
+    buckets_buf_append_char(&b, ',');
+  }
+  buckets_buf_append_c(&b, "\"objects\":[{\"objectName\":");
+  jstr(&b, object);
+  if (version_id && *version_id) {
+    buckets_buf_append_c(&b, ",\"versionId\":");
+    jstr(&b, version_id);
+  }
+  buckets_buf_append_c(&b, "}],\"rx\":0,\"tx\":0}");
+  if (ntags) { /* a Go map: sorted keys */
+    size_t *ord = buckets_xcalloc(ntags, sizeof(*ord));
+    for (size_t i = 0; i < ntags; i++) {
+      size_t j = i;
+      for (; j > 0 && strcmp(keys[ord[j - 1]], keys[i]) > 0; j--) ord[j] = ord[j - 1];
+      ord[j] = i;
+    }
+    buckets_buf_append_c(&b, ",\"tags\":{");
+    for (size_t i = 0; i < ntags; i++) {
+      if (i) buckets_buf_append_char(&b, ',');
+      jstr(&b, keys[ord[i]]);
+      buckets_buf_append_char(&b, ':');
+      jstr(&b, values[ord[i]]);
+    }
+    buckets_buf_append_char(&b, '}');
+    free(ord);
+  }
+  if (error && *error) {
+    buckets_buf_append_c(&b, ",\"error\":");
+    jstr(&b, error);
+  }
+  buckets_buf_append_char(&b, '}');
+  buckets_logger_audit(s->logger, b.data, b.len);
+  buckets_buf_free(&b);
+}

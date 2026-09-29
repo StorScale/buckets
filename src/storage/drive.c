@@ -188,9 +188,7 @@ buckets_drive_err buckets_drive_open_raw(const char *path, buckets_drive **out) 
 
 static buckets_drive_err drive_prepare(const char *path, buckets_drive **out) {
   buckets_drive *d = buckets_xcalloc(1, sizeof(*d));
-  d->root = buckets_xstrdup(path);
-  size_t rl = strlen(d->root);
-  while (rl > 1 && d->root[rl - 1] == '/') d->root[--rl] = '\0';
+  d->root = buckets_path_clean(path);
   static const char *const meta_dirs[] = {"tmp", "buckets", "multipart", "config"};
   for (size_t i = 0; i < BUCKETS_ARRAY_LEN(meta_dirs); i++) {
     buckets_buf p = BUCKETS_BUF_INIT;
@@ -208,9 +206,7 @@ static buckets_drive_err drive_prepare(const char *path, buckets_drive **out) {
 
 buckets_drive_err buckets_drive_open(const char *path, buckets_drive **out) {
   buckets_drive *d = buckets_xcalloc(1, sizeof(*d));
-  d->root = buckets_xstrdup(path);
-  size_t rl = strlen(d->root);
-  while (rl > 1 && d->root[rl - 1] == '/') d->root[--rl] = '\0';
+  d->root = buckets_path_clean(path);
 
   static const char *const meta_dirs[] = {"tmp", "buckets", "multipart", "config"};
   buckets_drive_err err = BUCKETS_DRIVE_OK;

@@ -97,6 +97,10 @@ bool buckets_s3_metrics_handle(s3_ctx *c);
  * api is its route (metrics/stats.h), with its time to first byte, time to
  * response and body bytes sent. */
 void buckets_s3_audit(s3_ctx *c, int api, int64_t ttfb_ns, int64_t ttr_ns, uint64_t tx);
+/* buckets_audit_internal_fn, ud the server */
+void buckets_s3_audit_internal(void *ud, const char *event, const char *api_name, const char *bucket, const char *object,
+                               const char *version_id, const char *error, const char *const *keys,
+                               const char *const *values, size_t ntags);
 /* The request's trace record to trace subscribers, when there are any:
  * start and end (unix ns), time to first byte and body bytes sent. */
 void buckets_s3_trace_http(s3_ctx *c, int api, int64_t start_ns, int64_t end_ns, int64_t ttfb_ns, uint64_t tx);

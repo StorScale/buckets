@@ -49,6 +49,9 @@ buckets_obj_err buckets_ep_list(buckets_epool *P, const char *bucket, const char
 buckets_obj_err buckets_ep_heal(buckets_epool *P, const char *bucket, const char *object, const char *version_id,
                                 const buckets_heal_opts *opts, buckets_heal_result *res);
 size_t buckets_ep_heal_bucket(buckets_epool *P, const char *bucket);
+/* The drive the scanner reports for object (the first online one of its
+ * set), and with meta_size its xl.meta's size there (0 if unreadable). */
+const char *buckets_ep_scan_drive(buckets_epool *P, const char *object, const char *bucket, int64_t *meta_size);
 
 buckets_obj_err buckets_ep_mpu_new(buckets_epool *P, const char *bucket, const char *object, const buckets_xl_kv *meta,
                                    size_t nmeta, char upload_id[BUCKETS_UPLOAD_ID_MAX]);

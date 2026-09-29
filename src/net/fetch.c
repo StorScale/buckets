@@ -42,7 +42,11 @@ bool buckets_fetch(const char *method, const char *url, const char *ca_file, con
   if (secure && !(tls = buckets_tls_client_new(ca_file, err, errlen))) return false;
   buckets_http_client *c = buckets_http_client_new(host, port, tls, timeout_ms > 0 ? timeout_ms : 10000);
   bool ok = buckets_http_client_do(c, method, target, hdrs, nhdrs, body, len, out);
-  if (!ok) snprintf(err, errlen, "%s %s: connection failed", method, url);
+  if (!ok) {
+    const char *de = buckets_http_client_dial_error(c);
+    if (*de) snprintf(err, errlen, "%s", de);
+    else snprintf(err, errlen, "%s %s: connection failed", method, url);
+  }
   buckets_http_client_free(c);
   buckets_tls_client_free(tls);
   return ok;

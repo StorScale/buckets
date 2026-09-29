@@ -11,7 +11,11 @@
 #include <strings.h>
 #include <time.h>
 
+#include "core/auditctx.h"
 #include "core/buf.h"
+#include "notify/event.h"
+#include "core/timefmt.h"
+#include "trace/trace.h"
 #include "core/log.h"
 #include "core/msgpack.h"
 #include "core/pool.h"
@@ -3020,6 +3024,8 @@ static buckets_obj_err heal_version(buckets_epool *L, buckets_eset *s, const cha
     memcpy(st, c.st, sizeof(st));
     for (size_t i = 0; i < s->n; i++) nf_parts = BUCKETS_MAX(nf_parts, (size_t)c.parts_not_found[i]);
     res->size = o.size;
+    res->data_blocks = o.ec_m;
+    res->parity_blocks = o.ec_n;
     long good[MAX_SET];
     bool outdated[MAX_SET];
     int ngood = 0, nbad = 0;
@@ -3085,6 +3091,90 @@ static buckets_obj_err heal_version(buckets_epool *L, buckets_eset *s, const cha
   return err;
 }
 
+static const char *drive_state(buckets_heal_state st) {
+  switch (st) {
+  case BUCKETS_HEAL_OK: return "ok";
+  case BUCKETS_HEAL_OFFLINE: return "offline";
+  case BUCKETS_HEAL_MISSING: return "missing";
+  case BUCKETS_HEAL_CORRUPT: return "corrupt";
+  }
+  return "unknown";
+}
+
+static void heal_drives(buckets_buf *b, buckets_epool *L, const buckets_eset *s, const buckets_heal_state *st, size_t n) {
+  size_t set = (size_t)(s - L->sets);
+  buckets_buf_append_c(b, "{\"drives\":[");
+  for (size_t i = 0; i < n; i++) {
+    const buckets_drive *d = s->drives[i] ? s->drives[i] : L->all[set * s->n + i];
+    buckets_buf_append_c(b, i ? ",{\"uuid\":\"\",\"endpoint\":" : "{\"uuid\":\"\",\"endpoint\":");
+    buckets_json_go_string(b, d && d->root ? d->root : "", d && d->root ? strlen(d->root) : 0);
+    buckets_buf_appendf(b, ",\"state\":\"%s\"}", drive_state(st[i]));
+  }
+  buckets_buf_append_c(b, "]}");
+}
+
+/* healTrace and auditHealObject for one version (MinIO's healObject defers):
+ * a heal.Object trace with its madmin.HealResultItem, and a HealObject
+ * audit entry. The scanner's checks report only what needed healing. */
+static void heal_report(buckets_epool *L, const buckets_eset *s, const char *bucket, const char *object,
+                        const uint8_t id[16], const buckets_heal_opts *opts, const buckets_heal_result *r,
+                        buckets_obj_err err, int64_t start) {
+  if (opts && opts->quiet_clean && !err && !r->healed && !r->dangling) return;
+  char vkey[37];
+  buckets_xl_version_id_string(id, vkey);
+  const char *errs = err ? buckets_obj_strerror(err) : NULL;
+  if (buckets_trace_wanted(BUCKETS_TRACE_HEALING)) {
+    int64_t dur = now_ns() - start;
+    char when[64];
+    buckets_time_rfc3339_nano((long long)(start / 1000000000LL), (long)(start % 1000000000LL), when);
+    buckets_buf b = BUCKETS_BUF_INIT, path = BUCKETS_BUF_INIT;
+    buckets_buf_appendf(&path, "%s/%s", bucket, object);
+    buckets_buf_appendf(&b, "{\"type\":%u,\"nodename\":", (unsigned)BUCKETS_TRACE_HEALING);
+    const char *node = buckets_trace_node();
+    buckets_json_go_string(&b, node, strlen(node));
+    buckets_buf_appendf(&b, ",\"funcname\":\"heal.Object\",\"time\":\"%s\",\"path\":", when);
+    buckets_json_go_string(&b, path.data, path.len);
+    buckets_buf_appendf(&b, ",\"dur\":%lld", (long long)dur);
+    if (r->size) buckets_buf_appendf(&b, ",\"bytes\":%lld", (long long)r->size);
+    if (errs) {
+      buckets_buf_append_c(&b, ",\"error\":");
+      buckets_json_go_string(&b, errs, strlen(errs));
+    }
+    bool dry = opts && opts->dry_run, remove = opts && opts->remove_dangling;
+    buckets_buf_appendf(&b, ",\"custom\":{\"disks\":\"%zu\",\"dry\":\"%s\",\"mode\":\"%d\",\"remove\":\"%s\",\"version-id\":\"%s\"}",
+                        s->n, dry ? "true" : "false", opts ? opts->scan_mode : 0, remove ? "true" : "false", vkey);
+    buckets_buf_append_c(&b, ",\"healResult\":{\"resultId\":0,\"type\":\"object\",\"bucket\":");
+    buckets_json_go_string(&b, bucket, strlen(bucket));
+    buckets_buf_append_c(&b, ",\"object\":");
+    buckets_json_go_string(&b, object, strlen(object));
+    buckets_buf_appendf(&b, ",\"versionId\":\"%s\",\"detail\":\"\"", vkey);
+    if (r->parity_blocks) buckets_buf_appendf(&b, ",\"parityBlocks\":%d", r->parity_blocks);
+    if (r->data_blocks) buckets_buf_appendf(&b, ",\"dataBlocks\":%d", r->data_blocks);
+    buckets_buf_appendf(&b, ",\"diskCount\":%zu,\"setCount\":0,\"before\":", s->n);
+    heal_drives(&b, L, s, r->before, s->n);
+    buckets_buf_append_c(&b, ",\"after\":");
+    heal_drives(&b, L, s, r->after, s->n);
+    buckets_buf_appendf(&b, ",\"objectSize\":%lld}}", (long long)r->size);
+    buckets_trace_meta m = {.type = BUCKETS_TRACE_HEALING, .dur_ns = dur};
+    buckets_trace_publish(&m, b.data, b.len);
+    buckets_buf_free(&b);
+    buckets_buf_free(&path);
+  }
+  /* auditHealObject: fully unhealable missing or corrupt blocks are errors */
+  size_t mb = 0, ma = 0, cb = 0, ca = 0;
+  for (size_t i = 0; i < s->n; i++) {
+    mb += r->before[i] == BUCKETS_HEAL_MISSING, ma += r->after[i] == BUCKETS_HEAL_MISSING;
+    cb += r->before[i] == BUCKETS_HEAL_CORRUPT, ca += r->after[i] == BUCKETS_HEAL_CORRUPT;
+  }
+  char msg[96];
+  if (mb > 0 && mb == ma) snprintf(msg, sizeof(msg), "unable to heal %zu missing blocks on drives", mb), errs = msg;
+  else if (cb > 0 && cb == ca) snprintf(msg, sizeof(msg), "unable to heal %zu corrupted blocks on drives", cb), errs = msg;
+  char tag[1200];
+  snprintf(tag, sizeof(tag), "name=%s,pool=%zu,set=%zu", object, L->index + 1, (size_t)(s - L->sets) + 1);
+  const char *keys[] = {"healObject"}, *values[] = {tag};
+  buckets_audit_internal("HealObject", "", bucket, object, vkey, errs, keys, values, 1);
+}
+
 buckets_obj_err buckets_ep_heal(buckets_epool *L, const char *bucket, const char *object, const char *version_id,
                                  const buckets_heal_opts *opts, buckets_heal_result *res) {
   buckets_heal_result local;
@@ -3123,7 +3213,9 @@ buckets_obj_err buckets_ep_heal(buckets_epool *L, const char *bucket, const char
   for (size_t j = 0; j < nids && !err; j++) {
     buckets_heal_result one;
     memset(&one, 0, sizeof(one));
+    int64_t start = now_ns();
     err = heal_version(L, s, bucket, object, ids[j], opts, &one);
+    heal_report(L, s, bucket, object, ids[j], opts, &one, err, start);
     res->ndrives = one.ndrives;
     res->versions += one.versions;
     res->healed += one.healed;
@@ -3142,6 +3234,23 @@ buckets_obj_err buckets_ep_heal(buckets_epool *L, const char *bucket, const char
   free(ids);
   buckets_nslock_unlock(lk);
   return err;
+}
+
+const char *buckets_ep_scan_drive(buckets_epool *L, const char *object, const char *bucket, int64_t *meta_size) {
+  buckets_eset *s = buckets_ep_set_for(L, object);
+  for (size_t i = 0; i < s->n; i++) {
+    buckets_drive *d = s->drives[i];
+    if (!d) continue;
+    if (meta_size) {
+      char *op = obj_path(object), *mp = join(op, XL_META);
+      if (buckets_drive_file_size(d, bucket, mp, meta_size) != BUCKETS_DRIVE_OK) *meta_size = 0;
+      free(mp);
+      free(op);
+    }
+    return d->root;
+  }
+  if (meta_size) *meta_size = 0;
+  return "";
 }
 
 size_t buckets_ep_heal_bucket(buckets_epool *L, const char *bucket) {

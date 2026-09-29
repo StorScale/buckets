@@ -35,13 +35,30 @@ All notable changes to this project are documented here. The format follows
   - `GET /minio/admin/v3/trace` with MinIO's options (types, `err`, `threshold`, the deprecated `all`) and `admin:ServerTrace`: madmin.TraceInfo records as JSON lines, a space each idle second. HTTP records as MinIO's tracer writes them (function `s3.<API>`/`admin.<Handler>`, request and response headers, bodies or `<BLOB>` for header-only handlers, timings and byte counts, the path as Go reports it); `tests/integration/trace-interop.sh` finds them identical to MinIO's for 29 requests. Storage records (`storage.<Op>`, the drive and paths, errors) from every drive call.
   - `GET /minio/admin/v3/log` (`node`, `limit`, `logType`, `admin:ConsoleLog`): the last records of a 10000-entry ring, then new ones, as log.Info JSON (warnings and errors as entries, other messages as console messages).
   - Across a cluster both merge every node's records, as MinIO's handlers do: each node streams its own over internode (`peer/trace` with the same options, `peer/log` with the log mask; peers send their whole ring, as MinIO's do), read by one relay thread per peer that reconnects while the peer is down. `node` limits logs to one node. `tests/integration/cluster.sh` checks both.
+  - Scanner, healing and ILM records, as MinIO writes them:
+    - `scanner.ScanCycle` (the cycle number) for each cycle.
+    - For each bucket walked: `scanner.ScanObject` (drive and `<bucket>/<key>/xl.meta`, `metasize`, `size`, `versions`), `scanner.CompactFolder` (MinIO's compaction rule: under 500 objects, or only single-object children) and `scanner.ScanFolder` (`new`/`existing`) for every folder level, children before parents, then `scanner.ScanBucketDrive`. The walk is over listings, so the drive is the first online one of the key's set.
+    - `heal.Object` with the madmin.HealResultItem (drive states before and after, data and parity blocks, the scan mode and options) for every version healed by MRF, drive healing or reads. The scanner's own checks report only versions that needed healing, since ours checks every object each cycle where MinIO's checks about one in 1024.
+    - `ilm:expiry` with the lcAuditEvent tags and MinIO's source-location message.
+    - `tests/integration/trace-interop.sh` compares the record shapes with MinIO's for a scanner walk, a heal on read and two expiries.
   - Admin routes carry MinIO's handler names (the trace's function names).
   - Streams of unknown length (listen, trace, logs) end when the server shuts down instead of holding the drain.
 
+- Notification targets `notify_redis` and `notify_nsq` (Phase 7):
+  - Redis: namespace format (HSET `<bucket>/<object>` with `{"Records":[event]}`, HDEL for `s3:ObjectRemoved:Delete`) and access format (RPUSH `[{"Event":[event],"EventTime":…}]`), AUTH with or without a user, the key's type checked on first use. The connection pool behaves as MinIO's redigo pool does, including the PING before an idle connection is reused, so the command stream is the same as MinIO's.
+  - NSQ: go-nsq's producer protocol (the V2 magic, IDENTIFY with feature negotiation, a TLS upgrade when `tls=on` and nsqd agrees, NOP pings, PUB of the event.Log JSON), with server heartbeats answered while idle.
+  - Both take `queue_dir`/`queue_limit` (MinIO's queue store, sent as SendFromStore does) and validate their settings with MinIO's messages. Addresses are parsed as minio/pkg's `net.ParseHost` does, errors included.
+  - `mc admin config set` of a notification target now checks that the targets it names are reachable, as MinIO's TestSubSysNotificationTargets does (`error (<name>:<type>): dial tcp …: connect: connection refused`); webhooks included.
+  - `tests/integration/notify-targets.sh` diffs the commands MinIO and bucketsd send to logging Redis and nsqd stand-ins (both formats, AUTH, a queue store, heartbeats) and their config set messages.
+- Audit entries for what the server does on its own (MinIO's auditLogInternal): `HealObject` for each healed version (tagged `healObject: name=…,pool=…,set=…`, with MinIO's "unable to heal N missing/corrupted blocks" errors) and `ILMExpiry` for each lifecycle expiry (trigger and event `ilm:expiry`, lcAuditEvent tags). trace-interop finds them identical to MinIO's.
+
 ### Changed
+- Failed outbound HTTP connections are reported as Go reports them (`dial tcp HOST:PORT: connect: connection refused`, `i/o timeout`, `lookup HOST: no such host`).
+- Drive paths are cleaned as MinIO's endpoints are (`filepath.Clean`: repeated and trailing slashes, `.` and `..`), for local paths and URLs alike, so they read the same in traces, metrics and admin info.
 - Response headers MinIO writes in lowercase (`x-amz-version-id`, `x-amz-delete-marker`, `x-amz-mp-parts-count`, `x-amz-copy-source-version-id`) are written that way, `Vary` comes as separate headers as MinIO sends it, and S3 responses carry MinIO's `X-Ratelimit-Limit` and `X-Ratelimit-Remaining` (the API workers and how many are free).
 
 ### Fixed
+- `tests/integration/notify-interop.sh` no longer fails now and then on the order of one DeleteObjects request's events: both servers hand events to several send workers, so the records of one request are compared in key order.
 - A log message at exit (after the server's log targets were freed) no longer touches them.
 - CopyObject now gives the copy a checksum as MinIO does: the algorithm asked for with `x-amz-checksum-algorithm` (an unknown one is ignored), else the source's (a composite multipart one is computed again whole), else a CRC64NVME computed on the way; the response carries the ETag and the checksum. CompleteMultipartUpload's response carries the ETag header. New s3diff scenario `copy`.
 - MRF healing no longer drops an object healed while one of its drives is still offline, which left that drive's copy unwritten once it came back: such entries, and ones that fail with a passing error, are retried with backoff (up to 20 times, about a quarter of an hour) instead of three times at once.

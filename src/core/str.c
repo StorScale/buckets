@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 #include "core/str.h"
 
+#include "core/common.h"
+
 #include <string.h>
 
 static inline char lower_ascii(char c) { return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c; }
@@ -81,4 +83,34 @@ long buckets_url_decode(buckets_str src, char *dst, bool plus_is_space) {
 bool buckets_str_has_suffix(buckets_str s, const char *suffix) {
   size_t n = strlen(suffix);
   return s.n >= n && memcmp(s.p + s.n - n, suffix, n) == 0;
+}
+
+char *buckets_path_clean(const char *p) {
+  size_t n = strlen(p), r = 0, w = 0, dotdot = 0;
+  char *out = buckets_xmalloc(n + 2);
+  bool rooted = n && p[0] == '/';
+  if (rooted) out[w++] = '/', r = dotdot = 1;
+  while (r < n) {
+    if (p[r] == '/') {
+      r++;
+    } else if (p[r] == '.' && (r + 1 == n || p[r + 1] == '/')) {
+      r++;
+    } else if (p[r] == '.' && p[r + 1] == '.' && (r + 2 == n || p[r + 2] == '/')) {
+      r += 2;
+      if (w > dotdot) {
+        w--;
+        while (w > dotdot && out[w] != '/') w--;
+      } else if (!rooted) {
+        if (w > 0) out[w++] = '/';
+        out[w++] = '.', out[w++] = '.';
+        dotdot = w;
+      }
+    } else {
+      if ((rooted && w != 1) || (!rooted && w != 0)) out[w++] = '/';
+      for (; r < n && p[r] != '/'; r++) out[w++] = p[r];
+    }
+  }
+  if (w == 0) out[w++] = '.';
+  out[w] = '\0';
+  return out;
 }

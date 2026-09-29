@@ -7,12 +7,29 @@
 
 #include "core/common.h"
 
-static const buckets_target_kind *const k_kinds[] = {&buckets_target_webhook};
+static const buckets_target_kind *const k_kinds[] = {&buckets_target_webhook, &buckets_target_redis, &buckets_target_nsq};
 
 /* A target's value, resolved (env, config, default); caller frees. */
 static char *get(const buckets_config *cfg, const char *subsys, const char *target, const char *key) {
   char *v = buckets_config_get(cfg, subsys, target, key);
   return v ? v : buckets_xstrdup("");
+}
+
+static _Thread_local const char *g_probe_subsys;
+static _Thread_local char *const *g_probe;
+static _Thread_local size_t g_nprobe;
+
+void buckets_targets_probe_set(const char *subsys, char *const *names, size_t n) {
+  g_probe_subsys = subsys;
+  g_probe = names;
+  g_nprobe = names ? n : 0;
+}
+
+static bool probed(const char *subsys, const char *name) {
+  if (!g_probe_subsys || strcmp(g_probe_subsys, subsys) != 0) return false;
+  for (size_t i = 0; i < g_nprobe; i++)
+    if (strcmp(g_probe[i], name) == 0) return true;
+  return false;
 }
 
 static bool run(const buckets_config *cfg, const char *ca_file, buckets_target ***out, size_t *n, char *err, size_t errlen) {
@@ -37,8 +54,19 @@ static bool run(const buckets_config *cfg, const char *ca_file, buckets_target *
       }
       if (on != 1 || !ok) continue;
       void *impl = NULL;
-      if (!kind->create(cfg, names[j], ca_file, out ? &impl : NULL, err, errlen)) {
+      bool probe = !out && probed(kind->subsys, names[j]);
+      if (!kind->create(cfg, names[j], ca_file, out || probe ? &impl : NULL, err, errlen)) {
         ok = false;
+        continue;
+      }
+      if (probe) { /* a target just set must be online */
+        char why[512] = "";
+        bool up = !kind->ops->is_active || kind->ops->is_active(impl, why, sizeof(why));
+        kind->ops->free(impl);
+        if (!up) {
+          snprintf(err, errlen, "error (%s:%s): %s", names[j], kind->ops->type, *why ? why : "not connected");
+          ok = false;
+        }
         continue;
       }
       if (!out) continue;

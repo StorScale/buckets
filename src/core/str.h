@@ -32,4 +32,8 @@ char *buckets_str_dup(buckets_str s); /* NUL-terminated heap copy */
  * -1 on a malformed escape. */
 long buckets_url_decode(buckets_str src, char *dst, bool plus_is_space);
 
+/* filepath.Clean, as MinIO cleans endpoint paths: no repeated or trailing
+ * slashes, no "." elements, ".." resolved lexically. Malloc'd. */
+char *buckets_path_clean(const char *p);
+
 #endif

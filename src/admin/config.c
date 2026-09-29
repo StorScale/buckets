@@ -7,6 +7,7 @@
 #include <yyjson.h>
 
 #include "admin/admin.h"
+#include "notify/targets.h"
 #include "config/sys.h"
 #include "iam/ldapidp.h"
 #include "iam/openid.h"
@@ -109,6 +110,31 @@ static void applied(s3_ctx *c, bool dynamic) {
   c->resp->status = 200;
 }
 
+/* validateConfig with the request's targets (ParseConfigTargetID): the
+ * notification targets it names must be reachable. */
+static bool validate_set(buckets_config *cfg, const char *sub, const char *text, char *err, size_t errlen) {
+  char **names = NULL;
+  size_t n = 0;
+  for (const char *p = text; *p;) {
+    const char *eol = strchr(p, '\n');
+    size_t len = eol ? (size_t)(eol - p) : strlen(p);
+    if (len && *p != '#') {
+      size_t w = 0;
+      while (w < len && p[w] != ' ' && p[w] != '\t') w++;
+      const char *colon = memchr(p, ':', w);
+      names = buckets_xrealloc(names, (n + 1) * sizeof(char *));
+      names[n++] = colon ? buckets_xstrndup(colon + 1, (size_t)(p + w - colon - 1)) : buckets_xstrdup("");
+    }
+    p += len + (eol != NULL);
+  }
+  buckets_targets_probe_set(sub, names, n);
+  bool ok = buckets_config_validate(cfg, sub, err, errlen);
+  buckets_targets_probe_set(NULL, NULL, 0);
+  for (size_t i = 0; i < n; i++) free(names[i]);
+  free(names);
+  return ok;
+}
+
 void buckets_admin_config_set_kv(s3_ctx *c) {
   if (!authorized(c)) return;
   char *text = read_body(c);
@@ -119,7 +145,7 @@ void buckets_admin_config_set_kv(s3_ctx *c) {
   if (!buckets_config_set_text(cfg, text, &dynamic, err, sizeof(err)) ||
       !buckets_config_subsys_of(text, sub, sizeof(sub), err, sizeof(err))) {
     config_error(c, err);
-  } else if (!buckets_config_validate(cfg, sub, err, sizeof(err))) {
+  } else if (!validate_set(cfg, sub, text, err, sizeof(err))) {
     bad_config(c, err);
   } else {
     bool ok = buckets_config_sys_update(c->s->config, cfg, text, sub, err, sizeof(err));

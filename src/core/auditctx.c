@@ -39,3 +39,18 @@ void buckets_audit_tags_free(buckets_audit_tags *t) {
   free(t->values);
   memset(t, 0, sizeof(*t));
 }
+
+static buckets_audit_internal_fn g_internal;
+static void *g_internal_ud;
+
+void buckets_audit_internal_set(buckets_audit_internal_fn fn, void *ud) {
+  g_internal_ud = ud;
+  g_internal = fn;
+}
+
+void buckets_audit_internal(const char *event, const char *api_name, const char *bucket, const char *object,
+                            const char *version_id, const char *error, const char *const *keys,
+                            const char *const *values, size_t ntags) {
+  buckets_audit_internal_fn fn = g_internal;
+  if (fn) fn(g_internal_ud, event, api_name, bucket, object, version_id, error, keys, values, ntags);
+}

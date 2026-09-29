@@ -26,6 +26,9 @@ buckets_http_client *buckets_http_client_new(const char *host, int port, buckets
 void buckets_http_client_free(buckets_http_client *c);
 const char *buckets_http_client_host(const buckets_http_client *c);
 int buckets_http_client_port(const buckets_http_client *c);
+/* The last failed connection attempt in Go's words ("dial tcp HOST:PORT:
+ * connect: connection refused"), or "". */
+const char *buckets_http_client_dial_error(const buckets_http_client *c);
 
 /* Sends one request and reads the whole response. Returns false on a
  * transport failure (connect, send, receive, or a malformed response). A

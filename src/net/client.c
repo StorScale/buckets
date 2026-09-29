@@ -39,6 +39,7 @@ struct buckets_http_client {
   hconn idle[MAX_IDLE];
   size_t nidle;
   _Atomic uint64_t sent, received, errors, dials, dial_errors, dial_ns;
+  char dial_err[200]; /* the last failed dial, as Go's net.Dial reports it */
 };
 
 buckets_http_client *buckets_http_client_new(const char *host, int port, buckets_tls_client *tls, int timeout_ms) {
@@ -73,24 +74,28 @@ void buckets_http_client_free(buckets_http_client *c) {
   free(c);
 }
 
+const char *buckets_http_client_dial_error(const buckets_http_client *c) { return c->dial_err; }
+
 const char *buckets_http_client_host(const buckets_http_client *c) { return c->host; }
 int buckets_http_client_port(const buckets_http_client *c) { return c->port; }
 
-static bool connect_timeout(int fd, const struct sockaddr *sa, socklen_t sl, int timeout_ms) {
+/* 0, or the errno of the failure (ETIMEDOUT when the timeout passed). */
+static int connect_timeout(int fd, const struct sockaddr *sa, socklen_t sl, int timeout_ms) {
   int flags = fcntl(fd, F_GETFL);
   fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-  int rc = connect(fd, sa, sl);
-  if (rc != 0 && errno == EINPROGRESS) {
+  int rc = connect(fd, sa, sl), e = rc == 0 ? 0 : errno;
+  if (rc != 0 && e == EINPROGRESS) {
     struct pollfd p = {.fd = fd, .events = POLLOUT};
+    e = ETIMEDOUT;
     if (poll(&p, 1, timeout_ms) == 1) {
       int err = 0;
       socklen_t el = sizeof(err);
       getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &el);
-      rc = err ? -1 : 0;
+      e = err;
     }
   }
   fcntl(fd, F_SETFL, flags);
-  return rc == 0;
+  return e;
 }
 
 static bool dial(buckets_http_client *c, hconn *out) {
@@ -102,19 +107,25 @@ static bool dial(buckets_http_client *c, hconn *out) {
   struct timespec t0, t1;
   clock_gettime(CLOCK_MONOTONIC, &t0);
   atomic_fetch_add(&c->dials, 1);
+  char hp[300];
+  snprintf(hp, sizeof(hp), strchr(c->host, ':') ? "[%s]:%d" : "%s:%d", c->host, c->port);
   if (getaddrinfo(c->host, port, &hints, &res) != 0) {
     atomic_fetch_add(&c->dial_errors, 1);
+    snprintf(c->dial_err, sizeof(c->dial_err), "dial tcp: lookup %s: no such host", c->host);
     return false;
   }
-  int fd = -1;
+  int fd = -1, e = 0;
   for (struct addrinfo *ai = res; ai && fd < 0; ai = ai->ai_next) {
     fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
     if (fd < 0) continue;
-    if (!connect_timeout(fd, ai->ai_addr, ai->ai_addrlen, c->timeout_ms)) {
+    if ((e = connect_timeout(fd, ai->ai_addr, ai->ai_addrlen, c->timeout_ms)) != 0) {
       close(fd);
       fd = -1;
     }
   }
+  if (fd < 0)
+    snprintf(c->dial_err, sizeof(c->dial_err), e == ETIMEDOUT ? "dial tcp %s: i/o timeout" : "dial tcp %s: connect: %s", hp,
+             e == ECONNREFUSED ? "connection refused" : strerror(e));
   freeaddrinfo(res);
   clock_gettime(CLOCK_MONOTONIC, &t1);
   atomic_fetch_add(&c->dial_ns, (uint64_t)((t1.tv_sec - t0.tv_sec) * 1000000000LL + (t1.tv_nsec - t0.tv_nsec)));

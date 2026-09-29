@@ -271,6 +271,8 @@ typedef struct {
   bool deep;            /* verify every shard's bitrot hash, not just sizes */
   bool dry_run;         /* report only */
   bool remove_dangling; /* delete versions that can never reach read quorum */
+  int scan_mode;        /* madmin.HealScanMode, for traces: 0 unknown, 1 normal, 2 deep */
+  bool quiet_clean;     /* no trace or audit for versions found healthy (the scanner's checks) */
 } buckets_heal_opts;
 
 typedef struct {
@@ -280,6 +282,7 @@ typedef struct {
   size_t healed;        /* drive copies rewritten */
   size_t dangling;      /* versions removed as dangling */
   int64_t size;         /* of the latest version examined */
+  int data_blocks, parity_blocks;
 } buckets_heal_result;
 
 /* Heals one version, or with version_id NULL every version found on any
@@ -288,6 +291,9 @@ buckets_obj_err buckets_obj_heal(buckets_objlayer *L, const char *bucket, const 
                                  const buckets_heal_opts *opts, buckets_heal_result *res);
 /* Creates the bucket's volume on online drives that lack it. Returns the number created. */
 size_t buckets_obj_heal_bucket(buckets_objlayer *L, const char *bucket);
+/* For scanner traces: the drive (root) whose copy of object the scanner
+ * reports, in the first pool, and optionally the xl.meta size there. */
+const char *buckets_obj_scan_drive(buckets_objlayer *L, const char *bucket, const char *object, int64_t *meta_size);
 
 /* ---- multipart uploads ----
  * .minio.sys/multipart/<sha256(bucket/object)>/<upload-uuid>/xl.meta

@@ -4,8 +4,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "core/buf.h"
+#include "core/common.h"
+#include "core/str.h"
 #include "crypto/crc.h"
 #include "crypto/siphash.h"
 
@@ -243,6 +246,27 @@ void buckets_layout_free(buckets_pool_layout *l) {
   memset(l, 0, sizeof(*l));
 }
 
+/* NewEndpoint cleans the path, of a local drive or of a URL. */
+static char *clean_drive(const char *d) {
+  const char *rest = strncasecmp(d, "http://", 7) == 0 ? d + 7 : strncasecmp(d, "https://", 8) == 0 ? d + 8 : NULL;
+  if (!rest) return buckets_path_clean(d);
+  const char *slash = strchr(rest, '/');
+  if (!slash) return buckets_xstrdup(d);
+  char *path = buckets_path_clean(slash);
+  buckets_buf b = BUCKETS_BUF_INIT;
+  buckets_buf_appendf(&b, "%.*s%s", (int)(slash - d), d, path);
+  free(path);
+  return b.data;
+}
+
+static void clean_drives(buckets_pool_layout *l) {
+  for (size_t i = 0; i < l->ndrives; i++) {
+    char *c = clean_drive(l->drives[i]);
+    free(l->drives[i]);
+    l->drives[i] = c;
+  }
+}
+
 bool buckets_layout_pool(char *const *args, size_t nargs, size_t set_drive_count, buckets_pool_layout *out,
                          char *err, size_t errlen) {
   memset(out, 0, sizeof(*out));
@@ -250,6 +274,7 @@ bool buckets_layout_pool(char *const *args, size_t nargs, size_t set_drive_count
     out->drives = buckets_xcalloc(1, sizeof(char *));
     out->drives[0] = buckets_xstrdup(args[0]);
     out->ndrives = out->set_size = 1;
+    clean_drives(out);
     return true;
   }
   bool ellipses = true;
@@ -272,6 +297,7 @@ bool buckets_layout_pool(char *const *args, size_t nargs, size_t set_drive_count
     for (size_t i = 0; i < nargs; i++) out->drives[i] = buckets_xstrdup(args[i]);
   }
   out->ndrives = total;
+  clean_drives(out);
   out->set_size = buckets_layout_set_size(&total, 1, set_drive_count, ellipses ? &pat : NULL, ellipses ? 1 : 0, err, errlen);
   buckets_ell_arg_free(&pat);
   for (size_t i = 0; out->set_size && i < total; i++) {

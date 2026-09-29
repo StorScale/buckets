@@ -165,7 +165,7 @@ static bool heal_drive(buckets_healer *h, size_t di) {
     return false;
   }
   qsort(bk, nb, sizeof(*bk), cmp_str);
-  buckets_heal_opts opts = {.remove_dangling = true};
+  buckets_heal_opts opts = {.remove_dangling = true, .scan_mode = 1};
   size_t since_save = 0;
   bool complete = true;
   for (size_t b = 0; b < nb && complete; b++) {
@@ -294,7 +294,7 @@ static void *run(void *arg) {
     h->busy = true;
     pthread_mutex_unlock(&h->mu);
     buckets_heal_result r;
-    buckets_heal_opts opts = {.remove_dangling = true, .deep = e->deep};
+    buckets_heal_opts opts = {.remove_dangling = true, .deep = e->deep, .scan_mode = e->deep ? 2 : 0};
     buckets_obj_err err = buckets_obj_heal(h->L, e->bucket, e->object, *e->version_id ? e->version_id : NULL, &opts, &r);
     /* a drive still offline (its copy can be written once it is back) or a
      * passing error: again later, with backoff */

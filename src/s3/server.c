@@ -17,6 +17,7 @@
 #include <strings.h>
 #include <time.h>
 
+#include "core/auditctx.h"
 #include "core/log.h"
 #include "core/query.h"
 #include "core/timefmt.h"
@@ -420,6 +421,7 @@ void buckets_s3_server_init(buckets_s3_server *s, buckets_objlayer *layer, const
   s->notifier = buckets_notifier_new();
   s->logger = buckets_logger_new();
   buckets_log_set_sink(log_sink, s);
+  buckets_audit_internal_set(buckets_s3_audit_internal, s);
   buckets_config_register_validator("logger_webhook", buckets_logger_validate);
   buckets_config_register_validator("audit_webhook", buckets_logger_validate);
   static const char *const notify_subsys[] = {"notify_webhook", "notify_kafka", "notify_amqp", "notify_mqtt",
@@ -510,12 +512,98 @@ static bool version_locked(const buckets_object_info *oi, int64_t now_ns) {
   return false;
 }
 
-static bool expire(buckets_s3_server *s, const char *bucket, const char *object, const char *version_id,
-                   bool enabled, bool suspended, buckets_delete_result *r) {
+static const char *const k_lc_action_names[] = {
+    "NoneAction",           "DeleteAction",         "DeleteVersionAction",         "TransitionAction",
+    "TransitionVersionAction", "DeleteRestoredAction", "DeleteRestoredVersionAction", "DeleteAllVersionsAction",
+    "DelMarkerDeleteAllVersionsAction"};
+
+/* What applyExpiryOnNonTransitionedObjects reports of one expiry: on
+ * success an ILMExpiry audit entry (lcAuditEvent tags, the deleted version)
+ * and an ilm:expiry trace (the same tags, the matched version); otherwise a
+ * trace only, as MinIO's traceFn calls from their own source lines. */
+static void ilm_report(buckets_s3_server *s, const char *bucket, const buckets_object_info *oi, const char *oi_vid,
+                       const buckets_lc_event *e, int64_t start_ns, buckets_obj_err err, const char *deleted_vid) {
+  bool found = err != BUCKETS_OBJ_ERR_NO_SUCH_KEY && err != BUCKETS_OBJ_ERR_NO_SUCH_VERSION;
+  const char *keys[6], *values[6];
+  size_t n = 0;
+  char due[BUCKETS_TIME_AMZ_LEN + 1];
+  if (!err) {
+    keys[n] = "ilm-src", values[n++] = "Scanner";
+    keys[n] = "ilm-action", values[n++] = (size_t)e->action < BUCKETS_ARRAY_LEN(k_lc_action_names) ? k_lc_action_names[e->action] : "";
+    keys[n] = "ilm-rule-id", values[n++] = e->rule_id ? e->rule_id : "";
+    if (e->due_ns) {
+      buckets_time_amz((time_t)(e->due_ns / 1000000000LL), due);
+      keys[n] = "ilm-due", values[n++] = due;
+    }
+    if (e->storage_class && *e->storage_class) keys[n] = "ilm-tier", values[n++] = e->storage_class;
+    keys[n] = "version-id", values[n++] = deleted_vid ? deleted_vid : "";
+    buckets_audit_internal("ilm:expiry", "ILMExpiry", bucket, oi->name, deleted_vid, NULL, keys, values, n);
+  }
+  if (!buckets_trace_wanted(BUCKETS_TRACE_ILM)) return;
+  /* ilmTrace: version-id is the matched version's */
+  if (!err) values[n - 1] = oi_vid;
+  else keys[0] = "version-id", values[0] = oi_vid, n = 1;
+  size_t ord[6];
+  for (size_t i = 0; i < n; i++) {
+    size_t j = i;
+    for (; j > 0 && strcmp(keys[ord[j - 1]], keys[i]) > 0; j--) ord[j] = ord[j - 1];
+    ord[j] = i;
+  }
+  struct timespec ts;
+  clock_gettime(CLOCK_REALTIME, &ts);
+  int64_t dur = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec - start_ns;
+  char when[64];
+  buckets_time_rfc3339_nano((long long)(start_ns / 1000000000LL), (long)(start_ns % 1000000000LL), when);
+  buckets_buf b = BUCKETS_BUF_INIT, path = BUCKETS_BUF_INIT;
+  buckets_buf_appendf(&path, "%s/%s", bucket, oi->name);
+  buckets_buf_appendf(&b, "{\"type\":%u,\"nodename\":", (unsigned)BUCKETS_TRACE_ILM);
+  const char *node = buckets_trace_node();
+  buckets_json_go_string(&b, node, strlen(node));
+  buckets_buf_appendf(&b, ",\"funcname\":\"ilm:expiry\",\"time\":\"%s\",\"path\":", when);
+  buckets_json_go_string(&b, path.data, path.len);
+  buckets_buf_appendf(&b, ",\"dur\":%lld", (long long)dur);
+  int64_t sz = oi->delete_marker ? 0 : buckets_s3_actual_size(oi);
+  if (sz > 0) buckets_buf_appendf(&b, ",\"bytes\":%lld", (long long)sz);
+  if (err && found) {
+    buckets_buf msg = BUCKETS_BUF_INIT;
+    buckets_buf_appendf(&msg, "DeleteObject(%s, %s): %s", bucket, oi->name, buckets_obj_strerror(err));
+    buckets_buf_append_c(&b, ",\"error\":");
+    buckets_json_go_string(&b, msg.data, msg.len);
+    buckets_buf_free(&msg);
+  }
+  buckets_buf_appendf(&b, ",\"msg\":\"[data-scanner.go:%d:applyExpiryOnNonTransitionedObjects()]\",\"custom\":{",
+                      !err ? 1283 : found ? 1272 : 1266);
+  for (size_t i = 0; i < n; i++) {
+    if (i) buckets_buf_append_char(&b, ',');
+    buckets_json_go_string(&b, keys[ord[i]], strlen(keys[ord[i]]));
+    buckets_buf_append_char(&b, ':');
+    buckets_json_go_string(&b, values[ord[i]], strlen(values[ord[i]]));
+  }
+  buckets_buf_append_c(&b, "}}");
+  buckets_trace_meta m = {.type = BUCKETS_TRACE_ILM, .dur_ns = dur};
+  buckets_trace_publish(&m, b.data, b.len);
+  buckets_buf_free(&b);
+  buckets_buf_free(&path);
+}
+
+static int64_t wall_ns(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_REALTIME, &ts);
+  return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
+
+/* The expiry of one matched version (NULL version_id: the object's latest). */
+static bool expire(buckets_s3_server *s, const char *bucket, const buckets_object_info *oi, const char *oi_vid,
+                   const buckets_lc_event *e, const char *version_id, bool enabled, bool suspended,
+                   buckets_delete_result *r) {
+  int64_t start = wall_ns();
   buckets_delete_opts o = {.version_id = version_id, .versioned = enabled, .suspended = suspended};
-  buckets_obj_err err = buckets_obj_delete_ex(s->layer, bucket, object, &o, r);
+  buckets_obj_err err = buckets_obj_delete_ex(s->layer, bucket, oi->name, &o, r);
   if (err && err != BUCKETS_OBJ_ERR_NO_SUCH_KEY && err != BUCKETS_OBJ_ERR_NO_SUCH_VERSION)
-    buckets_log_warn("lifecycle: expiring %s/%s: %s", bucket, object, buckets_obj_strerror(err));
+    buckets_log_warn("lifecycle: expiring %s/%s: %s", bucket, oi->name, buckets_obj_strerror(err));
+  /* ToObjectInfo: no version ID for the null version outside versioning */
+  const char *dvid = !err ? (!enabled && !suspended && strcmp(r->version_id, "null") == 0 ? "" : r->version_id) : NULL;
+  if (e) ilm_report(s, bucket, oi, oi_vid, e, start, err, dvid);
   return !err;
 }
 
@@ -571,7 +659,7 @@ static void scanner_object(void *ud, const char *bucket, const buckets_object_in
       buckets_delete_result r;
       bool any = false;
       for (size_t j = 0; j < n; j++) {
-        any |= expire(s, bucket, name, v[j].version_id, false, false, &r);
+        any |= expire(s, bucket, &v[j], objs[j].version_id, j == i ? &ev[i] : NULL, v[j].version_id, false, false, &r);
         removed[j] = true;
       }
       /* one event, about the version the rule matched */
@@ -587,12 +675,12 @@ static void scanner_object(void *ud, const char *bucket, const buckets_object_in
     case BUCKETS_LC_DELETE: {
       buckets_delete_result r;
       if (!enabled) removed[i] = true; /* a versioned bucket only gains a marker */
-      if (expire(s, bucket, name, NULL, enabled, suspended, &r)) expiry_event(s, bucket, &v[i], &r);
+      if (expire(s, bucket, &v[i], objs[i].version_id, &ev[i], NULL, enabled, suspended, &r)) expiry_event(s, bucket, &v[i], &r);
       break;
     }
     case BUCKETS_LC_DELETE_VERSION: {
       buckets_delete_result r;
-      if (expire(s, bucket, name, v[i].version_id, false, false, &r)) expiry_event(s, bucket, &v[i], &r);
+      if (expire(s, bucket, &v[i], objs[i].version_id, &ev[i], v[i].version_id, false, false, &r)) expiry_event(s, bucket, &v[i], &r);
       removed[i] = true;
       break;
     }
@@ -641,6 +729,7 @@ void buckets_s3_server_set_layer(buckets_s3_server *s, buckets_objlayer *layer) 
 
 void buckets_s3_server_stop(buckets_s3_server *s) {
   buckets_log_set_sink(NULL, NULL); /* the server's log targets go away with it */
+  buckets_audit_internal_set(NULL, NULL);
   pthread_mutex_lock(&s->bg_mu);
   s->bg_stop = true;
   pthread_cond_broadcast(&s->bg_cv);

@@ -12,6 +12,12 @@ bool buckets_targets_build(const buckets_config *cfg, const char *ca_file, bucke
 /* The same checks without starting anything. */
 bool buckets_targets_check(const buckets_config *cfg, char *err, size_t errlen);
 
+/* The targets named in a config set request (ParseConfigTargetID), for the
+ * checks on this thread: those of subsys must be online
+ * (TestSubSysNotificationTargets).
+ * NULL clears. */
+void buckets_targets_probe_set(const char *subsys, char *const *names, size_t n);
+
 /* Target implementations: each validates its target's settings and, when
  * impl is not NULL, creates it. */
 typedef struct {
@@ -21,5 +27,7 @@ typedef struct {
 } buckets_target_kind;
 
 extern const buckets_target_kind buckets_target_webhook;
+extern const buckets_target_kind buckets_target_redis;
+extern const buckets_target_kind buckets_target_nsq;
 
 #endif

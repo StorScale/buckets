@@ -9,6 +9,7 @@
 #include "core/common.h"
 #include "core/log.h"
 #include "object/sysconfig.h"
+#include "scanner/scantrace.h"
 #include "scanner/usage.h"
 
 #define BLOOM_CYCLE_PATH "buckets/.bloomcycle.bin" /* dataUsageBloomNamePath: the next cycle */
@@ -25,6 +26,8 @@ struct buckets_scanner {
   uint64_t next_cycle;
   unsigned saves;
   buckets_scanner_stats st;
+  buckets_scantrace *trace;
+  bool tracing; /* the bucket being walked is traced */
 };
 
 static int64_t now_ns(void) {
@@ -61,7 +64,7 @@ static bool leads(buckets_objlayer *L, const char *object) {
 }
 
 static void heal_object(buckets_scanner *s, const char *bucket, const char *object) {
-  buckets_heal_opts opts = {.remove_dangling = true};
+  buckets_heal_opts opts = {.remove_dangling = true, .scan_mode = 1, .quiet_clean = true};
   buckets_heal_result r;
   bool healed = buckets_obj_heal(s->L, bucket, object, NULL, &opts, &r) == BUCKETS_OBJ_OK && r.healed;
   if (healed) buckets_log_info("scanner healed %s/%s on %zu drive%s", bucket, object, r.healed, r.healed == 1 ? "" : "s");
@@ -90,6 +93,8 @@ static void heal_bucket(buckets_scanner *s, const char *bucket) {
 
 /* The versions of one key: lifecycle, healing, then usage. */
 static void scan_key(buckets_scanner *s, const char *bucket, buckets_object_info *v, size_t n, buckets_bucket_usage *bu) {
+  int64_t start = now_ns();
+  uint64_t trace_size = 0, trace_versions = 0; /* sizeSummary: stored sizes; versions as MinIO counts them */
   pthread_mutex_lock(&s->mu);
   s->st.objects++;
   s->st.versions += n;
@@ -111,15 +116,24 @@ static void scan_key(buckets_scanner *s, const char *bucket, buckets_object_info
       markers += v[i].delete_marker;
       /* ToObjectInfo leaves VersionID empty for a null version when the
        * bucket is not versioned; those are not counted as versions. */
-      versions += versioned || strcmp(v[i].version_id, "null") != 0;
+      bool has_id = versioned || strcmp(v[i].version_id, "null") != 0;
+      versions += has_id;
+      if (s->tracing) {
+        int64_t stored = v[i].delete_marker ? 0 : v[i].size;
+        int64_t actual = v[i].delete_marker ? 0 : s->hooks.actual_size ? s->hooks.actual_size(s->hooks.ud, &v[i]) : v[i].size;
+        trace_size += stored > 0 ? (uint64_t)stored : 0;
+        trace_versions += has_id && stored == actual;
+      }
     }
     buckets_bucket_usage_add_object(bu, size, versions, markers);
   }
+  if (s->tracing) buckets_scantrace_key(s->trace, v[0].name, start, trace_size, trace_versions);
   free(removed);
 }
 
 /* The leader's bucket: every version, grouped by key. */
 static bool usage_bucket(buckets_scanner *s, const char *bucket, buckets_bucket_usage *bu) {
+  s->tracing = buckets_scantrace_bucket_begin(s->trace, s->L, bucket);
   char *key_marker = NULL, *ver_marker = NULL;
   buckets_object_info *group = NULL;
   size_t ng = 0, cap = 0;
@@ -155,6 +169,8 @@ static bool usage_bucket(buckets_scanner *s, const char *bucket, buckets_bucket_
     if (!key_marker) break;
   }
   if (ok && ng) scan_key(s, bucket, group, ng, bu);
+  if (s->tracing) buckets_scantrace_bucket_end(s->trace);
+  s->tracing = false;
   for (size_t j = 0; j < ng; j++) buckets_object_info_free(&group[j]);
   free(group);
   free(key_marker);
@@ -182,6 +198,7 @@ static void save_cycle(buckets_scanner *s) {
 }
 
 static void scan_cycle(buckets_scanner *s) {
+  int64_t start = now_ns();
   buckets_objlayer *L = s->L;
   bool leader = buckets_objlayer_set_is_led_here(L, 0, 0);
   buckets_bucket_info *bk = NULL;
@@ -208,6 +225,10 @@ static void scan_cycle(buckets_scanner *s) {
     pthread_mutex_unlock(&s->mu);
   }
   complete &= !stopping(s);
+  if (leader) {
+    buckets_scantrace_cycle(s->next_cycle, start);
+    buckets_scantrace_cycle_done(s->trace);
+  }
   if (leader && complete) {
     buckets_data_usage_total(&u);
     u.last_update_ns = now_ns();
@@ -245,6 +266,7 @@ buckets_scanner *buckets_scanner_start(buckets_objlayer *L, const buckets_scanne
   int fixed = iv ? atoi(iv) : -1;
   if (fixed == 0) return NULL; /* disabled */
   buckets_scanner *s = buckets_xcalloc(1, sizeof(*s));
+  s->trace = buckets_scantrace_new();
   s->L = L;
   if (hooks) s->hooks = *hooks;
   s->fixed_interval = fixed;
@@ -263,6 +285,7 @@ void buckets_scanner_stop(buckets_scanner *s) {
   pthread_join(s->thread, NULL);
   pthread_cond_destroy(&s->cv);
   pthread_mutex_destroy(&s->mu);
+  buckets_scantrace_free(s->trace);
   free(s);
 }
 

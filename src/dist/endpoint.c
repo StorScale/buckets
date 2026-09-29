@@ -12,6 +12,8 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include "core/str.h"
+
 bool buckets_endpoint_parse(const char *s, int default_port, buckets_endpoint *out, char *err, size_t errlen) {
   memset(out, 0, sizeof(*out));
   const char *rest;
@@ -60,7 +62,7 @@ bool buckets_endpoint_parse(const char *s, int default_port, buckets_endpoint *o
     return false;
   }
   out->host = buckets_xstrdup(h);
-  out->path = buckets_xstrdup(slash);
+  out->path = buckets_path_clean(slash);
   out->url = buckets_xstrdup(s);
   return true;
 }

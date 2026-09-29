@@ -15,7 +15,12 @@ WORK=$(mktemp -d "${TMPDIR:-/tmp}/buckets-config-XXXXXX")
 EP="http://127.0.0.1:$PORT"
 D="$WORK/drives"
 PID=
+# a live webhook endpoint: config set checks that a target it sets is reachable
+SINK_PORT=$((PORT + 1))
+python3 "$(cd "$(dirname "$0")" && pwd)/webhooksink.py" "$SINK_PORT" "$WORK/sink.log" &
+SINK=$!
 cleanup() {
+  kill "$SINK" 2>/dev/null || true
   [[ -n "$PID" ]] && kill "$PID" 2>/dev/null && wait "$PID" 2>/dev/null || true
   [[ -n "${KEEP:-}" ]] && echo "kept $WORK" || rm -rf "$WORK"
 }
@@ -58,9 +63,9 @@ out=$(mc admin config get root scanner)
 has "$out" "^# MINIO_SCANNER_SPEED=fastest" "env override shown"
 ok mc admin config set root scanner alert_excess_versions=42
 has "$(mc admin config get root scanner)" "alert_excess_versions=42" "set scanner"
-ok mc admin config set root notify_webhook:hook1 endpoint=http://127.0.0.1:9999/ queue_limit=10 comment="first hook"
+ok mc admin config set root notify_webhook:hook1 endpoint=http://127.0.0.1:$SINK_PORT/ queue_limit=10 comment="first hook"
 out=$(mc admin config get root notify_webhook)
-has "$out" '^notify_webhook:hook1 endpoint=http://127.0.0.1:9999/ .*queue_limit=10' "webhook target"
+has "$out" "^notify_webhook:hook1 endpoint=http://127.0.0.1:$SINK_PORT/ .*queue_limit=10" "webhook target"
 has "$out" 'comment="first hook"' "quoted comment"
 
 echo "== validation"
@@ -95,7 +100,7 @@ has "$(mc admin config get root notify_webhook)" "queue_limit=20" "import"
 echo "== persistence"
 stop
 start buckets
-has "$(mc admin config get root notify_webhook)" "hook1 endpoint=http://127.0.0.1:9999/ .*queue_limit=20" "survives a restart"
+has "$(mc admin config get root notify_webhook)" "hook1 endpoint=http://127.0.0.1:$SINK_PORT/ .*queue_limit=20" "survives a restart"
 has "$(mc admin config get root scanner)" "speed=default" "env override gone"
 
 if [[ -n "${MINIO_BIN:-}" ]]; then

@@ -190,9 +190,11 @@ static bool wait_ms(buckets_target *t, int ms) {
   return !stop;
 }
 
-static buckets_send_result deliver(buckets_target *t, const item *it) {
+static buckets_send_result deliver(buckets_target *t, const item *it, bool from_store) {
   char err[512] = "";
-  buckets_send_result r = t->ops->send(t->impl, it->record, it->n, it->name, it->key, err, sizeof(err));
+  buckets_send_result r = from_store && t->ops->send_from_store
+                              ? t->ops->send_from_store(t->impl, it->record, it->n, it->name, it->key, err, sizeof(err))
+                              : t->ops->send(t->impl, it->record, it->n, it->name, it->key, err, sizeof(err));
   pthread_mutex_lock(&t->mu);
   t->st.online = r != BUCKETS_SEND_NOT_CONNECTED;
   if (r == BUCKETS_SEND_OK) t->st.sent++;
@@ -210,6 +212,7 @@ static void *worker_main(void *arg) {
       char file[256];
       if (!store_oldest(t->store_dir, file, sizeof(file))) {
         if (!wait_ms(t, 1000)) break;
+        if (t->ops->tick) t->ops->tick(t->impl);
         continue;
       }
       char path[4096];
@@ -227,7 +230,7 @@ static void *worker_main(void *arg) {
         size_t len = nl ? (size_t)(nl - (recs.data + off)) : recs.len - off;
         item it = {.record = recs.data + off, .n = len};
         if (len && record_meta(it.record, len, &it.name, &it.key)) {
-          r = deliver(t, &it);
+          r = deliver(t, &it, true);
           free(it.name);
           free(it.key);
         }
@@ -242,7 +245,20 @@ static void *worker_main(void *arg) {
       continue;
     }
     pthread_mutex_lock(&t->mu);
-    while (!t->head && !t->stop) pthread_cond_wait(&t->cv, &t->mu);
+    while (!t->head && !t->stop) {
+      if (!t->ops->tick) {
+        pthread_cond_wait(&t->cv, &t->mu);
+        continue;
+      }
+      struct timespec until;
+      clock_gettime(CLOCK_REALTIME, &until);
+      until.tv_sec += 1;
+      if (pthread_cond_timedwait(&t->cv, &t->mu, &until) != 0 && !t->head && !t->stop) {
+        pthread_mutex_unlock(&t->mu);
+        t->ops->tick(t->impl); /* idle: keep-alives */
+        pthread_mutex_lock(&t->mu);
+      }
+    }
     if (t->stop && !t->head) {
       pthread_mutex_unlock(&t->mu);
       break;
@@ -254,7 +270,7 @@ static void *worker_main(void *arg) {
     t->st.queued = t->nmem;
     bool stopping = t->stop;
     pthread_mutex_unlock(&t->mu);
-    if (!stopping) deliver(t, it); /* without a store a failed event is lost, as in MinIO */
+    if (!stopping) deliver(t, it, false); /* without a store a failed event is lost, as in MinIO */
     item_free(it);
     free(it);
   }
@@ -361,7 +377,8 @@ void buckets_target_stats_get(buckets_target *t, buckets_target_stats *out) {
 }
 
 bool buckets_target_is_active(buckets_target *t) {
-  bool up = !t->ops->is_active || t->ops->is_active(t->impl);
+  char err[256];
+  bool up = !t->ops->is_active || t->ops->is_active(t->impl, err, sizeof(err));
   pthread_mutex_lock(&t->mu);
   t->st.online = up;
   pthread_mutex_unlock(&t->mu);

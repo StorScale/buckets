@@ -38,6 +38,9 @@ add_library(buckets STATIC
   notify/target.c
   notify/targets.c
   notify/webhook.c
+  notify/redis.c
+  notify/nsq.c
+  notify/xnet.c
   notify/notifier.c
   metrics/expo.c
   metrics/stats.c
@@ -55,6 +58,7 @@ add_library(buckets STATIC
   net/http.c
   net/tls.c
   net/client.c
+  net/conn.c
   net/fetch.c
   net/ldap.c
   s3/errors.c
@@ -96,6 +100,7 @@ add_library(buckets STATIC
   erasure/layout.c
   heal/healer.c
   scanner/scanner.c
+  scanner/scantrace.c
   scanner/usage.c
   iam/policy.c
   iam/iam.c
