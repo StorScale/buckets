@@ -2086,6 +2086,10 @@ static void mpu_put_part(s3_ctx *c, const char *upload_id) {
   bool upload_known = buckets_obj_mpu_stat(c->s->layer, c->bucket, c->object, upload_id, &ui) == BUCKETS_OBJ_OK;
   bool part_enc = upload_known && buckets_s3_sse_encrypted(&ui);
   bool part_comp = upload_known && buckets_s3_is_compressed(&ui);
+  /* an SSE-C replica's parts arrive encrypted already: stored as they are */
+  if (part_enc && buckets_s3_sse_kind_of(&ui) == BUCKETS_SSE_C && buckets_object_meta(&ui, "X-Amz-Replication-Status") &&
+      buckets_s3_repl_request(c))
+    part_enc = part_comp = false;
   sse_put sp = {.cx = &cx, .b = &bsrc, .compressed = part_comp};
   buckets_sse_writer w;
   buckets_read_fn rd = bsrc.rd;
@@ -2285,6 +2289,9 @@ static void mpu_client_etag(void *ud, const char *stored, char out[128]) {
 typedef struct {
   mpu_sse *cs; /* encrypted uploads */
   int64_t mtime_ns;
+  bool repl;         /* a replication request */
+  char *actual_size; /* X-Minio-Replication-Actual-Object-Size */
+  char *ssec_crc;    /* X-Minio-Replication-Ssec-Crc */
 } mpu_commit;
 
 static buckets_obj_err mpu_pre_commit(void *ud, buckets_xl_object *o) {
@@ -2297,6 +2304,17 @@ static buckets_obj_err mpu_pre_commit(void *ud, buckets_xl_object *o) {
     remove_kv(o->meta_sys, &o->nmeta_sys, MPU_VID_META);
   }
   if (mc->mtime_ns) o->mod_time = mc->mtime_ns;
+  if (mc->repl) { /* the source's actual size, when it sent one */
+    if (mc->actual_size && *mc->actual_size)
+      buckets_xl_kv_set(&o->meta_sys, &o->nmeta_sys, BUCKETS_ACTUAL_SIZE_META, mc->actual_size, strlen(mc->actual_size));
+    else remove_kv(o->meta_sys, &o->nmeta_sys, BUCKETS_ACTUAL_SIZE_META);
+  }
+  if (mc->ssec_crc && *mc->ssec_crc) {
+    uint8_t *raw = buckets_xmalloc(strlen(mc->ssec_crc) + 3);
+    long rn = buckets_base64_decode(mc->ssec_crc, strlen(mc->ssec_crc), raw);
+    if (rn > 0) buckets_xl_kv_set(&o->meta_sys, &o->nmeta_sys, BUCKETS_CKSUM_META, raw, (size_t)rn);
+    free(raw);
+  }
   return BUCKETS_OBJ_OK;
 }
 
@@ -2385,7 +2403,11 @@ static void mpu_complete(s3_ctx *c, const char *upload_id) {
   bool versioned, suspended;
   buckets_s3_versioning(c, c->object, &versioned, &suspended);
   mpu_sse cs = {0};
-  mpu_commit mc = {.mtime_ns = ri.mtime_ns};
+  mpu_commit mc = {.mtime_ns = ri.mtime_ns, .repl = ri.request};
+  buckets_str ash = buckets_http_header_get(c->req, BUCKETS_H_REPL_ACTUAL_SIZE);
+  buckets_str crch = buckets_http_header_get(c->req, BUCKETS_H_REPL_SSEC_CRC);
+  mc.actual_size = ash.p ? buckets_str_dup(ash) : NULL;
+  mc.ssec_crc = crch.p ? buckets_str_dup(crch) : NULL;
   buckets_complete_opts co = {.versioned = versioned, .pre_commit = mpu_pre_commit, .ud = &mc};
   buckets_object_info ui;
   c->tags.paused = true; /* a lookup of our own: MinIO's handler tags only the completion */
@@ -2401,6 +2423,8 @@ static void mpu_complete(s3_ctx *c, const char *upload_id) {
           free(cksums[i]);
         }
         free(etags), free(cksums), free(parts);
+        free(mc.actual_size);
+        free(mc.ssec_crc);
         buckets_s3_sse_write_error(c, ke);
         return;
       }
@@ -2412,6 +2436,8 @@ static void mpu_complete(s3_ctx *c, const char *upload_id) {
   buckets_obj_err err = buckets_obj_mpu_complete(c->s->layer, c->bucket, c->object, upload_id, parts, n,
                                                  want.type ? &want : NULL, &co, &oi);
   OPENSSL_cleanse(&cs, sizeof(cs));
+  free(mc.actual_size);
+  free(mc.ssec_crc);
   for (size_t i = 0; i < n; i++) {
     free(etags[i]);
     free(cksums[i]);

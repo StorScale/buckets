@@ -281,6 +281,20 @@ static char *target_fp(const buckets_bucket_target *t) {
   return b.data;
 }
 
+/* The TLS client for targets: system roots plus certs/CAs, made on first
+ * use (bootstrap can run before the certificates directory is known). */
+static buckets_tls_client *repl_tls(buckets_repl *r) {
+  if (!r) return NULL;
+  pthread_mutex_lock(&r->mu);
+  if (!r->tls) {
+    char err[256];
+    r->tls = buckets_tls_client_new(r->s->ca_path, err, sizeof(err));
+  }
+  buckets_tls_client *t = r->tls;
+  pthread_mutex_unlock(&r->mu);
+  return t;
+}
+
 buckets_s3c *buckets_repl_client_for(buckets_repl *r, const buckets_bucket_target *t) {
   char app[512];
   snprintf(app, sizeof(app), "minio-replication-target/DEVELOPMENT.GOGET %s", t->arn);
@@ -290,7 +304,7 @@ buckets_s3c *buckets_repl_client_for(buckets_repl *r, const buckets_bucket_targe
                             .secret_key = t->secret_key,
                             .session_token = t->session_token,
                             .region = t->region,
-                            .tls = r ? r->tls : NULL,
+                            .tls = t->secure ? repl_tls(r) : NULL,
                             .timeout_ms = 60000,
                             .app_info = app};
   return buckets_s3c_new(&cfg);
@@ -404,7 +418,8 @@ static void *hc_main(void *arg) {
     memcpy(snap, r->hc, n * sizeof(*snap));
     pthread_mutex_unlock(&r->mu);
     for (size_t i = 0; i < n && !atomic_load(&r->stop); i++) {
-      buckets_s3c_config cfg = {.endpoint = snap[i].endpoint, .secure = snap[i].secure, .tls = r->tls, .timeout_ms = 3000};
+      buckets_s3c_config cfg = {.endpoint = snap[i].endpoint, .secure = snap[i].secure,
+                                .tls = snap[i].secure ? repl_tls(r) : NULL, .timeout_ms = 3000};
       buckets_s3c *c = buckets_s3c_new(&cfg);
       buckets_s3c_result res;
       int64_t t0 = mono_ns();
@@ -1750,8 +1765,6 @@ buckets_repl *buckets_repl_new(buckets_s3_server *s) {
   pthread_mutex_init(&r->mu, NULL);
   pthread_mutex_init(&r->stop_mu, NULL);
   pthread_cond_init(&r->stop_cv, NULL);
-  char err[256];
-  r->tls = buckets_tls_client_new(s->ca_path, err, sizeof(err));
   for (size_t i = 0; i < REPL_WORKERS; i++) worker_start(r, &r->w[i], false);
   worker_start(r, &r->mrf, true);
   r->hc_started = pthread_create(&r->hc_thread, NULL, hc_main, r) == 0;

@@ -194,8 +194,57 @@ run_active() { # kind-a kind-b
   stop_all
 }
 
+# SSE-C objects replicate as stored (the target never sees the key), over TLS
+run_ssec() { # kind-a kind-b
+  PAIR="$1->$2 (SSE-C)"
+  local dir="$WORK/ssec_${1}_$2" certs="$WORK/ssec-certs"
+  if [[ ! -f "$certs/public.crt" ]]; then
+    mkdir -p "$certs/CAs"
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -pkeyopt ec_param_enc:named_curve -nodes -days 1 -keyout "$certs/private.key" \
+      -out "$certs/public.crt" -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" 2>/dev/null
+    cp "$certs/public.crt" "$certs/CAs/"
+  fi
+  local kinds=("$1" "$2") i=0
+  for side in a b; do
+    local kind=${kinds[$i]} port=$((PORT + i)) d="$dir/$side"
+    mkdir -p "$d"/d{1..4}
+    if [[ $kind == minio ]]; then
+      MINIO_CI_CD=on MINIO_BROWSER=off "$MINIO_BIN" server --quiet --certs-dir "$certs" --address "127.0.0.1:$port" "$d/d{1...4}" >>"$d.log" 2>&1 &
+    else
+      "$BIN" server --certs-dir "$certs" --address "127.0.0.1:$port" "$d/d{1...4}" 2>>"$d.log" &
+    fi
+    PIDS+=($!)
+    for _ in $(seq 200); do
+      [[ $(curl -sk -o /dev/null -w '%{http_code}' "https://127.0.0.1:$port/minio/health/ready") == 200 ]] && break
+      sleep 0.1
+    done
+    MC_INSECURE=true MC alias set "$side" "https://127.0.0.1:$port" rootadmin rootsecret123 >/dev/null
+    i=$((i + 1))
+  done
+  MC mb --insecure a/ssec b/ssec >/dev/null
+  MC version enable --insecure a/ssec >/dev/null
+  MC version enable --insecure b/ssec >/dev/null
+  MC replicate add --insecure a/ssec --remote-bucket "https://rootadmin:rootsecret123@127.0.0.1:$((PORT + 1))/ssec" \
+    --priority 1 >/dev/null 2>&1
+  local hex=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+  local key="a/ssec=$hex" bkey="b/ssec=$hex"
+  echo secret-data >"$dir/s"
+  MC cp --insecure --enc-c "$key" "$dir/s" a/ssec/obj >/dev/null
+  head -c $((18 * 1024 * 1024)) /dev/urandom >"$dir/sbig"
+  MC cp --insecure --enc-c "$key" "$dir/sbig" a/ssec/big >/dev/null
+  wait_for 20 bash -c "[[ \$('$MC_BIN' stat --insecure --enc-c '$key' --json a/ssec/big | python3 -c 'import json,sys; print(json.load(sys.stdin).get(\"replicationStatus\",\"\"))') == COMPLETED ]]" ||
+    bad "SSE-C multipart not COMPLETED"
+  check "ssec data" "$(MC cat --insecure --enc-c "$bkey" b/ssec/obj 2>&1)" secret-data
+  check "ssec big data" "$(MC cat --insecure --enc-c "$bkey" b/ssec/big | md5)" "$(md5 <"$dir/sbig")"
+  check "ssec version" "$(MC stat --insecure --enc-c "$bkey" --json b/ssec/obj | field versionID)" \
+    "$(MC stat --insecure --enc-c "$key" --json a/ssec/obj | field versionID)"
+  check "ssec no key" "$(MC cat --insecure b/ssec/obj >/dev/null 2>&1 && echo readable || echo refused)" refused
+  stop_all
+}
+
 PAIRS=${PAIRS:-"buckets:buckets minio:buckets buckets:minio minio:minio"}
 for p in $PAIRS; do run_pair "${p%%:*}" "${p##*:}"; done
+for p in ${SSEC:-$PAIRS}; do run_ssec "${p%%:*}" "${p##*:}"; done
 for p in ${ACTIVE:-$PAIRS}; do run_active "${p%%:*}" "${p##*:}"; done
 echo "replication: $pass passed, $fail failed"
 [[ $fail == 0 ]]
