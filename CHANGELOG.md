@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- The web console (Phase 6), deployed apart from storage:
+  - `consoled` (`src/console`, `src/cmd/consoled`): serves the SPA and logs users in by exchanging their keys for STS credentials at bucketsd (AssumeRole), kept in an AES-256-GCM cookie keyed by PBKDF2 of `CONSOLE_PBKDF_PASSPHRASE`/`SALT` (MinIO console's names; replicas share it). The SPA's S3 and admin calls go through a SigV4-signing proxy to bucketsd (`/api/v1/s3/*`, `/api/v1/admin/*`), streaming uploads (UNSIGNED-PAYLOAD) and downloads, with madmin encryption of admin bodies and replies done server side. Unsafe requests need `X-Console-Request`, cookies are HttpOnly and SameSite=Strict, pages carry a strict CSP.
+  - `console/web`: React 18 + TypeScript + Vite SPA: dashboard (servers, drives, usage), buckets, an object browser (folders, uploads with progress, downloads, bulk and recursive deletes, versions, object metadata and tags), bucket settings (versioning, quota, tags, access policy with presets, default encryption, object lock retention, lifecycle), users, groups, policies, access keys (service accounts, secret shown once) and configuration by subsystem.
+  - Playwright end-to-end suite (`console/web/e2e`, 9 tests) against a real bucketsd and consoled, in `scripts/ci.sh` under ASan/UBSan.
+  - The operator deploys it from `spec.console` (`enabled`, `replicas`, `image`, `serviceType`, `resources`, `ingress` with host, class, TLS and annotations): a `<name>-console` Deployment (non-root, read-only root filesystem, trusting the cluster CA under TLS), Service and Ingress, and a generated cookie-key Secret; console pods never match the storage Service. Disabling it removes them. `docker/Dockerfile.console` builds the image; `tests/e2e-k8s/kind.sh` runs the Playwright suite against the console on kind.
+  - libbuckets gains a streaming HTTP client and a SigV4 request signer (`src/s3/sign.c`).
+
 ## [0.5.0] - 2026-09-28
 
 Phase 5: versioning, object lock, tagging, CORS, quotas, lifecycle expiry,

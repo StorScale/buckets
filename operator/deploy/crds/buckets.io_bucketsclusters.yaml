@@ -130,11 +130,32 @@ spec:
                   default: ClusterIP
                 console:
                   type: object
-                  description: The web console, deployed separately from storage (arrives with the console).
+                  description: The web console (consoled and the SPA), a Deployment of its own apart from storage.
                   properties:
                     enabled: {type: boolean, default: false}
                     replicas: {type: integer, minimum: 1, default: 1}
-                    image: {type: string}
+                    image: {type: string, description: "Defaults to ghcr.io/buckets-io/buckets-console at the operator's version."}
+                    serviceType:
+                      type: string
+                      enum: [ClusterIP, NodePort, LoadBalancer]
+                      default: ClusterIP
+                    resources:
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
+                    ingress:
+                      type: object
+                      description: Expose the console at a host name.
+                      required: [host]
+                      properties:
+                        host: {type: string}
+                        ingressClassName: {type: string}
+                        tlsSecret:
+                          type: object
+                          properties:
+                            name: {type: string}
+                        annotations:
+                          type: object
+                          additionalProperties: {type: string}
             status:
               type: object
               properties:

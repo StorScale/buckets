@@ -16,3 +16,11 @@ spec:
             storage: 100Gi
       resources:
         requests: {cpu: "1", memory: 2Gi}
+  # The web console, a Deployment of its own (not on the storage pods).
+  console:
+    enabled: true
+    replicas: 2
+    # ingress:
+    #   host: console.example.com
+    #   ingressClassName: nginx
+    #   tlsSecret: {name: console-tls}

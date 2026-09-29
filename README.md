@@ -54,7 +54,7 @@ kubectl apply -f operator/examples/cluster.yaml     # 4 servers x 4 drives
 kubectl get bucketsclusters                          # SERVERS 4/4, PHASE Ready
 ```
 
-Root credentials land in the Secret `<name>-root` unless `spec.credsSecret` names your own. Pools can be appended to expand a cluster; the operator then restarts every server together. Image changes roll one server at a time. `operator/examples/cluster-tls.yaml` shows TLS with cert-manager.
+Root credentials land in the Secret `<name>-root` unless `spec.credsSecret` names your own. `spec.console.enabled` adds the web console as a Deployment of its own (`<name>-console`, port 9090, optionally behind an Ingress); sign in with any Buckets credentials. Pools can be appended to expand a cluster; the operator then restarts every server together. Image changes roll one server at a time. `operator/examples/cluster-tls.yaml` shows TLS with cert-manager.
 
 Any S3 client works:
 
@@ -62,6 +62,18 @@ Any S3 client works:
 curl --aws-sigv4 "aws:amz:us-east-1:s3" --user admin:change-me-now -X PUT http://localhost:9000/photos
 aws --endpoint-url http://localhost:9000 s3 ls
 ```
+
+### The web console
+
+The console is a separate process, `consoled`, serving the SPA and talking to `bucketsd` like any other client:
+
+```bash
+(cd console/web && npm ci && npm run build)
+CONSOLE_MINIO_SERVER=http://127.0.0.1:9000 CONSOLE_PBKDF_PASSPHRASE=some-secret \
+  build/src/consoled --address :9090 --web-dir console/web/dist
+```
+
+Sign in at http://localhost:9090 with any Buckets credentials: the console exchanges them for STS credentials and keeps those in an encrypted cookie. `CONSOLE_PBKDF_PASSPHRASE`/`CONSOLE_PBKDF_SALT` derive the cookie key; give every replica the same values.
 
 `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD` and `MINIO_REGION` are honored as fallbacks, so existing deployments can switch over. The health endpoints are `/minio/health/{live,ready,cluster}`, also served under `/buckets/health/...`.
 
@@ -76,6 +88,7 @@ aws --endpoint-url http://localhost:9000 s3 ls
 | `tests/integration/{erasure,heal,concurrency,pools,tls,cluster}.sh` | Drive loss and bitrot; healing; racing writers; pool expansion; HTTPS; a 4-node cluster losing and regaining nodes (`MINIO_BIN` adds MinIO interop) |
 | `tests/e2e-k8s/envtest.sh` | The operator against a real kube-apiserver and etcd (envtest binaries, downloaded on first use), running as its own ServiceAccount |
 | `tests/e2e-k8s/kind.sh` | Full end to end on kind: images, operator, a 4-server cluster, pod and PVC loss, pool expansion, image rollout (needs docker and kind) |
+| `console/web: npx playwright test` | The console end to end: starts bucketsd and consoled (or `CONSOLE_URL`) and drives the SPA in Chromium |
 | `scripts/ci.sh` | The full gate: release, ASan/UBSan and TSan builds, unit, smoke and interop tests |
 
 ## Layout
@@ -99,7 +112,8 @@ docker/      container images
 
 operator/    the Kubernetes operator (C): CRDs, RBAC, manifests, examples
 
-Coming in later phases: `console/` (the web UI, deployed separately from storage).
+console/     the web console: web/ (React + TypeScript SPA, Playwright e2e) served by
+             src/console + src/cmd/consoled (the C backend-for-frontend)
 
 ## License
 

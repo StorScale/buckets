@@ -4,3 +4,6 @@ build*/
 .deps/
 .oracles/
 .conformance/
+console/web/node_modules/
+console/web/dist/
+console/web/test-results/

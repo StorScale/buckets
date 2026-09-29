@@ -85,6 +85,36 @@ static bool ensure_creds(op_ctx *o, const bc_spec *s, char *msg, size_t cap) {
   return ok;
 }
 
+/* The console's cookie key: random, created once, kept across restarts so
+ * sessions survive them (and are shared by the console's replicas). */
+static bool ensure_console_secret(op_ctx *o, const bc_spec *s, char *msg, size_t cap) {
+  char name[128];
+  bc_console_secret_name(s, name, sizeof(name));
+  buckets_buf path = BUCKETS_BUF_INIT;
+  buckets_buf_appendf(&path, "/api/v1/namespaces/%s/secrets/%s", s->ns, name);
+  int st = kube_get(o->k, path.data, NULL);
+  bool ok = st == 200;
+  if (st == 404) {
+    char pass[48], salt[24];
+    random_token(pass, 40, false);
+    random_token(salt, 16, false);
+    yyjson_mut_doc *d = bc_console_secret(s, pass, salt);
+    buckets_buf coll = BUCKETS_BUF_INIT;
+    buckets_buf_appendf(&coll, "/api/v1/namespaces/%s/secrets", s->ns);
+    yyjson_doc *resp;
+    st = kube_create(o->k, coll.data, d, &resp);
+    ok = st == 201 || st == 409;
+    if (!ok) snprintf(msg, cap, "creating Secret %s failed (%d): %s", name, st, kube_error_message(resp));
+    yyjson_doc_free(resp);
+    yyjson_mut_doc_free(d);
+    buckets_buf_free(&coll);
+  } else if (!ok) {
+    snprintf(msg, cap, "console Secret %s cannot be read (%d)", name, st);
+  }
+  buckets_buf_free(&path);
+  return ok;
+}
+
 /* ---- pods: coordinated restarts ------------------------------------------------ */
 
 static bool pod_ready(yyjson_val *pod) {
@@ -260,11 +290,15 @@ static void reconcile_cluster(op_ctx *o, yyjson_val *bc) {
     write_status(o, bc, &s, "Pending", false, "Credentials", err, NULL, NULL, 0);
     return;
   }
+  if (s.console.enabled && !ensure_console_secret(o, &s, err, sizeof(err))) {
+    write_status(o, bc, &s, "Pending", false, "ConsoleSecret", err, NULL, NULL, 0);
+    return;
+  }
   char topo[17];
   bc_topology(&s, topo);
   bc_object *objs;
   size_t n = bc_desired(&s, &objs);
-  yyjson_doc *applied[2 * BC_MAX_POOLS + 2] = {0};
+  yyjson_doc *applied[2 * BC_MAX_POOLS + 5] = {0};
   yyjson_val *sts[BC_MAX_POOLS];
   size_t nsts = 0;
   bool failed = false;
@@ -298,6 +332,15 @@ static void reconcile_cluster(op_ctx *o, yyjson_val *bc) {
     write_status(o, bc, &s, phase, !outdated && ready == servers, reason, msg, topo, sts, nsts);
   }
   for (size_t i = 0; i < n; i++) yyjson_doc_free(applied[i]);
+  /* A disabled console (or Ingress) goes away. */
+  char **stale;
+  size_t ns = bc_console_stale(&s, &stale);
+  for (size_t i = 0; i < ns; i++) {
+    int code = kube_delete(o->k, stale[i]);
+    if (code / 100 == 2) buckets_log_info("%s/%s: deleted %s", s.ns, s.name, stale[i]);
+    free(stale[i]);
+  }
+  free(stale);
   bc_objects_free(objs, n);
 }
 

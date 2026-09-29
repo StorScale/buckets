@@ -28,9 +28,10 @@ md5of() { (md5sum 2>/dev/null || md5 -r) | cut -d' ' -f1; }
 echo "== images and cluster"
 docker build -q -f "$ROOT/docker/Dockerfile.bucketsd" -t buckets/bucketsd:e2e "$ROOT" >/dev/null
 docker build -q -f "$ROOT/docker/Dockerfile.operator" -t buckets/buckets-operator:e2e "$ROOT" >/dev/null
+docker build -q -f "$ROOT/docker/Dockerfile.console" -t buckets/buckets-console:e2e "$ROOT" >/dev/null
 docker tag buckets/bucketsd:e2e buckets/bucketsd:e2e2 # "a new release" for the rollout step
 kind get clusters | grep -qx "$NAME" || kind create cluster --name "$NAME" --wait 120s
-for img in buckets/bucketsd:e2e buckets/bucketsd:e2e2 buckets/buckets-operator:e2e; do
+for img in buckets/bucketsd:e2e buckets/bucketsd:e2e2 buckets/buckets-operator:e2e buckets/buckets-console:e2e; do
   kind load docker-image --name "$NAME" "$img" >/dev/null
 done
 kubectl apply -f "$ROOT/operator/deploy/crds/" >/dev/null
@@ -103,6 +104,26 @@ wait_ready
 expect "all servers on the new image" "$imgs" buckets/bucketsd:e2e2
 kill $PF; kubectl -n $NS port-forward svc/store $LPORT:9000 >/dev/null 2>&1 & PF=$!; sleep 3
 expect "data intact after the rollout" "$(curl -s "${S3[@]}" "$EP/e2ebucket/big.bin" | md5of)" "$BIG"
+
+echo "== the console runs as its own Deployment (Phase 6)"
+kubectl -n $NS patch bc store --type=merge -p '{"spec":{"console":{"enabled":true,"replicas":2,"image":"buckets/buckets-console:e2e"}}}' >/dev/null
+kubectl -n $NS rollout status deploy/store-console --timeout=180s >/dev/null && ok=yes || ok=no
+expect "console deployment ready" "$ok" yes
+expect "console pods are not storage pods" \
+  "$(kubectl -n $NS get pods -l buckets.io/cluster=store,buckets.io/console=store -o name | wc -l | tr -d ' ')" 0
+CPORT=$((LPORT + 1))
+kubectl -n $NS port-forward svc/store-console $CPORT:9090 >/dev/null 2>&1 &
+CPF=$!
+sleep 3
+if command -v npm >/dev/null; then
+  (cd "$ROOT/console/web" && npm ci --no-audit --no-fund >/dev/null && npx playwright install chromium >/dev/null &&
+    CONSOLE_URL="http://127.0.0.1:$CPORT" E2E_USER="$AK" E2E_PASSWORD="$SK" npx playwright test) && ok=yes || ok=no
+  expect "console Playwright suite against the cluster" "$ok" yes
+fi
+kubectl -n $NS patch bc store --type=merge -p '{"spec":{"console":{"enabled":false}}}' >/dev/null
+for _ in $(seq 30); do kubectl -n $NS get deploy/store-console >/dev/null 2>&1 || break; sleep 2; done
+expect "disabling the console removes it" "$(kubectl -n $NS get deploy/store-console -o name 2>/dev/null)" ""
+kill $CPF 2>/dev/null || true
 
 echo "kind: $pass passed, $fail failed"
 [[ $fail -eq 0 ]]

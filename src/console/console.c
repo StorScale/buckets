@@ -339,11 +339,13 @@ static void proxy(buckets_console *c, const buckets_http_request *req, buckets_h
   size_t nh = 0;
   char *owned[BUCKETS_SIGN_MAX_HEADERS * 2];
   size_t no = 0;
-  bool encrypt = false, decrypt = false;
+  bool encrypt = buckets_str_eq_c(buckets_http_header_get(req, "X-Console-Encrypt"), "1");
+  bool decrypt = buckets_str_eq_c(buckets_http_header_get(req, "X-Console-Decrypt"), "1");
+  /* An encrypted admin body is octet-stream, as madmin sends it. */
+  if (encrypt) hdrs[nh++] = (buckets_http_kv){"Content-Type", "application/octet-stream"};
   for (size_t i = 0; i < req->nheaders; i++) {
     buckets_str nm = req->headers[i].name;
-    if (buckets_str_ieq_c(nm, "X-Console-Encrypt")) encrypt = buckets_str_eq_c(req->headers[i].value, "1");
-    if (buckets_str_ieq_c(nm, "X-Console-Decrypt")) decrypt = buckets_str_eq_c(req->headers[i].value, "1");
+    if (encrypt && buckets_str_ieq_c(nm, "Content-Type")) continue;
     if (!forward_request_header(nm) || nh >= BUCKETS_SIGN_MAX_HEADERS - 5) continue;
     owned[no++] = buckets_str_dup(nm);
     owned[no++] = buckets_str_dup(req->headers[i].value);
@@ -418,7 +420,9 @@ static void proxy(buckets_console *c, const buckets_http_request *req, buckets_h
       json_error(resp, 502, "UpstreamUnavailable", "the storage service did not answer");
     } else {
       resp->status = res.status;
-      if (decrypt && res.status == 200) {
+      /* Only replies that are madmin-encrypted are decrypted, so the SPA can
+       * ask for it on every admin read. */
+      if (decrypt && res.status == 200 && buckets_madmin_is_encrypted(res.body.data ? res.body.data : "", res.body.len)) {
         buckets_buf plain = BUCKETS_BUF_INIT;
         if (buckets_madmin_decrypt(s->secret_key, res.body.data ? res.body.data : "", res.body.len, &plain)) {
           buckets_http_resp_header(resp, "Content-Type", "application/json");

@@ -149,10 +149,76 @@ static void test_invalid(void **state) {
   for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) yyjson_doc_free(parse(bad[i], &s, false));
 }
 
+static const char *k_console =
+    "{\"apiVersion\":\"buckets.io/v1alpha1\",\"kind\":\"BucketsCluster\","
+    "\"metadata\":{\"name\":\"store\",\"namespace\":\"data\",\"uid\":\"u-1\",\"generation\":3},"
+    "\"spec\":{\"tls\":{\"certSecret\":{\"name\":\"store-tls\"}},\"pools\":[{\"servers\":4,\"volumesPerServer\":1}],"
+    "\"console\":{\"enabled\":true,\"replicas\":2,\"image\":\"console:test\","
+    "\"ingress\":{\"host\":\"console.example.com\",\"ingressClassName\":\"nginx\",\"tlsSecret\":{\"name\":\"web-tls\"}}}}}";
+
+static void test_console(void **state) {
+  (void)state;
+  bc_spec s;
+  yyjson_doc *d = parse(k_cluster, &s, true);
+  bc_object *o;
+  size_t n = bc_desired(&s, &o);
+  assert_int_equal(n, 6); /* disabled: nothing of the console */
+  bc_objects_free(o, n);
+  char **stale;
+  size_t ns = bc_console_stale(&s, &stale);
+  assert_int_equal(ns, 3);
+  assert_string_equal(stale[0], "/apis/apps/v1/namespaces/data/deployments/store-console");
+  for (size_t i = 0; i < ns; i++) free(stale[i]);
+  free(stale);
+  yyjson_doc_free(d);
+
+  d = parse(k_console, &s, true);
+  n = bc_desired(&s, &o);
+  assert_int_equal(n, 2 + 2 + 3);
+  assert_string_equal(o[4].path, "/api/v1/namespaces/data/services/store-console");
+  assert_string_equal(o[5].path, "/apis/apps/v1/namespaces/data/deployments/store-console");
+  assert_string_equal(o[6].path, "/apis/networking.k8s.io/v1/namespaces/data/ingresses/store-console");
+  yyjson_mut_val *dep = yyjson_mut_doc_get_root(o[5].doc);
+  assert_int_equal(yyjson_mut_get_int(AT(dep, "spec", "replicas")), 2);
+  /* console pods never match the storage Service's selector */
+  yyjson_mut_val *pl = AT(dep, "spec", "template", "metadata", "labels");
+  assert_null(yyjson_mut_obj_get(pl, "buckets.io/cluster"));
+  assert_string_equal(yyjson_mut_get_str(yyjson_mut_obj_get(pl, "buckets.io/console")), "store");
+  assert_string_equal(yyjson_mut_get_str(AT(yyjson_mut_doc_get_root(o[4].doc), "spec", "selector", "buckets.io/console")), "store");
+  yyjson_mut_val *c = yyjson_mut_arr_get_first(AT(dep, "spec", "template", "spec", "containers"));
+  assert_string_equal(yyjson_mut_get_str(yyjson_mut_obj_get(c, "image")), "console:test");
+  yyjson_mut_val *env = yyjson_mut_obj_get(c, "env");
+  bool server = false, ca = false, secure = false, pass = false;
+  size_t i, max;
+  yyjson_mut_val *e;
+  yyjson_mut_arr_foreach(env, i, max, e) {
+    const char *nm = yyjson_mut_get_str(yyjson_mut_obj_get(e, "name"));
+    const char *v = yyjson_mut_get_str(yyjson_mut_obj_get(e, "value"));
+    if (!strcmp(nm, "BUCKETS_CONSOLE_SERVER")) server = !strcmp(v, "https://store.data.svc.cluster.local:9000");
+    if (!strcmp(nm, "BUCKETS_CONSOLE_CA_DIR")) ca = true;
+    if (!strcmp(nm, "BUCKETS_CONSOLE_SECURE_COOKIE")) secure = true;
+    if (!strcmp(nm, "BUCKETS_CONSOLE_PBKDF_PASSPHRASE"))
+      pass = !strcmp(yyjson_mut_get_str(AT(e, "valueFrom", "secretKeyRef", "name")), "store-console");
+  }
+  assert_true(server && ca && secure && pass);
+  yyjson_mut_val *ing = yyjson_mut_doc_get_root(o[6].doc);
+  assert_string_equal(yyjson_mut_get_str(AT(ing, "spec", "ingressClassName")), "nginx");
+  assert_string_equal(yyjson_mut_get_str(yyjson_mut_obj_get(yyjson_mut_arr_get_first(AT(ing, "spec", "rules")), "host")), "console.example.com");
+  bc_objects_free(o, n);
+  ns = bc_console_stale(&s, &stale);
+  assert_int_equal(ns, 0);
+  free(stale);
+  yyjson_mut_doc *sec = bc_console_secret(&s, "p", "s");
+  assert_string_equal(yyjson_mut_get_str(AT(yyjson_mut_doc_get_root(sec), "stringData", "passphrase")), "p");
+  yyjson_mut_doc_free(sec);
+  yyjson_doc_free(d);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_volumes_and_topology), cmocka_unit_test(test_desired_objects), cmocka_unit_test(test_tls),
       cmocka_unit_test(test_root_secret_not_owned), cmocka_unit_test(test_invalid),
+      cmocka_unit_test(test_console),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

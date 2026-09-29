@@ -29,9 +29,15 @@ rules:
   - apiGroups: [apps]
     resources: [statefulsets]
     verbs: [get, list, watch, create, patch, update]
+  - apiGroups: [apps] # the console
+    resources: [deployments]
+    verbs: [get, list, watch, create, patch, update, delete]
+  - apiGroups: [networking.k8s.io] # the console's Ingress
+    resources: [ingresses]
+    verbs: [get, list, watch, create, patch, update, delete]
   - apiGroups: [""]
     resources: [services]
-    verbs: [get, list, watch, create, patch, update]
+    verbs: [get, list, watch, create, patch, update, delete]
   - apiGroups: [""]
     resources: [secrets]
     verbs: [get, create]

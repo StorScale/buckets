@@ -53,6 +53,20 @@ bool bc_parse(yyjson_val *obj, const char *cluster_domain, bc_spec *out, char *e
   out->ca_secret = str_at(yyjson_obj_get(tls, "caSecret"), "name");
   out->service_type = str_at(spec, "serviceType");
   if (!out->service_type) out->service_type = "ClusterIP";
+  yyjson_val *con = yyjson_obj_get(spec, "console");
+  out->console.enabled = yyjson_get_bool(yyjson_obj_get(con, "enabled"));
+  out->console.replicas = (int)yyjson_get_int(yyjson_obj_get(con, "replicas"));
+  if (out->console.replicas < 1) out->console.replicas = 1;
+  out->console.image = str_at(con, "image");
+  if (!out->console.image) out->console.image = BC_CONSOLE_IMAGE;
+  out->console.service_type = str_at(con, "serviceType");
+  if (!out->console.service_type) out->console.service_type = "ClusterIP";
+  yyjson_val *ing = yyjson_obj_get(con, "ingress");
+  out->console.ingress_host = str_at(ing, "host");
+  out->console.ingress_class = str_at(ing, "ingressClassName");
+  out->console.ingress_tls_secret = str_at(yyjson_obj_get(ing, "tlsSecret"), "name");
+  out->console.annotations = yyjson_obj_get(ing, "annotations");
+  out->console.resources = yyjson_obj_get(con, "resources");
 
   yyjson_val *pools = yyjson_obj_get(spec, "pools");
   size_t n = yyjson_arr_size(pools);
@@ -398,8 +412,176 @@ static bc_object pdb(const bc_spec *s, size_t pi) {
   return (bc_object){path_of("/apis/policy/v1", s, "poddisruptionbudgets", name), d};
 }
 
+/* ---- the console ------------------------------------------------------------------ */
+
+void bc_console_secret_name(const bc_spec *s, char *out, size_t cap) { snprintf(out, cap, "%s-console", s->name); }
+
+/* Console pods carry their own labels: the storage Service selects
+ * buckets.io/cluster, and must never send S3 traffic to them. */
+static void console_labels(mdoc *d, mval *obj, const bc_spec *s) {
+  ADD_STR(d, obj, "app.kubernetes.io/name", "buckets-console");
+  ADD_STR(d, obj, "app.kubernetes.io/instance", s->name);
+  ADD_STR(d, obj, "app.kubernetes.io/managed-by", "buckets-operator");
+  ADD_STR(d, obj, "buckets.io/console", s->name);
+}
+
+static mval *console_object(mdoc *d, const char *api, const char *kind, const bc_spec *s, const char *name) {
+  mval *root = object(d, api, kind, s, name, NULL);
+  mval *meta = yyjson_mut_obj_get(root, "metadata");
+  yyjson_mut_obj_remove_key(meta, "labels");
+  console_labels(d, ADD_OBJ(d, meta, "labels"), s);
+  return root;
+}
+
+static bc_object console_service(const bc_spec *s) {
+  mdoc *d = yyjson_mut_doc_new(NULL);
+  char name[128];
+  bc_console_secret_name(s, name, sizeof(name));
+  mval *root = console_object(d, "v1", "Service", s, name);
+  mval *spec = ADD_OBJ(d, root, "spec");
+  ADD_STR(d, spec, "type", s->console.service_type);
+  ADD_STR(d, ADD_OBJ(d, spec, "selector"), "buckets.io/console", s->name);
+  mval *port = yyjson_mut_arr_add_obj(d, ADD_ARR(d, spec, "ports"));
+  ADD_STR(d, port, "name", "http-console");
+  ADD_INT(d, port, "port", BC_CONSOLE_PORT);
+  ADD_INT(d, port, "targetPort", BC_CONSOLE_PORT);
+  ADD_STR(d, port, "protocol", "TCP");
+  return (bc_object){path_of("/api/v1", s, "services", name), d};
+}
+
+static bc_object console_deployment(const bc_spec *s) {
+  mdoc *d = yyjson_mut_doc_new(NULL);
+  char name[128];
+  bc_console_secret_name(s, name, sizeof(name));
+  mval *root = console_object(d, "apps/v1", "Deployment", s, name);
+  mval *spec = ADD_OBJ(d, root, "spec");
+  ADD_INT(d, spec, "replicas", s->console.replicas);
+  ADD_STR(d, ADD_OBJ(d, ADD_OBJ(d, spec, "selector"), "matchLabels"), "buckets.io/console", s->name);
+  mval *tmpl = ADD_OBJ(d, spec, "template");
+  console_labels(d, ADD_OBJ(d, ADD_OBJ(d, tmpl, "metadata"), "labels"), s);
+  mval *pod = ADD_OBJ(d, tmpl, "spec");
+  mval *sec = ADD_OBJ(d, pod, "securityContext");
+  ADD_INT(d, sec, "runAsUser", 65532);
+  ADD_INT(d, sec, "runAsGroup", 65532);
+  ADD_BOOL(d, sec, "runAsNonRoot", true);
+  if (s->pull_secrets) yyjson_mut_obj_add_val(d, pod, "imagePullSecrets", yyjson_val_mut_copy(d, s->pull_secrets));
+  mval *c = yyjson_mut_arr_add_obj(d, ADD_ARR(d, pod, "containers"));
+  ADD_STR(d, c, "name", "console");
+  ADD_STR(d, c, "image", s->console.image);
+  ADD_STR(d, c, "imagePullPolicy", s->pull_policy);
+  mval *args = ADD_ARR(d, c, "args");
+  yyjson_mut_arr_add_str(d, args, "--address");
+  yyjson_mut_arr_add_str(d, args, ":9090");
+  yyjson_mut_arr_add_str(d, args, "--web-dir");
+  yyjson_mut_arr_add_str(d, args, "/usr/share/buckets-console");
+  mval *port = yyjson_mut_arr_add_obj(d, ADD_ARR(d, c, "ports"));
+  ADD_STR(d, port, "name", "http");
+  ADD_INT(d, port, "containerPort", BC_CONSOLE_PORT);
+  mval *env = ADD_ARR(d, c, "env");
+  char url[512];
+  snprintf(url, sizeof(url), "%s://%s.%s.svc.%s:%d", s->tls_secret ? "https" : "http", s->name, s->ns, s->cluster_domain,
+           BC_S3_PORT);
+  env_value(d, env, "BUCKETS_CONSOLE_SERVER", url);
+  env_secret(d, env, "BUCKETS_CONSOLE_PBKDF_PASSPHRASE", name, "passphrase");
+  env_secret(d, env, "BUCKETS_CONSOLE_PBKDF_SALT", name, "salt");
+  if (s->console.ingress_tls_secret) env_value(d, env, "BUCKETS_CONSOLE_SECURE_COOKIE", "on");
+  if (s->tls_secret) env_value(d, env, "BUCKETS_CONSOLE_CA_DIR", "/etc/buckets/ca");
+  for (int i = 0; i < 2; i++) {
+    mval *p = ADD_OBJ(d, c, i ? "livenessProbe" : "readinessProbe");
+    mval *get = ADD_OBJ(d, p, "httpGet");
+    ADD_STR(d, get, "path", "/healthz");
+    ADD_INT(d, get, "port", BC_CONSOLE_PORT);
+    ADD_INT(d, p, "periodSeconds", i ? 20 : 5);
+  }
+  if (s->console.resources) yyjson_mut_obj_add_val(d, c, "resources", yyjson_val_mut_copy(d, s->console.resources));
+  else {
+    mval *r = ADD_OBJ(d, c, "resources");
+    mval *req = ADD_OBJ(d, r, "requests");
+    ADD_STR(d, req, "cpu", "50m");
+    ADD_STR(d, req, "memory", "64Mi");
+    ADD_STR(d, ADD_OBJ(d, r, "limits"), "memory", "256Mi");
+  }
+  mval *csec = ADD_OBJ(d, c, "securityContext");
+  ADD_BOOL(d, csec, "allowPrivilegeEscalation", false);
+  ADD_BOOL(d, csec, "readOnlyRootFilesystem", true);
+  yyjson_mut_arr_add_str(d, ADD_ARR(d, ADD_OBJ(d, csec, "capabilities"), "drop"), "ALL");
+  mval *mounts = ADD_ARR(d, c, "volumeMounts"), *vols = ADD_ARR(d, pod, "volumes");
+  /* Large uploads spool to /tmp. */
+  mval *m = yyjson_mut_arr_add_obj(d, mounts);
+  ADD_STR(d, m, "name", "tmp");
+  ADD_STR(d, m, "mountPath", "/tmp");
+  mval *v = yyjson_mut_arr_add_obj(d, vols);
+  ADD_STR(d, v, "name", "tmp");
+  ADD_OBJ(d, v, "emptyDir");
+  if (s->tls_secret) { /* trust the cluster's CA, as bucketsd's peers do */
+    m = yyjson_mut_arr_add_obj(d, mounts);
+    ADD_STR(d, m, "name", "ca");
+    ADD_STR(d, m, "mountPath", "/etc/buckets/ca");
+    ADD_BOOL(d, m, "readOnly", true);
+    v = yyjson_mut_arr_add_obj(d, vols);
+    ADD_STR(d, v, "name", "ca");
+    mval *src = ADD_OBJ(d, v, "secret");
+    ADD_STR(d, src, "secretName", s->ca_secret ? s->ca_secret : s->tls_secret);
+    mval *it = yyjson_mut_arr_add_obj(d, ADD_ARR(d, src, "items"));
+    ADD_STR(d, it, "key", "ca.crt");
+    ADD_STR(d, it, "path", "ca.crt");
+  }
+  return (bc_object){path_of("/apis/apps/v1", s, "deployments", name), d};
+}
+
+static bc_object console_ingress(const bc_spec *s) {
+  mdoc *d = yyjson_mut_doc_new(NULL);
+  char name[128];
+  bc_console_secret_name(s, name, sizeof(name));
+  mval *root = console_object(d, "networking.k8s.io/v1", "Ingress", s, name);
+  if (s->console.annotations)
+    yyjson_mut_obj_add_val(d, yyjson_mut_obj_get(root, "metadata"), "annotations", yyjson_val_mut_copy(d, s->console.annotations));
+  mval *spec = ADD_OBJ(d, root, "spec");
+  if (s->console.ingress_class) ADD_STR(d, spec, "ingressClassName", s->console.ingress_class);
+  if (s->console.ingress_tls_secret) {
+    mval *t = yyjson_mut_arr_add_obj(d, ADD_ARR(d, spec, "tls"));
+    yyjson_mut_arr_add_str(d, ADD_ARR(d, t, "hosts"), s->console.ingress_host);
+    ADD_STR(d, t, "secretName", s->console.ingress_tls_secret);
+  }
+  mval *rule = yyjson_mut_arr_add_obj(d, ADD_ARR(d, spec, "rules"));
+  ADD_STR(d, rule, "host", s->console.ingress_host);
+  mval *path = yyjson_mut_arr_add_obj(d, ADD_ARR(d, ADD_OBJ(d, rule, "http"), "paths"));
+  ADD_STR(d, path, "path", "/");
+  ADD_STR(d, path, "pathType", "Prefix");
+  mval *svc = ADD_OBJ(d, ADD_OBJ(d, path, "backend"), "service");
+  ADD_STR(d, svc, "name", name);
+  ADD_INT(d, ADD_OBJ(d, svc, "port"), "number", BC_CONSOLE_PORT);
+  return (bc_object){path_of("/apis/networking.k8s.io/v1", s, "ingresses", name), d};
+}
+
+size_t bc_console_stale(const bc_spec *s, char ***paths) {
+  char name[128];
+  bc_console_secret_name(s, name, sizeof(name));
+  char **p = buckets_xcalloc(3, sizeof(char *));
+  size_t n = 0;
+  if (!s->console.enabled) {
+    p[n++] = path_of("/apis/apps/v1", s, "deployments", name);
+    p[n++] = path_of("/api/v1", s, "services", name);
+  }
+  if (!s->console.enabled || !s->console.ingress_host) p[n++] = path_of("/apis/networking.k8s.io/v1", s, "ingresses", name);
+  *paths = p;
+  return n;
+}
+
+yyjson_mut_doc *bc_console_secret(const bc_spec *s, const char *passphrase, const char *salt) {
+  mdoc *d = yyjson_mut_doc_new(NULL);
+  char name[128];
+  bc_console_secret_name(s, name, sizeof(name));
+  mval *root = console_object(d, "v1", "Secret", s, name);
+  ADD_STR(d, root, "type", "Opaque");
+  mval *data = ADD_OBJ(d, root, "stringData");
+  ADD_STR(d, data, "passphrase", passphrase);
+  ADD_STR(d, data, "salt", salt);
+  return d;
+}
+
 size_t bc_desired(const bc_spec *s, bc_object **out) {
-  size_t n = 2 + 2 * s->npools, k = 0;
+  size_t n = 2 + 2 * s->npools + 3, k = 0;
   bc_object *o = buckets_xcalloc(n, sizeof(*o));
   char *vols = bc_volumes(s);
   char topo[17];
@@ -408,6 +590,11 @@ size_t bc_desired(const bc_spec *s, bc_object **out) {
   o[k++] = service(s, false);
   for (size_t p = 0; p < s->npools; p++) o[k++] = statefulset(s, p, vols, topo);
   for (size_t p = 0; p < s->npools; p++) o[k++] = pdb(s, p);
+  if (s->console.enabled) {
+    o[k++] = console_service(s);
+    o[k++] = console_deployment(s);
+    if (s->console.ingress_host) o[k++] = console_ingress(s);
+  }
   free(vols);
   *out = o;
   return k;

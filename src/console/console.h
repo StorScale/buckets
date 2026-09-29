@@ -20,7 +20,7 @@
  *   *    /api/v1/s3/<bucket>/<key>?...                -> bucketsd /<bucket>/<key>?...
  *   *    /api/v1/admin/<api>?...                      -> bucketsd /minio/admin/v3/<api>?...
  *        (X-Console-Encrypt: 1 madmin-encrypts the body with the session's
- *        secret key, X-Console-Decrypt: 1 decrypts a 200 reply)
+ *        secret key, X-Console-Decrypt: 1 decrypts a reply that is encrypted)
  *   GET  /healthz
  *   GET  anything else                                -> the SPA (index.html fallback)
  *

@@ -43,6 +43,14 @@ for t in iam config openid plugins ldap certsts service usage; do
   run tests/integration/$t.sh build-ci-asan/src/bucketsd
 done
 run tests/integration/s3diff.sh build-ci-asan/src/bucketsd
+# The console: SPA build, typecheck and Playwright e2e against the sanitized
+# bucketsd and consoled (skipped without npm).
+if command -v npm >/dev/null; then
+  (cd console/web && run npm ci --no-audit --no-fund && run npm run build && run npx playwright install chromium &&
+    BUCKETSD_BIN=../../build-ci-asan/src/bucketsd CONSOLED_BIN=../../build-ci-asan/src/consoled run npx playwright test)
+else
+  echo "console e2e: skipped (no npm)"
+fi
 
 # MinIO interoperability (skipped unless MC_BIN and MINIO_BIN are set;
 # tools/build-oracles.sh builds both).

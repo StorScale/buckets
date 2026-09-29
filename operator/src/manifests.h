@@ -12,6 +12,8 @@
 #define BC_API_VERSION "buckets.io/v1alpha1"
 #define BC_KIND "BucketsCluster"
 #define BC_S3_PORT 9000
+#define BC_CONSOLE_PORT 9090
+#define BC_CONSOLE_IMAGE "ghcr.io/buckets-io/buckets-console:0.6.0"
 #define BC_MAX_POOLS 32
 
 typedef struct {
@@ -32,6 +34,13 @@ typedef struct {
   const char *tls_secret, *ca_secret;
   const char *service_type;
   const char *cluster_domain; /* e.g. cluster.local */
+  struct {
+    bool enabled;
+    int replicas;
+    const char *image, *service_type;
+    const char *ingress_host, *ingress_class, *ingress_tls_secret; /* host NULL: no Ingress */
+    yyjson_val *resources, *annotations;
+  } console;
 } bc_spec;
 
 /* Reads and validates a BucketsCluster; strings point into the document. */
@@ -55,10 +64,18 @@ typedef struct {
   yyjson_mut_doc *doc;  /* desired object, for server-side apply */
 } bc_object;
 
-/* Services, one StatefulSet and one PodDisruptionBudget per pool, in apply
+/* Services, one StatefulSet and one PodDisruptionBudget per pool, then the
+ * console's Service, Deployment and Ingress when it is enabled, in apply
  * order. Caller frees with bc_objects_free. */
 size_t bc_desired(const bc_spec *s, bc_object **out);
 void bc_objects_free(bc_object *o, size_t n);
+
+/* The console's objects (paths only) to delete when it is disabled, or its
+ * Ingress when that is not wanted. Caller frees each and the array. */
+size_t bc_console_stale(const bc_spec *s, char ***paths);
+/* The console's cookie-key Secret (<name>-console), owned by the cluster. */
+void bc_console_secret_name(const bc_spec *s, char *out, size_t cap);
+yyjson_mut_doc *bc_console_secret(const bc_spec *s, const char *passphrase, const char *salt);
 
 /* The operator-managed root credentials Secret (deliberately not owned by the
  * cluster, so it outlives it like the data does). */
