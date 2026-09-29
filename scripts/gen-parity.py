@@ -106,6 +106,8 @@ STATUS = {
     "StorageInfoHandler": (DONE, ""),
     "TopLocksHandler": (DONE, ""),
     "ForceUnlockHandler": (DONE, ""),
+    "ExportBucketMetadataHandler": (DONE, ""),
+    "ImportBucketMetadataHandler": (DONE, ""),
     "ServiceV2Handler": (DONE, ""),
     # STS
     "AssumeRole": (DONE, ""),

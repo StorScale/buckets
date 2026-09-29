@@ -57,6 +57,8 @@ bool buckets_bucket_targets_parse(const char *json, size_t len, buckets_bucket_t
 /* json.Marshal(target) / (&targets); clone: t.Clone() (credentials reduced to the access key). */
 void buckets_bucket_target_json(const buckets_bucket_target *t, bool clone, buckets_buf *out);
 void buckets_bucket_targets_json(const buckets_bucket_targets *ts, buckets_buf *out);
+/* xml.Marshal(&targets), as the bucket metadata export writes it. */
+void buckets_bucket_targets_xml(const buckets_bucket_targets *ts, buckets_buf *out);
 
 /* The stored form: encrypted (meta_json filled) when kms is set. */
 bool buckets_bucket_targets_seal(struct buckets_kms *kms, const char *bucket, const void *json, size_t len,

@@ -1384,8 +1384,7 @@ static void get_bucket_versioning(s3_ctx *c) {
   /* An unversioned bucket has an empty configuration. */
   buckets_bucket_state *st = buckets_metasys_get(c->s->meta, c->bucket);
   buckets_buf *b = &c->resp->body;
-  buckets_xml_header(b);
-  buckets_versioning_xml(&st->versioning, b);
+  buckets_versioning_xml(&st->versioning, b); /* xml.Marshal, no declaration (writeSuccessResponseXML) */
   buckets_bucket_state_release(st);
   buckets_s3_write_xml(c, 200);
 }

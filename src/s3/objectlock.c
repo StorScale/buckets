@@ -458,8 +458,7 @@ void buckets_s3_get_bucket_object_lock(s3_ctx *c) {
     return;
   }
   buckets_buf *b = &c->resp->body;
-  buckets_xml_header(b);
-  buckets_lock_config_xml(&st->object_lock, b);
+  buckets_lock_config_xml(&st->object_lock, b); /* xml.Marshal, no declaration (writeSuccessResponseXML) */
   buckets_bucket_state_release(st);
   buckets_s3_write_xml(c, 200);
 }

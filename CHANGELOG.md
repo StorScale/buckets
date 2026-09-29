@@ -21,12 +21,14 @@ All notable changes to this project are documented here. The format follows
 - `mc admin heal` (`POST /minio/admin/v3/heal/[bucket[/prefix]]`): heal sequences as MinIO's admin-heal-ops runs them -- the config prefix and the buckets newest first, one result item per bucket and object version with each drive's state before and after, dry runs, deep scans, pool/set filters, collected by client token (a sequence waits once 1000 items are uncollected), force start/stop, already-running and overlapping-path errors; in a cluster the token names the node running the sequence and other nodes forward status requests there.
 - StorageInfo and BackgroundHealStatus, with MinIO's per-drive `apiCalls`/`lastMinute` metrics and the heal tracker of a drive being healed; ServerInfo returns drive metrics with `?metrics=true`.
 - `mc admin top locks` and `mc admin unlock` in distributed setups: lock servers record who holds what (owner, quorum, source, time), and one node holds the cluster leader lock (`.minio.sys/leader.lock`) as MinIO's does.
+- `mc admin cluster bucket export|import`: every bucket's configurations in a zip, each written as MinIO marshals it (bucket policies as Go's `json.Marshal` writes them, remote targets as `xml.Marshal` does, credentials and all), and imported in MinIO's order with its report (object lock first, then versioning, then the rest; replication and targets are not imported).
 - `tests/integration/adminops.sh` (single node) and `adminops-dist.sh` (4 nodes) compare these admin APIs with MinIO.
 
 ### Changed
 - Unknown admin API routes, and known routes with another method, answer 426 XMinioAdminVersionMismatch as MinIO does.
 
 ### Fixed
+- GET bucket versioning, object lock configuration and notification configuration carry no XML declaration, as MinIO writes them.
 - ListObjects (V1 and V2) elements are in MinIO's order (NextContinuationToken before KeyCount, NextMarker after Marker, EncodingType last).
 - JSON strings with invalid UTF-8 carry the replacement character itself, as Go's encoding/json writes it, not the `\ufffd` escape (event records too).
 

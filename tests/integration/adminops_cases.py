@@ -262,5 +262,129 @@ for name, method, path in [("storage info by POST", "POST", "/storageinfo"),
         res.append(err_view(c, b))
     compare(name, *res)
 
+# ---- bucket metadata export and import ---------------------------------------------------------------
+import io  # noqa: E402
+import re  # noqa: E402
+import zipfile  # noqa: E402
+
+MC_CFG = tempfile.mkdtemp()
+for alias, (base, _) in zip(("m", "b"), SERVERS):
+    subprocess.run([MC, "--config-dir", MC_CFG, "alias", "set", alias, base, AK, SK], capture_output=True)
+
+
+def mc(*args):
+    return subprocess.run([MC, "--config-dir", MC_CFG, *args], capture_output=True, text=True)
+
+
+def config_view(name, data):
+    """A configuration with what differs by nature (IDs, times, set order) taken out."""
+    text = data.decode()
+    if name.endswith("lifecycle.xml"):
+        text = re.sub(r"<ID>[^<]*</ID>", "<ID/>", text)
+        text = re.sub(r"<ExpiryUpdatedAt>[^<]*</ExpiryUpdatedAt>", "<ExpiryUpdatedAt/>", text)
+    if name.endswith("tagging.xml"):
+        return sorted(re.findall(r"<Tag>.*?</Tag>", text))
+    if name.endswith("policy.json"):
+        j = json.loads(text)
+        for st in j.get("Statement") or []:
+            for k in ("Action", "NotAction", "Resource", "NotResource"):
+                if k in st:
+                    st[k] = sorted(st[k])
+        return j
+    return text
+
+
+def zip_view(body):
+    try:
+        z = zipfile.ZipFile(io.BytesIO(body))
+    except zipfile.BadZipFile:
+        return ("not a zip", body[:200])
+    return [(i.filename, i.compress_type, oct(i.external_attr >> 16), config_view(i.filename, z.read(i)))
+            for i in z.infolist()]
+
+
+for a in ("m", "b"):
+    mc("mb", "--with-lock", f"{a}/metaa")
+    mc("mb", f"{a}/metab")
+    mc("anonymous", "set", "download", f"{a}/metaa")
+    mc("ilm", "rule", "add", "--expire-days", "30", "--prefix", "logs/", f"{a}/metaa")
+    mc("tag", "set", f"{a}/metaa", "k1=v1&k2=v2")
+    mc("quota", "set", f"{a}/metaa", "--size", "1GiB")
+    mc("retention", "set", "--default", "GOVERNANCE", "1d", f"{a}/metaa")
+    mc("version", "enable", f"{a}/metab")
+for base, _ in SERVERS:
+    curl(f"{base}/metab?policy", "PUT", json.dumps({"Version": "2012-10-17", "Statement": [
+        {"Sid": "ip", "Effect": "Deny", "Principal": "*", "Action": ["s3:PutObject", "s3:DeleteObject"],
+         "Resource": ["arn:aws:s3:::metab/*"], "Condition": {"IpAddress": {"aws:SourceIp": ["10.0.0.0/8"]},
+                                                           "StringLike": {"s3:prefix": ["a/*", "b/*"]}}}]}))
+
+for q in ("", "?bucket=metaa", "?bucket=metab/", "?bucket=./metab", "?bucket=nosuchbucket"):
+    res = []
+    for base, _ in SERVERS:
+        c, h, b = admin(base, "GET", "/export-bucket-metadata" + q)
+        v = zip_view(b) if c == 200 else err_view(c, b)
+        if q == "":  # only the buckets made here
+            v = [x for x in v if x[0].split("/")[0] in ("metaa", "metab")] if isinstance(v, list) else v
+        res.append((c, v))
+    compare(f"export bucket metadata {q or '(all)'}", *res)
+
+
+def make_zip(files):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for name, data in files:
+            z.writestr(name, data)
+    return buf.getvalue()
+
+
+LOCK = "<ObjectLockConfiguration><ObjectLockEnabled>Enabled</ObjectLockEnabled><Rule><DefaultRetention><Mode>COMPLIANCE</Mode><Days>2</Days></DefaultRetention></Rule></ObjectLockConfiguration>"
+IMPORT = make_zip([
+    ("impa/object-lock.xml", LOCK),
+    ("impa/policy.json", json.dumps({"Version": "2012-10-17", "Statement": [
+        {"Effect": "Allow", "Principal": {"AWS": ["*"]}, "Action": ["s3:GetObject"], "Resource": ["arn:aws:s3:::impa/*"]}]})),
+    ("impa/lifecycle.xml", "<LifecycleConfiguration><Rule><ID>r1</ID><Status>Enabled</Status><Filter><Prefix>x/</Prefix></Filter><Expiration><Days>3</Days></Expiration></Rule></LifecycleConfiguration>"),
+    ("impa/tagging.xml", "<Tagging><TagSet><Tag><Key>team</Key><Value>eng</Value></Tag></TagSet></Tagging>"),
+    ("impa/quota.json", '{"quota":0,"size":5368709120,"rate":0,"requests":0,"quotatype":"hard"}'),
+    ("impa/versioning.xml", '<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Status>Suspended</Status></VersioningConfiguration>'),
+    ("impa/notification.xml", "<NotificationConfiguration></NotificationConfiguration>"),
+    ("impa/bucket-encryption.xml", '<ServerSideEncryptionConfiguration><Rule><ApplyServerSideEncryptionByDefault><SSEAlgorithm>AES256</SSEAlgorithm></ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>'),
+    ("impa/replication.xml", "<ReplicationConfiguration></ReplicationConfiguration>"),
+    ("impb/versioning.xml", '<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Status>Enabled</Status></VersioningConfiguration>'),
+    ("impb/policy.json", json.dumps({"Statement": [
+        {"Effect": "Allow", "Principal": "*", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::impb/*"}]})),
+    ("impb/quota.json", '{"quota":"lots"}'),
+    ("impb/object-lock.xml", "<ObjectLockConfiguration><ObjectLockEnabled>Nope</ObjectLockEnabled></ObjectLockConfiguration>"),
+    ("impc/whatever.txt", "x"),
+    ("toplevel.txt", "x"),
+    ("metab/tagging.xml", "<Tagging><TagSet><Tag><Key>imported</Key><Value>yes</Value></Tag></TagSet></Tagging>"),
+])
+res = []
+for base, _ in SERVERS:
+    c, _, b = admin(base, "PUT", "/import-bucket-metadata", IMPORT)
+    res.append((c, jbody(b)))
+compare("import bucket metadata report", *res)
+
+res = []
+for base, _ in SERVERS:
+    out = []
+    for bucket in ("impa", "impb", "impc", "metab"):
+        for sub in ("policy", "tagging", "lifecycle", "object-lock", "versioning", "encryption", "notification"):
+            c, _, b = curl(f"{base}/{bucket}?{sub}")
+            text = b.decode(errors="replace")
+            text = re.sub(r"<(RequestId|HostId)>[^<]*</\1>", "", text)
+            text = re.sub(r"<ExpiryUpdatedAt>[^<]*</ExpiryUpdatedAt>", "<ExpiryUpdatedAt/>", text)
+            out.append((bucket, sub, c, config_view("policy.json", b) if sub == "policy" and c == 200 else text))
+        c, _, b = admin(base, "GET", f"/get-bucket-quota?bucket={bucket}")
+        out.append((bucket, "quota", c, jbody(b) if c == 200 else err_view(c, b)))
+    res.append(out)
+compare("configurations after the import", *res)
+
+for name, body in [("not a zip", b"hello"), ("empty body", b""), ("empty zip", make_zip([]))]:
+    res = []
+    for base, _ in SERVERS:
+        c, _, b = admin(base, "PUT", "/import-bucket-metadata", body)
+        res.append(err_view(c, b) if c != 200 else (c, jbody(b)))
+    compare(f"import {name}", *res)
+
 print(f"adminops: {Score.passed} passed, {Score.failed} failed")
 sys.exit(1 if Score.failed else 0)

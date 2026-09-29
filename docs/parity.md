@@ -5,7 +5,7 @@ registers is listed; statuses live in the script's `STATUS` table.
 
 ✅ done · 🟡 partial · ⬜ not started · ➖ dropped on purpose
 
-**Overall:** 200 done, 5 partial, 15 not started, 2 dropped (222 handlers).
+**Overall:** 202 done, 5 partial, 13 not started, 2 dropped (222 handlers).
 
 ## S3 API (76/76)
 
@@ -90,7 +90,7 @@ Source: `cmd/api-router.go`
 | ✅ | `SelectObjectContentHandler` | CSV, JSON and Parquet (MINIO_API_SELECT_PARQUET); every input compression |
 | ✅ | `ValidateBucketReplicationCredsHandler` |  |
 
-## Admin API (madmin / mc admin) (103/123)
+## Admin API (madmin / mc admin) (105/123)
 
 Source: `cmd/admin-router.go`
 
@@ -121,7 +121,7 @@ Source: `cmd/admin-router.go`
 | ⬜ | `DownloadProfilingHandler` |  |
 | ⬜ | `DriveSpeedtestHandler` |  |
 | ✅ | `EditTierHandler` |  |
-| ⬜ | `ExportBucketMetadataHandler` |  |
+| ✅ | `ExportBucketMetadataHandler` |  |
 | ✅ | `ExportIAM` |  |
 | ✅ | `ForceUnlockHandler` |  |
 | ✅ | `GetBucketQuotaConfigHandler` |  |
@@ -133,7 +133,7 @@ Source: `cmd/admin-router.go`
 | ✅ | `HealHandler` |  |
 | ⬜ | `HealthInfoHandler` |  |
 | ✅ | `HelpConfigKVHandler` |  |
-| ⬜ | `ImportBucketMetadataHandler` |  |
+| ✅ | `ImportBucketMetadataHandler` |  |
 | ✅ | `ImportIAM` |  |
 | ✅ | `ImportIAMV2` |  |
 | ✅ | `InfoAccessKey` |  |

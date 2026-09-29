@@ -32,8 +32,7 @@ void buckets_s3_get_notification(s3_ctx *c) {
   if (have) buckets_notify_config_prune(&cfg, buckets_notifier_exists, c->s->notifier);
   else snprintf(cfg.xmlns, sizeof(cfg.xmlns), "%s", BUCKETS_S3_XMLNS); /* the default config (parseAllConfigs) */
   buckets_buf *b = &c->resp->body;
-  buckets_xml_header(b);
-  buckets_notify_config_xml(&cfg, c->s->region, b);
+  buckets_notify_config_xml(&cfg, c->s->region, b); /* xml.Marshal, no declaration (writeSuccessResponseXML) */
   buckets_notify_config_free(&cfg);
   buckets_s3_write_xml(c, 200);
 }

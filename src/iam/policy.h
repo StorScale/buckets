@@ -2,6 +2,7 @@
 #ifndef BUCKETS_IAM_POLICY_H
 #define BUCKETS_IAM_POLICY_H
 
+#include "core/buf.h"
 #include <stddef.h>
 
 #include "core/common.h"
@@ -53,6 +54,8 @@ bool buckets_policies_allowed(const buckets_policy *const *ps, size_t n, const b
  * buckets_policy_free and evaluated with buckets_bucket_policy_allowed. */
 bool buckets_bucket_policy_parse(const char *json, size_t len, const char *bucket, buckets_policy **out, char *err,
                                  size_t errlen);
+/* json.Marshal of a parsed bucket policy, as MinIO stores and exports it. */
+void buckets_bucket_policy_json(const buckets_policy *p, buckets_buf *out);
 bool buckets_bucket_policy_allowed(const buckets_policy *p, const buckets_policy_args *a);
 
 /* Merges several policies into one (MinIO's MergePolicies): the union of

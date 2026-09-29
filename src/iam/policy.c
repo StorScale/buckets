@@ -16,6 +16,7 @@
 #include "core/buf.h"
 #include "core/timefmt.h"
 #include "crypto/base64.h"
+#include "notify/event.h"
 
 #include "iam/policy_tables.inc"
 
@@ -1509,4 +1510,171 @@ const char *buckets_policy_canned(const char *name) {
     if (strcmp(canned[i].name, name) == 0) return canned[i].doc;
   }
   return NULL;
+}
+
+/* ---- json.Marshal(policy.BucketPolicy) -------------------------------------------------------
+ * As MinIO writes a bucket policy it parsed (the export of bucket metadata):
+ * sets as arrays (Go writes actions and resources in map order; sorted
+ * here), conditions by function name, then key. */
+
+static int str_cmp(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+
+static void json_str(buckets_buf *b, const char *s) { buckets_json_go_string(b, s, strlen(s)); }
+
+static void json_sorted_set(buckets_buf *b, const strset *s) {
+  char **v = buckets_xcalloc(s->n ? s->n : 1, sizeof(char *));
+  memcpy(v, s->v, s->n * sizeof(char *));
+  qsort(v, s->n, sizeof(char *), str_cmp);
+  buckets_buf_append_char(b, '[');
+  for (size_t i = 0; i < s->n; i++) {
+    if (i) buckets_buf_append_char(b, ',');
+    json_str(b, v[i]);
+  }
+  buckets_buf_append_char(b, ']');
+  free(v);
+}
+
+static char *resource_string(const resource *r) {
+  buckets_buf b = BUCKETS_BUF_INIT;
+  buckets_buf_append_c(&b, r->type == ARN_TYPE_S3 ? ARN_S3 : r->type == ARN_TYPE_KMS ? ARN_KMS : "*");
+  buckets_buf_append_c(&b, r->pattern);
+  buckets_buf_append_char(&b, '\0');
+  return b.data;
+}
+
+static void json_resources(buckets_buf *b, const resource *r, size_t n) {
+  strset s = {0};
+  for (size_t i = 0; i < n; i++) {
+    char *x = resource_string(&r[i]);
+    set_add(&s, x);
+    free(x);
+  }
+  json_sorted_set(b, &s);
+  set_free(&s);
+}
+
+static void json_cidr(buckets_buf *b, const ipnet *n) {
+  char a[64];
+  if (n->len == 4) snprintf(a, sizeof(a), "%u.%u.%u.%u/%d", n->addr[0], n->addr[1], n->addr[2], n->addr[3], n->bits);
+  else {
+    struct in6_addr in6;
+    memcpy(&in6, n->addr, 16);
+    char t[INET6_ADDRSTRLEN];
+    inet_ntop(AF_INET6, &in6, t, sizeof(t));
+    snprintf(a, sizeof(a), "%s/%d", t, n->bits);
+  }
+  json_str(b, a);
+}
+
+/* One function's values (its toMap). */
+static void json_func_values(buckets_buf *b, const cond_func *f) {
+  if (f->kind == F_STRING || f->kind == F_STRING_LIKE) {
+    json_sorted_set(b, &f->values);
+    return;
+  }
+  buckets_buf_append_char(b, '[');
+  switch (f->kind) {
+  case F_STRING:
+  case F_STRING_LIKE: break;
+  case F_IP:
+    for (size_t i = 0; i < f->nnets; i++) {
+      if (i) buckets_buf_append_char(b, ',');
+      json_cidr(b, &f->nets[i]);
+    }
+    break;
+  case F_NULL: buckets_buf_append_c(b, f->null_value ? "true" : "false"); break;
+  case F_BOOL: json_str(b, f->bool_value ? f->bool_value : ""); break;
+  case F_NUMERIC: buckets_buf_appendf(b, "%lld", f->num); break;
+  case F_DATE: {
+    char t[64];
+    buckets_time_rfc3339_nano(f->date_sec, f->date_nsec, t);
+    json_str(b, t);
+    break;
+  }
+  }
+  buckets_buf_append_char(b, ']');
+}
+
+static int func_cmp(const void *a, const void *b) {
+  const cond_func *x = *(const cond_func *const *)a, *y = *(const cond_func *const *)b;
+  int c = strcmp(x->name, y->name);
+  if (c) return c;
+  c = strcmp(x->key.name, y->key.name);
+  if (c) return c;
+  return strcmp(x->key.variable ? x->key.variable : "", y->key.variable ? y->key.variable : "");
+}
+
+static void json_conditions(buckets_buf *b, const functions *fs) {
+  const cond_func **v = buckets_xcalloc(fs->n ? fs->n : 1, sizeof(*v));
+  for (size_t i = 0; i < fs->n; i++) v[i] = &fs->f[i];
+  qsort(v, fs->n, sizeof(*v), func_cmp);
+  buckets_buf_append_char(b, '{');
+  for (size_t i = 0; i < fs->n; i++) {
+    bool first_of_name = i == 0 || strcmp(v[i - 1]->name, v[i]->name) != 0;
+    if (first_of_name) {
+      if (i) buckets_buf_append_c(b, "},");
+      json_str(b, v[i]->name);
+      buckets_buf_append_c(b, ":{");
+    } else {
+      buckets_buf_append_char(b, ',');
+    }
+    buckets_buf k = BUCKETS_BUF_INIT;
+    buckets_buf_append_c(&k, v[i]->key.name);
+    if (v[i]->key.variable && *v[i]->key.variable) buckets_buf_appendf(&k, "/%s", v[i]->key.variable);
+    buckets_buf_append_char(&k, '\0');
+    json_str(b, k.data);
+    buckets_buf_free(&k);
+    buckets_buf_append_char(b, ':');
+    json_func_values(b, v[i]);
+  }
+  if (fs->n) buckets_buf_append_char(b, '}');
+  buckets_buf_append_char(b, '}');
+  free(v);
+}
+
+void buckets_bucket_policy_json(const buckets_policy *p, buckets_buf *out) {
+  buckets_buf_append_char(out, '{');
+  if (p->id && *p->id) {
+    buckets_buf_append_c(out, "\"ID\":");
+    json_str(out, p->id);
+    buckets_buf_append_char(out, ',');
+  }
+  buckets_buf_append_c(out, "\"Version\":");
+  json_str(out, p->version ? p->version : "");
+  buckets_buf_append_c(out, ",\"Statement\":");
+  if (!p->n) buckets_buf_append_c(out, "null");
+  else buckets_buf_append_char(out, '[');
+  for (size_t i = 0; i < p->n; i++) {
+    const statement *s = &p->st[i];
+    if (i) buckets_buf_append_char(out, ',');
+    buckets_buf_append_char(out, '{');
+    if (s->sid && *s->sid) {
+      buckets_buf_append_c(out, "\"Sid\":");
+      json_str(out, s->sid);
+      buckets_buf_append_char(out, ',');
+    }
+    buckets_buf_append_c(out, "\"Effect\":");
+    json_str(out, s->eff == EFFECT_ALLOW ? "Allow" : s->eff == EFFECT_DENY ? "Deny" : (s->eff_raw ? s->eff_raw : ""));
+    buckets_buf_append_c(out, ",\"Principal\":{\"AWS\":");
+    json_sorted_set(out, &s->principals);
+    buckets_buf_append_c(out, "},\"Action\":");
+    json_sorted_set(out, &s->actions);
+    if (s->not_actions.n) {
+      buckets_buf_append_c(out, ",\"NotAction\":");
+      json_sorted_set(out, &s->not_actions);
+    }
+    buckets_buf_append_c(out, ",\"Resource\":");
+    json_resources(out, s->res, s->nres);
+    if (s->nnot_res) {
+      buckets_buf_append_c(out, ",\"NotResource\":");
+      json_resources(out, s->not_res, s->nnot_res);
+    }
+    if (s->conds.n) {
+      buckets_buf_append_c(out, ",\"Condition\":");
+      json_conditions(out, &s->conds);
+    }
+    buckets_buf_append_char(out, '}');
+  }
+  if (p->n) buckets_buf_append_char(out, ']');
+  buckets_buf_append_char(out, '}');
 }

@@ -18,6 +18,7 @@
 #include "crypto/objkey.h"
 #include "kms/kms.h"
 #include "notify/event.h"
+#include "s3/xml.h"
 
 static char *dup0(const char *s) { return buckets_xstrdup(s ? s : ""); }
 
@@ -466,4 +467,65 @@ void buckets_arn_generate(const char *type, const char *region, const char *id, 
     id = u;
   }
   snprintf(out, cap, "arn:minio:%s:%s:%s:%s", type, region ? region : "", id, bucket);
+}
+
+/* xml.Marshal(madmin.BucketTargets): elements named after the Go fields,
+ * in their order (the export of bucket metadata writes this, credentials
+ * and all). */
+static void xml_time(buckets_buf *out, const char *tag, int64_t sec, int32_t nsec) {
+  char t[64];
+  buckets_time_rfc3339_nano(sec, nsec, t);
+  buckets_xml_elem(out, tag, t);
+}
+
+static void xml_int(buckets_buf *out, const char *tag, long long v) {
+  char t[32];
+  snprintf(t, sizeof(t), "%lld", v);
+  buckets_xml_elem(out, tag, t);
+}
+
+void buckets_bucket_targets_xml(const buckets_bucket_targets *ts, buckets_buf *out) {
+  buckets_xml_open(out, "BucketTargets");
+  for (size_t i = 0; i < ts->n; i++) {
+    const buckets_bucket_target *t = &ts->t[i];
+    buckets_xml_open(out, "Targets");
+    buckets_xml_elem(out, "SourceBucket", t->source_bucket ? t->source_bucket : "");
+    buckets_xml_elem(out, "Endpoint", t->endpoint ? t->endpoint : "");
+    if (t->has_creds) {
+      buckets_xml_open(out, "Credentials");
+      buckets_xml_elem(out, "AccessKeyId", t->access_key ? t->access_key : "");
+      buckets_xml_elem(out, "SecretAccessKey", t->secret_key ? t->secret_key : "");
+      buckets_xml_elem(out, "SessionToken", t->session_token ? t->session_token : "");
+      xml_time(out, "Expiration", t->creds_exp_sec, t->creds_exp_nsec);
+      buckets_xml_close(out, "Credentials");
+    }
+    buckets_xml_elem(out, "TargetBucket", t->target_bucket ? t->target_bucket : "");
+    buckets_xml_elem(out, "Secure", t->secure ? "true" : "false");
+    buckets_xml_elem(out, "Path", t->path ? t->path : "");
+    buckets_xml_elem(out, "API", t->api ? t->api : "");
+    buckets_xml_elem(out, "Arn", t->arn ? t->arn : "");
+    buckets_xml_elem(out, "Type", t->type ? t->type : "");
+    buckets_xml_elem(out, "Region", t->region ? t->region : "");
+    xml_int(out, "BandwidthLimit", t->bandwidth_limit);
+    buckets_xml_elem(out, "ReplicationSync", t->replication_sync ? "true" : "false");
+    buckets_xml_elem(out, "StorageClass", t->storage_class ? t->storage_class : "");
+    xml_int(out, "HealthCheckDuration", t->health_check_ns);
+    buckets_xml_elem(out, "DisableProxy", t->disable_proxy ? "true" : "false");
+    xml_time(out, "ResetBeforeDate", t->reset_before_sec, t->reset_before_nsec);
+    buckets_xml_elem(out, "ResetID", t->reset_id ? t->reset_id : "");
+    xml_int(out, "TotalDowntime", t->total_downtime_ns);
+    xml_time(out, "LastOnline", t->last_online_sec, t->last_online_nsec);
+    buckets_xml_elem(out, "Online", t->online ? "true" : "false");
+    buckets_xml_open(out, "Latency");
+    xml_int(out, "Curr", t->lat_curr);
+    xml_int(out, "Avg", t->lat_avg);
+    xml_int(out, "Max", t->lat_max);
+    buckets_xml_close(out, "Latency");
+    buckets_xml_elem(out, "DeploymentID", t->deployment_id ? t->deployment_id : "");
+    buckets_xml_elem(out, "Edge", t->edge ? "true" : "false");
+    buckets_xml_elem(out, "EdgeSyncBeforeExpiry", t->edge_sync_before_expiry ? "true" : "false");
+    xml_int(out, "OfflineCount", t->offline_count);
+    buckets_xml_close(out, "Targets");
+  }
+  buckets_xml_close(out, "BucketTargets");
 }

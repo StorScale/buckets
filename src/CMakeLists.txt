@@ -10,6 +10,7 @@ add_library(buckets STATIC
   core/common.c
   core/str.c
   core/buf.c
+  core/zipwrite.c
   core/log.c
   core/timefmt.c
   core/yaml.c
@@ -153,6 +154,7 @@ add_library(buckets STATIC
   s3/compress.c
   s3/notification.c
   admin/admin.c
+  admin/bucketmeta.c
   admin/heal.c
   admin/info.c
   admin/locks.c
