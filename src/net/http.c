@@ -72,6 +72,7 @@ typedef struct conn {
   bool peer_loaded;
   /* A streamed request body: the handler already runs and reads it from pipe. */
   struct buckets_body_pipe *pipe;
+  bool chunked_stream; /* ... chunked, of unknown length */
   bool read_paused;  /* pipe full: parsing and reading stop until it drains */
   bool backpressure; /* on_body asked to pause (vs. message complete) */
   bool discarding;   /* the handler finished early: drop the rest of the body */
@@ -274,6 +275,11 @@ static long pipe_read(body_pipe *p, void *out, size_t n) {
 
 long buckets_http_body_read(buckets_http_body_cursor *c, void *buf, size_t n) {
   const buckets_http_request *req = c->req;
+  if (req->body_len < 0 && req->pipe) { /* chunked, streamed: until it ends */
+    long r = pipe_read(req->pipe, buf, n);
+    if (r > 0) c->off += r;
+    return r;
+  }
   if (c->off >= req->body_len) return 0;
   if (req->pipe) {
     long r = pipe_read(req->pipe, buf, (size_t)BUCKETS_MIN((int64_t)n, req->body_len - c->off));
@@ -675,7 +681,7 @@ static void dispatch_request_mode(conn *c, bool streamed) {
   if (streamed) {
     rq->pipe = c->pipe;
     rq->body_fd = -1;
-    rq->body_len = (int64_t)c->parser.content_length;
+    rq->body_len = c->chunked_stream ? -1 : (int64_t)c->parser.content_length;
   }
   j->resp = (buckets_http_response){.status = 200, .content_length = -1};
   j->resp.head_only = buckets_str_eq_c(rq->method, "HEAD");
@@ -895,6 +901,13 @@ static int on_headers_complete(llhttp_t *p) {
   }
   bool big = has_len && p->content_length > cfg->mem_body_limit;
   bool stream = big && !(p->flags & F_CHUNKED) && cfg->workers;
+  bool chunked_stream = false;
+  if ((p->flags & F_CHUNKED) && cfg->workers && cfg->stream_chunked) {
+    buckets_str target = buckets_buf_str(&c->url), path, query;
+    split_target(target, &path, &query);
+    chunked_stream = stream = cfg->stream_chunked(path);
+  }
+  c->chunked_stream = chunked_stream;
   if (!stream && ((p->flags & F_CHUNKED) || big)) {
     c->body_fd = open_spool(cfg->spool_dir);
     if (c->body_fd < 0) {

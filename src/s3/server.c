@@ -425,8 +425,9 @@ void buckets_s3_peer_bucket(void *server, const char *bucket) {
 
 char *buckets_s3_peer_server_info(void *server) { return buckets_admin_local_server_json(server); }
 
-void buckets_s3_peer_admin(void *server, const buckets_query *q, buckets_http_response *resp) {
-  buckets_admin_peer(server, q, resp);
+void buckets_s3_peer_admin(void *server, const buckets_http_request *req, const buckets_query *q,
+                           buckets_http_response *resp) {
+  buckets_admin_peer(server, req, q, resp);
 }
 
 void buckets_s3_peer_datamove(void *server, const buckets_query *q, int *status, buckets_buf *body) {
@@ -2078,7 +2079,10 @@ void buckets_s3_handle(const buckets_http_request *req, buckets_http_response *r
       c.audited = true;
       buckets_audit_tags_set(&c.tags);
     }
-    if ((err = authenticate(&c)) != BUCKETS_ERR_NONE) buckets_admin_error(&c, err);
+    buckets_str authz = buckets_http_header_get(req, "Authorization");
+    if (!authz.p && !buckets_query_has(&c.q, "X-Amz-Signature") && buckets_admin_site_perf_unsigned(s, req->path))
+      buckets_admin_handle(&c); /* MinIO's sites call these unsigned */
+    else if ((err = authenticate(&c)) != BUCKETS_ERR_NONE) buckets_admin_error(&c, err);
     else buckets_admin_handle(&c);
     if (c.audited && c.op_name) {
       struct timespec t1;

@@ -98,6 +98,15 @@ same_object() { # alias/bucket/key alias/bucket/key
   [[ -n "$a" && "$a" == "$b" ]]
 }
 cat_eq() { [[ $(MC cat "$1" 2>/dev/null) == "$2" ]]; }
+# mc support perf site-replication, as the admin API answers it: the number
+# of sites, whether each sent and received, their errors
+siteperf() { # alias port
+  curl -s -X POST --aws-sigv4 aws:amz:us-east-1:s3 --user rootadmin:rootsecret123 \
+    "http://127.0.0.1:$2/minio/admin/v3/speedtest/site?duration=10s" | python3 -c 'import json,sys
+r=json.load(sys.stdin)["nodeResults"]
+print(len(r), all(x["tx"] > 0 for x in r), all(x["rx"] > 0 for x in r), sorted(x.get("error", "") for x in r),
+      len({x["endpoint"] for x in r}))' 2>&1
+}
 
 # Three sites s1 s2 s3 of the given kinds, joined from s1 (which has data).
 run_group() { # kind1 kind2 kind3
@@ -123,6 +132,8 @@ EOF
   check "replicate add" "$(field success <<<"$out")" True
   check "info s1" "$(sr_sites s1)" "s1 s2 s3"
   check "info s2" "$(sr_sites s2)" "s1 s2 s3"
+  check "site perf from s1" "$(siteperf s1 "$PORT")" "3 True True ['', '', ''] 3"
+  check "site perf from s2" "$(siteperf s2 "$((PORT + 1))")" "3 True True ['', '', ''] 3"
   check "info s3" "$(sr_sites s3)" "s1 s2 s3"
 
   # the initial sync

@@ -433,6 +433,12 @@ static void leader_stop(leader_lock *l) {
   l->started = false;
 }
 
+/* The endless request bodies of the network speedtests are streamed. */
+static bool stream_chunked(buckets_str path) {
+  return buckets_str_eq_c(path, "/minio/admin/v3/speedtest/client/devnull") ||
+         buckets_str_eq_c(path, "/minio/admin/v3/site-replication/devnull");
+}
+
 static void *dsync_lock_fn(void *ud, const char *res, bool write, int timeout_ms) {
   return buckets_dsync_lock(ud, res, write, timeout_ms);
 }
@@ -697,6 +703,7 @@ int main(int argc, char **argv) {
       .port = port,
       .max_body = MAX_BODY_BYTES,
       .mem_body_limit = MEM_BODY_BYTES,
+      .stream_chunked = stream_chunked,
       .spool_dir = spool,
       .idle_timeout_sec = 30,
       .server_header = "Buckets",
@@ -712,6 +719,15 @@ int main(int argc, char **argv) {
    * (mc admin service freeze) parks its requests, which must not block the
    * unfreeze or the kubelet's probes. */
   buckets_pool *control_pool = api_pool ? buckets_pool_new(4) : NULL;
+  /* The network speedtests' devnull endpoints hold a worker per incoming
+   * stream for the whole test (tens of them per peer): workers of their own. */
+  buckets_pool *perf_pool = api_pool ? buckets_pool_new(96) : NULL;
+  if (perf_pool) {
+    static const char *const perf[] = {"/minio/admin/v3/speedtest/client/devnull",
+                                       "/minio/admin/v3/site-replication/devnull"};
+    for (size_t i = 0; i < BUCKETS_ARRAY_LEN(perf); i++)
+      hcfg.routes[hcfg.nroutes++] = (buckets_http_route){perf[i], buckets_s3_handle, &s3, perf_pool};
+  }
   if (control_pool) {
     static const char *const control[] = {"/minio/admin/", "/minio/health/", "/buckets/health/"};
     for (size_t i = 0; i < BUCKETS_ARRAY_LEN(control); i++)
@@ -737,6 +753,8 @@ int main(int argc, char **argv) {
                                                         topo.lock_server, internode_pool};
     hcfg.routes[hcfg.nroutes++] = (buckets_http_route){BUCKETS_INTERNODE_PREFIX "peer/", buckets_peer_server_handle,
                                                         &peer_handlers, internode_pool};
+    hcfg.routes[hcfg.nroutes++] = (buckets_http_route){BUCKETS_INTERNODE_PREFIX "perf/", buckets_admin_internode_devnull,
+                                                        &s3, perf_pool ? perf_pool : internode_pool};
   }
 
   /* HTTPS when the certs directory holds a key pair, as in MinIO. */
@@ -782,6 +800,7 @@ int main(int argc, char **argv) {
     }
   }
   s3.cluster = cluster_describe(&topo, host, tls != NULL);
+  s3.internode_tls = topo.tls_client;
   buckets_trace_set_node(s3.cluster->self);
   if (topo.distributed) {
     topology_connect(&topo);
@@ -830,6 +849,7 @@ int main(int argc, char **argv) {
   pthread_mutex_unlock(&s3.freeze_mu);
   buckets_pool_free(api_pool); /* finishes in-flight handlers before their connections go */
   buckets_pool_free(control_pool);
+  buckets_pool_free(perf_pool);
   buckets_pool_free(internode_pool);
   buckets_admin_heal_shutdown(); /* heal sequences use the object layer */
   leader_stop(&g_leader);

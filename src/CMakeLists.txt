@@ -162,6 +162,7 @@ add_library(buckets STATIC
   admin/jobstream.c
   admin/perf.c
   admin/locks.c
+  admin/netperf.c
   admin/config.c
   admin/iamxfer.c
   admin/bucket.c

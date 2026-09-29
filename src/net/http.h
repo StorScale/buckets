@@ -33,7 +33,7 @@ typedef struct {
   size_t nheaders;
   buckets_str body;
   int body_fd;       /* -1 when the body is in memory */
-  int64_t body_len;  /* total body bytes in either representation */
+  int64_t body_len;  /* total body bytes in either representation; -1: a streamed chunked body */
   bool keep_alive;
   bool secure; /* arrived over TLS */
   /* The TLS client's certificates (see buckets_tls_peer_chain), or NULL. */
@@ -115,6 +115,10 @@ typedef struct {
   buckets_tls *tls;
   buckets_http_route routes[BUCKETS_HTTP_MAX_ROUTES];
   size_t nroutes;
+  /* Chunked request bodies to paths it accepts are streamed to the handler
+   * as they arrive (body_len -1; read until buckets_http_body_read returns
+   * 0) instead of spooled whole (the network speedtests' endless bodies). */
+  bool (*stream_chunked)(buckets_str path);
 } buckets_http_config;
 
 typedef struct buckets_http_server buckets_http_server;

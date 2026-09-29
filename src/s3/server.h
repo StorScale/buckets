@@ -62,6 +62,7 @@ typedef struct buckets_s3_server {
   struct buckets_scanner *_Atomic scanner; /* the data scanner, once started (for its metrics) */
   struct buckets_healer *_Atomic healer;   /* MRF and drive healing, once started (for its metrics) */
   struct buckets_lock_server *lock_server; /* this node's dsync locks (distributed), for metrics */
+  struct buckets_tls_client *internode_tls; /* for connections to peers of our own (netperf), NULL: plain */
   struct buckets_http_client **internode;  /* clients to the other nodes (their traffic), and how many */
   size_t ninternode;
   _Atomic uint64_t ilm_actions[9];       /* their outcomes, by lifecycle action (bucket/lifecycle.h) */
@@ -91,7 +92,8 @@ char *buckets_s3_peer_server_info(void *server);
 char *buckets_s3_peer_tier_stats(void *server);
 char *buckets_s3_peer_batch_metrics(void *server);
 void buckets_s3_peer_datamove(void *server, const buckets_query *q, int *status, buckets_buf *body);
-void buckets_s3_peer_admin(void *server, const buckets_query *q, buckets_http_response *resp);
+void buckets_s3_peer_admin(void *server, const buckets_http_request *req, const buckets_query *q,
+                           buckets_http_response *resp);
 /* Which versions of one key (newest first) lifecycle would delete now. */
 void buckets_s3_lifecycle_due(buckets_s3_server *s, const char *bucket, const buckets_object_info *v, size_t n,
                               bool *due);

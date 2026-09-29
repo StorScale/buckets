@@ -2242,6 +2242,12 @@ static const route k_routes[] = {
     {"POST", "/speedtest", buckets_admin_object_speedtest, "ObjectSpeedTest"},
     {"POST", "/speedtest/object", buckets_admin_object_speedtest, "ObjectSpeedTest"},
     {"POST", "/speedtest/drive", buckets_admin_drive_speedtest, "DriveSpeedtest"},
+    {"POST", "/speedtest/net", buckets_admin_netperf, "Netperf"},
+    {"POST", "/speedtest/site", buckets_admin_site_perf, "SitePerf"},
+    {"POST", "/speedtest/client/devnull", buckets_admin_client_devnull, "ClientDevNull"},
+    {"POST", "/speedtest/client/devnull/extratime", buckets_admin_client_devnull_extratime, "ClientDevNullExtraTime"},
+    {"POST", "/site-replication/devnull", buckets_admin_sr_devnull, "SiteReplicationDevNull"},
+    {"POST", "/site-replication/netperf", buckets_admin_sr_netperf, "SiteReplicationNetPerf"},
     {"GET", "/inspect-data", buckets_admin_inspect_data, "InspectData"},
     {"POST", "/inspect-data", buckets_admin_inspect_data, "InspectData"},
     {"GET", "/export-bucket-metadata", buckets_admin_export_bucket_metadata, "ExportBucketMetadata"},
@@ -2377,7 +2383,8 @@ void buckets_admin_handle(s3_ctx *c) {
   buckets_admin_unsupported(c);
 }
 
-void buckets_admin_peer(buckets_s3_server *s, const buckets_query *q, buckets_http_response *resp) {
+void buckets_admin_peer(buckets_s3_server *s, const buckets_http_request *req, const buckets_query *q,
+                        buckets_http_response *resp) {
   const char *op = buckets_query_get(q, "op");
   buckets_http_resp_header(resp, "Content-Type", "application/json");
   if (op && strcmp(op, "heal-status") == 0) {
@@ -2386,6 +2393,8 @@ void buckets_admin_peer(buckets_s3_server *s, const buckets_query *q, buckets_ht
     resp->status = status;
   } else if (op && buckets_admin_perf_peer(s, op, q, resp)) {
     /* a speedtest */
+  } else if (op && buckets_admin_netperf_peer(s, op, req, q, resp)) {
+    /* netperf, or its devnull */
   } else {
     resp->status = 400;
   }

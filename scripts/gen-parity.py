@@ -110,6 +110,12 @@ STATUS = {
     "ImportBucketMetadataHandler": (DONE, ""),
     "InspectDataHandler": (DONE, ""),
     "ObjectSpeedTestHandler": (DONE, "PUTs and GETs through the object layer rather than a loopback S3 client"),
+    "NetperfHandler": (DONE, ""),
+    "SitePerfHandler": (DONE, ""),
+    "ClientDevNull": (DONE, ""),
+    "ClientDevNullExtraTime": (DONE, ""),
+    "SiteReplicationDevNull": (DONE, "unsigned requests are served only while site replication is on"),
+    "SiteReplicationNetPerf": (DONE, "unsigned requests are served only while site replication is on"),
     "DriveSpeedtestHandler": (DONE, "dperf's O_DIRECT test on Linux, \"not implemented\" elsewhere, as dperf"),
     "ServiceV2Handler": (DONE, ""),
     # STS

@@ -5,7 +5,7 @@ registers is listed; statuses live in the script's `STATUS` table.
 
 ✅ done · 🟡 partial · ⬜ not started · ➖ dropped on purpose
 
-**Overall:** 205 done, 5 partial, 10 not started, 2 dropped (222 handlers).
+**Overall:** 211 done, 5 partial, 4 not started, 2 dropped (222 handlers).
 
 ## S3 API (76/76)
 
@@ -90,7 +90,7 @@ Source: `cmd/api-router.go`
 | ✅ | `SelectObjectContentHandler` | CSV, JSON and Parquet (MINIO_API_SELECT_PARQUET); every input compression |
 | ✅ | `ValidateBucketReplicationCredsHandler` |  |
 
-## Admin API (madmin / mc admin) (108/123)
+## Admin API (madmin / mc admin) (114/123)
 
 Source: `cmd/admin-router.go`
 
@@ -110,8 +110,8 @@ Source: `cmd/admin-router.go`
 | ✅ | `CancelBatchJob` |  |
 | ✅ | `CancelDecommission` |  |
 | ✅ | `ClearConfigHistoryKVHandler` |  |
-| ⬜ | `ClientDevNull` |  |
-| ⬜ | `ClientDevNullExtraTime` |  |
+| ✅ | `ClientDevNull` |  |
+| ✅ | `ClientDevNullExtraTime` |  |
 | ✅ | `ConsoleLogHandler` |  |
 | ✅ | `DataUsageInfoHandler` |  |
 | ✅ | `DelConfigKVHandler` |  |
@@ -162,7 +162,7 @@ Source: `cmd/admin-router.go`
 | ✅ | `ListTierHandler` |  |
 | ✅ | `ListUsers` |  |
 | 🟡 | `MetricsHandler` | batch jobs; the scanner, disk, OS, net, memory, CPU, RPC and runtime types are not reported yet |
-| ⬜ | `NetperfHandler` |  |
+| ✅ | `NetperfHandler` |  |
 | ✅ | `ObjectSpeedTestHandler` | PUTs and GETs through the object layer rather than a loopback S3 client |
 | ⬜ | `ProfileHandler` |  |
 | ✅ | `PutBucketQuotaConfigHandler` |  |
@@ -196,13 +196,13 @@ Source: `cmd/admin-router.go`
 | ✅ | `SetPolicyForUserOrGroup` |  |
 | ✅ | `SetRemoteTargetHandler` |  |
 | ✅ | `SetUserStatus` |  |
-| ⬜ | `SitePerfHandler` |  |
+| ✅ | `SitePerfHandler` |  |
 | ✅ | `SiteReplicationAdd` |  |
-| ⬜ | `SiteReplicationDevNull` |  |
+| ✅ | `SiteReplicationDevNull` | unsigned requests are served only while site replication is on |
 | ✅ | `SiteReplicationEdit` |  |
 | ✅ | `SiteReplicationInfo` |  |
 | ✅ | `SiteReplicationMetaInfo` |  |
-| ⬜ | `SiteReplicationNetPerf` |  |
+| ✅ | `SiteReplicationNetPerf` | unsigned requests are served only while site replication is on |
 | ✅ | `SiteReplicationRemove` |  |
 | ✅ | `SiteReplicationResyncOp` |  |
 | ✅ | `SiteReplicationStatus` |  |

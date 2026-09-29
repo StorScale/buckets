@@ -494,5 +494,25 @@ for base, root in SERVERS:
     res.append((c, h.get("content-type"), endpoint_view(last, base)))
 compare("drive speedtest", *res)
 
+# ---- network speedtests -------------------------------------------------------------------------------
+for name, path in [("net on one node", "/speedtest/net"), ("site without site replication", "/speedtest/site")]:
+    res = []
+    for base, root in SERVERS:
+        c, _, b = admin(base, "POST", path)
+        res.append(err_view(c, b))
+    compare(f"speedtest {name}", *res)
+
+res = []
+for base, root in SERVERS:
+    body = subprocess.run(
+        ["sh", "-c", f"head -c 20000000 /dev/zero | curl -s -o /dev/null -w '%{{http_code}}' -X POST "
+                     f"-H 'Transfer-Encoding: chunked' -H 'X-Amz-Content-Sha256: UNSIGNED-PAYLOAD' --data-binary @- "
+                     f"--aws-sigv4 aws:amz:us-east-1:s3 --user {AK}:{SK} {base}{ADMIN}/speedtest/client/devnull"],
+        capture_output=True, text=True).stdout
+    c, h, b = admin(base, "POST", "/speedtest/client/devnull/extratime")
+    j = json.loads(b)
+    res.append((body, c, h.get("content-type"), sorted(j), all(v > 0 for v in j.values())))
+compare("client perf (devnull, extra time)", *res)
+
 print(f"adminops: {Score.passed} passed, {Score.failed} failed")
 sys.exit(1 if Score.failed else 0)

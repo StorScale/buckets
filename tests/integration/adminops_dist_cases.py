@@ -212,5 +212,15 @@ for side, root in SIDES:
     res.append(port_view(side, (c, sorted(out))))
 compare("drive speedtest across nodes", *res)
 
+# ---- netperf -------------------------------------------------------------------------------------------
+res = []
+for side, root in SIDES:
+    c, h, b = admin(node(side, 1), "POST", "/speedtest/net?duration=10s")
+    j = jbody(b)
+    if isinstance(j, dict):
+        j = sorted((x["endpoint"], x["tx"] > 0, x["rx"] > 0, x.get("error")) for x in j["nodeResults"])
+    res.append(port_view(side, (c, h.get("content-type"), j)))
+compare("netperf across nodes", *res)
+
 print(f"adminops-dist: {Score.passed} passed, {Score.failed} failed")
 sys.exit(1 if Score.failed else 0)
