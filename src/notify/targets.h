@@ -34,5 +34,6 @@ extern const buckets_target_kind buckets_target_mqtt;
 extern const buckets_target_kind buckets_target_elasticsearch;
 extern const buckets_target_kind buckets_target_postgres;
 extern const buckets_target_kind buckets_target_mysql;
+extern const buckets_target_kind buckets_target_amqp;
 
 #endif

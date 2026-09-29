@@ -751,6 +751,15 @@ bool buckets_config_check_notify_keys(const buckets_config *c, const char *name,
   return true;
 }
 
+char *buckets_config_get_stored(const buckets_config *c, const char *name, const char *tgt, const char *key) {
+  const subsys *s = cfind(c, name);
+  if (!s) return buckets_xstrdup("");
+  const cfg_key_def *k = key_def(s->def, key);
+  const target *t = tfind(s, tgt && *tgt ? tgt : DEF);
+  const char *v = t ? kvs_lookup(&t->k, key) : NULL;
+  return buckets_xstrdup(v ? v : k ? k->def : "");
+}
+
 char *buckets_config_getenv_only(const char *name, const char *tgt, const char *key) {
   char en[512];
   env_name(name, tgt && *tgt ? tgt : DEF, key, en, sizeof(en));

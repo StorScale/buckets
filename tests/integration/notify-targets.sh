@@ -254,6 +254,32 @@ done
 compare es
 compare es-config
 
+echo "== amqp"
+for kind in minio buckets; do
+  mock_start amqpmock.py "$WORK/amqp.raw"
+  MINIO_NOTIFY_AMQP_ENABLE_a1=on MINIO_NOTIFY_AMQP_URL_a1="amqp://amqpuser:amqppass@127.0.0.1:$MOCK_PORT/vh1" \
+    MINIO_NOTIFY_AMQP_EXCHANGE_a1=events MINIO_NOTIFY_AMQP_EXCHANGE_TYPE_a1=fanout MINIO_NOTIFY_AMQP_ROUTING_KEY_a1=rk \
+    MINIO_NOTIFY_AMQP_DURABLE_a1=on MINIO_NOTIFY_AMQP_DELIVERY_MODE_a1=2 \
+    MINIO_NOTIFY_AMQP_ENABLE_a2=on MINIO_NOTIFY_AMQP_URL_a2="amqp://127.0.0.1:$MOCK_PORT" \
+    MINIO_NOTIFY_AMQP_EXCHANGE_a2=stored MINIO_NOTIFY_AMQP_EXCHANGE_TYPE_a2=direct MINIO_NOTIFY_AMQP_PUBLISHING_CONFIRMS_a2=on \
+    MINIO_NOTIFY_AMQP_MANDATORY_a2=on MINIO_NOTIFY_AMQP_QUEUE_DIR_a2="$WORK/$kind-amqpq" \
+    start "$kind" "$WORK/$kind-amqp"
+  curl -s -o /dev/null "${S3[@]}" -X PUT "$EP/tbucket"
+  notification arn:minio:sqs::a1:amqp arn:minio:sqs::a2:amqp
+  workload
+  sleep 3
+  for kv in "notify_amqp:c1 url=amqp://127.0.0.1:1 exchange=e" "notify_amqp:c2 url=http://127.0.0.1:$MOCK_PORT exchange=e" \
+    "notify_amqp:c3 url=amqp://127.0.0.1:$MOCK_PORT delivery_mode=x" "notify_amqp:c4 url=amqp://127.0.0.1:$MOCK_PORT queue_dir=rel"; do
+    # shellcheck disable=SC2086
+    config_set $kv >>"$WORK/$kind.amqp-config"
+  done
+  stop
+  mock_stop
+  python3 "$HERE/targets/normalize.py" <"$WORK/amqp.raw" >"$WORK/$kind.amqp"
+done
+compare amqp
+compare amqp-config
+
 if [[ -n "${PG_BIN:-}" ]]; then
   echo "== postgresql"
   # a real server (SCRAM auth, a database per kind), its statement log and the tables compared

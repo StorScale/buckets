@@ -66,6 +66,9 @@ bool buckets_config_check_notify_keys(const buckets_config *c, const char *subsy
 /* A setting read only from the environment (MINIO_<SUBSYS>_<KEY>[_<TARGET>])
  * such as notify_nats's nkey_seed; "" when unset. Malloc'd. */
 char *buckets_config_getenv_only(const char *subsys, const char *target, const char *key);
+/* A setting from the stored configuration (or its default), ignoring the
+ * environment: for keys whose environment variable is named differently. */
+char *buckets_config_get_stored(const buckets_config *c, const char *subsys, const char *target, const char *key);
 
 /* GetResolvedConfigParams: every key of subsys with its resolved value and
  * where it came from, plus the comment when set. With redact, secret keys
