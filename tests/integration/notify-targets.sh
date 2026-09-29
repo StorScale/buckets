@@ -5,7 +5,8 @@
 # validation for each target type.
 #   MINIO_BIN=/path/to/minio MC_BIN=/path/to/mc [PG_BIN=/path/to/postgres/bin] \
 #     tests/integration/notify-targets.sh [bucketsd]
-# PG_BIN (initdb, pg_ctl, postgres) adds the PostgreSQL target against a real server.
+# PG_BIN (initdb, pg_ctl, postgres) adds the PostgreSQL target against a real server, MYSQL_DIR (a
+# MySQL 8 installation: bin/mysqld, bin/mysql) the MySQL target.
 set -euo pipefail
 BIN=${1:-build/src/bucketsd}
 if [[ -z "${MINIO_BIN:-}" || -z "${MC_BIN:-}" ]]; then
@@ -314,6 +315,74 @@ PY
   compare pg
   compare pg-rows
   compare pg-config
+fi
+
+if [[ -n "${MYSQL_DIR:-}" ]]; then
+  echo "== mysql"
+  # a real MySQL (caching_sha2_password), its general log and the tables compared
+  MY_PORT=$((PORT + 3))
+  MYDATA="$WORK/mydata"
+  "$MYSQL_DIR/bin/mysqld" --no-defaults --initialize-insecure --datadir="$MYDATA" --basedir="$MYSQL_DIR" >/dev/null 2>&1
+  "$MYSQL_DIR/bin/mysqld" --no-defaults --datadir="$MYDATA" --basedir="$MYSQL_DIR" --port="$MY_PORT" --bind-address=127.0.0.1 \
+    --socket="$WORK/my.sock" --mysqlx=OFF --general-log=1 --general-log-file="$WORK/mygeneral.log" >"$WORK/mysqld.log" 2>&1 &
+  MYSQLD=$!
+  for _ in $(seq 100); do "$MYSQL_DIR/bin/mysql" --no-defaults -h127.0.0.1 -P"$MY_PORT" -uroot -e "SELECT 1" >/dev/null 2>&1 && break; sleep 0.2; done
+  "$MYSQL_DIR/bin/mysql" --no-defaults -h127.0.0.1 -P"$MY_PORT" -uroot \
+    -e "CREATE USER 'myuser'@'%' IDENTIFIED BY 'mypass'; GRANT ALL ON *.* TO 'myuser'@'%'; CREATE DATABASE minio_db; CREATE DATABASE buckets_db;"
+  for kind in minio buckets; do
+    # an empty caching_sha2_password cache: each client goes through full (RSA) authentication
+    "$MYSQL_DIR/bin/mysql" --no-defaults -h127.0.0.1 -P"$MY_PORT" -uroot -e "FLUSH PRIVILEGES"
+    MINIO_NOTIFY_MYSQL_ENABLE_y1=on MINIO_NOTIFY_MYSQL_DSN_STRING_y1="myuser:mypass@tcp(127.0.0.1:$MY_PORT)/${kind}_db" \
+      MINIO_NOTIFY_MYSQL_TABLE_y1=nsevents MINIO_NOTIFY_MYSQL_FORMAT_y1=namespace \
+      MINIO_NOTIFY_MYSQL_ENABLE_y2=on MINIO_NOTIFY_MYSQL_DSN_STRING_y2="myuser:mypass@tcp(127.0.0.1:$MY_PORT)/${kind}_db" \
+      MINIO_NOTIFY_MYSQL_TABLE_y2=accevents MINIO_NOTIFY_MYSQL_FORMAT_y2=access MINIO_NOTIFY_MYSQL_QUEUE_DIR_y2="$WORK/$kind-myq" \
+      start "$kind" "$WORK/$kind-my"
+    curl -s -o /dev/null "${S3[@]}" -X PUT "$EP/tbucket"
+    notification arn:minio:sqs::y1:mysql arn:minio:sqs::y2:mysql
+    workload
+    sleep 3
+    for kv in "notify_mysql:c1 dsn_string=u:p@tcp(127.0.0.1:1)/d table=t format=namespace" \
+      "notify_mysql:c2 dsn_string=u:p@tcp(127.0.0.1:1 table=t format=namespace" \
+      "notify_mysql:c3 dsn_string=nodb table=t format=namespace" \
+      "notify_mysql:c4 dsn_string=myuser:wrong@tcp(127.0.0.1:$MY_PORT)/minio_db table=t format=namespace" \
+      "notify_mysql:c5 dsn_string=myuser:mypass@tcp(127.0.0.1:$MY_PORT)/minio_db table=t format=weird" \
+      "notify_mysql:c6 dsn_string=myuser:mypass@tcp(127.0.0.1:$MY_PORT)/minio_db?tls=bogus table=t format=namespace"; do
+      # shellcheck disable=SC2086
+      config_set $kv >>"$WORK/$kind.my-config"
+    done
+    stop
+  done
+  for kind in minio buckets; do
+    python3 - "$WORK/mygeneral.log" "${kind}_db" >"$WORK/$kind.my" <<'PY'
+import re, sys
+db_of, groups, last = {}, {}, {}
+for line in open(sys.argv[1], errors="replace"):
+    m = re.match(r"\S+\s+(\d+)\s+(\w+)\t?(.*)", line.rstrip("\n"))
+    if not m:
+        continue
+    tid, cmd, arg = m.groups()
+    if cmd == "Connect":
+        db_of[tid] = arg.split(" on ")[1].split(" ")[0] if " on " in arg else ""
+        continue
+    if db_of.get(tid) != sys.argv[2] or cmd in ("Quit", "Ping"):
+        continue
+    arg = re.sub(r"'\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(\.\d+)?'", "'(t)'", arg)
+    arg = re.sub(r'\\"(eventTime|sequencer|x-amz-request-id|x-amz-id-2|x-minio-deployment-id)\\":\\"[^\\]*\\"', r'\\"\1\\":\\"(v)\\"', arg)
+    t = re.search(r"\b(nsevents|accevents)\b", arg)
+    table = t.group(1) if t else last.get(tid, "")
+    last[tid] = table
+    groups.setdefault(table, []).append(cmd + " " + arg)
+for table in sorted(groups):
+    print("== " + table); print("\n".join(groups[table]))
+PY
+    for q in "SELECT key_name, key_hash, value FROM nsevents ORDER BY key_name" "SELECT event_data FROM accevents ORDER BY event_data"; do
+      "$MYSQL_DIR/bin/mysql" --no-defaults -h127.0.0.1 -P"$MY_PORT" -uroot -D "${kind}_db" -N -e "$q" 2>&1
+    done | sed -E 's/"(eventTime|sequencer|x-amz-request-id|x-amz-id-2|x-minio-deployment-id)": "[^"]*"/"\1": "(v)"/g' | sort >"$WORK/$kind.my-rows"
+  done
+  kill "$MYSQLD" 2>/dev/null || true; wait "$MYSQLD" 2>/dev/null || true
+  compare my
+  compare my-rows
+  compare my-config
 fi
 
 echo "notify-targets: $pass passed, $fails failed"
