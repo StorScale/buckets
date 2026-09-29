@@ -228,7 +228,20 @@ buckets_obj_err buckets_ep_list_buckets(buckets_epool *L, buckets_bucket_info **
 
 /* ---- namespace locks ------------------------------------------------------ */
 
-#define LOCK_TIMEOUT_MS 30000
+/* How long a request waits for a namespace lock: the floor of MinIO's
+ * globalOperationTimeout (a dynamic 10 minutes, adapting down to 5), so a
+ * writer outlasts a stalled reader (dropped after 60s) as with MinIO.
+ * BUCKETS_LOCK_TIMEOUT (seconds) overrides it. */
+static int lock_timeout_ms(void) {
+  static int ms;
+  if (!ms) {
+    const char *e = getenv("BUCKETS_LOCK_TIMEOUT");
+    int v = e ? atoi(e) : 0;
+    ms = v > 0 ? v * 1000 : 5 * 60 * 1000;
+  }
+  return ms;
+}
+#define LOCK_TIMEOUT_MS lock_timeout_ms()
 
 static buckets_nslock_entry *lock_ns(buckets_epool *L, const char *vol, const char *path, bool write) {
   buckets_nslock_entry *e = buckets_nslock_lock(L->top->locks, vol, path, write, LOCK_TIMEOUT_MS);

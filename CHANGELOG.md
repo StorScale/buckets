@@ -56,6 +56,7 @@ All notable changes to this project are documented here. The format follows
   - PutObject, CreateMultipartUpload and CompleteMultipartUpload honor `If-Match` / `If-None-Match` against the current version (PreconditionFailed; NoSuchKey for an If-Match on a missing key), as MinIO's checkPreconditionsPUT does
   - `response-content-type` and the other response overrides replace the header instead of adding a second value
   - a presigned URL with `X-Amz-Expires=0` has expired
+  - requests wait for a namespace lock as long as MinIO's globalOperationTimeout allows (5 minutes, `BUCKETS_LOCK_TIMEOUT` to override) instead of 30 seconds, so a write outlasts a reader that stalls mid-download (dropped after 60 seconds) as it does on MinIO
   - `x-amz-copy-source` splits its query at the first literal `?` before decoding, so keys with an encoded `?` (or ` `) and version IDs copy correctly
 - A client that stops reading a response no longer holds it (and the object's read lock, blocking every writer of that key) forever: a response that makes no progress for 60 seconds is closed (found by ceph s3-tests).
 - An unsatisfiable range answers MinIO's InvalidRange (the range and `ActualObjectSize`/`RangeRequested` in the document, no `Content-Range`), and a malformed one fails before the object is looked up.
