@@ -7,7 +7,7 @@
 
 #include "core/common.h"
 
-static const buckets_target_kind *const k_kinds[] = {&buckets_target_webhook, &buckets_target_redis, &buckets_target_nsq, &buckets_target_nats, &buckets_target_mqtt};
+static const buckets_target_kind *const k_kinds[] = {&buckets_target_webhook, &buckets_target_redis, &buckets_target_nsq, &buckets_target_nats, &buckets_target_mqtt, &buckets_target_elasticsearch};
 
 /* A target's value, resolved (env, config, default); caller frees. */
 static char *get(const buckets_config *cfg, const char *subsys, const char *target, const char *key) {
@@ -64,7 +64,7 @@ static bool run(const buckets_config *cfg, const char *ca_file, buckets_target *
         bool up = !kind->ops->is_active || kind->ops->is_active(impl, why, sizeof(why));
         kind->ops->free(impl);
         if (!up) {
-          snprintf(err, errlen, "error (%s:%s): %s", names[j], kind->ops->type, *why ? why : "not connected");
+          snprintf(err, errlen, "error (%s:%s): %s", names[j], kind->ops->type, *why ? why : "not connected to target server/service");
           ok = false;
         }
         continue;

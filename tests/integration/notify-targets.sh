@@ -208,5 +208,48 @@ compare mqtt
 compare mqtt-config
 [[ $(cat "$WORK/buckets.mqtt-pings") -gt 0 ]] && echo "  ok    mqtt keep-alive pings" || { echo "  FAIL  no keep-alive pings"; fails=$((fails + 1)); }
 
+echo "== elasticsearch"
+for kind in minio buckets; do
+  mock_start esmock.py "$WORK/es.raw"
+  MINIO_NOTIFY_ELASTICSEARCH_ENABLE_e1=on MINIO_NOTIFY_ELASTICSEARCH_URL_e1="http://127.0.0.1:$MOCK_PORT" \
+    MINIO_NOTIFY_ELASTICSEARCH_INDEX_e1=nsindex MINIO_NOTIFY_ELASTICSEARCH_FORMAT_e1=namespace \
+    MINIO_NOTIFY_ELASTICSEARCH_USERNAME_e1=esuser MINIO_NOTIFY_ELASTICSEARCH_PASSWORD_e1=espass \
+    MINIO_NOTIFY_ELASTICSEARCH_ENABLE_e2=on MINIO_NOTIFY_ELASTICSEARCH_URL_e2="http://127.0.0.1:$MOCK_PORT" \
+    MINIO_NOTIFY_ELASTICSEARCH_INDEX_e2=accindex MINIO_NOTIFY_ELASTICSEARCH_FORMAT_e2=access \
+    MINIO_NOTIFY_ELASTICSEARCH_QUEUE_DIR_e2="$WORK/$kind-esq" \
+    start "$kind" "$WORK/$kind-es"
+  curl -s -o /dev/null "${S3[@]}" -X PUT "$EP/tbucket"
+  notification arn:minio:sqs::e1:elasticsearch arn:minio:sqs::e2:elasticsearch
+  workload
+  sleep 3
+  for kv in "notify_elasticsearch:c1 url=http://127.0.0.1:1 index=i format=namespace" \
+    "notify_elasticsearch:c2 url=ftp://127.0.0.1:$MOCK_PORT index=i format=namespace" \
+    "notify_elasticsearch:c3 url=http://127.0.0.1:$MOCK_PORT index=i format=weird" \
+    "notify_elasticsearch:c4 url=http://127.0.0.1:$MOCK_PORT index=i format=namespace username=u"; do
+    # shellcheck disable=SC2086
+    config_set $kv >>"$WORK/$kind.es-config"
+  done
+  stop
+  mock_stop
+  # requests go to one target or the other in any order: each index's requests, in order
+  python3 - "$WORK/es.raw" >"$WORK/$kind.es.raw2" <<'PY'
+import json, sys
+recs = [json.loads(l) for l in open(sys.argv[1])]
+def idx(r):
+    p = r[2].split("/")
+    return p[3] if p[1] == "_resolve" else p[1] if len(p) > 1 and p[1] else ""
+for group in sorted({idx(r) for r in recs}):
+    lines = []
+    for r in recs:
+        if idx(r) == group:
+            r[0] = group or "(root)"
+            lines.append(json.dumps(r))
+    print("\n".join(sorted(lines) if not group else lines))  # both targets check the server at once
+PY
+  python3 "$HERE/targets/normalize.py" <"$WORK/$kind.es.raw2" | sed -E 's/"User-Agent[^"]*"//' >"$WORK/$kind.es"
+done
+compare es
+compare es-config
+
 echo "notify-targets: $pass passed, $fails failed"
 [[ $fails -eq 0 ]]

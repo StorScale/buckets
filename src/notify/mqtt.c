@@ -404,7 +404,7 @@ static mstatus connect_mqtt(mqtt *m, char *err, size_t errlen) {
 static mstatus is_open(mqtt *m, char *err, size_t errlen) {
   if (m->conn && buckets_conn_broken(m->conn)) drop(m);
   if (m->conn) return M_OK;
-  snprintf(err, errlen, "not connected");
+  snprintf(err, errlen, "not connected to target server/service");
   return M_CONN;
 }
 
@@ -424,7 +424,7 @@ static mstatus wait_ack(mqtt *m, uint8_t want, uint16_t id, char *err, size_t er
   for (;;) {
     uint8_t type;
     if (!read_packet(m, &type, &body)) {
-      snprintf(err, errlen, "not connected"); /* the token timed out, or the connection was lost */
+      snprintf(err, errlen, "not connected to target server/service"); /* the token timed out, or the connection was lost */
       drop(m);
       break;
     }
@@ -454,7 +454,7 @@ static mstatus publish(mqtt *m, const char *data, size_t n, char *err, size_t er
   buckets_buf_free(&body);
   if (!sent) {
     drop(m);
-    snprintf(err, errlen, "not connected");
+    snprintf(err, errlen, "not connected to target server/service");
     return M_CONN;
   }
   if (m->qos == 1) return wait_ack(m, 0x40, id, err, errlen);
@@ -468,7 +468,7 @@ static mstatus publish(mqtt *m, const char *data, size_t n, char *err, size_t er
     buckets_buf_free(&rel);
     if (!sent) {
       drop(m);
-      snprintf(err, errlen, "not connected");
+      snprintf(err, errlen, "not connected to target server/service");
       return M_CONN;
     }
     return wait_ack(m, 0x70, id, err, errlen);

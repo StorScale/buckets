@@ -312,7 +312,7 @@ static nstatus is_active_locked(nats *n, char *err, size_t errlen) {
   if (n->conn && buckets_conn_broken(n->conn)) drop(n);
   if (n->conn) return S_OK;
   if (!n->ever_connected) return connect_nats(n, err, errlen);
-  snprintf(err, errlen, "not connected");
+  snprintf(err, errlen, "not connected to target server/service");
   return S_CONN;
 }
 

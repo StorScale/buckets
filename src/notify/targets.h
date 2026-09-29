@@ -31,5 +31,6 @@ extern const buckets_target_kind buckets_target_redis;
 extern const buckets_target_kind buckets_target_nsq;
 extern const buckets_target_kind buckets_target_nats;
 extern const buckets_target_kind buckets_target_mqtt;
+extern const buckets_target_kind buckets_target_elasticsearch;
 
 #endif
