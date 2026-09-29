@@ -1006,7 +1006,8 @@ static bool proxy_to_target(s3_ctx *c, const char *version, bool head, buckets_s
   }
   static const char *const skip[] = {"Date", "Server", "Content-Length", "Connection", "Transfer-Encoding", "Keep-Alive",
                                      "X-Amz-Request-Id", "X-Amz-Id-2", "Vary", "Accept-Ranges",
-                                     "Strict-Transport-Security", "X-Content-Type-Options", "X-Xss-Protection"};
+                                     "Strict-Transport-Security", "X-Content-Type-Options", "X-Xss-Protection",
+                                     "X-Ratelimit-Limit", "X-Ratelimit-Remaining"};
   buckets_str rest = buckets_buf_str(&p->res.headers), line;
   while (rest.n) {
     buckets_str_cut(rest, '\n', &line, &rest);

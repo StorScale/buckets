@@ -149,7 +149,49 @@ run_pair() { # source-kind target-kind
   stop_all
 }
 
+# active-active: each side replicates to the other
+run_active() { # kind-a kind-b
+  PAIR="$1<->$2"
+  local dir="$WORK/aa_${1}_$2"
+  start "$1" "$PORT" a "$dir/a"
+  start "$2" "$((PORT + 1))" b "$dir/b"
+  MC mb a/rrb b/rrb >/dev/null
+  MC version enable a/rrb >/dev/null
+  MC version enable b/rrb >/dev/null
+  # B -> A first: an object put on A now is on A only, and B proxies to A
+  MC replicate add b/rrb --remote-bucket "http://rootadmin:rootsecret123@127.0.0.1:$PORT/rrb" --priority 1 \
+    --replicate "delete,delete-marker,existing-objects" >/dev/null 2>&1
+  echo only-on-a >"$dir/p"
+  MC cp "$dir/p" a/rrb/proxied >/dev/null
+  check "proxied GET" "$(MC cat b/rrb/proxied 2>&1)" only-on-a
+  local hv
+  hv=$(curl -s -I "http://127.0.0.1:$((PORT + 1))/rrb/proxied" --aws-sigv4 "aws:amz:us-east-1:s3" \
+    --user rootadmin:rootsecret123 | tr -d '\r' | awk -F': ' 'tolower($1)=="x-amz-version-id"{print $2}')
+  check "proxied HEAD version" "$hv" "$(stat a/rrb/proxied | field versionID)"
+  MC replicate add a/rrb --remote-bucket "http://rootadmin:rootsecret123@127.0.0.1:$((PORT + 1))/rrb" --priority 1 \
+    --replicate "delete,delete-marker,existing-objects" >/dev/null 2>&1
+  echo from-a >"$dir/fa"
+  echo from-b >"$dir/fb"
+  MC cp "$dir/fa" a/rrb/fa >/dev/null
+  MC cp "$dir/fb" b/rrb/fb >/dev/null
+  wait_for 10 is_completed a/rrb/fa || bad "fa not COMPLETED: $(repl_status a/rrb/fa)"
+  wait_for 10 is_completed b/rrb/fb || bad "fb not COMPLETED: $(repl_status b/rrb/fb)"
+  check "fa on b" "$(MC cat b/rrb/fa)" from-a
+  check "fb on a" "$(MC cat a/rrb/fb)" from-b
+  check "fa replica" "$(repl_status b/rrb/fa)" REPLICA
+  check "fb replica" "$(repl_status a/rrb/fb)" REPLICA
+  sleep 1 # no ping-pong: one version each side
+  check "fa versions on a" "$(versions a/rrb/fa | wc -l | tr -d ' ')" 1
+  check "fb versions on b" "$(versions b/rrb/fb | wc -l | tr -d ' ')" 1
+  # a delete marker made on B reaches A
+  MC rm b/rrb/fa >/dev/null
+  wait_for 10 bash -c "'$MC_BIN' ls --versions a/rrb/fa | grep -q DEL" || bad "marker from b not on a"
+  check "marker ids" "$(versions a/rrb/fa | head -1)" "$(versions b/rrb/fa | head -1)"
+  stop_all
+}
+
 PAIRS=${PAIRS:-"buckets:buckets minio:buckets buckets:minio minio:minio"}
 for p in $PAIRS; do run_pair "${p%%:*}" "${p##*:}"; done
+for p in ${ACTIVE:-$PAIRS}; do run_active "${p%%:*}" "${p##*:}"; done
 echo "replication: $pass passed, $fail failed"
 [[ $fail == 0 ]]
