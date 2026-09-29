@@ -28,6 +28,8 @@
 #include "core/timefmt.h"
 #include "crypto/base64.h"
 #include "crypto/xxhash.h"
+#include "crypto/hex.h"
+#include "crypto/sha256.h"
 #include "s3/checksum.h"
 #include "s3/compress.h"
 #include "s3/internal.h"
@@ -240,6 +242,7 @@ typedef struct job {
   char *target_arn;        /* resync: this target only */
   char *reset_id;
   int64_t qsize;           /* the version's size, for the queue statistics */
+  int64_t due_ns;          /* MRF retries: not before (monotonic) */
 } job;
 
 typedef struct {
@@ -409,9 +412,17 @@ size_t buckets_repl_health_list(buckets_repl *r, buckets_repl_ep_health **out) {
 }
 
 /* heartBeat: every endpoint in use, GET /minio/health/live. */
+static void mrf_load(buckets_repl *r);
+
 static void *hc_main(void *arg) {
   buckets_repl *r = arg;
+  bool mrf_loaded = false;
   while (!atomic_load(&r->stop)) {
+    /* the MRF saved at the last shutdown, once the node knows its name */
+    if (!mrf_loaded && r->s->layer && r->s->meta && r->s->endpoint[0]) {
+      mrf_load(r);
+      mrf_loaded = true;
+    }
     pthread_mutex_lock(&r->mu);
     size_t n = r->nhc;
     ep_health *snap = buckets_xcalloc(n + 1, sizeof(*snap));
@@ -455,7 +466,8 @@ static void *hc_main(void *arg) {
     if (!atomic_load(&r->stop)) {
       struct timespec ts;
       clock_gettime(CLOCK_REALTIME, &ts);
-      ts.tv_sec += HEALTH_INTERVAL_MS / 1000;
+      if (mrf_loaded) ts.tv_sec += HEALTH_INTERVAL_MS / 1000;
+      else ts.tv_sec += 1; /* soon after startup: the saved MRF */
       pthread_cond_timedwait(&r->stop_cv, &r->stop_mu, &ts);
     }
     pthread_mutex_unlock(&r->stop_mu);
@@ -897,6 +909,71 @@ static void query_vid(char *out, size_t cap, const char *vid) {
   buckets_buf_free(&b);
 }
 
+/* ---- bandwidth limits (MinIO's bucket bandwidth monitor): a token bucket
+ * per target, shared by every transfer to it ---- */
+
+typedef struct {
+  char key[600];
+  int64_t limit;  /* bytes per second */
+  double tokens;
+  int64_t last_ns;
+} throttle;
+
+static pthread_mutex_t g_thr_mu = PTHREAD_MUTEX_INITIALIZER;
+static throttle *g_thr;
+static size_t g_nthr;
+
+static void throttle_take(const char *bucket, const char *arn, int64_t limit, size_t n) {
+  if (limit <= 0) return;
+  char key[600];
+  snprintf(key, sizeof(key), "%s\n%s", bucket, arn);
+  for (;;) {
+    pthread_mutex_lock(&g_thr_mu);
+    throttle *t = NULL;
+    for (size_t i = 0; i < g_nthr; i++)
+      if (strcmp(g_thr[i].key, key) == 0) t = &g_thr[i];
+    if (!t) {
+      g_thr = buckets_xrealloc(g_thr, (g_nthr + 1) * sizeof(*g_thr));
+      t = &g_thr[g_nthr++];
+      memset(t, 0, sizeof(*t));
+      snprintf(t->key, sizeof(t->key), "%s", key);
+      t->tokens = (double)limit;
+      t->last_ns = mono_ns();
+    }
+    t->limit = limit;
+    int64_t now = mono_ns();
+    t->tokens += (double)(now - t->last_ns) / 1e9 * (double)limit;
+    if (t->tokens > (double)limit) t->tokens = (double)limit; /* one second of burst */
+    t->last_ns = now;
+    double need = (double)n;
+    if (t->tokens >= need || t->tokens >= (double)limit) {
+      t->tokens -= need;
+      pthread_mutex_unlock(&g_thr_mu);
+      return;
+    }
+    double missing = need - t->tokens;
+    pthread_mutex_unlock(&g_thr_mu);
+    int64_t wait_ns = (int64_t)(missing / (double)limit * 1e9);
+    if (wait_ns > 100000000) wait_ns = 100000000;
+    struct timespec ts = {wait_ns / 1000000000LL, wait_ns % 1000000000LL};
+    nanosleep(&ts, NULL);
+  }
+}
+
+typedef struct {
+  src_rd *rd;
+  const char *bucket, *arn;
+  int64_t limit;
+} throttled;
+
+static long throttled_read(void *ud, void *buf, size_t n) {
+  throttled *t = ud;
+  if (t->limit > 0 && n > 65536) n = 65536;
+  long k = src_read(t->rd, buf, n);
+  if (k > 0) throttle_take(t->bucket, t->arn, t->limit, (size_t)k);
+  return k;
+}
+
 static bool single_put(buckets_s3_server *s, buckets_repl_target *t, const char *bucket, const char *object,
                        src_info *si, hdrs *h, tinfo *ti) {
   src_rd rd;
@@ -907,8 +984,9 @@ static bool single_put(buckets_s3_server *s, buckets_repl_target *t, const char 
   char q[128];
   query_vid(q, sizeof(q), si->oi.version_id);
   buckets_s3c_result res;
-  bool ok = buckets_s3c_do_stream(t->c, "PUT", t->t.target_bucket, object, strcmp(si->oi.version_id, "null") ? q : NULL,
-                                  h->kv, h->n, src_read, &rd, si->oi.size, &res);
+  throttled th = {&rd, bucket, t->t.arn, t->t.bandwidth_limit};
+  bool ok = buckets_s3c_do_stream(t->c, "PUT", t->t.target_bucket, object, q, h->kv, h->n, throttled_read, &th,
+                                  si->oi.size, &res);
   src_close(&rd);
   if (!ok) {
     snprintf(ti->err, sizeof(ti->err), "%s", buckets_s3c_error(&res));
@@ -1002,7 +1080,9 @@ static bool multipart_put(buckets_s3_server *s, buckets_repl_target *t, const ch
       ok = false;
       break;
     }
-    ok = buckets_s3c_do_stream(t->c, "PUT", t->t.target_bucket, object, uq.data, ph.kv, ph.n, src_read, &rd, size, &res);
+    throttled th = {&rd, bucket, t->t.arn, t->t.bandwidth_limit};
+    ok = buckets_s3c_do_stream(t->c, "PUT", t->t.target_bucket, object, uq.data, ph.kv, ph.n, throttled_read, &th, size,
+                               &res);
     src_close(&rd);
     hfree(&ph);
     if (!ok) {
@@ -1379,6 +1459,8 @@ static void job_free(job *j) {
 }
 
 static void enqueue(buckets_repl *r, job *j, bool mrf);
+static void mrf_save(buckets_repl *r);
+static void mrf_load(buckets_repl *r);
 
 static void audit_repl(const char *event, const char *api, const char *bucket, const char *object, const char *vid,
                        const char *status) {
@@ -1681,7 +1763,19 @@ static void *worker_main(void *arg) {
   buckets_repl *r = w->r;
   for (;;) {
     pthread_mutex_lock(&w->mu);
-    while (!w->head && !atomic_load(&r->stop)) pthread_cond_wait(&w->cv, &w->mu);
+    for (;;) {
+      while (!w->head && !atomic_load(&r->stop)) pthread_cond_wait(&w->cv, &w->mu);
+      if (atomic_load(&r->stop) || !w->mrf) break;
+      /* retries wait for their time, staying queued (and saved at shutdown) */
+      int64_t wait = w->head->due_ns - mono_ns();
+      if (wait <= 0) break;
+      struct timespec ts;
+      clock_gettime(CLOCK_REALTIME, &ts);
+      int64_t ns = ts.tv_nsec + (wait < 1000000000LL ? wait : 1000000000LL);
+      ts.tv_sec += ns / 1000000000LL;
+      ts.tv_nsec = ns % 1000000000LL;
+      pthread_cond_timedwait(&w->cv, &w->mu, &ts);
+    }
     if (atomic_load(&r->stop)) {
       pthread_mutex_unlock(&w->mu);
       break;
@@ -1691,22 +1785,6 @@ static void *worker_main(void *arg) {
     if (!w->head) w->tail = NULL;
     w->n--;
     pthread_mutex_unlock(&w->mu);
-    if (w->mrf) { /* retries wait a little, unless shutting down */
-      pthread_mutex_lock(&r->stop_mu);
-      if (!atomic_load(&r->stop)) {
-        struct timespec ts;
-        clock_gettime(CLOCK_REALTIME, &ts);
-        int64_t ns = ts.tv_nsec + (int64_t)mrf_delay_ms() * 1000000LL;
-        ts.tv_sec += ns / 1000000000LL;
-        ts.tv_nsec = ns % 1000000000LL;
-        pthread_cond_timedwait(&r->stop_cv, &r->stop_mu, &ts);
-      }
-      pthread_mutex_unlock(&r->stop_mu);
-      if (atomic_load(&r->stop)) {
-        job_free(j);
-        break;
-      }
-    }
     atomic_fetch_add(&r->active, 1);
     buckets_repl_stats_workers(1);
     buckets_repl_stats_queue(j->bucket, j->qsize, -1);
@@ -1743,6 +1821,7 @@ static void enqueue(buckets_repl *r, job *j, bool mrf) {
     return;
   }
   buckets_repl_stats_queue(j->bucket, j->qsize, 1);
+  if (mrf) j->due_ns = mono_ns() + (int64_t)mrf_delay_ms() * 1000000LL;
   if (w->tail) w->tail->next = j;
   else w->head = j;
   w->tail = j;
@@ -1788,6 +1867,7 @@ void buckets_repl_stop(buckets_repl *r) {
   for (size_t i = 0; i <= REPL_WORKERS; i++)
     if (all[i]->started) pthread_join(all[i]->th, NULL);
   if (r->hc_started) pthread_join(r->hc_thread, NULL);
+  if (r->s->layer) mrf_save(r); /* the retries still waiting */
 }
 
 void buckets_repl_free(buckets_repl *r) {
@@ -2669,4 +2749,127 @@ void buckets_repl_mrf_json(buckets_repl *r, const char *bucket, const char *node
     buckets_buf_appendf(out, ",\"retryCount\":%d}\n", j->retry);
   }
   pthread_mutex_unlock(&r->mrf.mu);
+}
+
+/* ---- the MRF on disk (persistMRF / loadMRF) ----
+ * .minio.sys/buckets/.replication/mrf/<sha256(node) hex>.bin on the first
+ * local drive: LE uint16 format 1 and version 1, then msgp
+ * MRFReplicateEntries {"e": {versionID: {"b","o","rc"}}, "v": 1}. */
+
+static void mrf_path(buckets_repl *r, char *out, size_t cap) {
+  const char *ep = r->s->endpoint, *h = strstr(ep, "://");
+  const char *node = h ? h + 3 : ep;
+  uint8_t sum[32];
+  buckets_sha256(node, strlen(node), sum);
+  char hex[65];
+  buckets_hex_encode(sum, 32, hex);
+  snprintf(out, cap, "buckets/.replication/mrf/%s.bin", hex);
+}
+
+static buckets_drive *local_drive(buckets_objlayer *L) {
+  for (size_t i = 0; L && i < L->nall; i++)
+    if (L->all[i] && !L->all[i]->remote) return L->all[i];
+  return NULL;
+}
+
+/* Saves what waits in the MRF queue (at shutdown). */
+static void mrf_save(buckets_repl *r) {
+  buckets_objlayer *L = r->s->layer;
+  buckets_drive *d = local_drive(L);
+  if (!d) return;
+  size_t n = 0;
+  for (job *j = r->mrf.head; j; j = j->next) n++;
+  if (!n) return;
+  buckets_buf b = BUCKETS_BUF_INIT;
+  uint8_t hdr[4] = {1, 0, 1, 0};
+  buckets_buf_append(&b, hdr, 4);
+  buckets_mp_map(&b, 2);
+  buckets_mp_cstr(&b, "e");
+  /* one entry per version (a map: the last retry of a version wins) */
+  size_t unique = 0;
+  for (job *j = r->mrf.head; j; j = j->next) {
+    bool later = false;
+    for (job *k = j->next; k && !later; k = k->next) later = strcmp(k->version_id, j->version_id) == 0;
+    unique += !later;
+  }
+  buckets_mp_map(&b, (uint32_t)unique);
+  for (job *j = r->mrf.head; j; j = j->next) {
+    bool later = false;
+    for (job *k = j->next; k && !later; k = k->next) later = strcmp(k->version_id, j->version_id) == 0;
+    if (later) continue;
+    buckets_mp_cstr(&b, j->version_id);
+    buckets_mp_map(&b, 3);
+    buckets_mp_cstr(&b, "b");
+    buckets_mp_cstr(&b, j->bucket);
+    buckets_mp_cstr(&b, "o");
+    buckets_mp_cstr(&b, j->object);
+    buckets_mp_cstr(&b, "rc");
+    buckets_mp_int(&b, j->retry);
+  }
+  buckets_mp_cstr(&b, "v");
+  buckets_mp_int(&b, 1);
+  char path[400];
+  mrf_path(r, path, sizeof(path));
+  buckets_drive_write_all(d, ".minio.sys", path, b.data, b.len);
+  buckets_buf_free(&b);
+}
+
+/* loadMRF + queueMRFHeal: re-checks the versions saved at the last shutdown. */
+static void mrf_load(buckets_repl *r) {
+  buckets_objlayer *L = r->s->layer;
+  char path[400];
+  mrf_path(r, path, sizeof(path));
+  for (size_t i = 0; L && i < L->nall; i++) {
+    buckets_drive *d = L->all[i];
+    if (!d || d->remote) continue;
+    buckets_buf data = BUCKETS_BUF_INIT;
+    if (buckets_drive_read_all(d, ".minio.sys", path, &data) != BUCKETS_DRIVE_OK) {
+      buckets_buf_free(&data);
+      continue;
+    }
+    buckets_drive_delete(d, ".minio.sys", path, false, false);
+    const uint8_t *p = (const uint8_t *)data.data;
+    if (data.len > 4 && p[0] == 1 && p[1] == 0 && p[2] == 1 && p[3] == 0) {
+      buckets_mp_reader rd = buckets_mp_reader_init(p + 4, data.len - 4);
+      uint32_t nf;
+      if (buckets_mp_read_map(&rd, &nf)) {
+        for (uint32_t f = 0; f < nf; f++) {
+          buckets_str k;
+          if (!buckets_mp_read_str(&rd, &k)) break;
+          if (!buckets_str_eq_c(k, "e")) {
+            if (!buckets_mp_skip(&rd)) break;
+            continue;
+          }
+          uint32_t ne;
+          if (!buckets_mp_read_map(&rd, &ne)) break;
+          for (uint32_t e = 0; e < ne; e++) {
+            buckets_str vid;
+            uint32_t nk;
+            if (!buckets_mp_read_str(&rd, &vid) || !buckets_mp_read_map(&rd, &nk)) break;
+            char *bucket = NULL, *object = NULL;
+            int64_t rc = 0;
+            for (uint32_t m = 0; m < nk; m++) {
+              buckets_str fk, fv;
+              if (!buckets_mp_read_str(&rd, &fk)) break;
+              if (buckets_str_eq_c(fk, "b") && buckets_mp_read_str(&rd, &fv)) bucket = buckets_str_dup(fv);
+              else if (buckets_str_eq_c(fk, "o") && buckets_mp_read_str(&rd, &fv)) object = buckets_str_dup(fv);
+              else if (buckets_str_eq_c(fk, "rc")) buckets_mp_read_int(&rd, &rc);
+              else buckets_mp_skip(&rd);
+            }
+            char *v = buckets_str_dup(vid);
+            buckets_object_info oi;
+            if (bucket && object && buckets_obj_stat(L, bucket, object, v, &oi) == BUCKETS_OBJ_OK) {
+              buckets_repl_heal(r->s, bucket, &oi, (int)rc);
+              buckets_object_info_free(&oi);
+            }
+            free(v);
+            free(bucket);
+            free(object);
+          }
+        }
+      }
+    }
+    buckets_buf_free(&data);
+    break;
+  }
 }

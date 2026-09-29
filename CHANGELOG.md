@@ -17,6 +17,7 @@ All notable changes to this project are documented here. The format follows
   - existing-object replication: `mc replicate resync` (`?replication-reset`, its status in `.replication/resync.bin`) and the scanner's replication healing of pending, failed and never-replicated versions;
   - replication statistics: `GetBucketReplicationMetrics(V2)` (`mc replicate status`) and the v2/v3 replication metrics, per target and per node (metric-name diff against MinIO with replication active: 0);
   - `mc replicate diff` (`/replication/diff`), the MRF backlog (`/replication/mrf`) and `?replication-check` credential validation;
+  - failed replications wait in the MRF queue, saved at shutdown (MinIO's `mrf/<node>.bin`) and re-checked after restart; per-target bandwidth limits;
   - SSE-C objects replicate as stored (single-part and multipart), over TLS; `tests/integration/replication.sh` covers every MinIO/Buckets pairing.
 
 ## [0.7.0] - 2026-09-29
