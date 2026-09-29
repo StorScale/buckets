@@ -37,6 +37,7 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -pkeyopt ec_p
   -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" 2>/dev/null
 cp "$D/certs/public.crt" "$D/certs/CAs/"
 export MINIO_ROOT_USER=$MAIN_AK MINIO_ROOT_PASSWORD=$MAIN_SK
+export MINIO_SCANNER_SPEED=fastest # lifecycle tests wait only a few scanner cycles
 export MINIO_KMS_SECRET_KEY=s3tests-key:MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
 if [[ $KIND == minio ]]; then
   MINIO_CI_CD=on MINIO_BROWSER=off "$MINIO_BIN" server --quiet --address "127.0.0.1:$PORT" --certs-dir "$D/certs" \

@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
@@ -126,6 +127,24 @@ static long conn_send(conn *c, const void *buf, size_t n) {
 
 void buckets_http_resp_header(buckets_http_response *resp, const char *name, const char *value) {
   buckets_buf_appendf(&resp->headers, "%s: %s\r\n", name, value);
+}
+
+void buckets_http_resp_header_set(buckets_http_response *resp, const char *name, const char *value) {
+  /* Drop earlier "name:" lines (case-insensitive), then append. */
+  buckets_buf kept = BUCKETS_BUF_INIT;
+  size_t nl = strlen(name);
+  const char *p = resp->headers.data, *end = p + resp->headers.len;
+  while (p && p < end) {
+    const char *eol = memchr(p, '\n', (size_t)(end - p));
+    const char *next = eol ? eol + 1 : end;
+    if (!((size_t)(next - p) > nl && p[nl] == ':' && strncasecmp(p, name, nl) == 0))
+      buckets_buf_append(&kept, p, (size_t)(next - p));
+    p = next;
+  }
+  buckets_buf_reset(&resp->headers);
+  if (kept.len) buckets_buf_append(&resp->headers, kept.data, kept.len);
+  buckets_buf_free(&kept);
+  buckets_http_resp_header(resp, name, value);
 }
 
 void buckets_http_resp_headerf(buckets_http_response *resp, const char *name, const char *fmt, ...) {

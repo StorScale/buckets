@@ -580,11 +580,56 @@ static void sse_put_response(s3_ctx *c, const buckets_object_info *oi, const uin
   buckets_s3_sse_headers(c, oi);
 }
 
+/* checkPreconditionsPUT (PutObject, CreateMultipartUpload and
+ * CompleteMultipartUpload): If-Match / If-None-Match against the current
+ * version's ETag, as clients see it. An If-Match on a missing object is
+ * NoSuchKey. Returns true when a response was written. */
+static bool etag_matches(const char *etag, buckets_str given);
+static bool put_preconditions(s3_ctx *c, const char *object) {
+  buckets_str im = buckets_http_header_get(c->req, "If-Match");
+  buckets_str inm = buckets_http_header_get(c->req, "If-None-Match");
+  bool has_im = im.p && im.n, has_inm = inm.p && inm.n;
+  if (!has_im && !has_inm) return false;
+  buckets_object_info oi;
+  buckets_obj_err err = buckets_obj_stat(c->s->layer, c->bucket, object, NULL, &oi);
+  if (!err && oi.delete_marker) {
+    buckets_object_info_free(&oi);
+    err = BUCKETS_OBJ_ERR_NO_SUCH_KEY;
+  }
+  if (err) {
+    if (err != BUCKETS_OBJ_ERR_NO_SUCH_KEY && err != BUCKETS_OBJ_ERR_NO_SUCH_VERSION) {
+      buckets_s3_write_error(c, buckets_s3_obj_error(err));
+      return true;
+    }
+    if (has_im) {
+      buckets_s3_write_error(c, BUCKETS_ERR_NO_SUCH_KEY);
+      return true;
+    }
+    return false;
+  }
+  if (buckets_s3_sse_encrypted(&oi)) {
+    char etag[80];
+    buckets_s3_sse_client_etag(c, &oi, NULL, etag);
+    snprintf(oi.etag, sizeof(oi.etag), "%s", etag);
+  }
+  bool failed = (has_im && !etag_matches(oi.etag, im)) || (has_inm && etag_matches(oi.etag, inm));
+  if (failed) {
+    char lm[BUCKETS_TIME_HTTP_LEN + 1];
+    buckets_time_http((time_t)(oi.mod_time_ns / 1000000000LL), lm);
+    buckets_http_resp_header(c->resp, "Last-Modified", lm);
+    if (oi.etag[0]) etag_header(c->resp, oi.etag);
+    buckets_s3_write_error(c, BUCKETS_ERR_PRECONDITION_FAILED);
+  }
+  buckets_object_info_free(&oi);
+  return failed;
+}
+
 static void put_object(s3_ctx *c) {
   if (buckets_http_header_get(c->req, "X-Amz-Copy-Source").p) {
     copy_object(c);
     return;
   }
+  if (put_preconditions(c, c->object)) return;
   body_src b;
   buckets_s3_error serr = body_open(c, &b);
   if (!serr && b.size > BUCKETS_S3_MAX_OBJECT_SIZE) serr = BUCKETS_ERR_ENTITY_TOO_LARGE;
@@ -871,7 +916,7 @@ static void response_overrides(s3_ctx *c) {
              {"response-content-encoding", "Content-Encoding"}};
   for (size_t i = 0; i < BUCKETS_ARRAY_LEN(map); i++) {
     const char *v = buckets_query_get(&c->q, map[i].param);
-    if (v) buckets_http_resp_header(c->resp, map[i].header, v);
+    if (v) buckets_http_resp_header_set(c->resp, map[i].header, v);
   }
 }
 
@@ -1180,32 +1225,18 @@ static buckets_s3_error open_source(s3_ctx *c, const char *b, const char *o, con
   return BUCKETS_ERR_NONE;
 }
 
+static bool parse_copy_source(buckets_str h, char **decoded, const char **bucket, const char **object,
+                              const char **version);
+
 static void copy_object(s3_ctx *c) {
   buckets_str src_h = buckets_http_header_get(c->req, "X-Amz-Copy-Source");
-  char *decoded = buckets_xmalloc(src_h.n + 1);
-  long dn = buckets_url_decode(src_h, decoded, false);
-  if (dn < 0) {
+  char *decoded;
+  const char *src_bucket, *src_object, *version;
+  if (!parse_copy_source(src_h, &decoded, &src_bucket, &src_object, &version)) {
     free(decoded);
     buckets_s3_write_error(c, BUCKETS_ERR_INVALID_COPY_SOURCE);
     return;
   }
-  decoded[dn] = '\0';
-  char *path = decoded;
-  char *version = NULL;
-  char *q = strchr(path, '?');
-  if (q) {
-    *q = '\0';
-    if (strncmp(q + 1, "versionId=", 10) == 0) version = q + 11;
-  }
-  while (*path == '/') path++;
-  char *slash = strchr(path, '/');
-  if (!slash || !slash[1]) {
-    free(decoded);
-    buckets_s3_write_error(c, BUCKETS_ERR_INVALID_COPY_SOURCE);
-    return;
-  }
-  *slash = '\0';
-  const char *src_bucket = path, *src_object = slash + 1;
   if (!buckets_s3_require(c, "s3:GetObject", src_bucket, src_object, NULL)) {
     free(decoded);
     return;
@@ -1388,6 +1419,7 @@ static void copy_object(s3_ctx *c) {
 /* ---- multipart uploads ---------------------------------------------------- */
 
 static void mpu_create(s3_ctx *c) {
+  if (put_preconditions(c, c->object)) return;
   /* the upload's encryption: its key is sealed into the upload's metadata */
   buckets_sse_req sse;
   buckets_s3_error serr = buckets_s3_sse_parse(c, &sse);
@@ -1477,20 +1509,36 @@ static bool parse_part_number(s3_ctx *c, int *out) {
   return true;
 }
 
-/* x-amz-copy-source: "/bucket/key[?versionId=...]" (URL-encoded). */
+/* x-amz-copy-source: "/bucket/key[?versionId=...]". As MinIO's url.Parse:
+ * the query starts at the first literal '?' (one in a key comes encoded),
+ * and only the path is URL-decoded. */
 static bool parse_copy_source(buckets_str h, char **decoded, const char **bucket, const char **object,
                               const char **version) {
-  *decoded = buckets_xmalloc(h.n + 1);
-  long dn = buckets_url_decode(h, *decoded, false);
+  *decoded = buckets_xmalloc(2 * h.n + 2);
+  *version = NULL;
+  const char *q = memchr(h.p, '?', h.n);
+  size_t pn = q ? (size_t)(q - h.p) : h.n;
+  long dn = buckets_url_decode((buckets_str){h.p, pn}, *decoded, false);
   if (dn < 0) return false;
   (*decoded)[dn] = '\0';
-  char *path = *decoded;
-  *version = NULL;
-  char *q = strchr(path, '?');
-  if (q) {
-    *q = '\0';
-    if (strncmp(q + 1, "versionId=", 10) == 0) *version = q + 11;
+  if (q) { /* versionId from the query, stored after the path */
+    buckets_str rest = {q + 1, h.n - pn - 1}, part;
+    while (rest.n) {
+      buckets_str_cut(rest, '&', &part, &rest);
+      buckets_str k, v;
+      if (!buckets_str_cut(part, '=', &k, &v)) k = part, v = (buckets_str){part.p + part.n, 0};
+      if (!buckets_str_eq_c(k, "versionId")) continue;
+      char *vs = *decoded + dn + 1;
+      long vn = buckets_url_decode(v, vs, true);
+      if (vn < 0) return false;
+      vs[vn] = '\0';
+      while (*vs == ' ') vs++;
+      for (long e = (long)strlen(vs); e > 0 && vs[e - 1] == ' '; e--) vs[e - 1] = '\0';
+      *version = vs;
+      break;
+    }
   }
+  char *path = *decoded;
   while (*path == '/') path++;
   char *slash = strchr(path, '/');
   if (!slash || !slash[1]) return false;
@@ -1860,6 +1908,10 @@ static void mpu_complete(s3_ctx *c, const char *upload_id) {
       !buckets_str_eq_c(doc.nodes[0].name, "CompleteMultipartUpload")) {
     if (doc.nodes) buckets_xml_doc_free(&doc);
     buckets_s3_write_error(c, BUCKETS_ERR_MALFORMED_XML);
+    return;
+  }
+  if (put_preconditions(c, c->object)) {
+    buckets_xml_doc_free(&doc);
     return;
   }
   size_t cap = 0, n = 0;
@@ -2728,7 +2780,7 @@ void buckets_s3_list_objects(s3_ctx *c, bool v2) {
     xml_key(b, "Marker", buckets_query_get(&c->q, "marker"), url);
   }
   buckets_buf_appendf(b, "<MaxKeys>%lld</MaxKeys>", max_keys);
-  if (delimiter) xml_key(b, "Delimiter", delimiter, url);
+  if (delimiter && *delimiter) xml_key(b, "Delimiter", delimiter, url);
   if (url) buckets_xml_elem(b, "EncodingType", "url");
   buckets_xml_elem(b, "IsTruncated", l.truncated ? "true" : "false");
   if (l.truncated && l.next_marker) {

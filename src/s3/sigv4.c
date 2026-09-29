@@ -460,7 +460,8 @@ buckets_s3_error buckets_sigv4_verify_presigned(const buckets_sigv4_config *cfg,
     err = BUCKETS_ERR_REQUEST_NOT_READY_YET;
     goto done;
   }
-  if (cfg->now > t + expires) {
+  /* MinIO compares nanosecond clocks: a zero expiry has always passed. */
+  if (cfg->now > t + expires || (expires == 0 && cfg->now >= t)) {
     err = BUCKETS_ERR_EXPIRED_PRESIGN_REQUEST;
     goto done;
   }

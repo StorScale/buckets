@@ -50,6 +50,13 @@ All notable changes to this project are documented here. The format follows
 - ListMultipartUploads matches MinIO: uploads oldest first, paging by `upload-id-marker` with `NextUploadIdMarker` and `IsTruncated`, the 10000 default, `EncodingType` echoed, and empty Initiator/Owner/StorageClass.
 
 ### Fixed
+- Found by ceph s3-tests against MinIO:
+  - listings put a directory object (`a/`) before the keys under it, so paged version listings no longer skip it (bucket cleanup failed with BucketNotEmpty)
+  - an empty `delimiter` is not echoed in ListObjects V1/V2
+  - PutObject, CreateMultipartUpload and CompleteMultipartUpload honor `If-Match` / `If-None-Match` against the current version (PreconditionFailed; NoSuchKey for an If-Match on a missing key), as MinIO's checkPreconditionsPUT does
+  - `response-content-type` and the other response overrides replace the header instead of adding a second value
+  - a presigned URL with `X-Amz-Expires=0` has expired
+  - `x-amz-copy-source` splits its query at the first literal `?` before decoding, so keys with an encoded `?` (or ` `) and version IDs copy correctly
 - A client that stops reading a response no longer holds it (and the object's read lock, blocking every writer of that key) forever: a response that makes no progress for 60 seconds is closed (found by ceph s3-tests).
 - An unsatisfiable range answers MinIO's InvalidRange (the range and `ActualObjectSize`/`RangeRequested` in the document, no `Content-Range`), and a malformed one fails before the object is looked up.
 - An `x-amz-checksum-algorithm` header without a checksum value asks for nothing (getContentChecksum); bucketsd computed and stored one.

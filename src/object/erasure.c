@@ -1698,7 +1698,13 @@ typedef struct {
   bool is_obj;
 } entry;
 
-static int entry_cmp(const void *a, const void *b) { return strcmp(((const entry *)a)->key, ((const entry *)b)->key); }
+/* By key; a directory object ("a/", stored as a__XLDIR__) before the prefix
+ * "a/" it shares its key with, since it sorts before everything under it. */
+static int entry_cmp(const void *a, const void *b) {
+  const entry *x = a, *y = b;
+  int c = strcmp(x->key, y->key);
+  return c ? c : (int)y->is_obj - (int)x->is_obj;
+}
 
 typedef struct {
   buckets_drive *d;

@@ -75,6 +75,8 @@ typedef struct {
 } buckets_http_response;
 
 void buckets_http_resp_header(buckets_http_response *resp, const char *name, const char *value);
+/* Replaces any earlier values of the header. */
+void buckets_http_resp_header_set(buckets_http_response *resp, const char *name, const char *value);
 void buckets_http_resp_headerf(buckets_http_response *resp, const char *name, const char *fmt, ...)
     BUCKETS_PRINTF(3, 4);
 const char *buckets_http_status_text(int status);
