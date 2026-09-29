@@ -44,6 +44,8 @@ buckets_drive_err buckets_rdrive_list_dir(buckets_drive *d, const char *vol, con
 buckets_drive_err buckets_rdrive_disk_info(buckets_drive *d, uint64_t *total, uint64_t *free_bytes);
 buckets_drive_err buckets_rdrive_file_size(buckets_drive *d, const char *vol, const char *path, int64_t *size);
 int buckets_rdrive_stat(buckets_drive *d, const char *vol, const char *path);
+buckets_drive_err buckets_rdrive_stat_info(buckets_drive *d, const char *vol, const char *path, buckets_stat_info **out,
+                                           size_t *n);
 buckets_drive_err buckets_rwriter_write(struct buckets_rwriter *w, const void *data, size_t n);
 buckets_drive_err buckets_rwriter_close(struct buckets_rwriter *w);
 void buckets_rwriter_abort(struct buckets_rwriter *w);

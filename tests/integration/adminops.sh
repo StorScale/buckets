@@ -3,7 +3,8 @@
 # status, top locks, bucket metadata export/import, inspect, speedtests,
 # profiling, health info): both servers get the same requests and damage
 # and must answer alike.
-#   MINIO_BIN=/path/to/minio MC=/path/to/mc tests/integration/adminops.sh [bucketsd]
+#   MINIO_BIN=/path/to/minio MC=/path/to/mc [INSPECTDEC=/path/to/inspectdec] tests/integration/adminops.sh [bucketsd]
+# (INSPECTDEC: tests/integration/inspectdec built, for the inspect cases)
 set -uo pipefail
 BIN=${1:-build/src/bucketsd}
 if [[ -z "${MINIO_BIN:-}" ]]; then

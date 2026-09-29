@@ -22,6 +22,7 @@ All notable changes to this project are documented here. The format follows
 - StorageInfo and BackgroundHealStatus, with MinIO's per-drive `apiCalls`/`lastMinute` metrics and the heal tracker of a drive being healed; ServerInfo returns drive metrics with `?metrics=true`.
 - `mc admin top locks` and `mc admin unlock` in distributed setups: lock servers record who holds what (owner, quorum, source, time), and one node holds the cluster leader lock (`.minio.sys/leader.lock`) as MinIO's does.
 - `mc admin cluster bucket export|import`: every bucket's configurations in a zip, each written as MinIO marshals it (bucket policies as Go's `json.Marshal` writes them, remote targets as `xml.Marshal` does, credentials and all), and imported in MinIO's order with its report (object lock first, then versioning, then the rest; replication and targets are not imported).
+- `mc support inspect` (InspectData): the raw files matching a pattern (path.Match per element, `**` across them) on every drive, local or remote, with each drive's format.json, the command line and the start script, zipped; sent as madmin's estream (the zip under a key encrypted to the caller's RSA key with RSA-OAEP/SHA-512, cluster.info to SUBNET's key, sio-go STREAM sealing) or in the legacy keyed form. `tests/integration/inspectdec` opens both with mc's own libraries.
 - `tests/integration/adminops.sh` (single node) and `adminops-dist.sh` (4 nodes) compare these admin APIs with MinIO.
 
 ### Changed

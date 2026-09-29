@@ -289,6 +289,18 @@ int buckets_rdrive_stat(buckets_drive *d, const char *vol, const char *path) {
   return r;
 }
 
+buckets_drive_err buckets_rdrive_stat_info(buckets_drive *d, const char *vol, const char *path, buckets_stat_info **out,
+                                           size_t *n) {
+  args a = {BUCKETS_BUF_INIT};
+  arg(&a, "vol", vol);
+  arg(&a, "path", path);
+  buckets_buf body = BUCKETS_BUF_INIT;
+  buckets_drive_err e = call(d, "stat_info", &a, NULL, 0, &body);
+  if (!e && !buckets_stat_info_parse(body.data ? body.data : "[]", body.len, out, n)) e = BUCKETS_DRIVE_ERR_IO;
+  buckets_buf_free(&body);
+  return e;
+}
+
 /* ---- writer: buffered appends --------------------------------------------------------- */
 
 struct buckets_rwriter {

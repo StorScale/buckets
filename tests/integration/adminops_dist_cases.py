@@ -172,5 +172,18 @@ for side, root in SIDES:
     res.append((c, h.get("content-type"), j["offline_nodes"], j["HealDisks"], sets, j["sc_parity"]))
 compare("background heal status across nodes", *res)
 
+# ---- inspect across nodes ------------------------------------------------------------------------------
+DEC = os.environ.get("INSPECTDEC")
+if DEC:
+    import re  # noqa: E402
+    res = []
+    for side, root in SIDES:
+        c, _, b = admin(node(side, 2), "GET", "/inspect-data?volume=lockb&file=small.txt/xl.meta")
+        out = subprocess.run([DEC], input=b, capture_output=True).stdout
+        j = json.loads(out)
+        names = [port_view(side, re.sub(r"/\S*/(m|b)/n", "/<root>/n", e["name"])) for e in j.get("entries") or []]
+        res.append((c, j["format"], j.get("error"), names))
+    compare("inspect across nodes", *res)
+
 print(f"adminops-dist: {Score.passed} passed, {Score.failed} failed")
 sys.exit(1 if Score.failed else 0)

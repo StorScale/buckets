@@ -2239,6 +2239,8 @@ static const route k_routes[] = {
     {"POST", "/background-heal/status", h_bg_heal_status, "BackgroundHealStatus"},
     {"POST", "/heal/**", buckets_admin_heal, "Heal"},
     {"GET", "/top/locks", buckets_admin_top_locks, "TopLocks"},
+    {"GET", "/inspect-data", buckets_admin_inspect_data, "InspectData"},
+    {"POST", "/inspect-data", buckets_admin_inspect_data, "InspectData"},
     {"GET", "/export-bucket-metadata", buckets_admin_export_bucket_metadata, "ExportBucketMetadata"},
     {"PUT", "/import-bucket-metadata", buckets_admin_import_bucket_metadata, "ImportBucketMetadata"},
     {"POST", "/force-unlock", buckets_admin_force_unlock, "ForceUnlock"},

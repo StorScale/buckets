@@ -131,6 +131,11 @@ void buckets_storage_server_handle(const buckets_http_request *req, buckets_http
     if (!(e = buckets_drive_file_size(d, Q("vol"), Q("path"), &sz))) buckets_buf_appendf(&resp->body, "%lld", (long long)sz);
   } else if (strcmp(op, "stat") == 0) {
     buckets_buf_appendf(&resp->body, "%d", buckets_drive_stat(d, Q("vol"), Q("path")));
+  } else if (strcmp(op, "stat_info") == 0) {
+    buckets_stat_info *si;
+    size_t n;
+    if (!(e = buckets_drive_stat_info(d, Q("vol"), Q("path"), &si, &n))) buckets_stat_info_json(si, n, &resp->body);
+    buckets_stat_info_free(si, n);
   } else {
     resp->status = 400;
   }

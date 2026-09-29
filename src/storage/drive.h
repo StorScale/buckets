@@ -130,6 +130,22 @@ buckets_drive_err buckets_drive_file_size(buckets_drive *d, const char *vol, con
 /* 0 = missing, 1 = file, 2 = directory */
 int buckets_drive_stat(buckets_drive *d, const char *vol, const char *path);
 
+/* StatInfoFile with globbing: the entries of vol matching path, a pattern
+ * with path.Match's syntax per element and "**" for any number of
+ * elements, sorted by name (names relative to vol). NOT_FOUND when none. */
+typedef struct {
+  char *name;
+  int64_t size, mtime_ns;
+  uint32_t mode; /* Unix permission bits */
+  bool dir;
+} buckets_stat_info;
+buckets_drive_err buckets_drive_stat_info(buckets_drive *d, const char *vol, const char *path, buckets_stat_info **out,
+                                          size_t *n);
+void buckets_stat_info_free(buckets_stat_info *s, size_t n);
+/* The stat info list as the storage RPC carries it, and back. */
+void buckets_stat_info_json(const buckets_stat_info *s, size_t n, buckets_buf *out);
+bool buckets_stat_info_parse(const char *json, size_t len, buckets_stat_info **out, size_t *n);
+
 /* A unique path under .minio.sys/tmp for staging (caller frees). */
 char *buckets_drive_tmp_name(void);
 

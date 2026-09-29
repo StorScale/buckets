@@ -386,5 +386,54 @@ for name, body in [("not a zip", b"hello"), ("empty body", b""), ("empty zip", m
         res.append(err_view(c, b) if c != 200 else (c, jbody(b)))
     compare(f"import {name}", *res)
 
+# ---- inspect ------------------------------------------------------------------------------------------
+DEC = os.environ.get("INSPECTDEC")
+if DEC:
+    keyfile = os.path.join(MC_CFG, "inspect.key")
+    pub = subprocess.run([DEC, "genkey", keyfile], capture_output=True, text=True).stdout
+    for base, root in SERVERS:
+        put(base, "healb", "insp/one.txt", b"one")
+        put(base, "healb", "insp/two.txt", b"two")
+
+    def inspect_view(root, body, key=None):
+        out = subprocess.run([DEC] + ([key] if key else []), input=body, capture_output=True).stdout
+        j = json.loads(out)
+        entries = []
+        for e in j.get("entries") or []:
+            name = re.sub(r"\S*/(m|b)/d", "<root>/d", e["name"])
+            content = re.sub(r"\S*/(m|b)/d", "<root>/d", e["content"])
+            if e["name"] == "cluster.info":
+                content = sorted(json.loads(content))
+            elif name.endswith((".json", "xl.meta")) or content.startswith("binary:"):
+                content = "<data>"
+            entries.append((name, e["mode"], e["method"], content))
+        return j["format"], j.get("streams"), j.get("error"), j.get("zipError"), entries
+
+    for name, q, with_key in [("an object's xl.meta", "volume=healb&file=insp/one.txt/xl.meta", False),
+                              ("a pattern", "volume=healb&file=insp/*/xl.meta", False),
+                              ("a recursive pattern", "volume=healb&file=insp/**", False),
+                              ("a directory", "volume=healb&file=insp", False),
+                              ("nothing matched", "volume=healb&file=nosuch", False),
+                              ("encrypted to a key", "volume=healb&file=insp/two.txt/xl.meta", True),
+                              ("encrypted, nothing matched", "volume=healb&file=nosuch*", True)]:
+        res = []
+        for base, root in SERVERS:
+            qq = q + ("&public-key=" + urllib.parse.quote(pub, safe="") if with_key else "")
+            c, h, b = admin(base, "GET", "/inspect-data?" + qq)
+            res.append((c, inspect_view(root, b, keyfile if with_key else None) if c == 200 else err_view(c, b)))
+        compare(f"inspect {name}", *res)
+
+for name, q in [("no volume", "file=x"), ("no file", "volume=healb"), ("a parent path", "volume=healb&file=../x"),
+                ("a bad public key", "volume=healb&file=x&public-key=%25%25%25")]:
+    res = []
+    for base, root in SERVERS:
+        c, h, b = admin(base, "GET", "/inspect-data?" + q)
+        v = err_view(c, b)
+        if not isinstance(v[1], str):
+            m = re.search(rb"<Code>(.*?)</Code><Message>(.*?)</Message>", b)
+            v = (c, m.groups() if m else b[:100])
+        res.append(v)
+    compare(f"inspect {name}", *res)
+
 print(f"adminops: {Score.passed} passed, {Score.failed} failed")
 sys.exit(1 if Score.failed else 0)

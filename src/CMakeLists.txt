@@ -36,6 +36,7 @@ add_library(buckets STATIC
   crypto/madmin.c
   crypto/aead.c
   crypto/dare.c
+  crypto/estream.c
   crypto/objkey.c
   kms/kms.c
   compress/s2.c
@@ -157,6 +158,7 @@ add_library(buckets STATIC
   admin/bucketmeta.c
   admin/heal.c
   admin/info.c
+  admin/inspect.c
   admin/locks.c
   admin/config.c
   admin/iamxfer.c

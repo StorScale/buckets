@@ -966,3 +966,225 @@ buckets_drive_err buckets_drive_rename_file(buckets_drive *d, const char *src_vo
   if (buckets_trace_wanted(BUCKETS_TRACE_STORAGE)) drive_trace(d, BUCKETS_DOP_RENAME_FILE, t0, t1, e, 4, src_vol, src, dst_vol, dst);
   return e;
 }
+
+/* ---- StatInfoFile with globbing ------------------------------------------------------------------ */
+
+/* path.Match on one element: '*', '?', and character classes. */
+static bool match_elem(const char *p, const char *s) {
+  while (*p) {
+    if (*p == '*') {
+      while (*p == '*') p++;
+      if (!*p) return true;
+      for (; *s; s++)
+        if (match_elem(p, s)) return true;
+      return match_elem(p, s);
+    }
+    if (!*s) return false;
+    if (*p == '?') {
+      p++, s++;
+      continue;
+    }
+    if (*p == '[') {
+      const char *q = p + 1;
+      bool neg = *q == '^' || *q == '!';
+      if (neg) q++;
+      bool hit = false, first = true;
+      while (*q && (*q != ']' || first)) {
+        first = false;
+        char lo = *q == '\\' && q[1] ? *++q : *q, hi = lo;
+        q++;
+        if (*q == '-' && q[1] && q[1] != ']') {
+          q++;
+          hi = *q == '\\' && q[1] ? *++q : *q;
+          q++;
+        }
+        if (*s >= lo && *s <= hi) hit = true;
+      }
+      if (*q != ']') return false; /* malformed: no match */
+      if (hit == neg) return false;
+      p = q + 1, s++;
+      continue;
+    }
+    if (*p == '\\' && p[1]) p++;
+    if (*p != *s) return false;
+    p++, s++;
+  }
+  return !*s;
+}
+
+/* The whole relative path, element by element; "**" spans elements. */
+static bool match_path(const char *p, const char *s) {
+  const char *pe = strchr(p, '/'), *se = strchr(s, '/');
+  size_t pl = pe ? (size_t)(pe - p) : strlen(p), sl = se ? (size_t)(se - s) : strlen(s);
+  if (pl == 2 && p[0] == '*' && p[1] == '*') {
+    if (!pe) return true;                 /* trailing "**": anything below */
+    if (match_path(pe + 1, s)) return true; /* zero elements */
+    return se ? match_path(p, se + 1) : false;
+  }
+  char pat[1024], seg[1024];
+  if (pl >= sizeof(pat) || sl >= sizeof(seg)) return false;
+  memcpy(pat, p, pl), pat[pl] = '\0';
+  memcpy(seg, s, sl), seg[sl] = '\0';
+  if (!match_elem(pat, seg)) return false;
+  if (!pe && !se) return true;
+  if (!se && pe && strcmp(pe + 1, "**") == 0) return true; /* "**" also matches nothing */
+  if (!pe || !se) return false;
+  return match_path(pe + 1, se + 1);
+}
+
+static bool has_meta(const char *s) { return strpbrk(s, "*?[\\") != NULL; }
+
+typedef struct {
+  buckets_stat_info *v;
+  size_t n, cap;
+} stat_list;
+
+static void stat_add(stat_list *l, const char *name, const struct stat *st) {
+  if (l->n == l->cap) {
+    l->cap = l->cap ? 2 * l->cap : 16;
+    l->v = buckets_xrealloc(l->v, l->cap * sizeof(*l->v));
+  }
+  buckets_stat_info *x = &l->v[l->n++];
+  x->name = buckets_xstrdup(name);
+  x->size = (int64_t)st->st_size;
+#ifdef __APPLE__
+  x->mtime_ns = (int64_t)st->st_mtimespec.tv_sec * 1000000000LL + st->st_mtimespec.tv_nsec;
+#else
+  x->mtime_ns = (int64_t)st->st_mtim.tv_sec * 1000000000LL + st->st_mtim.tv_nsec;
+#endif
+  x->mode = (uint32_t)(st->st_mode & 07777);
+  x->dir = S_ISDIR(st->st_mode);
+}
+
+/* Every entry under dir (rel: its path relative to the volume) matching pat. */
+static void walk_match(const char *volroot, const char *rel, const char *pat, stat_list *l, int depth) {
+  if (depth > 64 || l->n > 100000) return;
+  buckets_buf path = BUCKETS_BUF_INIT;
+  buckets_buf_appendf(&path, "%s%s%s", volroot, *rel ? "/" : "", rel);
+  DIR *dh = opendir(path.data);
+  buckets_buf_free(&path);
+  if (!dh) return;
+  struct dirent *de;
+  while ((de = readdir(dh))) {
+    if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) continue;
+    buckets_buf child = BUCKETS_BUF_INIT, full = BUCKETS_BUF_INIT;
+    buckets_buf_appendf(&child, "%s%s%s", rel, *rel ? "/" : "", de->d_name);
+    buckets_buf_appendf(&full, "%s/%s", volroot, child.data);
+    struct stat st;
+    if (lstat(full.data, &st) == 0) {
+      if (match_path(pat, child.data)) stat_add(l, child.data, &st);
+      if (S_ISDIR(st.st_mode)) walk_match(volroot, child.data, pat, l, depth + 1);
+    }
+    buckets_buf_free(&child);
+    buckets_buf_free(&full);
+  }
+  closedir(dh);
+}
+
+static int stat_cmp(const void *a, const void *b) {
+  return strcmp(((const buckets_stat_info *)a)->name, ((const buckets_stat_info *)b)->name);
+}
+
+buckets_drive_err buckets_drive_stat_info(buckets_drive *d, const char *vol, const char *path, buckets_stat_info **out,
+                                          size_t *n) {
+  *out = NULL;
+  *n = 0;
+  if (d->remote) return buckets_rdrive_stat_info(d, vol, path, out, n);
+  char *volroot = vpath(d, vol, NULL);
+  stat_list l = {0};
+  if (!has_meta(path)) {
+    buckets_buf full = BUCKETS_BUF_INIT;
+    buckets_buf_appendf(&full, "%s/%s", volroot, path);
+    struct stat st;
+    if (lstat(full.data, &st) == 0) {
+      /* filepath.Rel of the cleaned path */
+      const char *name = path;
+      while (*name == '/') name++;
+      stat_add(&l, name, &st);
+    }
+    buckets_buf_free(&full);
+  } else {
+    /* walk from the literal elements before the first pattern */
+    char *pat = buckets_xstrdup(path);
+    char *p = pat;
+    while (*p == '/') p++;
+    buckets_buf start = BUCKETS_BUF_INIT;
+    const char *rest = p;
+    for (;;) {
+      const char *slash = strchr(rest, '/');
+      size_t len = slash ? (size_t)(slash - rest) : strlen(rest);
+      char elem[1024];
+      if (!slash || len >= sizeof(elem)) break;
+      memcpy(elem, rest, len), elem[len] = '\0';
+      if (has_meta(elem)) break;
+      if (start.len) buckets_buf_append_char(&start, '/');
+      buckets_buf_append(&start, rest, len);
+      rest = slash + 1;
+    }
+    buckets_buf_append_char(&start, '\0');
+    if (*start.data) { /* the directory the walk starts from may match itself */
+      buckets_buf full = BUCKETS_BUF_INIT;
+      buckets_buf_appendf(&full, "%s/%s", volroot, start.data);
+      struct stat st;
+      if (lstat(full.data, &st) == 0 && match_path(p, start.data)) stat_add(&l, start.data, &st);
+      buckets_buf_free(&full);
+    }
+    walk_match(volroot, start.data, p, &l, 0);
+    buckets_buf_free(&start);
+    free(pat);
+  }
+  free(volroot);
+  qsort(l.v, l.n, sizeof(*l.v), stat_cmp);
+  *out = l.v;
+  *n = l.n;
+  return l.n ? BUCKETS_DRIVE_OK : BUCKETS_DRIVE_ERR_NOT_FOUND;
+}
+
+void buckets_stat_info_free(buckets_stat_info *s, size_t n) {
+  for (size_t i = 0; i < n; i++) free(s[i].name);
+  free(s);
+}
+
+void buckets_stat_info_json(const buckets_stat_info *s, size_t n, buckets_buf *out) {
+  yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+  yyjson_mut_val *arr = yyjson_mut_arr(doc);
+  yyjson_mut_doc_set_root(doc, arr);
+  for (size_t i = 0; i < n; i++) {
+    yyjson_mut_val *o = yyjson_mut_arr_add_obj(doc, arr);
+    yyjson_mut_obj_add_strcpy(doc, o, "name", s[i].name);
+    yyjson_mut_obj_add_int(doc, o, "size", s[i].size);
+    yyjson_mut_obj_add_int(doc, o, "mtime", s[i].mtime_ns);
+    yyjson_mut_obj_add_uint(doc, o, "mode", s[i].mode);
+    yyjson_mut_obj_add_bool(doc, o, "dir", s[i].dir);
+  }
+  size_t len;
+  char *json = yyjson_mut_write(doc, 0, &len);
+  buckets_buf_append(out, json, len);
+  free(json);
+  yyjson_mut_doc_free(doc);
+}
+
+bool buckets_stat_info_parse(const char *json, size_t len, buckets_stat_info **out, size_t *n) {
+  *out = NULL;
+  *n = 0;
+  yyjson_doc *doc = yyjson_read(json, len, 0);
+  yyjson_val *arr = yyjson_doc_get_root(doc);
+  if (!yyjson_is_arr(arr)) {
+    yyjson_doc_free(doc);
+    return false;
+  }
+  *out = buckets_xcalloc(yyjson_arr_size(arr) + 1, sizeof(**out));
+  size_t i, max;
+  yyjson_val *o;
+  yyjson_arr_foreach(arr, i, max, o) {
+    buckets_stat_info *x = &(*out)[(*n)++];
+    const char *name = yyjson_get_str(yyjson_obj_get(o, "name"));
+    x->name = buckets_xstrdup(name ? name : "");
+    x->size = yyjson_get_sint(yyjson_obj_get(o, "size"));
+    x->mtime_ns = yyjson_get_sint(yyjson_obj_get(o, "mtime"));
+    x->mode = (uint32_t)yyjson_get_uint(yyjson_obj_get(o, "mode"));
+    x->dir = yyjson_get_bool(yyjson_obj_get(o, "dir"));
+  }
+  yyjson_doc_free(doc);
+  return true;
+}

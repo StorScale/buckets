@@ -25,6 +25,8 @@ void buckets_admin_heal_shutdown(void);
 /* mc admin cluster bucket export|import (bucketmeta.c). */
 void buckets_admin_export_bucket_metadata(s3_ctx *c);
 void buckets_admin_import_bucket_metadata(s3_ctx *c);
+/* mc support inspect (inspect.c). */
+void buckets_admin_inspect_data(s3_ctx *c);
 /* mc admin top locks, mc admin unlock (locks.c; distributed setups only). */
 void buckets_admin_top_locks(s3_ctx *c);
 void buckets_admin_force_unlock(s3_ctx *c);

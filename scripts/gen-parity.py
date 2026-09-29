@@ -108,6 +108,7 @@ STATUS = {
     "ForceUnlockHandler": (DONE, ""),
     "ExportBucketMetadataHandler": (DONE, ""),
     "ImportBucketMetadataHandler": (DONE, ""),
+    "InspectDataHandler": (DONE, ""),
     "ServiceV2Handler": (DONE, ""),
     # STS
     "AssumeRole": (DONE, ""),
