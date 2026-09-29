@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-29
+
+Phase 8: bucket and site replication, tiering, batch jobs, decommission and rebalance, all interoperable with MinIO, with the two-cluster/three-site gate run on kind.
+
 ### Added
 - Bucket replication (Phase 8), interoperable with MinIO in both directions:
   - remote targets (`mc admin bucket remote add|ls|rm`, `set-remote-target` and friends), stored in the bucket metadata as MinIO does (SSE-S3-sealed when a KMS is configured), with health checks of each endpoint;
