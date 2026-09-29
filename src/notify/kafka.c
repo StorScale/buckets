@@ -24,6 +24,8 @@ typedef struct {
   char *version, *ca_dir, *cert, *key, *user, *pass, *mech, *codec;
   pthread_mutex_t mu;
   buckets_kafka *client;
+  size_t batch_size;
+  int64_t batch_commit_ns;
 } kafka;
 
 static char *get(const buckets_config *cfg, const char *target, const char *key) {
@@ -117,6 +119,8 @@ static bool create(const buckets_config *cfg, const char *target, const char *ca
     v[TOPIC] = v[VERSION] = v[CERT] = v[KEY] = v[USER] = v[PASS] = v[MECH] = v[CODEC] = NULL;
     k->ca_dir = ca_file ? buckets_xstrdup(ca_file) : NULL;
     k->brokers = brokers, k->nbrokers = nb, brokers = NULL, nb = 0;
+    k->batch_size = *v[QDIR] ? (size_t)batch : 0;
+    k->batch_commit_ns = batch_to;
     k->cfg = (buckets_kafka_cfg){.brokers = (const char *const *)k->brokers,
                                  .nbrokers = k->nbrokers,
                                  .version = k->version,
@@ -177,6 +181,44 @@ static buckets_send_result send_event(void *impl, const char *record, size_t n, 
   return r;
 }
 
+/* sendMultiple: a stored batch in one request. */
+static buckets_send_result send_batch(void *impl, const char *const *records, const size_t *lens,
+                                      const char *const *names, const char *const *keys, size_t n, char *err,
+                                      size_t errlen) {
+  kafka *k = impl;
+  pthread_mutex_lock(&k->mu);
+  buckets_send_result r;
+  if (!init_kafka(k, err, errlen)) {
+    r = BUCKETS_SEND_NOT_CONNECTED;
+  } else {
+    buckets_buf *vals = buckets_xcalloc(n, sizeof(buckets_buf));
+    buckets_kafka_msg *msgs = buckets_xcalloc(n, sizeof(*msgs));
+    for (size_t i = 0; i < n; i++) {
+      buckets_buf_append_c(&vals[i], "{\"EventName\":");
+      buckets_json_go_string(&vals[i], names[i], strlen(names[i]));
+      buckets_buf_append_c(&vals[i], ",\"Key\":");
+      buckets_json_go_string(&vals[i], keys[i], strlen(keys[i]));
+      buckets_buf_append_c(&vals[i], ",\"Records\":[");
+      buckets_buf_append(&vals[i], records[i], lens[i]);
+      buckets_buf_append_c(&vals[i], "]}");
+      msgs[i] = (buckets_kafka_msg){keys[i], strlen(keys[i]), vals[i].data, vals[i].len};
+    }
+    int rc = buckets_kafka_send(k->client, k->topic, msgs, n, err, errlen);
+    r = rc == 0 ? BUCKETS_SEND_OK : rc == 1 ? BUCKETS_SEND_NOT_CONNECTED : BUCKETS_SEND_ERROR;
+    for (size_t i = 0; i < n; i++) buckets_buf_free(&vals[i]);
+    free(vals);
+    free(msgs);
+  }
+  pthread_mutex_unlock(&k->mu);
+  return r;
+}
+
+static void batch_limits(void *impl, size_t *limit, int64_t *commit_ns) {
+  kafka *k = impl;
+  *limit = k->batch_size;
+  *commit_ns = k->batch_commit_ns;
+}
+
 static bool is_active(void *impl, char *err, size_t errlen) {
   kafka *k = impl;
   pthread_mutex_lock(&k->mu);
@@ -209,5 +251,6 @@ static void kafka_free(void *impl) {
 }
 
 static const buckets_target_ops k_ops = {
-    .type = "kafka", .send = send_event, .free = kafka_free, .is_active = is_active, .tick = tick};
+    .type = "kafka", .send = send_event, .free = kafka_free, .is_active = is_active, .tick = tick,
+    .send_batch = send_batch, .batch_limits = batch_limits};
 const buckets_target_kind buckets_target_kafka = {"notify_kafka", &k_ops, create};

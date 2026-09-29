@@ -285,18 +285,20 @@ if [[ -n "${KFAKE_BIN:-}" ]]; then
   echo "== kafka"
   for kind in minio buckets; do
     : >"$WORK/kafka.raw"
-    "$KFAKE_BIN" -port "$MOCK_PORT" -out "$WORK/kafka.raw" -topics events,stored,audit &
+    "$KFAKE_BIN" -port "$MOCK_PORT" -out "$WORK/kafka.raw" -topics events,stored,audit,batched &
     MOCK=$!
     for _ in $(seq 50); do nc -z 127.0.0.1 "$MOCK_PORT" 2>/dev/null && break; sleep 0.1; done
     MINIO_NOTIFY_KAFKA_ENABLE_k1=on MINIO_NOTIFY_KAFKA_BROKERS_k1="127.0.0.1:$MOCK_PORT" MINIO_NOTIFY_KAFKA_TOPIC_k1=events \
       MINIO_NOTIFY_KAFKA_ENABLE_k2=on MINIO_NOTIFY_KAFKA_BROKERS_k2="127.0.0.1:$MOCK_PORT" MINIO_NOTIFY_KAFKA_TOPIC_k2=stored \
       MINIO_NOTIFY_KAFKA_QUEUE_DIR_k2="$WORK/$kind-kafkaq" \
       MINIO_AUDIT_KAFKA_ENABLE_ak=on MINIO_AUDIT_KAFKA_BROKERS_ak="127.0.0.1:$MOCK_PORT" MINIO_AUDIT_KAFKA_TOPIC_ak=audit \
+      MINIO_NOTIFY_KAFKA_ENABLE_k3=on MINIO_NOTIFY_KAFKA_BROKERS_k3="127.0.0.1:$MOCK_PORT" MINIO_NOTIFY_KAFKA_TOPIC_k3=batched \
+      MINIO_NOTIFY_KAFKA_QUEUE_DIR_k3="$WORK/$kind-kafkabq" MINIO_NOTIFY_KAFKA_BATCH_SIZE_k3=3 MINIO_NOTIFY_KAFKA_BATCH_COMMIT_TIMEOUT_k3=2s \
       start "$kind" "$WORK/$kind-kafka"
     curl -s -o /dev/null "${S3[@]}" -X PUT "$EP/tbucket"
-    notification arn:minio:sqs::k1:kafka arn:minio:sqs::k2:kafka
+    notification arn:minio:sqs::k1:kafka arn:minio:sqs::k2:kafka arn:minio:sqs::k3:kafka
     workload
-    sleep 3
+    sleep 5 # the batch's 2s commit and its delivery
     for kv in "notify_kafka:c1 brokers=127.0.0.1:1 topic=t" "notify_kafka:c2 brokers=127.0.0.1:x topic=t" \
       "notify_kafka:c3 brokers=127.0.0.1:$MOCK_PORT topic=t version=bogus" \
       "notify_kafka:c4 brokers=127.0.0.1:$MOCK_PORT topic=t batch_size=10" \
@@ -336,6 +338,10 @@ for line in open(sys.argv[1]):
             rec[2] = json.dumps(e, sort_keys=True)
     s = re.sub(r'\\"(eventTime|sequencer|x-amz-request-id|x-amz-id-2|x-minio-deployment-id)\\":\\"[^\\]*\\"', r'\\"\1\\":\\"(v)\\"', json.dumps(r))
     topic = r[4][0] if r[0] == "Produce" and len(r) > 4 and isinstance(r[4], list) else "(metadata)"
+    if topic == "batched":  # how sarama splits a stored batch into requests is timing: the records, in order
+        for rec in json.loads(s)[4][10:]:
+            groups.setdefault(topic, []).append(json.dumps(rec[1:]))  # offset deltas follow the split
+        continue
     groups.setdefault(topic, []).append(s)
 for t in sorted(groups):
     lines = groups[t]

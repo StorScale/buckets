@@ -81,6 +81,12 @@ static bool run(const buckets_config *cfg, const char *ca_file, buckets_target *
         ok = false;
         continue;
       }
+      if (kind->ops->batch_limits) {
+        size_t limit = 0;
+        int64_t commit_ns = 0;
+        kind->ops->batch_limits(impl, &limit, &commit_ns);
+        if (limit > 1) buckets_target_set_batch(tg, limit, commit_ns);
+      }
       t = buckets_xrealloc(t, (k + 1) * sizeof(*t));
       t[k++] = tg;
     }

@@ -27,6 +27,14 @@ typedef struct {
   /* Called about once a second while the target is idle (keep-alives:
    * NSQ heartbeats, MQTT pings); NULL: none. */
   void (*tick)(void *impl);
+  /* A stored batch ("<n>:<uuid>.event") sent at once (Kafka's
+   * sendMultiple); NULL: its records one by one. */
+  buckets_send_result (*send_batch)(void *impl, const char *const *records, const size_t *lens, const char *const *names,
+                                    const char *const *keys, size_t n, char *err, size_t errlen);
+  /* Store batching (store.Batch): up to limit events are gathered, then
+   * written as one entry, or every commit_ns (0: 30s); NULL or limit <= 1:
+   * none. */
+  void (*batch_limits)(void *impl, size_t *limit, int64_t *commit_ns);
   /* SendFromStore, where a target's calls differ from Save's (NULL: send). */
   buckets_send_result (*send_from_store)(void *impl, const char *record, size_t n, const char *event_name,
                                          const char *key, char *err, size_t errlen);
@@ -42,6 +50,8 @@ buckets_target *buckets_target_new(const char *id, const buckets_target_ops *ops
 /* Stops the worker (events in a store stay there). */
 void buckets_target_free(buckets_target *t);
 const buckets_target_id *buckets_target_id_of(const buckets_target *t);
+/* Store batching (see buckets_target_ops.batch_limits). */
+void buckets_target_set_batch(buckets_target *t, size_t limit, int64_t commit_ns);
 /* Queues an event; false when the queue (or store) is full. */
 bool buckets_target_enqueue(buckets_target *t, const char *record, size_t n, const char *event_name, const char *key);
 

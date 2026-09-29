@@ -43,6 +43,10 @@ struct buckets_target {
   pthread_t worker;
   bool started;
   buckets_target_stats st;
+  /* store batching */
+  size_t batch_limit, nbatch;
+  int64_t commit_ns, last_commit_ns;
+  buckets_buf batch; /* records gathered, one per line */
 };
 
 /* ---- the queue store ---------------------------------------------------------
@@ -96,6 +100,46 @@ static bool store_oldest(const char *dir, char *out, size_t cap) {
   }
   closedir(d);
   return found;
+}
+
+/* PutMultiple: "<n>:<uuid>.event.snappy", the records one per line, S2. */
+static bool store_put_multiple(buckets_target *t, const buckets_buf *lines, size_t count) {
+  char id[40], path[4096], tmp[4200];
+  buckets_uuid_v4(id);
+  snprintf(path, sizeof(path), "%s/%zu:%s.event.snappy", t->store_dir, count, id);
+  snprintf(tmp, sizeof(tmp), "%s/.%s.tmp", t->store_dir, id);
+  uint8_t *enc = buckets_xmalloc(buckets_s2_max_encoded_len(lines->len));
+  size_t en = buckets_s2_encode(enc, (const uint8_t *)lines->data, lines->len);
+  FILE *f = fopen(tmp, "w");
+  bool ok = f && fwrite(enc, 1, en, f) == en;
+  if (f) {
+    ok = fflush(f) == 0 && ok;
+    ok = fsync(fileno(f)) == 0 && ok;
+    ok = fclose(f) == 0 && ok;
+  }
+  free(enc);
+  if (ok) ok = rename(tmp, path) == 0;
+  if (!ok) unlink(tmp);
+  return ok;
+}
+
+static bool store_put(buckets_target *t, const char *record, size_t n);
+
+/* Batch.commit (t->mu held): one event as a plain entry, more as one batch. */
+static bool batch_commit(buckets_target *t) {
+  bool ok = true;
+  if (t->nbatch == 1) {
+    size_t n = t->batch.len && t->batch.data[t->batch.len - 1] == '\n' ? t->batch.len - 1 : t->batch.len;
+    ok = store_put(t, t->batch.data, n);
+  } else if (t->nbatch > 1) {
+    ok = store_count(t->store_dir) < t->limit && store_put_multiple(t, &t->batch, t->nbatch);
+  }
+  if (!ok && t->nbatch) buckets_log_warn("notify %s:%s: the queue store is full or unwritable", t->id.id, t->id.type);
+  if (ok || t->nbatch == 1) {
+    buckets_buf_reset(&t->batch);
+    t->nbatch = 0;
+  }
+  return ok;
 }
 
 static bool store_put(buckets_target *t, const char *record, size_t n) {
@@ -210,6 +254,18 @@ static void *worker_main(void *arg) {
   for (;;) {
     if (t->store_dir) {
       char file[256];
+      if (t->batch_limit > 1) { /* the batch's commit ticker */
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        int64_t ns = (int64_t)now.tv_sec * 1000000000LL + now.tv_nsec;
+        pthread_mutex_lock(&t->mu);
+        if (!t->last_commit_ns) t->last_commit_ns = ns;
+        if (ns - t->last_commit_ns >= t->commit_ns) {
+          batch_commit(t);
+          t->last_commit_ns = ns;
+        }
+        pthread_mutex_unlock(&t->mu);
+      }
       if (!store_oldest(t->store_dir, file, sizeof(file))) {
         if (!wait_ms(t, 1000)) break;
         if (t->ops->tick) t->ops->tick(t->impl);
@@ -225,6 +281,37 @@ static void *worker_main(void *arg) {
       }
       /* every record of the entry must go through before it is removed */
       buckets_send_result r = BUCKETS_SEND_OK;
+      size_t nrec = 0;
+      for (size_t off = 0; off < recs.len; nrec++) {
+        char *nl = memchr(recs.data + off, '\n', recs.len - off);
+        off = nl ? (size_t)(nl - recs.data) + 1 : recs.len;
+      }
+      if (nrec > 1 && t->ops->send_batch) { /* sendMultiple */
+        const char **rv = buckets_xcalloc(nrec, sizeof(char *)), **nv = buckets_xcalloc(nrec, sizeof(char *));
+        const char **kv = buckets_xcalloc(nrec, sizeof(char *));
+        size_t *lv = buckets_xcalloc(nrec, sizeof(size_t)), k = 0;
+        for (size_t off = 0; off < recs.len && k < nrec;) {
+          char *nl = memchr(recs.data + off, '\n', recs.len - off);
+          size_t len = nl ? (size_t)(nl - (recs.data + off)) : recs.len - off;
+          char *name = NULL, *key = NULL;
+          if (len && record_meta(recs.data + off, len, &name, &key)) {
+            rv[k] = recs.data + off, lv[k] = len, nv[k] = name, kv[k] = key;
+            k++;
+          }
+          off += len + 1;
+        }
+        char err[512] = "";
+        r = t->ops->send_batch(t->impl, rv, lv, nv, kv, k, err, sizeof(err));
+        pthread_mutex_lock(&t->mu);
+        t->st.online = r != BUCKETS_SEND_NOT_CONNECTED;
+        if (r == BUCKETS_SEND_OK) t->st.sent += k;
+        else t->st.failed += k;
+        pthread_mutex_unlock(&t->mu);
+        if (r != BUCKETS_SEND_OK) buckets_log_warn("notify %s:%s: %s", t->id.id, t->id.type, *err ? err : "delivery failed");
+        for (size_t i = 0; i < k; i++) free((char *)nv[i]), free((char *)kv[i]);
+        free(rv), free(nv), free(kv), free(lv);
+        recs.len = 0; /* delivered (or not) as a whole */
+      }
       for (size_t off = 0; off < recs.len && r == BUCKETS_SEND_OK;) {
         char *nl = memchr(recs.data + off, '\n', recs.len - off);
         size_t len = nl ? (size_t)(nl - (recs.data + off)) : recs.len - off;
@@ -319,6 +406,7 @@ buckets_target *buckets_target_new(const char *id, const buckets_target_ops *ops
 void buckets_target_free(buckets_target *t) {
   if (!t) return;
   pthread_mutex_lock(&t->mu);
+  if (t->store_dir && t->nbatch) batch_commit(t); /* Batch.Close */
   t->stop = true;
   pthread_cond_broadcast(&t->cv);
   pthread_mutex_unlock(&t->mu);
@@ -329,6 +417,7 @@ void buckets_target_free(buckets_target *t) {
     free(it);
   }
   if (t->ops && t->ops->free) t->ops->free(t->impl);
+  buckets_buf_free(&t->batch);
   pthread_cond_destroy(&t->cv);
   pthread_mutex_destroy(&t->mu);
   free(t->store_dir);
@@ -337,7 +426,28 @@ void buckets_target_free(buckets_target *t) {
 
 const buckets_target_id *buckets_target_id_of(const buckets_target *t) { return &t->id; }
 
+void buckets_target_set_batch(buckets_target *t, size_t limit, int64_t commit_ns) {
+  pthread_mutex_lock(&t->mu);
+  t->batch_limit = t->store_dir ? limit : 0;
+  t->commit_ns = commit_ns > 0 ? commit_ns : 30000000000LL; /* defaultCommitTimeout */
+  pthread_mutex_unlock(&t->mu);
+}
+
 bool buckets_target_enqueue(buckets_target *t, const char *record, size_t n, const char *event_name, const char *key) {
+  if (t->store_dir && t->batch_limit > 1) { /* Batch.Add: a full batch is committed first */
+    pthread_mutex_lock(&t->mu);
+    bool ok = t->nbatch < t->batch_limit || batch_commit(t);
+    if (ok) {
+      buckets_buf_append(&t->batch, record, n);
+      buckets_buf_append_char(&t->batch, '\n');
+      t->nbatch++;
+    } else {
+      t->st.dropped++;
+    }
+    pthread_cond_broadcast(&t->cv);
+    pthread_mutex_unlock(&t->mu);
+    return ok;
+  }
   if (t->store_dir) {
     (void)event_name, (void)key; /* the record holds both */
     bool ok = store_count(t->store_dir) < t->limit && store_put(t, record, n);
