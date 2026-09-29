@@ -505,3 +505,22 @@ void buckets_s3_reset_bucket_replication_status(s3_ctx *c) {
   buckets_http_resp_header(c->resp, "Content-Type", "application/json");
   c->resp->status = 200;
 }
+
+/* ---- GetBucketReplicationMetrics / V2 ---- */
+
+void buckets_s3_get_bucket_replication_metrics(s3_ctx *c, bool v2) {
+  buckets_bucket_state *st = buckets_metasys_get(c->s->meta, c->bucket);
+  bool has = st->has_replication;
+  buckets_bucket_state_release(st);
+  if (!has) {
+    buckets_s3_write_error(c, BUCKETS_ERR_REPLICATION_CONFIGURATION_NOT_FOUND_ERROR);
+    return;
+  }
+  /* the node's name: host:port of its endpoint */
+  const char *ep = c->s->endpoint;
+  const char *h = strstr(ep, "://");
+  h = h ? h + 3 : ep;
+  buckets_repl_stats_json(c->bucket, h, v2, &c->resp->body);
+  buckets_http_resp_header(c->resp, "Content-Type", "application/json");
+  c->resp->status = 200;
+}

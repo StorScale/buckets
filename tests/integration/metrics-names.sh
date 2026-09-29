@@ -91,7 +91,11 @@ start() { # minio|buckets drives-dir
   PID=${PIDS[0]}
   healthy || { echo "$1 did not start"; exit 1; }
 }
-stop() { kill "${PIDS[@]}"; wait "${PIDS[@]}" 2>/dev/null || true; PIDS=(); PID=; }
+TPID=
+stop() {
+  kill "${PIDS[@]}" $TPID; wait "${PIDS[@]}" $TPID 2>/dev/null || true
+  PIDS=(); PID=; TPID=
+}
 
 workload() {
   MC alias set m "$EP" rootadmin rootsecret123 >/dev/null
@@ -116,6 +120,26 @@ workload() {
       curl -s -o /dev/null -X POST "$EP/" -d "Action=AssumeRoleWithCustomToken&Version=2011-06-15&Token=$t&RoleArn=arn:minio:iam:::role/idp-metricsplugin"
     done
   fi
+  # replication to a second deployment of the same kind (the replication metrics)
+  local tport=$((PORT + 50)) tdir="$WORK/$1-target"
+  mkdir -p "$tdir"/d{1..4}
+  if [[ $1 == minio ]]; then
+    MINIO_CI_CD=on MINIO_BROWSER=off "$MINIO_BIN" server --quiet --address "127.0.0.1:$tport" \
+      --console-address "127.0.0.1:$((tport + 1))" "$tdir/d{1...4}" >>"$WORK/$1-target.log" 2>&1 &
+  else
+    "$BIN" server --address "127.0.0.1:$tport" "$tdir/d{1...4}" 2>>"$WORK/$1-target.log" &
+  fi
+  TPID=$!
+  for _ in $(seq 300); do
+    [[ $(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$tport/minio/health/ready") == 200 ]] && break
+    sleep 0.1
+  done
+  MC alias set t "http://127.0.0.1:$tport" rootadmin rootsecret123 >/dev/null
+  MC mb --with-versioning t/rbkt >/dev/null
+  MC mb --with-versioning m/rsrc >/dev/null
+  MC replicate add m/rsrc --remote-bucket "http://rootadmin:rootsecret123@127.0.0.1:$tport/rbkt" --priority 1 >/dev/null
+  MC cp "$WORK/small" m/rsrc/r1 >/dev/null
+  MC cp "$WORK/small" m/rsrc/r2 >/dev/null
   if [[ $NODES -gt 1 ]]; then # writes that miss a node, healed (MRF) once it is back
     kill "${PIDS[$((NODES - 1))]}"; wait "${PIDS[$((NODES - 1))]}" 2>/dev/null || true
     for i in 1 2 3; do MC cp "$WORK/small" "m/mbkt/degraded$i" >/dev/null; done
@@ -130,7 +154,8 @@ fetch() { # kind
   mkdir -p "$d"
   for p in v2/metrics/cluster v2/metrics/node v2/metrics/bucket v2/metrics/resource \
     metrics/v3 metrics/v3/api/requests metrics/v3/system/drive metrics/v3/cluster/health \
-    metrics/v3/bucket/api/mbkt metrics/v3/bucket/replication/mbkt metrics/v3/debug/go; do
+    metrics/v3/bucket/api/mbkt metrics/v3/bucket/replication/mbkt metrics/v3/bucket/replication/rsrc \
+    metrics/v3/debug/go; do
     local f="$d/$(echo "$p" | tr / _)"
     curl -s "$EP/minio/$p" >"$f.txt"
     python3 "$HERE/metrics/signatures.py" --help <"$f.txt" >"$f.sig"
@@ -148,8 +173,9 @@ done
 # compared: v3 leaves out zero values, so a duration in whole milliseconds
 # comes and goes with the machine's speed; internode dial errors depend on
 # the order nodes start in; and whether a heal attempt fails depends on
-# whether it ran before the stopped node was back.
-TIMING_FAMILIES='minio_cluster_iam_last_sync_duration_millis|minio_system_network_internode_dial_errors_total|minio_heal_objects_errors_total'
+# whether it ran before the stopped node was back; a replication's upload
+# latency in whole milliseconds is 0 (and left out) on a fast enough machine.
+TIMING_FAMILIES='minio_cluster_iam_last_sync_duration_millis|minio_system_network_internode_dial_errors_total|minio_heal_objects_errors_total|minio_bucket_replication_latency_ms'
 TIMING="^(\\(help\\) )?($TIMING_FAMILIES)[ :]"
 for f in "$WORK"/minio/*.sig "$WORK"/buckets/*.sig; do
   grep -Ev "$TIMING" "$f" >"$f.tmp" || true

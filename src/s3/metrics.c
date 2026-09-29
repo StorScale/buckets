@@ -33,6 +33,7 @@
 #include "metrics/stats.h"
 #include "metrics/sys.h"
 #include "notify/notifier.h"
+#include "s3/replicate.h"
 #include "object/epool.h"
 #include "s3/internal.h"
 #include "s3/metrics.h"
@@ -535,7 +536,55 @@ static void replication_node(mctx *m) {
       "minio_node_replication_max_active_workers",     "minio_node_replication_max_queued_bytes",
       "minio_node_replication_max_queued_count",       "minio_node_replication_max_transfer_rate",
       "minio_node_replication_recent_backlog_count"};
-  for (size_t i = 0; i < BUCKETS_ARRAY_LEN(names); i++) ADD0(m, names[i], 0);
+  buckets_repl_node_stats ns;
+  buckets_repl_stats_node(&ns);
+  double tot_curr = ns.xfer[0][0] + ns.xfer[1][0], tot_avg = ns.xfer[0][1] + ns.xfer[1][1];
+  double tot_max = ns.xfer[0][2] > ns.xfer[1][2] ? ns.xfer[0][2] : ns.xfer[1][2];
+  const double v[] = {ns.workers_avg, ns.q_avg_bytes, ns.q_avg_count, tot_avg,
+                      (double)ns.workers_curr, tot_curr, (double)ns.q_bytes, (double)ns.q_count,
+                      (double)ns.workers_max, (double)ns.q_max_bytes, (double)ns.q_max_count, tot_max,
+                      (double)ns.mrf_failed_last5};
+  for (size_t i = 0; i < BUCKETS_ARRAY_LEN(names); i++) ADD0(m, names[i], v[i]);
+  /* each replication target endpoint's link health */
+  buckets_repl_ep_health *eh;
+  size_t ne = buckets_repl_health_list(m->s->repl, &eh);
+  for (size_t i = 0; i < ne; i++) {
+    const char *ep = eh[i].endpoint;
+    ADD1(m, "minio_node_replication_current_link_latency_ms", (double)(eh[i].lat_curr / 1000000), "endpoint", ep);
+    ADD1(m, "minio_node_replication_average_link_latency_ms", (double)(eh[i].lat_avg / 1000000), "endpoint", ep);
+    ADD1(m, "minio_node_replication_max_link_latency_ms", (double)(eh[i].lat_max / 1000000), "endpoint", ep);
+    ADD1(m, "minio_node_replication_link_online", eh[i].online ? 1 : 0, "endpoint", ep);
+    double curr_down = 0;
+    if (!eh[i].online && eh[i].last_online_sec) curr_down = (double)(time(NULL) - eh[i].last_online_sec);
+    ADD1(m, "minio_node_replication_link_offline_duration_seconds", curr_down, "endpoint", ep);
+    double down = (double)(eh[i].offline_ns / 1000000000LL);
+    ADD1(m, "minio_node_replication_link_downtime_duration_seconds", down > curr_down ? down : curr_down, "endpoint", ep);
+  }
+  free(eh);
+}
+
+/* the per-target replication statistics of a bucket (hasReplicationUsage) */
+static void replication_bucket(mctx *m, const char *bucket, const buckets_repl_bucket_stats *st) {
+  for (size_t i = 0; i < st->n; i++) {
+    const buckets_repl_target_stats *t = &st->t[i];
+    if (!(t->fail_total_count > 0 || t->repl_size > 0)) continue;
+    const char *arn = t->arn;
+    ADD2(m, "minio_bucket_replication_last_minute_failed_bytes", (double)t->fail_min_bytes, "bucket", bucket, "targetArn", arn);
+    ADD2(m, "minio_bucket_replication_last_minute_failed_count", (double)t->fail_min_count, "bucket", bucket, "targetArn", arn);
+    ADD2(m, "minio_bucket_replication_last_hour_failed_bytes", (double)t->fail_hour_bytes, "bucket", bucket, "targetArn", arn);
+    ADD2(m, "minio_bucket_replication_last_hour_failed_count", (double)t->fail_hour_count, "bucket", bucket, "targetArn", arn);
+    ADD2(m, "minio_bucket_replication_total_failed_bytes", (double)t->fail_total_bytes, "bucket", bucket, "targetArn", arn);
+    ADD2(m, "minio_bucket_replication_total_failed_count", (double)t->fail_total_count, "bucket", bucket, "targetArn", arn);
+    ADD2(m, "minio_bucket_replication_sent_bytes", (double)t->repl_size, "bucket", bucket, "targetArn", arn);
+    ADD2(m, "minio_bucket_replication_sent_count", (double)t->repl_count, "bucket", bucket, "targetArn", arn);
+    const char *tags[6];
+    uint64_t ms[6];
+    buckets_repl_stats_upload_latency(t, tags, ms);
+    for (int k = 0; k < 6; k++) {
+      const char *l[] = {"server", m->server, "bucket", bucket, "operation", "upload", "range", tags[k], "targetArn", arn};
+      buckets_expo_add(m->e, "minio_bucket_replication_latency_ms", (double)ms[k], l, 5);
+    }
+  }
 }
 
 /* client_golang's process collector (namespace "minio"), without the server label */
@@ -612,17 +661,21 @@ static void bucket_metrics(mctx *m) {
         if (q > 0) ADD1(m, "minio_bucket_quota_total_bytes", (double)q, "bucket", bu->name);
         buckets_bucket_state_release(st);
       }
-      /* replication statistics, kept for every bucket (none replicate yet) */
-      ADD1(m, "minio_bucket_replication_received_bytes", 0, "bucket", bu->name);
-      ADD1(m, "minio_bucket_replication_received_count", 0, "bucket", bu->name);
+      /* replication statistics, kept for every bucket */
+      buckets_repl_bucket_stats rst;
+      buckets_repl_stats_get(bu->name, &rst);
+      ADD1(m, "minio_bucket_replication_received_bytes", (double)rst.replica_size, "bucket", bu->name);
+      ADD1(m, "minio_bucket_replication_received_count", (double)rst.replica_count, "bucket", bu->name);
       static const char *const proxied[] = {"get", "head", "put_tagging", "get_tagging", "delete_tagging"};
       for (size_t i = 0; i < BUCKETS_ARRAY_LEN(proxied); i++) {
         char name[128];
         snprintf(name, sizeof(name), "minio_bucket_replication_proxied_%s_requests_total", proxied[i]);
-        ADD1(m, name, 0, "bucket", bu->name);
+        ADD1(m, name, (double)rst.proxy[i][0], "bucket", bu->name);
         snprintf(name, sizeof(name), "minio_bucket_replication_proxied_%s_requests_failures", proxied[i]);
-        ADD0(m, name, 0); /* MinIO leaves the bucket label off these */
+        ADD0(m, name, (double)rst.proxy[i][1]); /* MinIO leaves the bucket label off these */
       }
+      replication_bucket(m, bu->name, &rst);
+      buckets_repl_bucket_stats_free(&rst);
       histogram_range(m, "minio_bucket_objects_size_distribution", bu->sizes, BUCKETS_USAGE_SIZE_BINS, true, bu->name);
       histogram_range(m, "minio_bucket_objects_version_distribution", bu->version_counts, BUCKETS_USAGE_VERSION_BINS,
                       false, bu->name);
@@ -1145,8 +1198,39 @@ static void v3_bucket_api(m3ctx *m, const char *bucket) {
   buckets_stats_buckets_free(bs, nb);
 }
 
-/* /bucket/replication/<bucket>: nothing replicates yet */
-static void v3_bucket_replication(m3ctx *m, const char *bucket) { (void)m, (void)bucket; }
+/* /bucket/replication/<bucket> (loadBucketReplicationMetrics) */
+static void v3_bucket_replication(m3ctx *m, const char *bucket) {
+  buckets_repl_bucket_stats st;
+  if (!buckets_repl_stats_get(bucket, &st)) return;
+  static const char *const px[] = {"get", "head", "put_tagging", "get_tagging", "delete_tagging"};
+  for (size_t i = 0; i < st.n; i++) {
+    const buckets_repl_target_stats *t = &st.t[i];
+    if (!(t->fail_total_count > 0 || t->repl_size > 0)) continue;
+    const char *arn = t->arn;
+    SETL(m, "minio_bucket_replication_last_hour_failed_bytes", (double)t->fail_hour_bytes, "bucket", bucket, "targetArn", arn);
+    SETL(m, "minio_bucket_replication_last_hour_failed_count", (double)t->fail_hour_count, "bucket", bucket, "targetArn", arn);
+    SETL(m, "minio_bucket_replication_last_minute_failed_bytes", (double)t->fail_min_bytes, "bucket", bucket, "targetArn", arn);
+    SETL(m, "minio_bucket_replication_last_minute_failed_count", (double)t->fail_min_count, "bucket", bucket, "targetArn", arn);
+    for (size_t k = 0; k < BUCKETS_ARRAY_LEN(px); k++) {
+      char name[128];
+      snprintf(name, sizeof(name), "minio_bucket_replication_proxied_%s_requests_total", px[k]);
+      SETL(m, name, (double)st.proxy[k][0], "bucket", bucket, "targetArn", arn);
+      snprintf(name, sizeof(name), "minio_bucket_replication_proxied_%s_requests_failures", px[k]);
+      SETL(m, name, (double)st.proxy[k][1], "bucket", bucket, "targetArn", arn);
+    }
+    SETL(m, "minio_bucket_replication_sent_count", (double)t->repl_count, "bucket", bucket, "targetArn", arn);
+    SETL(m, "minio_bucket_replication_total_failed_bytes", (double)t->fail_total_bytes, "bucket", bucket, "targetArn", arn);
+    SETL(m, "minio_bucket_replication_total_failed_count", (double)t->fail_total_count, "bucket", bucket, "targetArn", arn);
+    SETL(m, "minio_bucket_replication_sent_bytes", (double)t->repl_size, "bucket", bucket, "targetArn", arn);
+    const char *tags[6];
+    uint64_t ms[6];
+    buckets_repl_stats_upload_latency(t, tags, ms);
+    for (int k = 0; k < 6; k++)
+      SETL(m, "minio_bucket_replication_latency_ms", (double)ms[k], "bucket", bucket, "operation", "upload", "range",
+           tags[k], "targetArn", arn);
+  }
+  buckets_repl_bucket_stats_free(&st);
+}
 
 /* /audit */
 static void v3_audit(m3ctx *m, const char *bucket) {

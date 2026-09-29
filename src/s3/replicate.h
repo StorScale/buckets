@@ -107,4 +107,55 @@ bool buckets_repl_proxy_open(buckets_repl *r, const char *bucket, const char *ob
                              const char *range, bool head, buckets_repl_proxy *out);
 void buckets_repl_proxy_close(buckets_repl_proxy *p);
 
+/* ---- statistics since startup (replstats.c) ---- */
+typedef struct {
+  char arn[256];
+  int64_t repl_size, repl_count;
+  int64_t fail_min_count, fail_min_bytes, fail_hour_count, fail_hour_bytes, fail_total_count, fail_total_bytes;
+  int64_t lat[6][60][3]; /* by size: per second {total ns, size, n} */
+  int64_t lat_last_sec[6];
+  double xfer[2][3]; /* large, small: curr, avg, peak (bytes/s) */
+} buckets_repl_target_stats;
+
+typedef struct {
+  buckets_repl_target_stats *t;
+  size_t n;
+  int64_t replica_size, replica_count;
+  int64_t q_count, q_bytes, q_max_count, q_max_bytes;
+  double q_avg_count, q_avg_bytes;
+  uint64_t proxy[5][2]; /* get, head, put/get/remove tagging: total, failed */
+} buckets_repl_bucket_stats;
+
+typedef struct {
+  int64_t uptime;
+  int64_t workers_curr, workers_max;
+  double workers_avg;
+  double xfer[2][3];
+  int64_t q_count, q_bytes, q_max_count, q_max_bytes;
+  double q_avg_count, q_avg_bytes;
+  int64_t mrf_failed_last5, mrf_dropped_count, mrf_dropped_bytes;
+} buckets_repl_node_stats;
+
+enum { BUCKETS_REPL_PROXY_GET, BUCKETS_REPL_PROXY_HEAD, BUCKETS_REPL_PROXY_PUT_TAG, BUCKETS_REPL_PROXY_GET_TAG,
+       BUCKETS_REPL_PROXY_RM_TAG };
+
+void buckets_repl_stats_init(void);
+/* A version replicated (completed) or not (failed) to arn, dur_ns the transfer. */
+void buckets_repl_stats_update(const char *bucket, const char *arn, bool completed, bool failed, int64_t size,
+                               int64_t dur_ns);
+void buckets_repl_stats_replica(const char *bucket, int64_t size);
+void buckets_repl_stats_queue(const char *bucket, int64_t size, int delta);
+void buckets_repl_stats_workers(int delta);
+void buckets_repl_stats_mrf_dropped(int64_t size);
+void buckets_repl_stats_mrf_failed(int64_t n);
+void buckets_repl_stats_proxy(const char *bucket, int api, bool failed);
+void buckets_repl_stats_delete_bucket(const char *bucket);
+/* false when the bucket has no statistics (out is zeroed) */
+bool buckets_repl_stats_get(const char *bucket, buckets_repl_bucket_stats *out);
+void buckets_repl_bucket_stats_free(buckets_repl_bucket_stats *s);
+void buckets_repl_stats_node(buckets_repl_node_stats *out);
+/* GetBucketReplicationMetrics (v1: BucketReplicationStats) or V2 (BucketStats). */
+void buckets_repl_stats_json(const char *bucket, const char *node_name, bool v2, buckets_buf *out);
+void buckets_repl_stats_upload_latency(const buckets_repl_target_stats *t, const char **tags, uint64_t *ms);
+
 #endif

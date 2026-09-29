@@ -163,6 +163,7 @@ void buckets_s3_get_bucket_replication(s3_ctx *c);
 void buckets_s3_delete_bucket_replication(s3_ctx *c);
 void buckets_s3_reset_bucket_replication_start(s3_ctx *c);
 void buckets_s3_reset_bucket_replication_status(s3_ctx *c);
+void buckets_s3_get_bucket_replication_metrics(s3_ctx *c, bool v2);
 
 /* ---- lifecycle (lifecycle.c) ---- */
 void buckets_s3_put_bucket_lifecycle(s3_ctx *c);

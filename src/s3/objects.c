@@ -779,6 +779,7 @@ static void put_object(s3_ctx *c) {
     buckets_s3_send_event_early(c, BUCKETS_EV_OBJECT_CREATED_PUT, c->bucket, c->object, &oi, NULL);
     buckets_repl_schedule(c->s, c->bucket, &oi, &dsc, BUCKETS_REPL_OBJECT, "replicate:incoming");
     buckets_repl_dsc_free(&dsc);
+    if (ri.replica) buckets_repl_stats_replica(c->bucket, b.size);
     buckets_object_info_free(&oi);
   }
   free_kvs(sp.sys, sp.nsys);

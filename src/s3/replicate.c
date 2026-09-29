@@ -239,6 +239,7 @@ typedef struct job {
   char *repl_status, *purge_status; /* the state recorded at delete time */
   char *target_arn;        /* resync: this target only */
   char *reset_id;
+  int64_t qsize;           /* the version's size, for the queue statistics */
 } job;
 
 typedef struct {
@@ -1411,7 +1412,18 @@ static void replicate_object(buckets_repl *r, job *j) {
                                      j->version_id, "Internal: [Replication]");
       continue;
     }
+    int64_t t0 = mono_ns();
     replicate_to(s, j, t, prev, &ti[nti]);
+    int64_t dur = mono_ns() - t0;
+    {
+      /* ReplicationStats.Update: data replications whose status changed */
+      char was[32];
+      buckets_repl_target_status(prev, arns[i], was, sizeof(was));
+      bool data = j->op != BUCKETS_REPL_METADATA && ti[nti].action == ACT_ALL;
+      bool done = strcmp(ti[nti].status, BUCKETS_RS_COMPLETED) == 0 && strcmp(was, BUCKETS_RS_COMPLETED) != 0;
+      bool fail = strcmp(ti[nti].status, BUCKETS_RS_FAILED) == 0 && strcmp(was, BUCKETS_RS_PENDING) == 0;
+      if (data && (done || fail)) buckets_repl_stats_update(j->bucket, arns[i], done, fail, ti[nti].size, dur);
+    }
     if (ti[nti].err[0]) buckets_log_warn("replication: %s/%s(%s) to %s: %s", j->bucket, j->object, j->version_id,
                                          t->t.endpoint, ti[nti].err);
     buckets_repl_target_put(t);
@@ -1448,6 +1460,7 @@ static void replicate_object(buckets_repl *r, job *j) {
     m->op = BUCKETS_REPL_HEAL;
     m->event = buckets_xstrdup("replicate:mrf");
     m->retry = j->retry + 1;
+    m->qsize = j->qsize;
     enqueue(r, m, true);
   }
   buckets_buf_free(&internal);
@@ -1680,11 +1693,14 @@ static void *worker_main(void *arg) {
       }
     }
     atomic_fetch_add(&r->active, 1);
+    buckets_repl_stats_workers(1);
+    buckets_repl_stats_queue(j->bucket, j->qsize, -1);
     if (r->s->layer && r->s->meta) {
       if (j->kind == JOB_OBJECT) replicate_object(r, j);
       else replicate_delete(r, j);
     }
     atomic_fetch_sub(&r->active, 1);
+    buckets_repl_stats_workers(-1);
     job_free(j);
   }
   return NULL;
@@ -1707,9 +1723,11 @@ static void enqueue(buckets_repl *r, job *j, bool mrf) {
   if (w->n >= REPL_QUEUE_MAX) {
     pthread_mutex_unlock(&w->mu);
     buckets_log_warn("replication: unable to keep up with incoming traffic");
+    if (mrf) buckets_repl_stats_mrf_dropped(j->qsize);
     job_free(j);
     return;
   }
+  buckets_repl_stats_queue(j->bucket, j->qsize, 1);
   if (w->tail) w->tail->next = j;
   else w->head = j;
   w->tail = j;
@@ -1737,6 +1755,7 @@ buckets_repl *buckets_repl_new(buckets_s3_server *s) {
   for (size_t i = 0; i < REPL_WORKERS; i++) worker_start(r, &r->w[i], false);
   worker_start(r, &r->mrf, true);
   r->hc_started = pthread_create(&r->hc_thread, NULL, hc_main, r) == 0;
+  buckets_repl_stats_init();
   return r;
 }
 
@@ -1790,6 +1809,7 @@ void buckets_repl_schedule(buckets_s3_server *s, const char *bucket, const bucke
   j->object = buckets_xstrdup(oi->name);
   snprintf(j->version_id, sizeof(j->version_id), "%s", oi->version_id);
   j->op = op;
+  j->qsize = oi->size;
   j->event = buckets_xstrdup(event ? event : "replicate:incoming");
   if (buckets_repl_dsc_sync(d)) {
     replicate_object(s->repl, j);
@@ -1854,6 +1874,7 @@ bool buckets_repl_proxy_open(buckets_repl *r, const char *bucket, const char *ob
       found = out->body != NULL;
     }
     hfree(&h);
+    buckets_repl_stats_proxy(bucket, head ? BUCKETS_REPL_PROXY_HEAD : BUCKETS_REPL_PROXY_GET, !found);
     if (found) {
       out->t = t;
     } else {

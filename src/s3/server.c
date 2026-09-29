@@ -1406,6 +1406,7 @@ static bool authorize_bucket_request(s3_ctx *c) {
     else if (buckets_query_has(&c->q, "uploads")) action = "s3:ListBucketMultipartUploads";
     else if (buckets_query_has(&c->q, "replication")) action = "s3:GetReplicationConfiguration";
     else if (buckets_query_has(&c->q, "replication-reset-status")) action = "s3:ResetBucketReplicationState";
+    else if (buckets_query_has(&c->q, "replication-metrics")) action = "s3:GetReplicationConfiguration";
     else if (buckets_query_has(&c->q, "events")) action = NULL; /* the handler authorizes */
     else if (!has_unhandled_subresource(&c->q)) action = "s3:ListBucket";
   }
@@ -1644,6 +1645,9 @@ static void route_bucket(s3_ctx *c) {
       buckets_s3_get_bucket_replication(c);
     } else if (buckets_query_has(&c->q, "replication-reset-status")) {
       buckets_s3_reset_bucket_replication_status(c);
+    } else if (buckets_query_has(&c->q, "replication-metrics")) {
+      const char *v = buckets_query_get(&c->q, "replication-metrics");
+      buckets_s3_get_bucket_replication_metrics(c, v && strcmp(v, "2") == 0);
 
     } else if (has_unhandled_subresource(&c->q)) {
       buckets_s3_write_error(c, BUCKETS_ERR_NOT_IMPLEMENTED);

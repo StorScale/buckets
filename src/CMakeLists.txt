@@ -76,6 +76,7 @@ add_library(buckets STATIC
   s3/errors_gen.c
   s3/xml.c
   s3/replicate.c
+  s3/replstats.c
   s3/replhandlers.c
   s3/sigv4.c
   s3/sign.c
