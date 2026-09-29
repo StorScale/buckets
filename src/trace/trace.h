@@ -64,4 +64,14 @@ buckets_trace_sub *buckets_trace_subscribe(const buckets_trace_opts *o);
 long buckets_trace_sub_read(void *sub, char *buf, size_t cap);
 void buckets_trace_sub_free(void *sub);
 
+/* ServiceTraceOpts.ParseParams (and the deprecated `all`); false on a bad threshold. */
+typedef struct {
+  const char *(*get)(void *ud, const char *key);
+  void *ud;
+} buckets_trace_params;
+bool buckets_trace_opts_parse(const buckets_trace_params *p, buckets_trace_opts *o);
+/* Adds a record received from a peer (a JSON line) to a subscriber. */
+void buckets_trace_sub_push(buckets_trace_sub *s, const char *line, size_t n);
+
+
 #endif

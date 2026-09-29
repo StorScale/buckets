@@ -11,6 +11,8 @@
 #include "core/log.h"
 #include "core/query.h"
 #include "dist/internode.h"
+#include "logger/console.h"
+#include "trace/trace.h"
 
 #define PEER_BACKOFF_MS 5000
 
@@ -214,6 +216,13 @@ void buckets_peer_info_free(buckets_peer_info *info, size_t n) {
   free(info);
 }
 
+static const char *query_param(void *ud, const char *key) { return buckets_query_get(ud, key); }
+
+static void stream_headers(buckets_http_response *resp) {
+  buckets_http_resp_header(resp, "Content-Type", "text/event-stream");
+  resp->chunked = true;
+}
+
 void buckets_peer_server_handle(const buckets_http_request *req, buckets_http_response *resp, void *ud) {
   const buckets_peer_handlers *h = ud;
   if (!buckets_internode_verify(req)) {
@@ -244,6 +253,25 @@ void buckets_peer_server_handle(const buckets_http_request *req, buckets_http_re
     buckets_http_resp_header(resp, "Content-Type", "text/plain");
     buckets_buf_append_c(&resp->body, text);
     free(text);
+  } else if (buckets_str_eq_c(path, BUCKETS_INTERNODE_PREFIX "peer/trace")) {
+    /* this node's records only: the admin handler merges the nodes */
+    buckets_trace_opts o;
+    buckets_trace_params tp = {query_param, &q};
+    if (!buckets_trace_opts_parse(&tp, &o)) {
+      resp->status = 400;
+    } else {
+      stream_headers(resp);
+      resp->stream = buckets_trace_sub_read;
+      resp->stream_ud = buckets_trace_subscribe(&o);
+      resp->stream_free = buckets_trace_sub_free;
+    }
+  } else if (buckets_str_eq_c(path, BUCKETS_INTERNODE_PREFIX "peer/log")) {
+    const char *m = buckets_query_get(&q, "mask");
+    uint32_t mask = m ? (uint32_t)strtoul(m, NULL, 10) : 0;
+    stream_headers(resp);
+    resp->stream = buckets_console_sub_read;
+    resp->stream_ud = buckets_console_subscribe(NULL, 0, mask ? mask : BUCKETS_LOGMASK_ALL) /* like MinIO: the whole ring */;
+    resp->stream_free = buckets_console_sub_free;
   } else {
     resp->status = 404;
   }

@@ -10,6 +10,7 @@
 
 #include "core/buf.h"
 #include "core/common.h"
+#include "core/timefmt.h"
 
 #define SUB_QUEUE_BYTES (64u << 20) /* a slow reader loses records rather than holding memory */
 
@@ -120,4 +121,50 @@ void buckets_trace_sub_free(void *ud) {
   pthread_cond_destroy(&s->cv);
   pthread_mutex_destroy(&s->mu);
   free(s);
+}
+
+bool buckets_trace_opts_parse(const buckets_trace_params *p, buckets_trace_opts *o) {
+  static const struct {
+    const char *q;
+    uint64_t bit;
+  } k[] = {{"s3", BUCKETS_TRACE_S3},
+           {"internal", BUCKETS_TRACE_INTERNAL},
+           {"storage", BUCKETS_TRACE_STORAGE},
+           {"os", BUCKETS_TRACE_OS},
+           {"scanner", BUCKETS_TRACE_SCANNER},
+           {"decommission", BUCKETS_TRACE_DECOMMISSION},
+           {"healing", BUCKETS_TRACE_HEALING},
+           {"batch-replication", BUCKETS_TRACE_BATCH_REPLICATION},
+           {"batch-keyrotation", BUCKETS_TRACE_BATCH_KEYROTATION},
+           {"batch-expire", BUCKETS_TRACE_BATCH_EXPIRE},
+           {"rebalance", BUCKETS_TRACE_REBALANCE},
+           {"replication-resync", BUCKETS_TRACE_REPLICATION_RESYNC},
+           {"bootstrap", BUCKETS_TRACE_BOOTSTRAP},
+           {"ftp", BUCKETS_TRACE_FTP},
+           {"ilm", BUCKETS_TRACE_ILM},
+           {"kms", BUCKETS_TRACE_KMS},
+           {"formatting", BUCKETS_TRACE_FORMATTING}};
+  memset(o, 0, sizeof(*o));
+  for (size_t i = 0; i < BUCKETS_ARRAY_LEN(k); i++) {
+    const char *v = p->get(p->ud, k[i].q);
+    if (v && strcmp(v, "true") == 0) o->types |= k[i].bit;
+  }
+  const char *all = p->get(p->ud, "all");
+  if (all && strcmp(all, "true") == 0)
+    o->types |= BUCKETS_TRACE_S3 | BUCKETS_TRACE_INTERNAL | BUCKETS_TRACE_STORAGE | BUCKETS_TRACE_OS;
+  o->internal = (o->types & BUCKETS_TRACE_INTERNAL) != 0;
+  const char *err = p->get(p->ud, "err");
+  o->only_errors = err && strcmp(err, "true") == 0;
+  const char *th = p->get(p->ud, "threshold");
+  return !(th && *th && !buckets_go_duration_parse(th, &o->threshold_ns));
+}
+
+void buckets_trace_sub_push(buckets_trace_sub *s, const char *line, size_t n) {
+  pthread_mutex_lock(&s->mu);
+  if (s->pending.len - s->pos + n < SUB_QUEUE_BYTES) {
+    buckets_buf_append(&s->pending, line, n);
+    buckets_buf_append_char(&s->pending, '\n');
+    pthread_cond_broadcast(&s->cv);
+  }
+  pthread_mutex_unlock(&s->mu);
 }

@@ -150,3 +150,13 @@ void buckets_console_sub_free(void *ud) {
   free(s->node);
   free(s);
 }
+
+void buckets_console_sub_push(buckets_console_sub *s, const char *line, size_t n) {
+  pthread_mutex_lock(&s->mu);
+  if (s->pending.len - s->pos < (32u << 20)) {
+    buckets_buf_append(&s->pending, line, n);
+    buckets_buf_append_char(&s->pending, '\n');
+    pthread_cond_broadcast(&s->cv);
+  }
+  pthread_mutex_unlock(&s->mu);
+}

@@ -33,6 +33,8 @@ typedef struct buckets_console_sub buckets_console_sub;
 buckets_console_sub *buckets_console_subscribe(const char *node, int last, uint32_t mask);
 /* Stream reads: records as JSON lines, or " " each idle half second. */
 long buckets_console_sub_read(void *sub, char *buf, size_t cap);
+/* Adds a record received from a peer (a JSON line). */
+void buckets_console_sub_push(buckets_console_sub *s, const char *line, size_t n);
 void buckets_console_sub_free(void *sub);
 
 #endif

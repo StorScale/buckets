@@ -68,6 +68,26 @@ ids=$(for n in 1 2 3 4; do for d in 1 2; do sed -n 's/.*"id":"\([^"]*\)".*/\1/p'
 expect "one deployment across all drives" "$ids" 1
 expect "cluster health" "$(curl -s -o /dev/null -w '%{http_code}' ${CURLTLS[@]+"${CURLTLS[@]}"} "$(ep 3)/minio/health/cluster")" 200
 
+if [[ -z "${TLS:-}" ]]; then
+  echo "== trace and logs from every node (mc admin trace, mc admin logs)"
+  HERE=$(cd "$(dirname "$0")" && pwd)
+  python3 "$HERE/listen.py" "$(ep 1)" "$AK" "$SK" /minio/admin/v3/trace "s3=true&err=false&threshold=0s" >"$WORK/trace.raw" &
+  LT=$!
+  python3 "$HERE/listen.py" "$(ep 1)" "$AK" "$SK" /minio/admin/v3/log "limit=5&logType=ALL" >"$WORK/log.raw" &
+  LA=$!
+  python3 "$HERE/listen.py" "$(ep 1)" "$AK" "$SK" /minio/admin/v3/log "node=127.0.0.1:$((BASE + 3))" >"$WORK/log3.raw" &
+  LN=$!
+  sleep 1.5
+  for n in 1 2 3 4; do status -X PUT "$(ep "$n")/tracebucket$n" >/dev/null; done
+  sleep 1.5
+  kill $LT $LA $LN 2>/dev/null || true; wait $LT $LA $LN 2>/dev/null || true
+  nodes() { grep -o "\"$1\":\"[^\"]*\"" "$2" | sort -u | wc -l | tr -d ' '; }
+  expect "trace records from all four nodes" "$(grep -c '"funcname":"s3.PutBucket"' "$WORK/trace.raw")/$(nodes nodename "$WORK/trace.raw")" 4/4
+  expect "log records from all four nodes" "$(nodes node "$WORK/log.raw")" 4
+  expect "log records from the named node only" "$(grep -o '"node":"[^"]*"' "$WORK/log3.raw" | sort -u)" "\"node\":\"127.0.0.1:$((BASE + 3))\""
+  for n in 1 2 3 4; do status -X DELETE "$(ep "$n")/tracebucket$n" >/dev/null; done
+fi
+
 echo "== S3 through any node"
 expect "create bucket via node 1" "$(status -X PUT "$(ep 1)/clusterbucket")" 200
 expect "bucket visible via node 4" "$(status -I "$(ep 4)/clusterbucket")" 200

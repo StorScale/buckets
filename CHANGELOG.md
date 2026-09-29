@@ -34,6 +34,7 @@ All notable changes to this project are documented here. The format follows
 - `mc admin trace` and `mc admin logs` (Phase 7):
   - `GET /minio/admin/v3/trace` with MinIO's options (types, `err`, `threshold`, the deprecated `all`) and `admin:ServerTrace`: madmin.TraceInfo records as JSON lines, a space each idle second. HTTP records as MinIO's tracer writes them (function `s3.<API>`/`admin.<Handler>`, request and response headers, bodies or `<BLOB>` for header-only handlers, timings and byte counts, the path as Go reports it); `tests/integration/trace-interop.sh` finds them identical to MinIO's for 29 requests. Storage records (`storage.<Op>`, the drive and paths, errors) from every drive call.
   - `GET /minio/admin/v3/log` (`node`, `limit`, `logType`, `admin:ConsoleLog`): the last records of a 10000-entry ring, then new ones, as log.Info JSON (warnings and errors as entries, other messages as console messages).
+  - Across a cluster both merge every node's records, as MinIO's handlers do: each node streams its own over internode (`peer/trace` with the same options, `peer/log` with the log mask; peers send their whole ring, as MinIO's do), read by one relay thread per peer that reconnects while the peer is down. `node` limits logs to one node. `tests/integration/cluster.sh` checks both.
   - Admin routes carry MinIO's handler names (the trace's function names).
   - Streams of unknown length (listen, trace, logs) end when the server shuts down instead of holding the drain.
 

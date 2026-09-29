@@ -6,6 +6,10 @@
 #include "core/timefmt.h"
 #include "logger/console.h"
 #include "trace/trace.h"
+#include "dist/peerstream.h"
+#include "dist/peer.h"
+#include "dist/internode.h"
+#include <strings.h>
 #include "admin/info.h"
 
 #include <stdio.h>
@@ -2067,54 +2071,81 @@ static void h_server_info(s3_ctx *c) {
 }
 
 /* TraceHandler: madmin.TraceInfo records as they happen, as JSON lines */
-static void h_trace(s3_ctx *c) {
-  if (!admin_req1(c, "admin:ServerTrace")) return;
-  static const struct {
-    const char *q;
-    uint64_t bit;
-  } k[] = {{"s3", BUCKETS_TRACE_S3},
-           {"internal", BUCKETS_TRACE_INTERNAL},
-           {"storage", BUCKETS_TRACE_STORAGE},
-           {"os", BUCKETS_TRACE_OS},
-           {"scanner", BUCKETS_TRACE_SCANNER},
-           {"decommission", BUCKETS_TRACE_DECOMMISSION},
-           {"healing", BUCKETS_TRACE_HEALING},
-           {"batch-replication", BUCKETS_TRACE_BATCH_REPLICATION},
-           {"batch-keyrotation", BUCKETS_TRACE_BATCH_KEYROTATION},
-           {"batch-expire", BUCKETS_TRACE_BATCH_EXPIRE},
-           {"rebalance", BUCKETS_TRACE_REBALANCE},
-           {"replication-resync", BUCKETS_TRACE_REPLICATION_RESYNC},
-           {"bootstrap", BUCKETS_TRACE_BOOTSTRAP},
-           {"ftp", BUCKETS_TRACE_FTP},
-           {"ilm", BUCKETS_TRACE_ILM},
-           {"kms", BUCKETS_TRACE_KMS},
-           {"formatting", BUCKETS_TRACE_FORMATTING}};
-  buckets_trace_opts o = {0};
-  for (size_t i = 0; i < BUCKETS_ARRAY_LEN(k); i++) {
-    const char *v = buckets_query_get(&c->q, k[i].q);
-    if (v && strcmp(v, "true") == 0) o.types |= k[i].bit;
+/* A stream of this node's records merged with the peers' (MinIO's trace and
+ * console log handlers subscribe locally and to every peer). */
+typedef struct {
+  void *sub;
+  long (*read)(void *, char *, size_t);
+  void (*push)(void *, const char *, size_t);
+  void (*free)(void *);
+  buckets_peer_relay *relay;
+} merged_stream;
+
+static long merged_read(void *ud, char *buf, size_t cap) {
+  merged_stream *m = ud;
+  return m->read(m->sub, buf, cap);
+}
+
+static void merged_push(void *ud, const char *line, size_t n) {
+  merged_stream *m = ud;
+  m->push(m->sub, line, n);
+}
+
+static void merged_free(void *ud) {
+  merged_stream *m = ud;
+  buckets_peer_relay_stop(m->relay); /* before the subscriber it pushes into */
+  m->free(m->sub);
+  free(m);
+}
+
+static void trace_push(void *sub, const char *line, size_t n) { buckets_trace_sub_push(sub, line, n); }
+static void console_push(void *sub, const char *line, size_t n) { buckets_console_sub_push(sub, line, n); }
+
+static void merged_start(s3_ctx *c, merged_stream *m, const char *target, const char *node) {
+  size_t np = 0;
+  buckets_http_client *const *all = buckets_peer_clients(c->s->peers, &np);
+  buckets_http_client **peers = buckets_xcalloc(np ? np : 1, sizeof(*peers));
+  size_t k = 0;
+  for (size_t i = 0; i < np; i++) {
+    char name[300];
+    snprintf(name, sizeof(name), "%s:%d", buckets_http_client_host(all[i]), buckets_http_client_port(all[i]));
+    if (!node || !*node || strcasecmp(name, node) == 0) peers[k++] = all[i];
   }
-  const char *all = buckets_query_get(&c->q, "all"); /* deprecated: s3, internal, storage and os */
-  if (all && strcmp(all, "true") == 0) o.types |= BUCKETS_TRACE_S3 | BUCKETS_TRACE_INTERNAL | BUCKETS_TRACE_STORAGE | BUCKETS_TRACE_OS;
-  o.internal = (o.types & BUCKETS_TRACE_INTERNAL) != 0;
-  const char *err = buckets_query_get(&c->q, "err");
-  o.only_errors = err && strcmp(err, "true") == 0;
-  const char *th = buckets_query_get(&c->q, "threshold");
-  if (th && *th && !buckets_go_duration_parse(th, &o.threshold_ns)) {
-    buckets_admin_error(c, BUCKETS_ERR_INVALID_REQUEST);
-    return;
-  }
+  m->relay = buckets_peer_relay_start(peers, k, target, merged_push, m);
+  free(peers);
   buckets_http_resp_header(c->resp, "Content-Type", "text/event-stream");
   buckets_http_resp_header(c->resp, "Cache-Control", "no-cache");
   buckets_http_resp_header(c->resp, "X-Accel-Buffering", "no");
   c->resp->status = 200;
   c->resp->chunked = true;
-  c->resp->stream = buckets_trace_sub_read;
-  c->resp->stream_ud = buckets_trace_subscribe(&o);
-  c->resp->stream_free = buckets_trace_sub_free;
+  c->resp->stream = merged_read;
+  c->resp->stream_ud = m;
+  c->resp->stream_free = merged_free;
 }
 
-/* ConsoleLogHandler: the last `limit` records, then new ones */
+static const char *query_param(void *ud, const char *key) { return buckets_query_get(ud, key); }
+
+/* TraceHandler: ServiceTraceOpts from the query; records from every node */
+static void h_trace(s3_ctx *c) {
+  if (!admin_req1(c, "admin:ServerTrace")) return;
+  buckets_trace_opts o;
+  buckets_trace_params tp = {query_param, &c->q};
+  if (!buckets_trace_opts_parse(&tp, &o)) {
+    buckets_admin_error(c, BUCKETS_ERR_INVALID_REQUEST);
+    return;
+  }
+  merged_stream *m = buckets_xcalloc(1, sizeof(*m));
+  *m = (merged_stream){buckets_trace_subscribe(&o), buckets_trace_sub_read, trace_push, buckets_trace_sub_free, NULL};
+  buckets_buf t = BUCKETS_BUF_INIT;
+  buckets_buf_append_c(&t, BUCKETS_INTERNODE_PREFIX "peer/trace?");
+  buckets_buf_append(&t, c->req->query.p, c->req->query.n);
+  buckets_buf_append_char(&t, '\0');
+  merged_start(c, m, t.data, NULL);
+  buckets_buf_free(&t);
+}
+
+/* ConsoleLogHandler: the last `limit` records, then new ones, from every
+ * node (or the one named by node) */
 static void h_console_log(s3_ctx *c) {
   if (!admin_req1(c, "admin:ConsoleLog")) return;
   const char *node = buckets_query_get(&c->q, "node");
@@ -2124,14 +2155,12 @@ static void h_console_log(s3_ctx *c) {
   if (!limit || !*limit || *end) last = 10;
   uint32_t mask = buckets_log_kind_mask(buckets_query_get(&c->q, "logType"));
   buckets_http_resp_header(c->resp, "Connection", "close");
-  buckets_http_resp_header(c->resp, "Content-Type", "text/event-stream");
-  buckets_http_resp_header(c->resp, "Cache-Control", "no-cache");
-  buckets_http_resp_header(c->resp, "X-Accel-Buffering", "no");
-  c->resp->status = 200;
-  c->resp->chunked = true;
-  c->resp->stream = buckets_console_sub_read;
-  c->resp->stream_ud = buckets_console_subscribe(node, (int)last, mask);
-  c->resp->stream_free = buckets_console_sub_free;
+  merged_stream *m = buckets_xcalloc(1, sizeof(*m));
+  *m = (merged_stream){buckets_console_subscribe(node, (int)last, mask), buckets_console_sub_read, console_push,
+                       buckets_console_sub_free, NULL};
+  char target[128];
+  snprintf(target, sizeof(target), BUCKETS_INTERNODE_PREFIX "peer/log?mask=%u", mask);
+  merged_start(c, m, target, node);
 }
 
 static void h_attach(s3_ctx *c) { attach_detach(c, true, false); }

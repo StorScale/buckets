@@ -78,6 +78,7 @@ add_library(buckets STATIC
   dist/storage_server.c
   dist/dsync.c
   dist/peer.c
+  dist/peerstream.c
   dist/endpoint.c
   object/erasure.c
   object/nslock.c
