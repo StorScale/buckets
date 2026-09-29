@@ -47,6 +47,22 @@ void buckets_admin_list_remote_targets(s3_ctx *c);
 void buckets_admin_remove_remote_target(s3_ctx *c);
 void buckets_admin_replication_diff(s3_ctx *c);
 void buckets_admin_replication_mrf(s3_ctx *c);
+/* site replication (siterepl.c) */
+void buckets_admin_sr_add(s3_ctx *c);
+void buckets_admin_sr_remove(s3_ctx *c);
+void buckets_admin_sr_info(s3_ctx *c);
+void buckets_admin_sr_metainfo(s3_ctx *c);
+void buckets_admin_sr_status(s3_ctx *c);
+void buckets_admin_sr_peer_join(s3_ctx *c);
+void buckets_admin_sr_peer_bucket_ops(s3_ctx *c);
+void buckets_admin_sr_peer_iam_item(s3_ctx *c);
+void buckets_admin_sr_peer_bucket_meta(s3_ctx *c);
+void buckets_admin_sr_peer_idp_settings(s3_ctx *c);
+void buckets_admin_sr_edit(s3_ctx *c);
+void buckets_admin_sr_peer_edit(s3_ctx *c);
+void buckets_admin_sr_peer_remove(s3_ctx *c);
+void buckets_admin_sr_resync_op(s3_ctx *c);
+void buckets_admin_sr_state_edit(s3_ctx *c);
 
 /* KMS APIs (kms.c): /minio/kms/v1/..., and the admin v3 /kms/... routes. */
 bool buckets_admin_is_kms_path(buckets_str path);

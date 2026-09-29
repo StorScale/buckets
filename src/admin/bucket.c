@@ -10,6 +10,7 @@
 #include "bucket/quota.h"
 #include "object/sysconfig.h"
 #include "scanner/usage.h"
+#include "siterepl/siterepl.h"
 
 /* vars["bucket"] after pathClean, and GetBucketInfo on it. */
 static const char *admin_bucket(s3_ctx *c) {
@@ -52,6 +53,7 @@ void buckets_admin_set_bucket_quota(s3_ctx *c) {
     return;
   }
   c->resp->status = 200;
+  buckets_sr_bucket_meta_hook(c->s->sr, bucket, "quota-config");
 }
 
 void buckets_admin_get_bucket_quota(s3_ctx *c) {

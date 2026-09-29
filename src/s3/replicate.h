@@ -89,6 +89,8 @@ void buckets_repl_target_put(buckets_repl_target *t);
 buckets_s3c *buckets_repl_target_client(buckets_repl_target *t);
 const buckets_bucket_target *buckets_repl_target_info(buckets_repl_target *t);
 /* A client for a target description (validation before it is stored). */
+/* The TLS client for remote endpoints (trusting certs/CAs). */
+buckets_tls_client *buckets_repl_tls(buckets_repl *r);
 buckets_s3c *buckets_repl_client_for(buckets_repl *r, const buckets_bucket_target *t);
 /* The endpoint's health (ListRemoteTargets). */
 void buckets_repl_health_fill(buckets_repl *r, buckets_bucket_target *t);

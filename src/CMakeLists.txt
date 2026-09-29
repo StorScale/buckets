@@ -141,6 +141,9 @@ add_library(buckets STATIC
   admin/iamxfer.c
   admin/bucket.c
   admin/replicate.c
+  admin/siterepl.c
+  siterepl/siterepl.c
+  siterepl/srstatus.c
   admin/kms.c
   config/config.c
   config/sys.c

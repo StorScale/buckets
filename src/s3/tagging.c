@@ -13,6 +13,7 @@
 #include "bucket/replication.h"
 #include "core/timefmt.h"
 #include "s3/xml.h"
+#include "siterepl/siterepl.h"
 
 #define TAGGING_META "X-Amz-Tagging"
 
@@ -216,6 +217,7 @@ void buckets_s3_put_bucket_tagging(s3_ctx *c) {
     return;
   }
   c->resp->status = 200;
+  buckets_sr_bucket_meta_hook(c->s->sr, c->bucket, "tags");
 }
 
 void buckets_s3_delete_bucket_tagging(s3_ctx *c) {
@@ -224,4 +226,5 @@ void buckets_s3_delete_bucket_tagging(s3_ctx *c) {
     return;
   }
   c->resp->status = 204;
+  buckets_sr_bucket_meta_hook(c->s->sr, c->bucket, "tags");
 }

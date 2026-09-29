@@ -124,6 +124,17 @@ buckets_obj_err buckets_obj_make_bucket(buckets_objlayer *L, const char *bucket)
 buckets_obj_err buckets_obj_stat_bucket(buckets_objlayer *L, const char *bucket);
 /* Fails with BUCKET_NOT_EMPTY if objects remain. */
 buckets_obj_err buckets_obj_delete_bucket(buckets_objlayer *L, const char *bucket);
+/* DeleteBucket with Force: the bucket goes with every object in it. */
+buckets_obj_err buckets_obj_delete_bucket_force(buckets_objlayer *L, const char *bucket);
+/* Site replication keeps the state of deleted buckets until the sites agree
+ * (MinIO's MarkDelete): the volume .minio.sys/buckets/.deleted/<bucket>,
+ * whose modification time is the deletion time. */
+void buckets_obj_mark_bucket_deleted(buckets_objlayer *L, const char *bucket);
+void buckets_obj_purge_bucket_deleted(buckets_objlayer *L, const char *bucket);
+/* When the bucket was marked deleted (0: it is not). */
+time_t buckets_obj_bucket_deleted_at(buckets_objlayer *L, const char *bucket);
+/* The marked buckets, with created holding the deletion time. */
+buckets_obj_err buckets_obj_list_deleted_buckets(buckets_objlayer *L, buckets_bucket_info **out, size_t *n);
 buckets_obj_err buckets_obj_list_buckets(buckets_objlayer *L, buckets_bucket_info **out, size_t *n);
 void buckets_bucket_info_free(buckets_bucket_info *b, size_t n);
 

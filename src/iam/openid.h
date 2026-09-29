@@ -51,4 +51,15 @@ buckets_oidc_status buckets_openid_validate(buckets_openid *o, const char *role_
 /* openid.GetDefaultExpiration: seconds, or -1 when invalid. */
 long long buckets_sts_expiry_seconds(const char *duration_seconds);
 
+/* madmin.OpenIDProviderSettings of each provider (OpenIDConfig.GetSettings):
+ * pointers into o; the array is the caller's to free. */
+typedef struct {
+  const char *arn;
+  bool claim_provider; /* the claim-based provider (no role ARN) */
+  bool claim_userinfo;
+  const char *role_policy, *client_id;
+  char hashed_secret[48]; /* base64url(sha256(client secret)), unpadded */
+} buckets_openid_setting;
+size_t buckets_openid_settings(const buckets_openid *o, buckets_openid_setting **out);
+
 #endif

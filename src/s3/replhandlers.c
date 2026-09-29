@@ -21,6 +21,7 @@
 #include "s3/internal.h"
 #include "s3/replicate.h"
 #include "s3/xml.h"
+#include "siterepl/siterepl.h"
 
 static int64_t now_ns(void) {
   struct timespec ts;
@@ -299,6 +300,10 @@ static bool validate_destination(s3_ctx *c, const buckets_replication *cfg, bool
 }
 
 void buckets_s3_put_bucket_replication(s3_ctx *c) {
+  if (buckets_sr_enabled(c->s->sr) && strcmp(c->ident->access_key, buckets_iam_root_access_key(c->s->iam)) != 0) {
+    buckets_s3_write_error(c, BUCKETS_ERR_REPLICATION_DENY_EDIT_ERROR);
+    return;
+  }
   bool enabled, suspended;
   buckets_s3_versioning(c, "", &enabled, &suspended);
   buckets_bucket_state *st = buckets_metasys_get(c->s->meta, c->bucket);
@@ -354,6 +359,10 @@ void buckets_s3_get_bucket_replication(s3_ctx *c) {
 }
 
 void buckets_s3_delete_bucket_replication(s3_ctx *c) {
+  if (buckets_sr_enabled(c->s->sr)) {
+    buckets_s3_write_error(c, BUCKETS_ERR_REPLICATION_DENY_EDIT_ERROR);
+    return;
+  }
   if (!buckets_metasys_update(c->s->meta, c->bucket, BUCKETS_BCFG_REPLICATION, NULL, 0)) {
     buckets_s3_write_error(c, BUCKETS_ERR_INTERNAL_ERROR);
     return;

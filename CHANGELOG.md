@@ -19,6 +19,18 @@ All notable changes to this project are documented here. The format follows
   - `mc replicate diff` (`/replication/diff`), the MRF backlog (`/replication/mrf`) and `?replication-check` credential validation;
   - failed replications wait in the MRF queue, saved at shutdown (MinIO's `mrf/<node>.bin`) and re-checked after restart; per-target bandwidth limits;
   - SSE-C objects replicate as stored (single-part and multipart), over TLS; `tests/integration/replication.sh` covers every MinIO/Buckets pairing.
+- Site replication (Phase 8), wire compatible with MinIO, so MinIO and Buckets sites can share a group:
+  - `mc admin replicate add|info|status|edit|rm|resync` and the peer API (`/site-replication/peer/join`, `bucket-ops`, `iam-item`, `bucket-meta`, `idp-settings`, `edit`, `remove`, `state/edit`, `metainfo`), with the state in `.minio.sys/config/site-replication/state.json` and the shared `site-replicator-0` service account, as MinIO keeps them;
+  - joining validates the sites as MinIO does (deployment IDs, existing members, one site with data, matching LDAP/OpenID settings) and then syncs buckets, bucket metadata, policies, users, groups, service accounts and policy mappings to the new sites;
+  - hooks push local changes to every peer: bucket creation (versioned, with `site-repl-<deployment>` replication rules and targets between every pair) and deletion (kept as MinIO's `.minio.sys/buckets/.deleted/<bucket>` marker until the sites agree), bucket policy, tags, object lock, encryption, versioning and quota, IAM users, groups, policies, mappings (built-in and LDAP), service accounts and STS credentials;
+  - STS session tokens are signed with the site replicator's secret while replication is on (MinIO's getTokenSigningKey), so temporary credentials from any site work on all of them;
+  - a periodic heal (on the cluster leader; `BUCKETS_SITE_REPLICATION_HEAL_INTERVAL`, default 30s) compares every site's `metainfo` and pushes the newest version of what differs: buckets, bucket metadata, replication rules, policies, users, groups and mappings;
+  - versioning cannot be suspended, replication rules edited by non-root users, or remote targets added, while a site is in a group, as with MinIO;
+  - `DeleteBucket` honours `X-Minio-Force-Delete`;
+  - `tests/integration/siterepl.sh` runs mixed three-site groups set up from a MinIO site and from a Buckets site (changes from every site, a site catching up after downtime, `replicate status` from each), and a MinIO→Buckets handover (a Buckets site joins a MinIO group, is resynced, and the MinIO sites leave).
+
+### Fixed
+- Resync of replication targets without a reset time no longer overflows computing the reset boundary.
 
 ## [0.7.0] - 2026-09-29
 

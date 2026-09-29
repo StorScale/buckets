@@ -298,6 +298,8 @@ static buckets_tls_client *repl_tls(buckets_repl *r) {
   return t;
 }
 
+buckets_tls_client *buckets_repl_tls(buckets_repl *r) { return repl_tls(r); }
+
 buckets_s3c *buckets_repl_client_for(buckets_repl *r, const buckets_bucket_target *t) {
   char app[512];
   snprintf(app, sizeof(app), "minio-replication-target/DEVELOPMENT.GOGET %s", t->arn);
@@ -1998,8 +2000,8 @@ static bool resync_target(const buckets_object_info *oi, const buckets_bucket_ta
   snprintf(key, sizeof(key), "%s-%s", BUCKETS_META_REPL_RESET, t->arn);
   const char *rs = sys_str(oi, key);
   if (!rs) rs = meta_fold(oi, "X-Minio-Replication-Reset-Status"); /* older releases */
-  int64_t before = t->reset_before_sec * 1000000000LL + t->reset_before_nsec;
   bool has_before = t->reset_before_sec != BUCKETS_GO_ZERO_SEC;
+  int64_t before = has_before ? t->reset_before_sec * 1000000000LL + t->reset_before_nsec : 0;
   if (!rs) {
     if (*t->reset_id && has_before && oi->mod_time_ns < before) return true;
     return !tgt_status || !*tgt_status;

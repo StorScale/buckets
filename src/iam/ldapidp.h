@@ -2,6 +2,8 @@
 #ifndef BUCKETS_IAM_LDAPIDP_H
 #define BUCKETS_IAM_LDAPIDP_H
 
+#include "core/buf.h"
+
 #include "config/config.h"
 #include "net/ldap.h"
 
@@ -72,5 +74,10 @@ bool buckets_ldapidp_user_groups(buckets_ldapidp *p, const char *username, const
 
 /* Frees a vector of strings. */
 void buckets_ldap_strv_free(char **v, size_t n);
+
+/* madmin.LDAPSettings (site replication checks that peers agree): the user
+ * and group search bases as configured (";"-joined) and the filters. */
+void buckets_ldapidp_settings(const buckets_ldapidp *p, buckets_buf *user_base, const char **user_filter,
+                              buckets_buf *group_base, const char **group_filter);
 
 #endif

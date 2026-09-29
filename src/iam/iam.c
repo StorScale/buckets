@@ -204,10 +204,37 @@ const char *buckets_iam_condition_user(const buckets_iam_ident *id) {
 
 /* getClaimsFromTokenWithSecret: verify with secret, else the root secret;
  * then decode the base64 sessionPolicy claim. */
+/* The site replication token key (getTokenSigningKey), or "". */
+static pthread_mutex_t g_token_key_mu = PTHREAD_MUTEX_INITIALIZER;
+static char g_token_key[128];
+
+void buckets_iam_set_token_key(const char *key) {
+  pthread_mutex_lock(&g_token_key_mu);
+  snprintf(g_token_key, sizeof(g_token_key), "%s", key ? key : "");
+  pthread_mutex_unlock(&g_token_key_mu);
+}
+
+static void token_key(char out[128]) {
+  pthread_mutex_lock(&g_token_key_mu);
+  memcpy(out, g_token_key, 128);
+  pthread_mutex_unlock(&g_token_key_mu);
+}
+
+/* The key STS tokens are signed with: the site replication key, else root's. */
+static const char *sts_key(const char *root_secret, char buf[128]) {
+  token_key(buf);
+  return *buf ? buf : root_secret;
+}
+
 static bool ident_load_claims(buckets_iam_ident *id, const char *secret, const char *root_secret) {
   long long now = (long long)time(NULL);
   yyjson_doc *c = buckets_jwt_verify(id->session_token, secret, now);
   if (!c && strcmp(secret, root_secret) != 0) c = buckets_jwt_verify(id->session_token, root_secret, now);
+  if (!c) { /* extractJWTClaims: the site replication key as well */
+    char k[128];
+    token_key(k);
+    if (*k && strcmp(k, secret) != 0 && strcmp(k, root_secret) != 0) c = buckets_jwt_verify(id->session_token, k, now);
+  }
   if (!c) return false;
   const char *sp = yyjson_get_str(yyjson_obj_get(yyjson_doc_get_root(c), "sessionPolicy"));
   if (sp) {
@@ -2250,6 +2277,9 @@ void buckets_iam_list_derived(buckets_iam *iam, const char *parent, buckets_iam_
 
 /* ---- STS ------------------------------------------------------------------------------------ */
 
+static buckets_iam_err store_temp(buckets_iam *iam, buckets_iam_ident *id, const char *parent, const char *policy,
+                                  buckets_iam_ident **out);
+
 buckets_iam_err buckets_iam_set_temp_user(buckets_iam *iam, const char *access_key, const char *secret_key,
                                           const char *parent, const char *const *groups, size_t ngroups,
                                           buckets_iam_time expiration, const char *claims_json,
@@ -2272,13 +2302,54 @@ buckets_iam_err buckets_iam_set_temp_user(buckets_iam *iam, const char *access_k
   yyjson_doc *cd = yyjson_read(claims_json, strlen(claims_json), 0);
   yyjson_mut_doc *claims = cd ? yyjson_doc_mut_copy(cd, NULL) : NULL;
   yyjson_doc_free(cd);
+  char kb[128];
   bool ok = claims && yyjson_mut_is_obj(yyjson_mut_doc_get_root(claims)) &&
-            sign_token(id, claims, iam->root->secret_key, iam->root->secret_key);
+            sign_token(id, claims, sts_key(iam->root->secret_key, kb), iam->root->secret_key);
   yyjson_mut_doc_free(claims);
   if (!ok || buckets_iam_ident_is_expired(id)) {
     buckets_iam_ident_release(id);
     return BUCKETS_IAM_ERR_INVALID_ARGUMENT;
   }
+  return store_temp(iam, id, parent, policy, out);
+}
+
+buckets_iam_err buckets_iam_set_temp_user_token(buckets_iam *iam, const char *access_key, const char *secret_key,
+                                                const char *session_token, const char *parent,
+                                                const char *const *groups, size_t ngroups, const char *policy) {
+  if (need_ready(iam)) return BUCKETS_IAM_ERR_NOT_INITIALIZED;
+  if (!access_key || !*access_key || !parent || !*parent || !session_token || !*session_token) {
+    return BUCKETS_IAM_ERR_INVALID_ARGUMENT;
+  }
+  buckets_iam_ident *id = ident_new();
+  id->type = BUCKETS_IAM_STS;
+  id->access_key = buckets_xstrdup(access_key);
+  id->secret_key = buckets_xstrdup(secret_key ? secret_key : "");
+  id->session_token = buckets_xstrdup(session_token);
+  id->parent = buckets_xstrdup(parent);
+  id->groups = strv_dup(groups, ngroups);
+  id->ngroups = ngroups;
+  set_status(id, "on");
+  id->updated = now_time();
+  char kb[128];
+  if (!ident_load_claims(id, sts_key(iam->root->secret_key, kb), iam->root->secret_key)) {
+    buckets_iam_ident_release(id);
+    return BUCKETS_IAM_ERR_INVALID_ARGUMENT;
+  }
+  yyjson_val *exp = yyjson_obj_get(yyjson_doc_get_root(id->claims), "exp");
+  long long e = yyjson_is_num(exp) ? (long long)yyjson_get_num(exp)
+                : yyjson_is_str(exp) ? atoll(yyjson_get_str(exp)) : 0;
+  id->expiration = (buckets_iam_time){e, 0};
+  if (e <= 0 || buckets_iam_ident_is_expired(id)) {
+    buckets_iam_ident_release(id);
+    return BUCKETS_IAM_ERR_INVALID_ARGUMENT;
+  }
+  return store_temp(iam, id, parent, policy, NULL);
+}
+
+/* Saves a new temporary credential (and its parent's mapping to policy). */
+static buckets_iam_err store_temp(buckets_iam *iam, buckets_iam_ident *id, const char *parent, const char *policy,
+                                  buckets_iam_ident **out) {
+  const char *access_key = id->access_key;
   pthread_mutex_lock(&iam->write_mu);
   buckets_iam_err e = BUCKETS_IAM_OK;
   if (policy && *policy) {
@@ -2733,7 +2804,8 @@ buckets_iam_err buckets_iam_set_groups(buckets_iam *iam, const char *access_key,
   memcpy(id->status, cur->status, sizeof(id->status));
   id->expiration = cur->expiration;
   id->updated = now_time();
-  const char *key = cur->type == BUCKETS_IAM_STS ? iam->root->secret_key : cur->secret_key;
+  char kb[128];
+  const char *key = cur->type == BUCKETS_IAM_STS ? sts_key(iam->root->secret_key, kb) : cur->secret_key;
   if (!ident_load_claims(id, key, iam->root->secret_key)) {
     e = BUCKETS_IAM_ERR_INVALID_ARGUMENT;
     goto out;

@@ -438,3 +438,22 @@ buckets_oidc_status buckets_openid_validate(buckets_openid *o, const char *role_
   *claims = m;
   return BUCKETS_OIDC_OK;
 }
+
+size_t buckets_openid_settings(const buckets_openid *o, buckets_openid_setting **out) {
+  *out = o && o->n ? buckets_xcalloc(o->n, sizeof(**out)) : NULL;
+  if (!o) return 0;
+  for (size_t i = 0; i < o->n; i++) {
+    const provider *p = &o->p[i];
+    buckets_openid_setting *s = &(*out)[i];
+    s->arn = p->arn;
+    s->claim_provider = strcmp(p->arn, DUMMY_ARN) == 0;
+    s->claim_userinfo = p->claim_userinfo;
+    s->role_policy = p->role_policy ? p->role_policy : "";
+    s->client_id = p->client_id ? p->client_id : "";
+    uint8_t h[SHA256_DIGEST_LENGTH];
+    const char *sec = p->client_secret ? p->client_secret : "";
+    SHA256((const unsigned char *)sec, strlen(sec), h);
+    buckets_base64url_raw_encode(h, sizeof(h), s->hashed_secret);
+  }
+  return o->n;
+}

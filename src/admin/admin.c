@@ -3,6 +3,7 @@
  * canned policies, policy mappings and service accounts.
  * Replaces MinIO's cmd/admin-handlers-users.go. */
 #include "admin/admin.h"
+#include "siterepl/siterepl.h"
 #include "notify/event.h"
 #include "core/timefmt.h"
 #include "logger/console.h"
@@ -276,9 +277,13 @@ static void h_add_user(s3_ctx *c) {
   const char *sk = yyjson_get_str(yyjson_obj_get(root, "secretKey"));
   const char *status = yyjson_get_str(yyjson_obj_get(root, "status"));
   buckets_iam_err e = buckets_iam_add_user(iam, ak, sk ? sk : "", status ? status : "");
+  if (e) {
+    iam_error(c, e, NULL);
+  } else {
+    c->resp->status = 200;
+    buckets_sr_iam_user(c->s->sr, ak, false, sk, status);
+  }
   yyjson_doc_free(req);
-  if (e) iam_error(c, e, NULL);
-  else c->resp->status = 200;
 }
 
 static void h_remove_user(s3_ctx *c) {
@@ -293,8 +298,12 @@ static void h_remove_user(s3_ctx *c) {
     return;
   }
   buckets_iam_err e = buckets_iam_delete_user(iam, ak);
-  if (e) iam_error(c, e, NULL);
-  else c->resp->status = 200;
+  if (e) {
+    iam_error(c, e, NULL);
+    return;
+  }
+  c->resp->status = 200;
+  buckets_sr_iam_user(c->s->sr, ak, true, NULL, NULL);
 }
 
 static void h_list_users(s3_ctx *c) {
@@ -348,8 +357,12 @@ static void h_set_user_status(s3_ctx *c) {
     return;
   }
   buckets_iam_err e = buckets_iam_set_user_status(c->s->iam, ak, strcmp(status, "enabled") == 0);
-  if (e) iam_error(c, e, NULL);
-  else c->resp->status = 200;
+  if (e) {
+    iam_error(c, e, NULL);
+    return;
+  }
+  c->resp->status = 200;
+  buckets_sr_iam_user(c->s->sr, ak, false, NULL, status);
 }
 
 /* ---- groups ----------------------------------------------------------------------------- */
@@ -393,8 +406,13 @@ static void h_update_group_members(s3_ctx *c) {
     }
     e = buckets_iam_group_add_members(iam, group, members, m);
   }
-  if (e) iam_error(c, e, NULL);
-  else c->resp->status = 200;
+  if (e) {
+    iam_error(c, e, NULL);
+  } else {
+    c->resp->status = 200;
+    const char *gs = yyjson_get_str(yyjson_obj_get(root, "groupStatus"));
+    buckets_sr_iam_group(c->s->sr, group, members, m, gs, is_remove);
+  }
 out:
   free(members);
   yyjson_doc_free(req);
@@ -444,8 +462,12 @@ static void h_set_group_status(s3_ctx *c) {
   if (strcmp(status, "enabled") == 0) e = buckets_iam_group_set_status(c->s->iam, qget(c, "group"), true);
   else if (strcmp(status, "disabled") == 0) e = buckets_iam_group_set_status(c->s->iam, qget(c, "group"), false);
   else e = BUCKETS_IAM_ERR_INVALID_ARGUMENT;
-  if (e) iam_error(c, e, NULL);
-  else c->resp->status = 200;
+  if (e) {
+    iam_error(c, e, NULL);
+    return;
+  }
+  c->resp->status = 200;
+  buckets_sr_iam_group(c->s->sr, qget(c, "group"), NULL, 0, status, false);
 }
 
 /* ---- canned policies --------------------------------------------------------------------- */
@@ -553,9 +575,14 @@ static void h_add_policy(s3_ctx *c) {
     return;
   }
   buckets_iam_err e = buckets_iam_set_policy(c->s->iam, name, c->doc.data, c->doc.len, err, sizeof(err));
-  if (e == BUCKETS_IAM_ERR_MALFORMED_POLICY) custom_error(c, 400, "XMinioMalformedIAMPolicy", err);
-  else if (e) iam_error(c, e, NULL);
-  else c->resp->status = 200;
+  if (e == BUCKETS_IAM_ERR_MALFORMED_POLICY) {
+    custom_error(c, 400, "XMinioMalformedIAMPolicy", err);
+  } else if (e) {
+    iam_error(c, e, NULL);
+  } else {
+    c->resp->status = 200;
+    buckets_sr_iam_policy(c->s->sr, name, c->doc.data);
+  }
 }
 
 static void h_remove_policy(s3_ctx *c) {
@@ -567,6 +594,7 @@ static void h_remove_policy(s3_ctx *c) {
     iam_error(c, e, NULL);
   } else {
     c->resp->status = 200;
+    buckets_sr_iam_policy(c->s->sr, qget(c, "name"), NULL);
   }
 }
 
@@ -619,14 +647,22 @@ static void h_set_user_or_group_policy(s3_ctx *c) {
       return;
     }
     buckets_iam_err e = buckets_iam_policy_set(iam, res.norm_dn, is_group, BUCKETS_IAM_STS, policy);
+    if (e) {
+      iam_error(c, e, NULL);
+    } else {
+      c->resp->status = 200;
+      buckets_sr_iam_mapping(c->s->sr, res.norm_dn, 1, is_group, policy);
+    }
     buckets_ldap_dnres_free(&res);
-    if (e) iam_error(c, e, NULL);
-    else c->resp->status = 200;
     return;
   }
   buckets_iam_err e = buckets_iam_policy_set(iam, entity, is_group, BUCKETS_IAM_REG, policy);
-  if (e) iam_error(c, e, NULL);
-  else c->resp->status = 200;
+  if (e) {
+    iam_error(c, e, NULL);
+    return;
+  }
+  c->resp->status = 200;
+  buckets_sr_iam_mapping(c->s->sr, entity, 0, is_group, policy);
 }
 
 static void add_csv_array(yyjson_mut_doc *d, yyjson_mut_val *o, const char *key, const char *csv) {
@@ -657,7 +693,7 @@ static void attach_detach(s3_ctx *c, bool attach, bool ldap) {
   }
   yyjson_doc *req = NULL;
   const char **policies = NULL;
-  char *changed = NULL, *dn = NULL;
+  char *changed = NULL, *dn = NULL, *effective = NULL;
   buckets_ldap_dnres res = {0};
   if (c->req->body_len > MAX_ECONFIG_JSON) {
     custom_error(c, 400, "XMinioAdminConfigTooLarge",
@@ -713,7 +749,7 @@ static void attach_detach(s3_ctx *c, bool attach, bool ldap) {
     /* Backward compatibility: detach from a non-normalized DN too. */
     if (!attach && strcmp(raw, dn) != 0)
       buckets_iam_policy_update_sts(iam, raw, has_group, false, policies, k, NULL, NULL);
-    e = buckets_iam_policy_update_sts(iam, dn, has_group, attach, policies, k, &changed, NULL);
+    e = buckets_iam_policy_update_sts(iam, dn, has_group, attach, policies, k, &changed, &effective);
   } else {
     if (has_user) {
       buckets_iam_ident *cur = buckets_iam_get_ident(iam, user);
@@ -726,7 +762,7 @@ static void attach_detach(s3_ctx *c, bool attach, bool ldap) {
       e = buckets_iam_group_describe(iam, group, &gd);
       if (!e) buckets_iam_group_desc_free(&gd);
     }
-    if (!e) e = buckets_iam_policy_update(iam, has_user ? user : group, has_group, attach, policies, k, &changed, NULL);
+    if (!e) e = buckets_iam_policy_update(iam, has_user ? user : group, has_group, attach, policies, k, &changed, &effective);
   }
   if (e) {
     iam_error(c, e, NULL);
@@ -736,6 +772,8 @@ static void attach_detach(s3_ctx *c, bool attach, bool ldap) {
   yyjson_mut_val *out = yyjson_mut_obj(d);
   yyjson_mut_doc_set_root(d, out);
   add_csv_array(d, out, attach ? "policiesAttached" : "policiesDetached", changed);
+  buckets_sr_iam_mapping(c->s->sr, ldap ? dn : has_user ? user : group, ldap ? 1 : 0, has_group,
+                         effective ? effective : "");
   struct timespec ts;
   clock_gettime(CLOCK_REALTIME, &ts);
   add_time(d, out, "updatedAt", (buckets_iam_time){ts.tv_sec, ts.tv_nsec});
@@ -743,6 +781,7 @@ static void attach_detach(s3_ctx *c, bool attach, bool ldap) {
   yyjson_mut_doc_free(d);
 out:
   free(changed);
+  free(effective);
   free(dn);
   free(policies);
   buckets_ldap_dnres_free(&res);
@@ -808,6 +847,10 @@ static void add_svc(s3_ctx *c, bool ldap) {
   if ((ak && has_space_be(ak)) || (ak && *ak && (!sk || !*sk)) || (sk && *sk && (!ak || !*ak)) ||
       (name && strlen(name) > 32) || (desc && strlen(desc) > 256)) {
     buckets_admin_error(c, BUCKETS_ERR_ADMIN_RESOURCE_INVALID_ARGUMENT);
+    goto out;
+  }
+  if (ak && strcmp(ak, BUCKETS_SR_SVC_ACCOUNT) == 0) { /* reserved for site replication */
+    iam_error(c, BUCKETS_IAM_ERR_NOT_ALLOWED, NULL);
     goto out;
   }
   target_user = buckets_xstrdup(target && *target ? target : requestor(c));
@@ -968,6 +1011,7 @@ static void add_svc(s3_ctx *c, bool ldap) {
   add_time(d, cr, "expiration", svc->expiration);
   write_json(c, d, true);
   yyjson_mut_doc_free(d);
+  buckets_sr_iam_svc_create(c->s->sr, svc->access_key);
   buckets_iam_ident_release(svc);
 out:
   free(target_user);
@@ -1042,9 +1086,14 @@ static void h_update_svc(s3_ctx *c) {
   };
   char err[512] = "";
   buckets_iam_err e = buckets_iam_update_svc(iam, ak, &u, err, sizeof(err));
-  if (e == BUCKETS_IAM_ERR_MALFORMED_POLICY) custom_error(c, 400, "XMinioMalformedIAMPolicy", err);
-  else if (e) iam_error(c, e, NULL);
-  else c->resp->status = 204;
+  if (e == BUCKETS_IAM_ERR_MALFORMED_POLICY) {
+    custom_error(c, 400, "XMinioMalformedIAMPolicy", err);
+  } else if (e) {
+    iam_error(c, e, NULL);
+  } else {
+    c->resp->status = 204;
+    buckets_sr_iam_svc_update(c->s->sr, ak, nsk, nstatus, nname, ndesc, policy_json, has_exp, exp_t.sec);
+  }
 out:
   free(policy_json);
   yyjson_doc_free(req);
@@ -1186,6 +1235,10 @@ static void h_delete_svc(s3_ctx *c) {
     buckets_admin_error(c, BUCKETS_ERR_ADMIN_INVALID_ARGUMENT);
     return;
   }
+  if (strcmp(ak, BUCKETS_SR_SVC_ACCOUNT) == 0 && buckets_sr_enabled(c->s->sr)) {
+    buckets_admin_error(c, BUCKETS_ERR_INVALID_ARGUMENT);
+    return;
+  }
   buckets_iam *iam = c->s->iam;
   buckets_iam_ident *svc = buckets_iam_get_ident(iam, ak);
   if (!svc || !buckets_iam_ident_is_svc(svc)) {
@@ -1200,8 +1253,12 @@ static void h_delete_svc(s3_ctx *c) {
     return;
   }
   buckets_iam_err e = buckets_iam_delete_svc(iam, ak);
-  if (e) iam_error(c, e, NULL);
-  else c->resp->status = 204;
+  if (e) {
+    iam_error(c, e, NULL);
+    return;
+  }
+  c->resp->status = 204;
+  buckets_sr_iam_svc_delete(c->s->sr, ak);
 }
 
 /* ---- access keys, temporary accounts and policy entities ----------------------------------- */
@@ -2229,6 +2286,21 @@ static const route k_routes[] = {
     {"DELETE", "/remove-remote-target", buckets_admin_remove_remote_target, "RemoveRemoteTarget"},
     {"POST", "/replication/diff", buckets_admin_replication_diff, "ReplicationDiff"},
     {"GET", "/replication/mrf", buckets_admin_replication_mrf, "ReplicationMRF"},
+    {"PUT", "/site-replication/add", buckets_admin_sr_add, "SiteReplicationAdd"},
+    {"PUT", "/site-replication/remove", buckets_admin_sr_remove, "SiteReplicationRemove"},
+    {"GET", "/site-replication/info", buckets_admin_sr_info, "SiteReplicationInfo"},
+    {"GET", "/site-replication/metainfo", buckets_admin_sr_metainfo, "SiteReplicationMetaInfo"},
+    {"GET", "/site-replication/status", buckets_admin_sr_status, "SiteReplicationStatus"},
+    {"PUT", "/site-replication/peer/join", buckets_admin_sr_peer_join, "SRPeerJoin"},
+    {"PUT", "/site-replication/peer/bucket-ops", buckets_admin_sr_peer_bucket_ops, "SRPeerBucketOps"},
+    {"PUT", "/site-replication/peer/iam-item", buckets_admin_sr_peer_iam_item, "SRPeerReplicateIAMItem"},
+    {"PUT", "/site-replication/peer/bucket-meta", buckets_admin_sr_peer_bucket_meta, "SRPeerReplicateBucketItem"},
+    {"GET", "/site-replication/peer/idp-settings", buckets_admin_sr_peer_idp_settings, "SRPeerGetIDPSettings"},
+    {"PUT", "/site-replication/edit", buckets_admin_sr_edit, "SiteReplicationEdit"},
+    {"PUT", "/site-replication/peer/edit", buckets_admin_sr_peer_edit, "SRPeerEdit"},
+    {"PUT", "/site-replication/peer/remove", buckets_admin_sr_peer_remove, "SRPeerRemove"},
+    {"PUT", "/site-replication/resync/op", buckets_admin_sr_resync_op, "SiteReplicationResyncOp"},
+    {"PUT", "/site-replication/state/edit", buckets_admin_sr_state_edit, "SRStateEdit"},
     {"POST", "/kms/status", buckets_admin_kms_status_v3, "KMSStatus"},
     {"POST", "/kms/key/create", buckets_admin_kms_create_key_v3, "KMSCreateKey"},
     {"GET", "/kms/key/status", buckets_admin_kms_key_status_v3, "KMSKeyStatus"},

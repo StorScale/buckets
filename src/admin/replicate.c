@@ -11,6 +11,7 @@
 #include "crypto/madmin.h"
 #include "notify/event.h"
 #include "s3/replicate.h"
+#include "siterepl/siterepl.h"
 
 static const char *bucket_param(s3_ctx *c, bool check) {
   const char *b = buckets_query_get(&c->q, "bucket");
@@ -141,6 +142,11 @@ void buckets_admin_set_remote_target(s3_ctx *c) {
     buckets_admin_error(c, BUCKETS_ERR_BUCKET_REMOTE_IDENTICAL_TO_SOURCE);
     return;
   }
+  if (buckets_sr_enabled(c->s->sr) && !update) {
+    buckets_bucket_target_free(&t);
+    buckets_admin_error(c, BUCKETS_ERR_REMOTE_TARGET_DENY_ADD_ERROR);
+    return;
+  }
   free(t.source_bucket);
   t.source_bucket = buckets_xstrdup(bucket);
   buckets_bucket_state *st = buckets_metasys_get(c->s->meta, bucket);
@@ -194,7 +200,7 @@ void buckets_admin_set_remote_target(s3_ctx *c) {
     free(nt.f);           \
     nt.f = buckets_xstrdup(t.f); \
   } while (0)
-    if (OP("creds")) {
+    if (OP("creds") && !buckets_sr_enabled(c->s->sr)) { /* the site replicator's credentials stay */
       SWAPS(access_key);
       SWAPS(secret_key);
       SWAPS(session_token);

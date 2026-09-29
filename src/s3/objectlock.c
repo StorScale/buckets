@@ -14,6 +14,7 @@
 #include "s3/internal.h"
 #include "s3/replicate.h"
 #include "s3/xml.h"
+#include "siterepl/siterepl.h"
 
 static int64_t now_ns(void) {
   struct timespec ts;
@@ -441,8 +442,12 @@ void buckets_s3_put_bucket_object_lock(s3_ctx *c) {
   buckets_lock_config_xml(&cfg, &x);
   bool ok = buckets_metasys_update(c->s->meta, c->bucket, BUCKETS_BCFG_OBJECT_LOCK, x.data, x.len);
   buckets_buf_free(&x);
-  if (!ok) buckets_s3_write_error(c, BUCKETS_ERR_INTERNAL_ERROR);
-  else c->resp->status = 200;
+  if (!ok) {
+    buckets_s3_write_error(c, BUCKETS_ERR_INTERNAL_ERROR);
+    return;
+  }
+  c->resp->status = 200;
+  buckets_sr_bucket_meta_hook(c->s->sr, c->bucket, "object-lock-config");
 }
 
 void buckets_s3_get_bucket_object_lock(s3_ctx *c) {

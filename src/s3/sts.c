@@ -17,6 +17,7 @@
 #include "crypto/hex.h"
 #include "crypto/sha256.h"
 #include "crypto/base64.h"
+#include "siterepl/siterepl.h"
 #include "s3/internal.h"
 #include "s3/sigv2.h"
 #include "s3/xml.h"
@@ -198,6 +199,8 @@ static buckets_iam_ident *issue(s3_ctx *c, const char *parent, char *const *grou
               err == BUCKETS_IAM_ERR_INVALID_ARGUMENT ? "token expired or has no expiry" : buckets_iam_strerror(err));
     return NULL;
   }
+  /* site replication: other sites accept the credential too (not root's) */
+  if (strcmp(parent, buckets_iam_root_access_key(c->s->iam)) != 0) buckets_sr_iam_sts(c->s->sr, cred->access_key, policy);
   return cred;
 }
 

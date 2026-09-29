@@ -177,14 +177,14 @@ Source: `cmd/admin-router.go`
 | ⬜ | `ReplicationMRFHandler` |  |
 | ✅ | `RestoreConfigHistoryKVHandler` |  |
 | ✅ | `RevokeTokens` |  |
-| ⬜ | `SRPeerBucketOps` |  |
-| ⬜ | `SRPeerEdit` |  |
-| ⬜ | `SRPeerGetIDPSettings` |  |
-| ⬜ | `SRPeerJoin` |  |
-| ⬜ | `SRPeerRemove` |  |
-| ⬜ | `SRPeerReplicateBucketItem` |  |
-| ⬜ | `SRPeerReplicateIAMItem` |  |
-| ⬜ | `SRStateEdit` |  |
+| ✅ | `SRPeerBucketOps` | Phase 8 |
+| ✅ | `SRPeerEdit` | Phase 8 |
+| ✅ | `SRPeerGetIDPSettings` | Phase 8 |
+| ✅ | `SRPeerJoin` | Phase 8 |
+| ✅ | `SRPeerRemove` | Phase 8 |
+| ✅ | `SRPeerReplicateBucketItem` | Phase 8 |
+| ✅ | `SRPeerReplicateIAMItem` | Phase 8 |
+| ✅ | `SRStateEdit` | Phase 8 |
 | 🟡 | `ServerInfoHandler` | usage figures wait for the scanner |
 | ⬜ | `ServerUpdateHandler` |  |
 | ⬜ | `ServerUpdateV2Handler` |  |
@@ -197,15 +197,15 @@ Source: `cmd/admin-router.go`
 | ⬜ | `SetRemoteTargetHandler` |  |
 | ✅ | `SetUserStatus` |  |
 | ⬜ | `SitePerfHandler` |  |
-| ⬜ | `SiteReplicationAdd` |  |
+| ✅ | `SiteReplicationAdd` | Phase 8 |
 | ⬜ | `SiteReplicationDevNull` |  |
-| ⬜ | `SiteReplicationEdit` |  |
-| ⬜ | `SiteReplicationInfo` |  |
-| ⬜ | `SiteReplicationMetaInfo` |  |
+| ✅ | `SiteReplicationEdit` | Phase 8 |
+| ✅ | `SiteReplicationInfo` | Phase 8 |
+| ✅ | `SiteReplicationMetaInfo` | Phase 8 |
 | ⬜ | `SiteReplicationNetPerf` |  |
-| ⬜ | `SiteReplicationRemove` |  |
-| ⬜ | `SiteReplicationResyncOp` |  |
-| ⬜ | `SiteReplicationStatus` |  |
+| ✅ | `SiteReplicationRemove` | Phase 8 |
+| ✅ | `SiteReplicationResyncOp` | Phase 8 |
+| ✅ | `SiteReplicationStatus` | Phase 8 |
 | ⬜ | `StartBatchJob` |  |
 | ⬜ | `StartDecommission` |  |
 | ⬜ | `StartProfilingHandler` |  |

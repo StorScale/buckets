@@ -135,9 +135,11 @@ The S3 core runs on one drive, many drives, several pools, or a cluster of nodes
 
 Phase 8's gate includes replication between MinIO (RELEASE.2025-10-15) and Buckets, run with a local MinIO binary:
 
-1. Bucket replication MinIO → Buckets and Buckets → MinIO: active-active, deletes and delete markers, existing-object replication, resync, and SSE-C objects.
-2. Three-site replication mixing MinIO and Buckets sites: users, policies and bucket settings created on any site appear on all of them.
-3. Handing a MinIO site's work over to a Buckets site (migration).
+1. ✅ Bucket replication MinIO → Buckets and Buckets → MinIO: active-active, deletes and delete markers, existing-object replication, resync, and SSE-C objects (`tests/integration/replication.sh`).
+2. ✅ Three-site replication mixing MinIO and Buckets sites: users, policies and bucket settings created on any site appear on all of them (`tests/integration/siterepl.sh`, groups set up from either kind of site).
+3. ✅ Handing a MinIO site's work over to a Buckets site (migration): a Buckets site joins a MinIO group, is resynced, and the MinIO sites leave (`siterepl.sh`).
+
+Site replication (`src/siterepl/`) speaks MinIO's admin protocol between sites, so a group can mix both. Each site keeps `config/site-replication/state.json`; hooks in the S3 and admin handlers push changes to peers as they happen, and the cluster leader's heal routine (every 30s) compares the sites' `metainfo` reports and repairs what a site missed while it was away. Deleted buckets leave a `.minio.sys/buckets/.deleted/<bucket>` marker until every site agrees, as MinIO does. ILM expiry-rule replication (`--replicate-ilm-expiry`) is accepted but its rules are not yet compared or healed; that comes with tiering and lifecycle transitions.
 
 | Phase | Deliverable | Exit gate |
 |---|---|---|

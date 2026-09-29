@@ -790,3 +790,17 @@ fail:
   buckets_ldapidp_release(p);
   return NULL;
 }
+
+void buckets_ldapidp_settings(const buckets_ldapidp *p, buckets_buf *user_base, const char **user_filter,
+                              buckets_buf *group_base, const char **group_filter) {
+  for (size_t i = 0; i < p->nuser_bases; i++) {
+    if (i) buckets_buf_append_c(user_base, ";");
+    buckets_buf_append_c(user_base, p->user_bases[i].original);
+  }
+  for (size_t i = 0; i < p->ngroup_bases; i++) {
+    if (i) buckets_buf_append_c(group_base, ";");
+    buckets_buf_append_c(group_base, p->group_bases[i].original);
+  }
+  *user_filter = p->user_filter ? p->user_filter : "";
+  *group_filter = p->group_filter ? p->group_filter : "";
+}

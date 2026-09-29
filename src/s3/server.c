@@ -45,6 +45,7 @@
 #include "s3/sigv4.h"
 #include "s3/internal.h"
 #include "s3/replicate.h"
+#include "siterepl/siterepl.h"
 #include "s3/sigv2.h"
 #include "s3/xml.h"
 
@@ -85,6 +86,10 @@ void buckets_s3_peer_iam(void *server, const char *kind, const char *name) {
   }
   if (strcmp(kind, "config") == 0) {
     if (s->config) buckets_config_sys_reload(s->config);
+    return;
+  }
+  if (strcmp(kind, "site-replication") == 0) {
+    buckets_sr_reload(s->sr);
     return;
   }
   buckets_iam_on_notify(s->iam, kind, name);
@@ -740,6 +745,8 @@ void buckets_s3_server_set_layer(buckets_s3_server *s, buckets_objlayer *layer) 
   s->repl = buckets_repl_new(s);
   s->layer = layer; /* atomic store, after host_id and meta */
   buckets_repl_resync_resume(s->repl);
+  s->sr = buckets_sr_new(s);
+  buckets_sr_start(s->sr); /* loads its state once IAM is up */
   s->iam_thread_started = pthread_create(&s->iam_thread, NULL, iam_start_main, s) == 0;
   s->metrics_thread_started = pthread_create(&s->metrics_thread, NULL, metrics_main, s) == 0;
 }
@@ -757,6 +764,7 @@ void buckets_s3_server_stop(buckets_s3_server *s) {
   s->ldap_thread_started = false;
   if (s->metrics_thread_started) pthread_join(s->metrics_thread, NULL);
   s->metrics_thread_started = false;
+  buckets_sr_stop(s->sr);
   buckets_repl_stop(s->repl);
   buckets_iam_stop_refresh(s->iam);
 }
@@ -1148,6 +1156,11 @@ static void create_bucket(s3_ctx *c) {
       if (!buckets_bucket_meta_save(c->s->layer, &bm)) buckets_log_warn("could not save metadata for bucket %s", c->bucket);
       buckets_bucket_meta_free(&bm);
       buckets_metasys_changed(c->s->meta, c->bucket);
+      if (buckets_sr_enabled(c->s->sr)) {
+        char err[4096];
+        if (!buckets_sr_make_bucket_hook(c->s->sr, c->bucket, lock_enabled, false, err, sizeof(err)))
+          buckets_log_warn("site replication: %s", err);
+      }
       buckets_http_resp_headerf(c->resp, "Location", "/%s", c->bucket);
       c->resp->status = 200;
       buckets_s3_send_event(c, BUCKETS_EV_BUCKET_CREATED, c->bucket, "", NULL, NULL);
@@ -1163,7 +1176,14 @@ static void create_bucket(s3_ctx *c) {
 }
 
 static void delete_bucket(s3_ctx *c) {
-  buckets_obj_err err = buckets_obj_delete_bucket(c->s->layer, c->bucket);
+  buckets_str fh = buckets_http_header_get(c->req, "X-Minio-Force-Delete");
+  bool force = fh.p && buckets_str_ieq_c(fh, "true");
+  bool sr = buckets_sr_enabled(c->s->sr);
+  buckets_obj_err err = force ? buckets_obj_delete_bucket_force(c->s->layer, c->bucket)
+                              : buckets_obj_delete_bucket(c->s->layer, c->bucket);
+  /* site replication holds on to the deleted bucket's state until the sites sync */
+  if (sr && (err == BUCKETS_OBJ_OK || err == BUCKETS_OBJ_ERR_NO_SUCH_BUCKET))
+    buckets_obj_mark_bucket_deleted(c->s->layer, c->bucket);
   if (err == BUCKETS_OBJ_ERR_BUCKET_NOT_EMPTY) {
     bool enabled, suspended;
     buckets_s3_versioning(c, NULL, &enabled, &suspended);
@@ -1179,6 +1199,10 @@ static void delete_bucket(s3_ctx *c) {
   }
   buckets_bucket_meta_delete(c->s->layer, c->bucket);
   buckets_metasys_changed(c->s->meta, c->bucket);
+  if (sr) {
+    char e[4096];
+    if (!buckets_sr_delete_bucket_hook(c->s->sr, c->bucket, force, e, sizeof(e))) buckets_log_warn("site replication: %s", e);
+  }
   c->resp->status = 204;
   buckets_s3_send_event(c, BUCKETS_EV_BUCKET_REMOVED, c->bucket, "", NULL, NULL);
 }
@@ -1227,6 +1251,12 @@ static void put_bucket_versioning(s3_ctx *c) {
     }
     return;
   }
+  if (buckets_sr_enabled(c->s->sr) && v.status != BUCKETS_VERSIONING_ENABLED) {
+    buckets_versioning_free(&v);
+    buckets_s3_write_custom_error(c, 400, "InvalidBucketState",
+                                  "Cluster replication is enabled on this site, versioning cannot be suspended on bucket.");
+    return;
+  }
   buckets_bucket_state *st = buckets_metasys_get(c->s->meta, c->bucket);
   bool locked = st->lock_enabled;
   buckets_bucket_state_release(st);
@@ -1241,8 +1271,12 @@ static void put_bucket_versioning(s3_ctx *c) {
   buckets_versioning_free(&v);
   bool ok = buckets_metasys_update(c->s->meta, c->bucket, BUCKETS_BCFG_VERSIONING, x.data, x.len);
   buckets_buf_free(&x);
-  if (!ok) buckets_s3_write_error(c, BUCKETS_ERR_INTERNAL_ERROR);
-  else c->resp->status = 200;
+  if (!ok) {
+    buckets_s3_write_error(c, BUCKETS_ERR_INTERNAL_ERROR);
+    return;
+  }
+  c->resp->status = 200;
+  buckets_sr_bucket_meta_hook(c->s->sr, c->bucket, "version-config");
 }
 
 /* ---- bucket policy (?policy) -------------------------------------------------- */
@@ -1280,6 +1314,7 @@ static void put_bucket_policy(s3_ctx *c) {
     return;
   }
   c->resp->status = 204;
+  buckets_sr_bucket_meta_hook(c->s->sr, c->bucket, "policy");
 }
 
 static void get_bucket_policy(s3_ctx *c) {
@@ -1301,6 +1336,7 @@ static void delete_bucket_policy(s3_ctx *c) {
     return;
   }
   c->resp->status = 204;
+  buckets_sr_bucket_meta_hook(c->s->sr, c->bucket, "policy");
 }
 
 /* PutBucketEncryptionHandler / GetBucketEncryptionHandler */
@@ -1342,8 +1378,12 @@ static void put_bucket_encryption(s3_ctx *c) {
   buckets_sse_config_xml(&cfg, &x);
   bool ok = buckets_metasys_update(c->s->meta, c->bucket, BUCKETS_BCFG_ENCRYPTION, x.data, x.len);
   buckets_buf_free(&x);
-  if (!ok) buckets_s3_write_error(c, BUCKETS_ERR_INTERNAL_ERROR);
-  else c->resp->status = 200;
+  if (!ok) {
+    buckets_s3_write_error(c, BUCKETS_ERR_INTERNAL_ERROR);
+    return;
+  }
+  c->resp->status = 200;
+  buckets_sr_bucket_meta_hook(c->s->sr, c->bucket, "sse-config");
 }
 
 static void get_bucket_encryption(s3_ctx *c) {
@@ -1621,8 +1661,12 @@ static void route_bucket(s3_ctx *c) {
       return;
     }
     if (buckets_query_has(&c->q, "encryption")) {
-      if (!buckets_metasys_update(c->s->meta, c->bucket, BUCKETS_BCFG_ENCRYPTION, NULL, 0)) buckets_s3_write_error(c, BUCKETS_ERR_INTERNAL_ERROR);
-      else c->resp->status = 204;
+      if (!buckets_metasys_update(c->s->meta, c->bucket, BUCKETS_BCFG_ENCRYPTION, NULL, 0)) {
+        buckets_s3_write_error(c, BUCKETS_ERR_INTERNAL_ERROR);
+      } else {
+        c->resp->status = 204;
+        buckets_sr_bucket_meta_hook(c->s->sr, c->bucket, "sse-config");
+      }
       return;
     }
     if (buckets_query_has(&c->q, "replication")) {

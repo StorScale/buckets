@@ -732,3 +732,108 @@ buckets_obj_err buckets_obj_mpu_list_uploads(buckets_objlayer *L, const char *bu
   qsort(*uploads, *n, sizeof(**uploads), upload_cmp);
   return BUCKETS_OBJ_OK;
 }
+
+/* ---- forced bucket deletion and deleted-bucket markers ---------------------------------- */
+
+#define DELETED_BUCKETS ".minio.sys/buckets/.deleted"
+
+buckets_obj_err buckets_obj_delete_bucket_force(buckets_objlayer *L, const char *bucket) {
+  if (!bucket || !*bucket || strchr(bucket, '/') || strcmp(bucket, ".") == 0 || strcmp(bucket, "..") == 0 ||
+      bucket[0] == '.') {
+    return BUCKETS_OBJ_ERR_NO_SUCH_BUCKET;
+  }
+  buckets_obj_err st = buckets_obj_stat_bucket(L, bucket);
+  if (st) return st;
+  for (size_t p = L->npools; p-- > 0;) {
+    buckets_epool *P = L->pools[p];
+    for (size_t i = 0; i < P->nall; i++) {
+      buckets_drive *d = P->all[i];
+      if (!d) continue;
+      buckets_dir_list l;
+      if (buckets_drive_list_dir(d, bucket, "", &l) == BUCKETS_DRIVE_OK) {
+        for (size_t k = 0; k < l.n; k++) {
+          size_t len = strlen(l.names[k]);
+          if (len && l.names[k][len - 1] == '/') l.names[k][len - 1] = '\0';
+          buckets_drive_delete(d, bucket, l.names[k], true, false);
+        }
+        buckets_dir_list_free(&l);
+      }
+    }
+  }
+  return buckets_obj_delete_bucket(L, bucket);
+}
+
+void buckets_obj_mark_bucket_deleted(buckets_objlayer *L, const char *bucket) {
+  char vol[1024];
+  snprintf(vol, sizeof(vol), DELETED_BUCKETS "/%s", bucket);
+  for (size_t p = 0; p < L->npools; p++) {
+    buckets_epool *P = L->pools[p];
+    for (size_t i = 0; i < P->nall; i++) {
+      if (!P->all[i]) continue;
+      buckets_drive_make_vol(P->all[i], DELETED_BUCKETS);
+      /* a fresh directory, so its time is this deletion's */
+      buckets_drive_delete_vol(P->all[i], vol);
+      buckets_drive_make_vol(P->all[i], vol);
+    }
+  }
+}
+
+void buckets_obj_purge_bucket_deleted(buckets_objlayer *L, const char *bucket) {
+  char vol[1024];
+  snprintf(vol, sizeof(vol), DELETED_BUCKETS "/%s", bucket);
+  for (size_t p = 0; p < L->npools; p++) {
+    buckets_epool *P = L->pools[p];
+    for (size_t i = 0; i < P->nall; i++)
+      if (P->all[i]) buckets_drive_delete_vol(P->all[i], vol);
+  }
+}
+
+time_t buckets_obj_bucket_deleted_at(buckets_objlayer *L, const char *bucket) {
+  char vol[1024];
+  snprintf(vol, sizeof(vol), DELETED_BUCKETS "/%s", bucket);
+  buckets_epool *P = L->pools[0];
+  size_t found = 0;
+  time_t t = 0;
+  for (size_t i = 0; i < P->nall; i++) {
+    time_t c = 0;
+    if (P->all[i] && buckets_drive_stat_vol(P->all[i], vol, &c) == BUCKETS_DRIVE_OK) {
+      found++;
+      if (c > t) t = c;
+    }
+  }
+  return found && found >= (P->nall / 2 ? P->nall / 2 : 1) ? t : 0;
+}
+
+buckets_obj_err buckets_obj_list_deleted_buckets(buckets_objlayer *L, buckets_bucket_info **out, size_t *n) {
+  *out = NULL;
+  *n = 0;
+  buckets_epool *P = L->pools[0];
+  char **names = NULL;
+  size_t nn = 0;
+  for (size_t i = 0; i < P->nall; i++) {
+    buckets_dir_list l;
+    if (!P->all[i] || buckets_drive_list_dir(P->all[i], ".minio.sys", "buckets/.deleted", &l) != BUCKETS_DRIVE_OK)
+      continue;
+    for (size_t k = 0; k < l.n; k++) {
+      size_t len = strlen(l.names[k]);
+      if (len && l.names[k][len - 1] == '/') l.names[k][len - 1] = '\0';
+      bool dup = false;
+      for (size_t j = 0; j < nn && !dup; j++) dup = strcmp(names[j], l.names[k]) == 0;
+      if (dup || !*l.names[k]) continue;
+      names = buckets_xrealloc(names, (nn + 1) * sizeof(char *));
+      names[nn++] = buckets_xstrdup(l.names[k]);
+    }
+    buckets_dir_list_free(&l);
+  }
+  for (size_t j = 0; j < nn; j++) {
+    time_t t = buckets_obj_bucket_deleted_at(L, names[j]);
+    if (t) {
+      *out = buckets_xrealloc(*out, (*n + 1) * sizeof(**out));
+      (*out)[(*n)++] = (buckets_bucket_info){names[j], t};
+    } else {
+      free(names[j]);
+    }
+  }
+  free(names);
+  return BUCKETS_OBJ_OK;
+}
