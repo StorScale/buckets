@@ -92,7 +92,7 @@ static char *path_join3(const char *a, const char *b, const char *c) {
 }
 
 /* getClusterMetaInfo: madmin.ClusterRegistrationInfo, indented */
-static void cluster_info(buckets_s3_server *s, buckets_buf *out) {
+void buckets_admin_cluster_info_json(buckets_s3_server *s, buckets_buf *out) {
   const buckets_cluster_info *ci = s->cluster;
   uint64_t total = 0, used = 0;
   size_t ndrives = ci ? ci->neps : 0;
@@ -261,7 +261,7 @@ void buckets_admin_inspect_data(s3_ctx *c) {
   buckets_buf zip = BUCKETS_BUF_INIT, info = BUCKETS_BUF_INIT;
   buckets_zipw *z = buckets_zipw_new(&zip);
   time_t now = time(NULL);
-  cluster_info(s, &info);
+  buckets_admin_cluster_info_json(s, &info);
   if (!client_key.len) buckets_zipw_add(z, "cluster.info", info.data, info.len, now);
   buckets_buf input = BUCKETS_BUF_INIT;
   buckets_buf_appendf(&input, "Inspect path: %s/%s\nServer command line args:", volume, file);

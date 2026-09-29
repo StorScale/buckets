@@ -514,5 +514,38 @@ for base, root in SERVERS:
     res.append((body, c, h.get("content-type"), sorted(j), all(v > 0 for v in j.values())))
 compare("client perf (devnull, extra time)", *res)
 
+# ---- profiling ----------------------------------------------------------------------------------------
+
+def zip_names(body, base):
+    try:
+        z = zipfile.ZipFile(io.BytesIO(body))
+    except zipfile.BadZipFile:
+        return ("not a zip", body[:100])
+    node = base.split("//")[1]
+    return sorted((i.filename.replace(node, "<node>"), oct(i.external_attr >> 16)) for i in z.infolist())
+
+
+res = []
+for base, root in SERVERS:
+    node = base.split("//")[1]
+    out = []
+    c, h, b = admin(base, "POST", "/profiling/start?profilerType=cpu,mem,block,mutex,threads,goroutines,trace,bogus")
+    out.append((c, h.get("content-type"), json.loads(b.decode().replace(node, "<node>"))))
+    c, h, b = admin(base, "GET", "/profiling/download")
+    out.append((c, h.get("content-type"), zip_names(b, base)))
+    # nothing runs now: a zip with cluster.info, and the error after it
+    c, h, b = admin(base, "GET", "/profiling/download")
+    tail = b[b.rfind(b"PK\x05\x06") + 22:] if b"PK\x05\x06" in b else b
+    j = jbody(tail)
+    out.append((c, zip_names(b[:len(b) - len(tail)], base), j.get("Code") if isinstance(j, dict) else j))
+    c, h, b = admin(base, "POST", "/profile?profilerType=cpu,goroutines&duration=1s")
+    out.append((c, h.get("content-type"), zip_names(b, base)))
+    c, h, b = admin(base, "POST", "/profile?profilerType=cpu&duration=forever")
+    out.append(err_view(c, b))
+    c, h, b = admin(base, "POST", "/profiling/start")
+    out.append(err_view(c, b))
+    res.append(out)
+compare("profiling", *res)
+
 print(f"adminops: {Score.passed} passed, {Score.failed} failed")
 sys.exit(1 if Score.failed else 0)

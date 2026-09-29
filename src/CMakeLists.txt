@@ -11,6 +11,7 @@ add_library(buckets STATIC
   core/str.c
   core/buf.c
   core/zipwrite.c
+  core/prof.c
   core/log.c
   core/timefmt.c
   core/yaml.c
@@ -161,6 +162,7 @@ add_library(buckets STATIC
   admin/inspect.c
   admin/jobstream.c
   admin/perf.c
+  admin/profile.c
   admin/locks.c
   admin/netperf.c
   admin/config.c

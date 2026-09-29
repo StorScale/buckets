@@ -25,8 +25,15 @@ void buckets_admin_heal_shutdown(void);
 /* mc admin cluster bucket export|import (bucketmeta.c). */
 void buckets_admin_export_bucket_metadata(s3_ctx *c);
 void buckets_admin_import_bucket_metadata(s3_ctx *c);
-/* mc support inspect (inspect.c). */
+/* mc support inspect (inspect.c); getClusterMetaInfo's cluster.info. */
 void buckets_admin_inspect_data(s3_ctx *c);
+void buckets_admin_cluster_info_json(buckets_s3_server *s, buckets_buf *out);
+/* mc admin profile (profile.c); the peer side. */
+void buckets_admin_start_profiling(s3_ctx *c);
+void buckets_admin_download_profiling(s3_ctx *c);
+void buckets_admin_profile(s3_ctx *c);
+bool buckets_admin_profile_peer(buckets_s3_server *s, const char *op, const buckets_query *q,
+                                buckets_http_response *resp);
 /* mc admin top locks, mc admin unlock (locks.c; distributed setups only). */
 void buckets_admin_top_locks(s3_ctx *c);
 void buckets_admin_force_unlock(s3_ctx *c);

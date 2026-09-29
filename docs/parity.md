@@ -5,7 +5,7 @@ registers is listed; statuses live in the script's `STATUS` table.
 
 ✅ done · 🟡 partial · ⬜ not started · ➖ dropped on purpose
 
-**Overall:** 211 done, 5 partial, 4 not started, 2 dropped (222 handlers).
+**Overall:** 214 done, 5 partial, 1 not started, 2 dropped (222 handlers).
 
 ## S3 API (76/76)
 
@@ -90,7 +90,7 @@ Source: `cmd/api-router.go`
 | ✅ | `SelectObjectContentHandler` | CSV, JSON and Parquet (MINIO_API_SELECT_PARQUET); every input compression |
 | ✅ | `ValidateBucketReplicationCredsHandler` |  |
 
-## Admin API (madmin / mc admin) (114/123)
+## Admin API (madmin / mc admin) (117/123)
 
 Source: `cmd/admin-router.go`
 
@@ -118,7 +118,7 @@ Source: `cmd/admin-router.go`
 | ✅ | `DeleteIdentityProviderCfg` |  |
 | ✅ | `DeleteServiceAccount` |  |
 | ✅ | `DescribeBatchJob` |  |
-| ⬜ | `DownloadProfilingHandler` |  |
+| ✅ | `DownloadProfilingHandler` |  |
 | ✅ | `DriveSpeedtestHandler` | dperf's O_DIRECT test on Linux, "not implemented" elsewhere, as dperf |
 | ✅ | `EditTierHandler` |  |
 | ✅ | `ExportBucketMetadataHandler` |  |
@@ -164,7 +164,7 @@ Source: `cmd/admin-router.go`
 | 🟡 | `MetricsHandler` | batch jobs; the scanner, disk, OS, net, memory, CPU, RPC and runtime types are not reported yet |
 | ✅ | `NetperfHandler` |  |
 | ✅ | `ObjectSpeedTestHandler` | PUTs and GETs through the object layer rather than a loopback S3 client |
-| ⬜ | `ProfileHandler` |  |
+| ✅ | `ProfileHandler` |  |
 | ✅ | `PutBucketQuotaConfigHandler` |  |
 | ✅ | `RebalanceStart` |  |
 | ✅ | `RebalanceStatus` |  |
@@ -208,7 +208,7 @@ Source: `cmd/admin-router.go`
 | ✅ | `SiteReplicationStatus` |  |
 | ✅ | `StartBatchJob` |  |
 | ✅ | `StartDecommission` |  |
-| ⬜ | `StartProfilingHandler` |  |
+| ✅ | `StartProfilingHandler` | pprof CPU samples (SIGPROF), heap in use, threads; block/mutex empty; trace empty |
 | ✅ | `StatusPool` |  |
 | ✅ | `StorageInfoHandler` |  |
 | ✅ | `TemporaryAccountInfo` |  |

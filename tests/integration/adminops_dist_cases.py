@@ -222,5 +222,18 @@ for side, root in SIDES:
     res.append(port_view(side, (c, h.get("content-type"), j)))
 compare("netperf across nodes", *res)
 
+# ---- profiling across nodes ------------------------------------------------------------------------------
+import io  # noqa: E402
+import zipfile  # noqa: E402
+
+res = []
+for side, root in SIDES:
+    c, h, b = admin(node(side, 1), "POST", "/profiling/start?profilerType=cpu,goroutines")
+    started = port_view(side, sorted((x["nodeName"], x["success"]) for x in json.loads(b)))
+    c2, h2, b2 = admin(node(side, 1), "GET", "/profiling/download")
+    names = sorted(port_view(side, [i.filename for i in zipfile.ZipFile(io.BytesIO(b2)).infolist()]))
+    res.append((c, started, c2, names))
+compare("profiling across nodes", *res)
+
 print(f"adminops-dist: {Score.passed} passed, {Score.failed} failed")
 sys.exit(1 if Score.failed else 0)

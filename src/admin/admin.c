@@ -2239,6 +2239,9 @@ static const route k_routes[] = {
     {"POST", "/background-heal/status", h_bg_heal_status, "BackgroundHealStatus"},
     {"POST", "/heal/**", buckets_admin_heal, "Heal"},
     {"GET", "/top/locks", buckets_admin_top_locks, "TopLocks"},
+    {"POST", "/profiling/start", buckets_admin_start_profiling, "StartProfiling"},
+    {"GET", "/profiling/download", buckets_admin_download_profiling, "DownloadProfiling"},
+    {"POST", "/profile", buckets_admin_profile, "Profile"},
     {"POST", "/speedtest", buckets_admin_object_speedtest, "ObjectSpeedTest"},
     {"POST", "/speedtest/object", buckets_admin_object_speedtest, "ObjectSpeedTest"},
     {"POST", "/speedtest/drive", buckets_admin_drive_speedtest, "DriveSpeedtest"},
@@ -2393,6 +2396,8 @@ void buckets_admin_peer(buckets_s3_server *s, const buckets_http_request *req, c
     resp->status = status;
   } else if (op && buckets_admin_perf_peer(s, op, q, resp)) {
     /* a speedtest */
+  } else if (op && buckets_admin_profile_peer(s, op, q, resp)) {
+    /* profiling */
   } else if (op && buckets_admin_netperf_peer(s, op, req, q, resp)) {
     /* netperf, or its devnull */
   } else {
