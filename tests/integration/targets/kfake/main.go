@@ -9,7 +9,11 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
+	"fmt"
+	"io"
 	"flag"
 	"log"
 	"os"
@@ -17,6 +21,9 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/klauspost/compress/s2"
+	"github.com/klauspost/compress/zstd"
+	"github.com/pierrec/lz4/v4"
 	"github.com/twmb/franz-go/pkg/kfake"
 	"github.com/twmb/franz-go/pkg/kmsg"
 )
@@ -77,8 +84,10 @@ func main() {
 						}
 						recs := []any{t.Topic, p.Partition, batch.Magic, batch.Attributes, batch.LastOffsetDelta,
 							batch.ProducerID, batch.ProducerEpoch, batch.FirstSequence, batch.PartitionLeaderEpoch, batch.NumRecords}
-						if batch.Attributes&7 == 0 {
-							raw := batch.Records
+						raw, derr := decompress(batch.Attributes&7, batch.Records)
+						if derr != nil {
+							recs = append(recs, "decompress: "+derr.Error())
+						} else {
 							for i := int32(0); i < batch.NumRecords; i++ {
 								var r kmsg.Record
 								if err := r.ReadFrom(raw); err != nil {
@@ -114,4 +123,30 @@ func varintLen(v int64) int {
 		n++
 	}
 	return n
+}
+
+// decompress: the records of a batch compressed with codec (1 gzip, 2 snappy, 3 lz4, 4 zstd).
+func decompress(codec int16, b []byte) ([]byte, error) {
+	switch codec {
+	case 0:
+		return b, nil
+	case 1:
+		r, err := gzip.NewReader(bytes.NewReader(b))
+		if err != nil {
+			return nil, err
+		}
+		return io.ReadAll(r)
+	case 2:
+		return s2.Decode(nil, b)
+	case 3:
+		return io.ReadAll(lz4.NewReader(bytes.NewReader(b)))
+	case 4:
+		d, err := zstd.NewReader(nil)
+		if err != nil {
+			return nil, err
+		}
+		defer d.Close()
+		return d.DecodeAll(b, nil)
+	}
+	return nil, fmt.Errorf("unknown codec %d", codec)
 }

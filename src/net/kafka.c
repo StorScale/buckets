@@ -54,7 +54,6 @@ struct buckets_kafka {
   size_t ntopics;
   int32_t corr;
   time_t last_refresh;
-  bool warned_codec;
 };
 
 /* ---- versions ------------------------------------------------------------------------ */
@@ -619,6 +618,77 @@ static void snappy_encode(const uint8_t *src, size_t n, buckets_buf *out) {
 #undef EMIT_LITERAL
 }
 
+/* XXH32 (for the LZ4 frame descriptor's checksum). */
+static uint32_t xxh32(const uint8_t *p, size_t n, uint32_t seed) {
+  const uint32_t P1 = 2654435761u, P2 = 2246822519u, P3 = 3266489917u, P4 = 668265263u, P5 = 374761393u;
+#define ROTL(x, r) (((x) << (r)) | ((x) >> (32 - (r))))
+  size_t i = 0;
+  uint32_t h;
+  if (n >= 16) {
+    uint32_t v1 = seed + P1 + P2, v2 = seed + P2, v3 = seed, v4 = seed - P1;
+    for (; i + 16 <= n; i += 16) {
+      uint32_t w[4];
+      memcpy(w, p + i, 16);
+      v1 = ROTL(v1 + w[0] * P2, 13) * P1;
+      v2 = ROTL(v2 + w[1] * P2, 13) * P1;
+      v3 = ROTL(v3 + w[2] * P2, 13) * P1;
+      v4 = ROTL(v4 + w[3] * P2, 13) * P1;
+    }
+    h = ROTL(v1, 1) + ROTL(v2, 7) + ROTL(v3, 12) + ROTL(v4, 18);
+  } else {
+    h = seed + P5;
+  }
+  h += (uint32_t)n;
+  for (; i + 4 <= n; i += 4) {
+    uint32_t w;
+    memcpy(&w, p + i, 4);
+    h = ROTL(h + w * P3, 17) * P4;
+  }
+  for (; i < n; i++) h = ROTL(h + p[i] * P5, 11) * P1;
+  h ^= h >> 15;
+  h *= P2;
+  h ^= h >> 13;
+  h *= P3;
+  h ^= h >> 16;
+#undef ROTL
+  return h;
+}
+
+/* An LZ4 frame of stored (uncompressed) 64KB blocks: valid for every reader. */
+static void lz4_frame(const uint8_t *src, size_t n, buckets_buf *out) {
+  buckets_buf_reset(out);
+  const uint8_t head[4] = {0x04, 0x22, 0x4d, 0x18}, desc[2] = {0x60, 0x40}; /* v1, independent blocks; 64KB */
+  buckets_buf_append(out, head, 4);
+  buckets_buf_append(out, desc, 2);
+  e8(out, (uint8_t)(xxh32(desc, 2, 0) >> 8));
+  for (size_t off = 0; off < n; off += 65536) {
+    size_t k = BUCKETS_MIN((size_t)65536, n - off);
+    uint32_t sz = (uint32_t)k | 0x80000000u; /* stored */
+    uint8_t le[4] = {(uint8_t)sz, (uint8_t)(sz >> 8), (uint8_t)(sz >> 16), (uint8_t)(sz >> 24)};
+    buckets_buf_append(out, le, 4);
+    buckets_buf_append(out, src + off, k);
+  }
+  const uint8_t end[4] = {0, 0, 0, 0};
+  buckets_buf_append(out, end, 4);
+}
+
+/* A zstd frame of raw blocks (single segment, the content size given). */
+static void zstd_frame(const uint8_t *src, size_t n, buckets_buf *out) {
+  buckets_buf_reset(out);
+  const uint8_t magic[4] = {0x28, 0xb5, 0x2f, 0xfd};
+  buckets_buf_append(out, magic, 4);
+  e8(out, 0xe0); /* an 8-byte content size, single segment */
+  for (int i = 0; i < 8; i++) e8(out, (uint8_t)((uint64_t)n >> (8 * i)));
+  size_t off = 0;
+  do {
+    size_t k = BUCKETS_MIN((size_t)131072, n - off);
+    uint32_t h = (uint32_t)(k << 3) | (off + k >= n ? 1u : 0u); /* raw block; last */
+    e8(out, (uint8_t)h), e8(out, (uint8_t)(h >> 8)), e8(out, (uint8_t)(h >> 16));
+    buckets_buf_append(out, src + off, k);
+    off += k;
+  } while (off < n);
+}
+
 /* A record batch (magic 2) of msgs, as sarama's produceSet builds it. */
 static void record_batch(buckets_kafka *k, const buckets_kafka_msg *msgs, size_t n, buckets_buf *out) {
   struct timespec ts;
@@ -656,9 +726,12 @@ static void record_batch(buckets_kafka *k, const buckets_kafka_msg *msgs, size_t
   } else if (!strcasecmp(c, "snappy")) {
     snappy_encode((const uint8_t *)recs.data, recs.len, &packed);
     codec = 2;
-  } else if ((!strcasecmp(c, "lz4") || !strcasecmp(c, "zstd")) && !k->warned_codec) {
-    buckets_log_warn("kafka: %s compression is not supported; sending uncompressed", c);
-    k->warned_codec = true;
+  } else if (!strcasecmp(c, "lz4")) {
+    lz4_frame((const uint8_t *)recs.data, recs.len, &packed);
+    codec = 3;
+  } else if (!strcasecmp(c, "zstd")) {
+    zstd_frame((const uint8_t *)recs.data, recs.len, &packed);
+    codec = 4;
   }
   buckets_buf b = BUCKETS_BUF_INIT;
   e64(&b, 0);          /* first offset */
