@@ -20,6 +20,7 @@ spec:
   console:
     enabled: true
     replicas: 2
+    # s3URL: https://s3.example.com   # S3 as browsers reach it; enables share links
     # ingress:
     #   host: console.example.com
     #   ingressClassName: nginx

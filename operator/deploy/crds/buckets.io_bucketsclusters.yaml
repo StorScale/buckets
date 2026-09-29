@@ -139,6 +139,11 @@ spec:
                       type: string
                       enum: [ClusterIP, NodePort, LoadBalancer]
                       default: ClusterIP
+                    s3URL:
+                      type: string
+                      description: >-
+                        The S3 endpoint as browsers reach it (for example the S3 Ingress URL).
+                        Share links are signed for it; without it the console offers none.
                     resources:
                       type: object
                       x-kubernetes-preserve-unknown-fields: true

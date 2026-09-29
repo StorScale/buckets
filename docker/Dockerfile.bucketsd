@@ -1,9 +1,9 @@
 # syntax=docker/dockerfile:1
 # Build:  docker build -f docker/Dockerfile.bucketsd -t buckets/bucketsd .
 # Run:    docker run -p 9000:9000 -v /srv/data:/data buckets/bucketsd
-# HTTPS:  mount public.crt + private.key and add --certs-dir (runtime libssl3 is in distroless/cc)
+# HTTPS:  mount public.crt + private.key and add --certs-dir (runtime libssl3 (OpenSSL 3.5, which has Argon2) is in distroless/cc-debian13)
 
-FROM debian:bookworm-slim AS build
+FROM debian:trixie-slim AS build
 RUN apt-get update \
  && apt-get install -y --no-install-recommends build-essential cmake ninja-build git ca-certificates libssl-dev perl \
  && rm -rf /var/lib/apt/lists/*
@@ -14,7 +14,7 @@ RUN cmake -S . -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release \
  && ninja -C /build bucketsd \
  && strip /build/src/bucketsd
 
-FROM gcr.io/distroless/cc-debian12:nonroot
+FROM gcr.io/distroless/cc-debian13:nonroot
 COPY --from=build /build/src/bucketsd /usr/local/bin/bucketsd
 EXPOSE 9000
 VOLUME ["/data"]

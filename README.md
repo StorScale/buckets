@@ -87,7 +87,8 @@ Sign in at http://localhost:9090 with any Buckets credentials: the console excha
 | `tests/conformance/minio-go.sh` | minio-go's functional suite (MinIO mint's Go suite); needs Go |
 | `tests/integration/{erasure,heal,concurrency,pools,tls,cluster}.sh` | Drive loss and bitrot; healing; racing writers; pool expansion; HTTPS; a 4-node cluster losing and regaining nodes (`MINIO_BIN` adds MinIO interop) |
 | `tests/e2e-k8s/envtest.sh` | The operator against a real kube-apiserver and etcd (envtest binaries, downloaded on first use), running as its own ServiceAccount |
-| `tests/e2e-k8s/kind.sh` | Full end to end on kind: images, operator, a 4-server cluster, pod and PVC loss, pool expansion, image rollout (needs docker and kind) |
+| `tests/e2e-k8s/kind.sh` | Full end to end on kind: images, operator, a 4-server cluster, pod and PVC loss, pool expansion, image rollout, the console Deployment and its Playwright suite (needs docker and kind; see `tests/e2e-k8s/README.md`) |
+| `tests/e2e-k8s/multisite.sh` | Two Buckets clusters and a MinIO site on kind: Buckets↔MinIO bucket replication, three-site site replication, a forwarded multi-server decommission |
 | `console/web: npx playwright test` | The console end to end: starts bucketsd and consoled (or `CONSOLE_URL`) and drives the SPA in Chromium |
 | `scripts/ci.sh` | The full gate: release, ASan/UBSan and TSan builds, unit, smoke and interop tests |
 

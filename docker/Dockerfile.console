@@ -10,7 +10,7 @@ RUN npm ci --no-audit --no-fund
 COPY console/web/ ./
 RUN npm run build
 
-FROM debian:bookworm-slim AS build
+FROM debian:trixie-slim AS build
 RUN apt-get update \
  && apt-get install -y --no-install-recommends build-essential cmake ninja-build git ca-certificates libssl-dev perl \
  && rm -rf /var/lib/apt/lists/*
@@ -21,7 +21,7 @@ RUN cmake -S . -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release \
  && ninja -C /build consoled \
  && strip /build/src/consoled
 
-FROM gcr.io/distroless/cc-debian12:nonroot
+FROM gcr.io/distroless/cc-debian13:nonroot
 COPY --from=build /build/src/consoled /usr/local/bin/consoled
 COPY --from=web /web/dist /usr/share/buckets-console
 USER nonroot:nonroot

@@ -280,7 +280,7 @@ usage and lifecycle expiry, SSE-S3/KMS/C with the builtin KMS, S2 compression, I
 plugins, OPA), notifications (10 targets), audit, metrics v2/v3, bucket and site replication, ILM
 transitions and tiering (S3, MinIO, Azure, GCS), batch jobs (replicate, keyrotate, expire), pool
 decommission and rebalance, the operator
-and the console (their kind gates are still to be run).
+and the console, each run on kind (`tests/e2e-k8s/kind.sh`, `multisite.sh`).
 
 Open: KES/MinIO KMS backends, S3 Select, SFTP/FTP.
 

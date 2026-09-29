@@ -89,6 +89,12 @@ run tests/integration/tier.sh build-ci/src/bucketsd
 run tests/integration/batch.sh build-ci/src/bucketsd
 run tests/integration/decom.sh build-ci/src/bucketsd
 
+# kind end to end (needs docker, kind and kubectl; see tests/e2e-k8s/README.md)
+if [[ -n "${KIND_E2E:-}" ]]; then
+  run tests/e2e-k8s/kind.sh
+  run tests/e2e-k8s/multisite.sh
+fi
+
 if [[ "$(uname -s)" == Linux ]]; then
   build build-ci-tsan -DCMAKE_BUILD_TYPE=Debug -DBUCKETS_SANITIZE=thread
 fi

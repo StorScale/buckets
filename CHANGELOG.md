@@ -55,6 +55,15 @@ All notable changes to this project are documented here. The format follows
   - decommission and rebalance trace records and audit events;
   - `tests/integration/decom.sh`: decommissions by each server read back by the other, errors as MinIO answers them, cancel and restart, and rebalances between pools on disk images.
 
+- Kubernetes end to end on kind, run for the first time (kind 0.33, Kubernetes 1.37, in a Lima VM):
+  - `tests/e2e-k8s/kind.sh` (17 checks): a 4-server cluster through pod loss, PVC replacement and healing, pool expansion and an image rollout, then the console Deployment and its Playwright suite against the cluster;
+  - `tests/e2e-k8s/multisite.sh` (48 checks): two operator-run Buckets clusters and a MinIO site in separate namespaces, reached by Service DNS: active-active bucket replication between Buckets and MinIO, a three-site group (Buckets, MinIO, Buckets) with changes from every site, and a multi-server decommission started and followed through servers that forward it to the pool's owner;
+  - a shared `tests/e2e-k8s/lib.sh` and a client image (`tests/e2e-k8s/tools`, with curl, jq and optionally mc and MinIO), so tests reach clusters through their Services from inside the cluster instead of a port-forward that dies with its pod; `KIND_E2E=1 scripts/ci.sh` runs both.
+- `BucketsCluster` `spec.console.s3URL`: the S3 endpoint as browsers reach it, passed to the console as `BUCKETS_CONSOLE_S3_URL`, so an operator-run console offers share links.
+
+### Changed
+- The container images build on Debian trixie and run on distroless `cc-debian13`. Bookworm's OpenSSL 3.0 has no Argon2id, which the admin API's encrypted payloads (madmin) need.
+
 ### Fixed
 - Completing an SSE-S3 multipart upload compared part ETags using the wrong state (the completion hook's user data), so uploads with small parts, such as `mc pipe --enc-s3`, could fail with `InvalidPart`.
 - Objects whose drives' erasure indexes no longer follow their distribution (MinIO's metadata-only rewrites, such as its key rotation, renumber them) are read by the distribution, as MinIO reads them.
@@ -63,6 +72,7 @@ All notable changes to this project are documented here. The format follows
 - Peers' last-day tier statistics lost their update times when merged.
 - `GetBucketLifecycle`'s `X-Minio-LifecycleConfig-UpdatedAt` is in MinIO's `20060102T150405Z` form (mc failed to parse it when adding a second rule).
 - Resync of replication targets without a reset time no longer overflows computing the reset boundary.
+- libyaml builds with GCC 14, which makes implicit declarations errors (`strdup` under `-std=c17`), so the images build again.
 
 ## [0.7.0] - 2026-09-29
 

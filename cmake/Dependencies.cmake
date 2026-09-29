@@ -54,6 +54,6 @@ add_library(buckets_libyaml STATIC ${BUCKETS_LIBYAML_SOURCES})
 target_include_directories(buckets_libyaml SYSTEM PUBLIC ${libyaml_SOURCE_DIR}/include)
 target_include_directories(buckets_libyaml PRIVATE ${libyaml_SOURCE_DIR}/src)
 target_compile_definitions(buckets_libyaml PUBLIC YAML_DECLARE_STATIC
-  PRIVATE YAML_VERSION_MAJOR=0 YAML_VERSION_MINOR=2 YAML_VERSION_PATCH=5 YAML_VERSION_STRING="0.2.5")
+  PRIVATE _GNU_SOURCE YAML_VERSION_MAJOR=0 YAML_VERSION_MINOR=2 YAML_VERSION_PATCH=5 YAML_VERSION_STRING="0.2.5")
 set_target_properties(buckets_libyaml PROPERTIES POSITION_INDEPENDENT_CODE ON C_CLANG_TIDY "")
 target_compile_options(buckets_libyaml PRIVATE -w)

@@ -67,6 +67,7 @@ bool bc_parse(yyjson_val *obj, const char *cluster_domain, bc_spec *out, char *e
   out->console.ingress_tls_secret = str_at(yyjson_obj_get(ing, "tlsSecret"), "name");
   out->console.annotations = yyjson_obj_get(ing, "annotations");
   out->console.resources = yyjson_obj_get(con, "resources");
+  out->console.s3_url = str_at(con, "s3URL");
 
   yyjson_val *pools = yyjson_obj_get(spec, "pools");
   size_t n = yyjson_arr_size(pools);
@@ -486,6 +487,7 @@ static bc_object console_deployment(const bc_spec *s) {
   env_secret(d, env, "BUCKETS_CONSOLE_PBKDF_SALT", name, "salt");
   if (s->console.ingress_tls_secret) env_value(d, env, "BUCKETS_CONSOLE_SECURE_COOKIE", "on");
   if (s->tls_secret) env_value(d, env, "BUCKETS_CONSOLE_CA_DIR", "/etc/buckets/ca");
+  if (s->console.s3_url) env_value(d, env, "BUCKETS_CONSOLE_S3_URL", s->console.s3_url);
   for (int i = 0; i < 2; i++) {
     mval *p = ADD_OBJ(d, c, i ? "livenessProbe" : "readinessProbe");
     mval *get = ADD_OBJ(d, p, "httpGet");

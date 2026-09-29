@@ -106,7 +106,7 @@ The S3 core runs on one drive, many drives, several pools, or a cluster of nodes
 - **HTTPS:** SNI and hot certificate reload.
 - **Health:** `/minio/health/cluster` reports per-set write and read quorum.
 
-**Phase 3 (Kubernetes), code complete; the kind gate is pending (see below):**
+**Phase 3 (Kubernetes):**
 - **CRDs:**
   - `BucketsCluster` has pools, image, credentials, parity, TLS, env and service type, with a status subresource and printer columns.
   - `BucketsUser`, `BucketsPolicy` and `Bucket` are defined, and reconcile once the admin API exists.
@@ -120,7 +120,7 @@ The S3 core runs on one drive, many drives, several pools, or a cluster of nodes
 - **Leader election:** on a Lease.
 - **Server awareness:** bucketsd reads `BUCKETS_VOLUMES`, takes credentials from `*_FILE` secrets, and recognizes its own endpoints by pod hostname before cluster DNS publishes it.
 - **Verified here:** manifest unit tests, and the operator against a real kube-apiserver and etcd (`tests/e2e-k8s/envtest.sh`, 34 checks, running as its own ServiceAccount under the shipped RBAC).
-- **Pending:** the Phase 3 gate (`kubectl apply` gives a healthy cluster; pod and PVC loss heal) is `tests/e2e-k8s/kind.sh`. It needs a container runtime, which the development machine does not have, so it has not run yet.
+- **On kind:** `tests/e2e-k8s/kind.sh` (17 checks) applies a 4-server `BucketsCluster` and keeps serving S3 through its Service while a pod is killed, a drive's PVC is replaced and healed, a pool is added and the image is rolled; then the console comes up as its own Deployment and its Playwright suite passes against the cluster. The images build on Debian trixie, whose OpenSSL (3.5) has the Argon2id that madmin's encrypted admin payloads need.
 
 **Known interim choices, each replaced in a later phase:**
 - One event-loop thread moves bytes for all connections (per node). Handlers and stream pulls run on a worker pool, and each fans out per-drive work to the drive I/O pool. Request bodies are still spooled synchronously on the loop thread. Multiple reactors, then io_uring, follow.
@@ -138,6 +138,7 @@ Phase 8's gate includes replication between MinIO (RELEASE.2025-10-15) and Bucke
 1. ✅ Bucket replication MinIO → Buckets and Buckets → MinIO: active-active, deletes and delete markers, existing-object replication, resync, and SSE-C objects (`tests/integration/replication.sh`).
 2. ✅ Three-site replication mixing MinIO and Buckets sites: users, policies and bucket settings created on any site appear on all of them (`tests/integration/siterepl.sh`, groups set up from either kind of site).
 3. ✅ Handing a MinIO site's work over to a Buckets site (migration): a Buckets site joins a MinIO group, is resynced, and the MinIO sites leave (`siterepl.sh`).
+4. ✅ The same on Kubernetes (`tests/e2e-k8s/multisite.sh`, 48 checks): two operator-run Buckets clusters and a MinIO site, each in its own namespace and reaching the others by Service DNS. It covers active-active bucket replication between Buckets and MinIO (multipart, metadata, delete markers, resync of existing objects), a three-site group (Buckets, MinIO, Buckets) set up from a Buckets site with changes made on every site, and a decommission on a multi-server site that is started and followed through servers that forward to the pool's owner.
 
 Site replication (`src/siterepl/`) speaks MinIO's admin protocol between sites, so a group can mix both. Each site keeps `config/site-replication/state.json`; hooks in the S3 and admin handlers push changes to peers as they happen, and the cluster leader's heal routine (every 30s) compares the sites' `metainfo` reports and repairs what a site missed while it was away. Deleted buckets leave a `.minio.sys/buckets/.deleted/<bucket>` marker until every site agrees, as MinIO does. ILM expiry-rule replication (`--replicate-ilm-expiry`) is accepted but its rules are not yet compared or healed.
 
@@ -152,11 +153,11 @@ Decommission and rebalance (`src/s3/datamove.c`) move versions between pools bel
 | 0 ✅ | Repo, build, core runtime, HTTP server, CI script, Dockerfile | `ctest` green, fuzz corpora replay, ASan/UBSan clean |
 | 1 ✅ | Single-node S3 core: streaming bodies, xl.meta v2, objects, multipart, listing, checksums, SigV2, POST policy | minio-go functional suite at 0 failures; MinIO interop both ways |
 | 2 ✅ | Erasure coding, multi-drive, distributed (RPC, dsync, pools, heal, scanner, MRF), TLS | Drive and node loss with no data loss; reads MinIO-written drives |
-| 3 🚧 | Operator and CRDs, K8s-aware server, kind e2e | `kubectl apply` gives a healthy 4×4 cluster; pod and PVC loss heals |
+| 3 ✅ | Operator and CRDs, K8s-aware server, kind e2e | `kubectl apply` gives a healthy 4×4 cluster; pod and PVC loss heals |
 | 4 | IAM, STS, policy, LDAP, OIDC, plugins, admin API core | `mc admin user/policy/svcacct`; mint IAM |
 | 5 | Versioning, object lock, tagging, CORS, quota, lifecycle, SSE-S3/KMS/C, compression | Full mint pass; ceph s3-tests at or above the MinIO baseline |
-| 6 | Console (web + consoled) as its own Deployment | Playwright e2e on kind |
+| 6 ✅ | Console (web + consoled) as its own Deployment | Playwright e2e on kind |
 | 7 ✅ | Notifications (10 targets), audit, metrics v2/v3 | Target integration tests; zero metric-name diff against MinIO |
-| 8 🚧 | Bucket and site replication, tiering, batch jobs, decommission, rebalance | Two-cluster and three-site e2e; mixed MinIO/Buckets replication (see below) |
+| 8 ✅ | Bucket and site replication, tiering, batch jobs, decommission, rebalance | Two-cluster and three-site e2e; mixed MinIO/Buckets replication (see below) |
 | 9 | S3 Select, object lambda, SFTP/FTP, Veeam SOS, remaining admin | `docs/parity.md` at 100% |
 | 10 | Performance parity (warp), fuzz soak, Helm chart | warp within 10% of MinIO or better |

@@ -153,7 +153,7 @@ static const char *k_console =
     "{\"apiVersion\":\"buckets.io/v1alpha1\",\"kind\":\"BucketsCluster\","
     "\"metadata\":{\"name\":\"store\",\"namespace\":\"data\",\"uid\":\"u-1\",\"generation\":3},"
     "\"spec\":{\"tls\":{\"certSecret\":{\"name\":\"store-tls\"}},\"pools\":[{\"servers\":4,\"volumesPerServer\":1}],"
-    "\"console\":{\"enabled\":true,\"replicas\":2,\"image\":\"console:test\","
+    "\"console\":{\"enabled\":true,\"replicas\":2,\"image\":\"console:test\",\"s3URL\":\"https://s3.example.com\","
     "\"ingress\":{\"host\":\"console.example.com\",\"ingressClassName\":\"nginx\",\"tlsSecret\":{\"name\":\"web-tls\"}}}}}";
 
 static void test_console(void **state) {
@@ -188,7 +188,7 @@ static void test_console(void **state) {
   yyjson_mut_val *c = yyjson_mut_arr_get_first(AT(dep, "spec", "template", "spec", "containers"));
   assert_string_equal(yyjson_mut_get_str(yyjson_mut_obj_get(c, "image")), "console:test");
   yyjson_mut_val *env = yyjson_mut_obj_get(c, "env");
-  bool server = false, ca = false, secure = false, pass = false;
+  bool server = false, ca = false, secure = false, pass = false, s3 = false;
   size_t i, max;
   yyjson_mut_val *e;
   yyjson_mut_arr_foreach(env, i, max, e) {
@@ -197,10 +197,11 @@ static void test_console(void **state) {
     if (!strcmp(nm, "BUCKETS_CONSOLE_SERVER")) server = !strcmp(v, "https://store.data.svc.cluster.local:9000");
     if (!strcmp(nm, "BUCKETS_CONSOLE_CA_DIR")) ca = true;
     if (!strcmp(nm, "BUCKETS_CONSOLE_SECURE_COOKIE")) secure = true;
+    if (!strcmp(nm, "BUCKETS_CONSOLE_S3_URL")) s3 = !strcmp(v, "https://s3.example.com");
     if (!strcmp(nm, "BUCKETS_CONSOLE_PBKDF_PASSPHRASE"))
       pass = !strcmp(yyjson_mut_get_str(AT(e, "valueFrom", "secretKeyRef", "name")), "store-console");
   }
-  assert_true(server && ca && secure && pass);
+  assert_true(server && ca && secure && pass && s3);
   yyjson_mut_val *ing = yyjson_mut_doc_get_root(o[6].doc);
   assert_string_equal(yyjson_mut_get_str(AT(ing, "spec", "ingressClassName")), "nginx");
   assert_string_equal(yyjson_mut_get_str(yyjson_mut_obj_get(yyjson_mut_arr_get_first(AT(ing, "spec", "rules")), "host")), "console.example.com");

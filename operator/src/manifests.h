@@ -39,6 +39,7 @@ typedef struct {
     int replicas;
     const char *image, *service_type;
     const char *ingress_host, *ingress_class, *ingress_tls_secret; /* host NULL: no Ingress */
+    const char *s3_url; /* S3 as browsers reach it, for share links (NULL: none) */
     yyjson_val *resources, *annotations;
   } console;
 } bc_spec;
