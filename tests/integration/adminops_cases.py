@@ -614,5 +614,48 @@ for base, root in SERVERS:
     res.append(out)
 compare("server info (shape)", *res)
 
+# ---- the bucket filters of list-users and list-canned-policies ------------------------------------------
+if DEC:
+    pols = {
+        "onlya": {"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Action": ["s3:GetObject"],
+                                                           "Resource": ["arn:aws:s3:::filta/*"]}]},
+        "bucketa": {"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Action": ["s3:ListBucket"],
+                                                             "Resource": ["arn:aws:s3:::filta"]}]},
+        "starb": {"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Action": ["s3:*"],
+                                                           "Resource": ["arn:aws:s3:::filt*"]}]},
+    }
+    for a in ("m", "b"):
+        for name, doc in pols.items():
+            f = os.path.join(MC_CFG, name + ".json")
+            with open(f, "w") as fh:
+                json.dump(doc, fh)
+            mc("admin", "policy", "create", a, name, f)
+        for u in ("filtuser1", "filtuser2", "filtuser3", "filtuser4"):
+            mc("admin", "user", "add", a, u, u + "secret123")
+        mc("admin", "policy", "attach", a, "bucketa", "--user", "filtuser1")
+        mc("admin", "policy", "attach", a, "readwrite", "--user", "filtuser2")
+        mc("admin", "group", "add", a, "filtgrp", "filtuser3", "filtuser2")
+        mc("admin", "policy", "attach", a, "starb", "--group", "filtgrp")
+        mc("admin", "policy", "attach", a, "onlya", "--user", "filtuser3")
+        mc("admin", "user", "disable", a, "filtuser3")
+    for q in ("?bucket=filta", "?bucket=filtb", "?bucket=other", "?bucket="):
+        res = []
+        for base, root in SERVERS:
+            c, h, b = admin(base, "GET", "/list-users" + q)
+            if c == 200:
+                out = subprocess.run([DEC, "madmin", SK], input=b, capture_output=True).stdout
+                j = json.loads(out)
+                v = {k: v for k, v in j.items() if k.startswith("filt")}
+            else:
+                v = err_view(c, b)
+            res.append((c, v))
+        compare(f"list users {q}", *res)
+    for q in ("?bucket=filta", "?bucket=filtb", "?bucket=other", "?bucket="):
+        res = []
+        for base, root in SERVERS:
+            c, h, b = admin(base, "GET", "/list-canned-policies" + q)
+            res.append((c, sorted(json.loads(b)) if c == 200 else err_view(c, b)))
+        compare(f"list policies {q}", *res)
+
 print(f"adminops: {Score.passed} passed, {Score.failed} failed")
 sys.exit(1 if Score.failed else 0)

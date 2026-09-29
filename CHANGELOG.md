@@ -27,6 +27,7 @@ All notable changes to this project are documented here. The format follows
 - The network speedtests: client perf (`/speedtest/client/devnull` and its extra time), node netperf across a cluster (every node streams to every other's internode devnull; TX/RX per second), and site-replication perf between MinIO and Buckets sites (MinIO's unsigned `/site-replication/devnull` and `/netperf`, the latter answering in gob). Chunked request bodies to the devnull endpoints are streamed rather than spooled, on a worker pool of their own.
 - Profiling (`mc admin profile`, StartProfiling/DownloadProfiling/Profile) across the cluster with MinIO's profile types and zip layout: CPU profiles sampled with SIGPROF at 100 Hz and written in pprof's format (read by `go tool pprof`, symbolized against the binary), the heap in use, threads, and empty block/mutex profiles.
 - `mc support diag` (HealthInfo): madmin.HealthInfo streamed after each section as MinIO does -- every node's CPUs, partitions, network interface, OS, memory, process, system errors, services and system configuration (from /proc and /sys on Linux; MinIO's own errors elsewhere), the redacted server configuration, and the server info with drive metrics.
+- The bucket filter of `list-users` (ListBucketUsers) and `list-canned-policies` (ListBucketPolicies): policies whose resources match the bucket (Policy.MatchResource), and the users they reach.
 - `tests/integration/adminops.sh` (single node) and `adminops-dist.sh` (4 nodes) compare these admin APIs with MinIO.
 
 ### Changed

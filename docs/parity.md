@@ -5,7 +5,7 @@ registers is listed; statuses live in the script's `STATUS` table.
 
 ✅ done · 🟡 partial · ⬜ not started · ➖ dropped on purpose
 
-**Overall:** 216 done, 4 partial, 0 not started, 2 dropped (222 handlers).
+**Overall:** 218 done, 2 partial, 0 not started, 2 dropped (222 handlers).
 
 ## S3 API (76/76)
 
@@ -90,7 +90,7 @@ Source: `cmd/api-router.go`
 | ✅ | `SelectObjectContentHandler` | CSV, JSON and Parquet (MINIO_API_SELECT_PARQUET); every input compression |
 | ✅ | `ValidateBucketReplicationCredsHandler` |  |
 
-## Admin API (madmin / mc admin) (119/123)
+## Admin API (madmin / mc admin) (121/123)
 
 Source: `cmd/admin-router.go`
 
@@ -148,8 +148,8 @@ Source: `cmd/admin-router.go`
 | ✅ | `ListAccessKeysLDAPBulk` |  |
 | ✅ | `ListAccessKeysOpenIDBulk` |  |
 | ✅ | `ListBatchJobs` |  |
-| 🟡 | `ListBucketPolicies` | the bucket filter is ignored |
-| 🟡 | `ListBucketUsers` | the bucket filter is ignored |
+| ✅ | `ListBucketPolicies` |  |
+| ✅ | `ListBucketUsers` |  |
 | ✅ | `ListCannedPolicies` |  |
 | ✅ | `ListConfigHistoryKVHandler` |  |
 | ✅ | `ListGroups` |  |

@@ -56,6 +56,8 @@ bool buckets_bucket_policy_parse(const char *json, size_t len, const char *bucke
                                  size_t errlen);
 /* json.Marshal of a parsed bucket policy, as MinIO stores and exports it. */
 void buckets_bucket_policy_json(const buckets_policy *p, buckets_buf *out);
+/* Policy.MatchResource: some statement's resource matches the name. */
+bool buckets_policy_match_resource(const buckets_policy *p, const char *resource);
 bool buckets_bucket_policy_allowed(const buckets_policy *p, const buckets_policy_args *a);
 
 /* Merges several policies into one (MinIO's MergePolicies): the union of

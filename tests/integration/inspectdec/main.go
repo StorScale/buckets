@@ -5,6 +5,7 @@
 //
 //	inspectdec genkey KEYFILE     writes a private key, prints the public key (base64 PKCS #1)
 //	inspectdec [KEYFILE] < answer  prints the streams and the zip's entries as JSON
+//	inspectdec madmin SECRET < body decrypts a madmin-encrypted admin answer (madmin.DecryptData)
 package main
 
 import (
@@ -21,9 +22,37 @@ import (
 	"os"
 	"unicode/utf8"
 
+	"crypto/sha256"
+
 	"github.com/minio/madmin-go/v3/estream"
 	"github.com/secure-io/sio-go"
+	"golang.org/x/crypto/argon2"
+	"golang.org/x/crypto/pbkdf2"
 )
+
+// madminDecrypt is madmin.DecryptData (its package cannot be imported here).
+func madminDecrypt(password string, data []byte) ([]byte, error) {
+	if len(data) < 41 {
+		return nil, fmt.Errorf("short header")
+	}
+	salt, id, nonce := data[0:32], data[32], data[33:41]
+	var stream *sio.Stream
+	var err error
+	switch id {
+	case 0:
+		stream, err = sio.AES_256_GCM.Stream(argon2.IDKey([]byte(password), salt, 1, 64*1024, 4, 32))
+	case 1:
+		stream, err = sio.ChaCha20Poly1305.Stream(argon2.IDKey([]byte(password), salt, 1, 64*1024, 4, 32))
+	case 2:
+		stream, err = sio.AES_256_GCM.Stream(pbkdf2.Key([]byte(password), salt, 8192, 32, sha256.New))
+	default:
+		return nil, fmt.Errorf("invalid encryption algorithm ID")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return io.ReadAll(stream.DecryptReader(bytes.NewReader(data[41:]), nonce, nil))
+}
 
 type entry struct {
 	Name    string `json:"name"`
@@ -71,6 +100,16 @@ func main() {
 		k, _ := rsa.GenerateKey(rand.Reader, 2048)
 		os.WriteFile(os.Args[2], pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(k)}), 0o600)
 		fmt.Print(base64.StdEncoding.EncodeToString(x509.MarshalPKCS1PublicKey(&k.PublicKey)))
+		return
+	}
+	if len(os.Args) > 2 && os.Args[1] == "madmin" {
+		in, _ := io.ReadAll(os.Stdin)
+		out, err := madminDecrypt(os.Args[2], in)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Stdout.Write(out)
 		return
 	}
 	in, _ := io.ReadAll(os.Stdin)

@@ -306,17 +306,74 @@ static void h_remove_user(s3_ctx *c) {
   buckets_sr_iam_user(c->s->sr, ak, true, NULL, NULL);
 }
 
+/* filterPolicies: the named policies (comma-separated) whose resources
+ * match the bucket, comma-separated. */
+static char *policies_for_bucket(buckets_iam *iam, const char *csv, const char *bucket) {
+  buckets_buf out = BUCKETS_BUF_INIT;
+  char *copy = buckets_xstrdup(csv ? csv : "");
+  for (char *save = NULL, *name = strtok_r(copy, ",", &save); name; name = strtok_r(NULL, ",", &save)) {
+    while (*name == ' ') name++;
+    if (!*name) continue;
+    buckets_iam_policy_doc pd;
+    if (buckets_iam_get_policy(iam, name, &pd) != BUCKETS_IAM_OK) continue;
+    buckets_policy *p = NULL;
+    char err[256];
+    if (buckets_policy_parse(pd.json, strlen(pd.json), &p, err, sizeof(err)) && buckets_policy_match_resource(p, bucket)) {
+      if (out.len) buckets_buf_append_char(&out, ',');
+      buckets_buf_append_c(&out, name);
+    }
+    if (p) buckets_policy_free(p);
+    buckets_iam_policy_doc_free(&pd, 1);
+  }
+  free(copy);
+  buckets_buf_append_char(&out, '\0');
+  return out.data;
+}
+
 static void h_list_users(s3_ctx *c) {
   if (!admin_req1(c, "admin:ListUsers")) return;
+  const char *bucket = buckets_query_get(&c->q, "bucket");
+  if (bucket && !*bucket) { /* GetBucketUsers("") */
+    buckets_admin_error_msg(c, BUCKETS_ERR_ADMIN_INVALID_ARGUMENT, "Invalid arguments specified. (Invalid arguments specified)");
+    return;
+  }
   buckets_iam_user_info *users;
   size_t n;
   buckets_iam_list_users(c->s->iam, &users, &n);
-  const char *bucket = buckets_query_get(&c->q, "bucket");
   yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
   yyjson_mut_val *root = yyjson_mut_obj(d);
   yyjson_mut_doc_set_root(d, root);
   for (size_t i = 0; i < n; i++) {
-    (void)bucket; /* ListBucketUsers: filtering by bucket access lands with bucket policies */
+    if (bucket) {
+      /* ListBucketUsers: the user's policies (with its groups', when the
+       * user has a mapping of its own) that reach the bucket */
+      if (!*users[i].policy) continue;
+      buckets_buf all = BUCKETS_BUF_INIT;
+      buckets_buf_append_c(&all, users[i].policy);
+      for (size_t g = 0; g < users[i].nmember_of; g++) {
+        buckets_iam_group_desc gd;
+        if (buckets_iam_group_describe(c->s->iam, users[i].member_of[g], &gd) == BUCKETS_IAM_OK) {
+          if (gd.policy && *gd.policy) buckets_buf_appendf(&all, ",%s", gd.policy);
+          buckets_iam_group_desc_free(&gd);
+        }
+      }
+      buckets_buf_append_char(&all, '\0');
+      char *matched = policies_for_bucket(c->s->iam, all.data, bucket);
+      buckets_buf_free(&all);
+      if (*matched) {
+        yyjson_mut_val *o = yyjson_mut_obj(d);
+        yyjson_mut_obj_add_strcpy(d, o, "policyName", matched);
+        yyjson_mut_obj_add_str(d, o, "status", users[i].enabled ? "enabled" : "disabled");
+        if (users[i].nmember_of) {
+          yyjson_mut_val *m = yyjson_mut_obj_add_arr(d, o, "memberOf");
+          for (size_t g = 0; g < users[i].nmember_of; g++) yyjson_mut_arr_add_strcpy(d, m, users[i].member_of[g]);
+        }
+        yyjson_mut_obj_add_str(d, o, "updatedAt", "0001-01-01T00:00:00Z"); /* not set by GetBucketUsers */
+        yyjson_mut_obj_add(root, yyjson_mut_strcpy(d, users[i].name), o);
+      }
+      free(matched);
+      continue;
+    }
     yyjson_mut_val *o = yyjson_mut_obj(d);
     add_user_info(d, o, &users[i]);
     yyjson_mut_obj_add(root, yyjson_mut_strcpy(d, users[i].name), o);
@@ -474,6 +531,7 @@ static void h_set_group_status(s3_ctx *c) {
 
 static void h_list_policies(s3_ctx *c) {
   if (!admin_req1(c, "admin:ListUserPolicies")) return;
+  const char *bucket = buckets_query_get(&c->q, "bucket"); /* ListBucketPolicies */
   buckets_iam_policy_doc *docs;
   size_t n;
   buckets_iam_list_policies(c->s->iam, &docs, &n);
@@ -482,6 +540,14 @@ static void h_list_policies(s3_ctx *c) {
   yyjson_mut_doc_set_root(d, root);
   yyjson_doc **parsed = buckets_xcalloc(n ? n : 1, sizeof(*parsed));
   for (size_t i = 0; i < n; i++) {
+    if (bucket && *bucket) {
+      buckets_policy *p = NULL;
+      char err[256];
+      bool match = buckets_policy_parse(docs[i].json, strlen(docs[i].json), &p, err, sizeof(err)) &&
+                   buckets_policy_match_resource(p, bucket);
+      if (p) buckets_policy_free(p);
+      if (!match) continue;
+    }
     parsed[i] = yyjson_read(docs[i].json, strlen(docs[i].json), 0);
     if (!parsed[i]) continue;
     yyjson_mut_obj_add(root, yyjson_mut_strcpy(d, docs[i].name), yyjson_val_mut_copy(d, yyjson_doc_get_root(parsed[i])));

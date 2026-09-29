@@ -1678,3 +1678,24 @@ void buckets_bucket_policy_json(const buckets_policy *p, buckets_buf *out) {
   if (p->n) buckets_buf_append_char(out, ']');
   buckets_buf_append_char(out, '}');
 }
+
+/* Policy.MatchResource: a statement's resource matches the name (a bucket,
+ * for the admin API's bucket filters). */
+bool buckets_policy_match_resource(const buckets_policy *p, const char *name) {
+  buckets_policy_args none;
+  memset(&none, 0, sizeof(none));
+  for (size_t i = 0; i < p->n; i++) {
+    for (size_t k = 0; k < p->st[i].nres; k++) {
+      const resource *r = &p->st[i].res[k];
+      if (!strchr(r->pattern, '$')) {
+        char *cp = path_clean(name);
+        bool exact = strcmp(cp, ".") != 0 && strcmp(cp, r->pattern) == 0;
+        free(cp);
+        if (exact || buckets_wildcard_match(r->pattern, name)) return true;
+      } else if (res_match(r, name, &none)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
