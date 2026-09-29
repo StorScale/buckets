@@ -19,6 +19,12 @@ void buckets_log(buckets_log_level level, const char *fmt, ...) BUCKETS_PRINTF(2
 /* Warnings and errors logged since start (whatever the level): what the
  * console log target has sent, for the metrics. */
 uint64_t buckets_log_problems(void);
+/* Receives every warning and error (whatever the level), e.g. to forward
+ * them to log targets. Threads that deliver log entries set suppress so
+ * their own failures are not fed back. */
+typedef void (*buckets_log_sink_fn)(void *ud, buckets_log_level level, const char *msg, size_t n);
+void buckets_log_set_sink(buckets_log_sink_fn fn, void *ud);
+void buckets_log_sink_suppress(bool on);
 
 #define buckets_log_debug(...) buckets_log(BUCKETS_LOG_DEBUG, __VA_ARGS__)
 #define buckets_log_info(...) buckets_log(BUCKETS_LOG_INFO, __VA_ARGS__)

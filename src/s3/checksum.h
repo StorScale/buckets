@@ -19,5 +19,7 @@ buckets_s3_error buckets_checksum_from_request(const buckets_http_request *req, 
 
 /* ReadCheckSums(b, part): emits X-Amz-Checksum-* and X-Amz-Checksum-Type headers. */
 void buckets_checksum_write_headers(const uint8_t *b, size_t n, int part, buckets_http_response *resp);
+/* The first checksum of a stored "x-minio-internal-crc" value. */
+bool buckets_checksum_read_stored(const uint8_t *b, size_t n, buckets_checksum *out);
 
 #endif

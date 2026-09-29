@@ -304,3 +304,9 @@ void buckets_stats_forget_bucket(const char *bucket) {
   }
   pthread_mutex_unlock(&g_bmu);
 }
+
+int64_t buckets_stats_inflight(void) {
+  int64_t n = 0;
+  for (size_t i = 0; i < NAPI; i++) n += atomic_load(&g_api[i].inflight);
+  return n;
+}

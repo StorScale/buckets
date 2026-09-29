@@ -4,6 +4,7 @@
 #define BUCKETS_S3_INTERNAL_H
 
 #include "bucket/notification.h"
+#include "core/auditctx.h"
 #include "core/query.h"
 #include "iam/iam.h"
 #include "net/http.h"
@@ -42,6 +43,11 @@ typedef struct {
   bool owner;               /* root, or root-derived without a session policy */
   s3_conds *conds;          /* policy condition values, built on first use */
   buckets_iam_key_status key_status; /* from the signature's key lookup */
+  /* audit (only while audit targets exist) */
+  bool audited;
+  buckets_audit_tags tags;       /* the object layer's operations */
+  buckets_buf audit_objects;     /* DeleteObjects: the objects, as JSON array elements */
+  char *audit_tagging;           /* the object's tags, as MinIO sets them into the request's X-Amz-Tagging */
 } s3_ctx;
 
 /* ---- STS (sts.c) ---- */
@@ -86,6 +92,10 @@ void buckets_s3_send_event_early(s3_ctx *c, int event_name, const char *bucket, 
 /* Serves /minio/v2/metrics/... and /minio/metrics/v3... (authenticating as
  * MinIO's AuthMiddleware); false when the request is not one of them. */
 bool buckets_s3_metrics_handle(s3_ctx *c);
+/* The request's audit entry to the audit targets, when there are any:
+ * api is its route (metrics/stats.h), with its time to first byte, time to
+ * response and body bytes sent. */
+void buckets_s3_audit(s3_ctx *c, int api, int64_t ttfb_ns, int64_t ttr_ns, uint64_t tx);
 int buckets_s3_api_index(const s3_ctx *c);
 void buckets_s3_send_internal_event(buckets_s3_server *s, int event_name, const char *bucket, const char *object,
                                     const buckets_object_info *oi, const char *version_id, const char *user_agent);

@@ -2,6 +2,7 @@
 #include "core/timefmt.h"
 
 #include <ctype.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -167,4 +168,40 @@ void buckets_time_rfc3339_nano(long long sec, long nsec, char *out) {
   }
   out[n++] = 'Z';
   out[n] = '\0';
+}
+
+bool buckets_go_duration_parse(const char *s, int64_t *ns) {
+  static const struct {
+    const char *unit;
+    double ns;
+  } units[] = {{"ns", 1}, {"us", 1e3}, {"\xc2\xb5s", 1e3}, {"\xce\xbcs", 1e3}, {"ms", 1e6},
+               {"s", 1e9}, {"m", 60e9}, {"h", 3600e9}};
+  if (!s || !*s) return false;
+  bool neg = false;
+  if (*s == '-' || *s == '+') neg = *s++ == '-';
+  if (strcmp(s, "0") == 0) {
+    *ns = 0;
+    return true;
+  }
+  double total = 0;
+  if (!*s) return false;
+  while (*s) {
+    char *end;
+    if (!((*s >= '0' && *s <= '9') || *s == '.')) return false;
+    double v = strtod(s, &end);
+    if (end == s) return false;
+    s = end;
+    size_t best = 0;
+    double mult = 0;
+    for (size_t i = 0; i < sizeof(units) / sizeof(units[0]); i++) {
+      size_t n = strlen(units[i].unit);
+      if (n > best && strncmp(s, units[i].unit, n) == 0) best = n, mult = units[i].ns;
+    }
+    if (!best) return false; /* a unit is required */
+    s += best;
+    total += v * mult;
+  }
+  if (total > 9.2e18) return false;
+  *ns = (int64_t)(neg ? -total : total);
+  return true;
 }

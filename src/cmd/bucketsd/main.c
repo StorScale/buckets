@@ -646,6 +646,7 @@ int main(int argc, char **argv) {
   long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
   long napi = apit ? strtol(apit, NULL, 10) : BUCKETS_MAX(8L, 2 * ncpu);
   buckets_pool *api_pool = napi > 0 ? buckets_pool_new((int)BUCKETS_MIN(napi, 4096L)) : NULL;
+  s3.requests_max = napi > 0 ? (int)BUCKETS_MIN(napi, 4096L) : 0; /* X-Ratelimit-Limit */
   hcfg.workers = api_pool;
   /* The admin API and health probes get their own workers: a frozen S3 API
    * (mc admin service freeze) parks its requests, which must not block the

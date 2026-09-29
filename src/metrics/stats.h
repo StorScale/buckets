@@ -51,6 +51,8 @@ typedef struct {
   uint64_t rx, tx;
 } buckets_stats_snapshot;
 void buckets_stats_get(buckets_stats_snapshot *out);
+/* Requests in flight now, over every API (reads nothing else). */
+int64_t buckets_stats_inflight(void);
 void buckets_stats_snapshot_free(buckets_stats_snapshot *s);
 
 typedef struct {

@@ -150,6 +150,19 @@ static bool get_uvarint(const uint8_t **p, const uint8_t *end, uint64_t *v) {
   return false;
 }
 
+bool buckets_checksum_read_stored(const uint8_t *b, size_t n, buckets_checksum *out) {
+  memset(out, 0, sizeof(*out));
+  const uint8_t *p = b, *end = b + n;
+  uint64_t t;
+  if (!b || !get_uvarint(&p, end, &t)) return false;
+  size_t len = buckets_cksum_raw_len((uint32_t)t);
+  if (!len || len > sizeof(out->raw) || (size_t)(end - p) < len) return false;
+  out->type = (uint32_t)t;
+  memcpy(out->raw, p, len);
+  out->raw_len = len;
+  return true;
+}
+
 void buckets_checksum_write_headers(const uint8_t *b, size_t n, int part, buckets_http_response *resp) {
   const uint8_t *p = b, *end = b + n;
   while (p < end) {

@@ -32,4 +32,8 @@ bool buckets_time_parse_rfc3339(const char *s, long long *sec, long *nsec);
 /* Days since 1970-01-01 of a proleptic Gregorian date. */
 long long buckets_days_from_civil(int y, int m, int d);
 
+/* time.ParseDuration: a signed sequence of decimal numbers with units
+ * (ns, us, µs, ms, s, m, h), e.g. "300ms", "-1.5h", "2h45m". */
+bool buckets_go_duration_parse(const char *s, int64_t *ns);
+
 #endif

@@ -6,6 +6,7 @@
  *  - writes go to the pool already holding the object, else to a pool picked
  *    at random weighted by the free space of the set the object hashes to;
  *  - buckets exist on every pool; listings merge all pools. */
+#include "core/auditctx.h"
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -319,6 +320,19 @@ static int write_pool(buckets_objlayer *L, const char *bucket, const char *objec
   return available_pool(L, object, size);
 }
 
+
+/* auditObjectErasureSet: the operation, with where the object lives */
+static void audit_op(buckets_objlayer *L, const char *op, const char *bucket, const char *object, int pool) {
+  /* the server's own metadata (MinIO reads and writes it outside the request's context) */
+  buckets_audit_tags *at = buckets_audit_tags_current();
+  if (!at || pool < 0 || (size_t)pool >= L->npools || (!at->sys_ops && strcmp(bucket, BUCKETS_META_BUCKET) == 0))
+    return;
+  char v[1400];
+  snprintf(v, sizeof(v), "name=%s,pool=%d,set=%zu", object ? object : "", pool + 1,
+           buckets_objlayer_object_set(L, (size_t)pool, object ? object : "") + 1);
+  buckets_audit_tag(op, v);
+}
+
 /* ---- buckets ------------------------------------------------------------------- */
 
 buckets_obj_err buckets_obj_make_bucket(buckets_objlayer *L, const char *bucket) {
@@ -371,23 +385,32 @@ buckets_obj_err buckets_obj_put(buckets_objlayer *L, const char *bucket, const c
   buckets_obj_err err;
   int p = write_pool(L, bucket, object, size, &err);
   if (p < 0) return err;
+  audit_op(L, "PutObject", bucket, object, p);
   return buckets_ep_put(L->pools[p], bucket, object, rd, rd_ud, size, opts, out);
 }
 
 buckets_obj_err buckets_obj_stat(buckets_objlayer *L, const char *bucket, const char *object, const char *version_id,
                                  buckets_object_info *out) {
-  if (L->npools == 1) return buckets_ep_stat(L->pools[0], bucket, object, version_id, out);
+  if (L->npools == 1) {
+    audit_op(L, "GetObjectInfo", bucket, object, 0);
+    return buckets_ep_stat(L->pools[0], bucket, object, version_id, out);
+  }
   lookup l = find_pool(L, bucket, object, version_id);
   if (l.pool < 0 || l.err) return l.err;
+  audit_op(L, "GetObjectInfo", bucket, object, l.pool);
   return buckets_ep_stat(L->pools[l.pool], bucket, object, version_id, out);
 }
 
 buckets_obj_err buckets_obj_open(buckets_objlayer *L, const char *bucket, const char *object, const char *version_id,
                                  int64_t offset, int64_t length, buckets_obj_reader **out,
                                  buckets_object_info *info) {
-  if (L->npools == 1) return buckets_ep_open(L->pools[0], bucket, object, version_id, offset, length, out, info);
+  if (L->npools == 1) {
+    audit_op(L, "GetObject", bucket, object, 0);
+    return buckets_ep_open(L->pools[0], bucket, object, version_id, offset, length, out, info);
+  }
   lookup l = find_pool(L, bucket, object, version_id);
   if (l.pool < 0 || l.err) return l.err;
+  audit_op(L, "GetObject", bucket, object, l.pool);
   return buckets_ep_open(L->pools[l.pool], bucket, object, version_id, offset, length, out, info);
 }
 
@@ -414,7 +437,14 @@ buckets_obj_err buckets_obj_delete(buckets_objlayer *L, const char *bucket, cons
  * removed from every pool that has them. */
 buckets_obj_err buckets_obj_delete_ex(buckets_objlayer *L, const char *bucket, const char *object,
                                       const buckets_delete_opts *opts, buckets_delete_result *res) {
-  if (L->npools == 1) return buckets_ep_delete_ex(L->pools[0], bucket, object, opts, res);
+  buckets_audit_tags *at = buckets_audit_tags_current();
+  const char *dop = at && at->delete_op ? at->delete_op : "DeleteObject";
+  if (L->npools == 1) {
+    buckets_obj_err err = buckets_ep_delete_ex(L->pools[0], bucket, object, opts, res);
+    if (err != BUCKETS_OBJ_ERR_NO_SUCH_KEY && err != BUCKETS_OBJ_ERR_NO_SUCH_VERSION) audit_op(L, dop, bucket, object, 0);
+    return err;
+  }
+  audit_op(L, dop, bucket, object, 0);
   bool marker = !(opts->version_id && *opts->version_id) && (opts->versioned || opts->suspended);
   if (marker) {
     buckets_obj_err err;
@@ -572,17 +602,19 @@ buckets_obj_err buckets_obj_mpu_new(buckets_objlayer *L, const char *bucket, con
   buckets_obj_err err;
   int p = write_pool(L, bucket, object, -1, &err);
   if (p < 0) return err;
+  audit_op(L, "NewMultipartUpload", bucket, object, p);
   err = buckets_ep_mpu_new(L->pools[p], bucket, object, meta, nmeta, upload_id);
   if (!err) mp_cache_add(L, bucket, object, upload_id);
   return err;
 }
 
 /* The upload lives in exactly one pool: try each until one knows it. */
-#define IN_UPLOAD_POOL(call)                                                   \
+#define IN_UPLOAD_POOL(op, call)                                               \
   do {                                                                         \
     buckets_obj_err err_ = BUCKETS_OBJ_ERR_NO_SUCH_UPLOAD;                     \
     for (size_t p = 0; p < L->npools; p++) {                                   \
       buckets_epool *P = L->pools[p];                                          \
+      audit_op(L, op, bucket, object, (int)p);                                         \
       err_ = (call);                                                           \
       if (err_ != BUCKETS_OBJ_ERR_NO_SUCH_UPLOAD) return err_;                 \
     }                                                                          \
@@ -593,6 +625,7 @@ buckets_obj_err buckets_obj_mpu_put_part(buckets_objlayer *L, const char *bucket
                                          int part_number, buckets_read_fn rd, void *rd_ud, int64_t size,
                                          const buckets_put_opts *opts, buckets_part_info *out) {
   if (L->npools == 1) {
+    audit_op(L, "PutObjectPart", bucket, object, 0);
     return buckets_ep_mpu_put_part(L->pools[0], bucket, object, upload_id, part_number, rd, rd_ud, size, opts, out);
   }
   /* The body can be read only once: find the pool before sending it. */
@@ -604,6 +637,7 @@ buckets_obj_err buckets_obj_mpu_put_part(buckets_objlayer *L, const char *bucket
     free(parts);
     if (err == BUCKETS_OBJ_ERR_NO_SUCH_UPLOAD) continue;
     if (err) return err;
+    audit_op(L, "PutObjectPart", bucket, object, (int)p);
     return buckets_ep_mpu_put_part(L->pools[p], bucket, object, upload_id, part_number, rd, rd_ud, size, opts, out);
   }
   return BUCKETS_OBJ_ERR_NO_SUCH_UPLOAD;
@@ -612,11 +646,11 @@ buckets_obj_err buckets_obj_mpu_put_part(buckets_objlayer *L, const char *bucket
 buckets_obj_err buckets_obj_mpu_list_parts(buckets_objlayer *L, const char *bucket, const char *object,
                                            const char *upload_id, int marker, int max, buckets_part_info **parts,
                                            size_t *n, bool *truncated) {
-  IN_UPLOAD_POOL(buckets_ep_mpu_list_parts(P, bucket, object, upload_id, marker, max, parts, n, truncated));
+  IN_UPLOAD_POOL("ListObjectParts", buckets_ep_mpu_list_parts(P, bucket, object, upload_id, marker, max, parts, n, truncated));
 }
 
 static buckets_obj_err mpu_abort(buckets_objlayer *L, const char *bucket, const char *object, const char *upload_id) {
-  IN_UPLOAD_POOL(buckets_ep_mpu_abort(P, bucket, object, upload_id));
+  IN_UPLOAD_POOL("AbortMultipartUpload", buckets_ep_mpu_abort(P, bucket, object, upload_id));
 }
 
 buckets_obj_err buckets_obj_mpu_abort(buckets_objlayer *L, const char *bucket, const char *object, const char *upload_id) {
@@ -628,7 +662,7 @@ buckets_obj_err buckets_obj_mpu_abort(buckets_objlayer *L, const char *bucket, c
 static buckets_obj_err mpu_complete(buckets_objlayer *L, const char *bucket, const char *object, const char *upload_id,
                                     const buckets_complete_part *parts, size_t nparts, const buckets_checksum *want,
                                     const buckets_complete_opts *co, buckets_object_info *out) {
-  IN_UPLOAD_POOL(buckets_ep_mpu_complete(P, bucket, object, upload_id, parts, nparts, want, co, out));
+  IN_UPLOAD_POOL("CompleteMultipartUpload", buckets_ep_mpu_complete(P, bucket, object, upload_id, parts, nparts, want, co, out));
 }
 
 buckets_obj_err buckets_obj_mpu_complete(buckets_objlayer *L, const char *bucket, const char *object,
@@ -642,7 +676,7 @@ buckets_obj_err buckets_obj_mpu_complete(buckets_objlayer *L, const char *bucket
 
 buckets_obj_err buckets_obj_mpu_stat(buckets_objlayer *L, const char *bucket, const char *object, const char *upload_id,
                                      buckets_object_info *out) {
-  IN_UPLOAD_POOL(buckets_ep_mpu_stat(P, bucket, object, upload_id, out));
+  IN_UPLOAD_POOL("GetMultipartInfo", buckets_ep_mpu_stat(P, bucket, object, upload_id, out));
 }
 
 static int upload_cmp(const void *a, const void *b) {
@@ -662,6 +696,7 @@ buckets_obj_err buckets_obj_mpu_list_uploads(buckets_objlayer *L, const char *bu
     mp_cache_list(L, bucket, uploads, n);
     return BUCKETS_OBJ_OK;
   }
+  audit_op(L, "ListMultipartUploads", bucket, object, 0);
   if (L->npools == 1) return buckets_ep_mpu_list_uploads(L->pools[0], bucket, object, uploads, n);
   *uploads = NULL;
   *n = 0;

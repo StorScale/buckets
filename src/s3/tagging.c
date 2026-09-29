@@ -78,6 +78,7 @@ void buckets_s3_get_object_tagging(s3_ctx *c) {
   buckets_object_info oi;
   if (!stat_version(c, &oi)) return;
   const char *ut = buckets_object_meta(&oi, TAGGING_META);
+  if (c->audited && ut && *ut) c->audit_tagging = buckets_xstrdup(ut); /* into X-Amz-Tagging, as MinIO */
   buckets_tags t = {0};
   buckets_tags_error e;
   if (ut && *ut && !buckets_tags_parse_query(ut, true, &t, &e)) {
@@ -98,12 +99,16 @@ void buckets_s3_get_object_tagging(s3_ctx *c) {
 
 typedef struct {
   const char *tags; /* the new X-Amz-Tagging value ("" removes them) */
+  char *old;        /* the tags it replaces */
 } tag_edit;
 
 static buckets_obj_err edit_tags(void *ud, const buckets_object_info *cur, buckets_xl_kv **user, size_t *nuser,
                                  buckets_xl_kv **sys, size_t *nsys) {
-  (void)cur, (void)sys, (void)nsys;
-  const tag_edit *e = ud;
+  (void)sys, (void)nsys;
+  tag_edit *e = ud;
+  const char *old = cur ? buckets_object_meta(cur, TAGGING_META) : NULL;
+  free(e->old);
+  e->old = old && *old ? buckets_xstrdup(old) : NULL;
   buckets_xl_kv_set(user, nuser, TAGGING_META, e->tags, strlen(e->tags));
   return BUCKETS_OBJ_OK;
 }
@@ -113,6 +118,12 @@ static void set_object_tags(s3_ctx *c, const char *tags, int status) {
   tag_edit e = {.tags = tags};
   buckets_object_info oi;
   buckets_obj_err err = buckets_obj_update_meta(c->s->layer, c->bucket, c->object, version, edit_tags, &e, &oi);
+  /* MinIO sets the request's X-Amz-Tagging: the new tags on a put, the old ones on a delete */
+  if (c->audited && !c->audit_tagging) {
+    if (*tags || status == 200) c->audit_tagging = buckets_xstrdup(tags);
+    else if (e.old) c->audit_tagging = buckets_xstrdup(e.old);
+  }
+  free(e.old);
   if (err) {
     buckets_s3_write_error(c, buckets_s3_obj_error(err));
     return;

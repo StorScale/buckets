@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 #include "bucket/metasys.h"
+#include "core/auditctx.h"
 
 #include <pthread.h>
 #include <stdlib.h>
@@ -134,8 +135,8 @@ buckets_bucket_state *buckets_metasys_get(buckets_metasys *m, const char *bucket
   return st;
 }
 
-bool buckets_metasys_update(buckets_metasys *m, const char *bucket, buckets_bucket_cfg cfg, const void *data,
-                            size_t len) {
+static bool metasys_update_impl(buckets_metasys *m, const char *bucket, buckets_bucket_cfg cfg, const void *data,
+                                size_t len) {
   pthread_mutex_lock(&m->write_mu);
   buckets_bucket_meta meta;
   if (!buckets_bucket_meta_load(m->layer, bucket, &meta)) {
@@ -156,6 +157,18 @@ bool buckets_metasys_update(buckets_metasys *m, const char *bucket, buckets_buck
     buckets_bucket_meta_free(&meta);
   }
   pthread_mutex_unlock(&m->write_mu);
+  return ok;
+}
+
+bool buckets_metasys_update(buckets_metasys *m, const char *bucket, buckets_bucket_cfg cfg, const void *data,
+                            size_t len) {
+  /* MinIO updates bucket metadata in the request's context: its reads and
+   * writes show in the audit entry's tags */
+  buckets_audit_tags *at = buckets_audit_tags_current();
+  bool was = at && at->sys_ops;
+  if (at) at->sys_ops = true;
+  bool ok = metasys_update_impl(m, bucket, cfg, data, len);
+  if (at) at->sys_ops = was;
   return ok;
 }
 

@@ -283,6 +283,23 @@ static void apply_edit(s3_ctx *c, lock_edit *e) {
   buckets_object_info_free(&oi);
 }
 
+/* time.Time.String() of a UTC time: "2006-01-02 15:04:05.999999999 +0000 UTC" */
+static void go_time_string(int64_t ns, char *out, size_t cap) {
+  time_t secs = (time_t)(ns / 1000000000LL);
+  long frac = (long)(ns % 1000000000LL);
+  struct tm tm;
+  gmtime_r(&secs, &tm);
+  int n = snprintf(out, cap, "%04d-%02d-%02d %02d:%02d:%02d", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour,
+                   tm.tm_min, tm.tm_sec);
+  if (frac && n > 0 && (size_t)n < cap) {
+    char f[16];
+    snprintf(f, sizeof(f), "%09ld", frac);
+    for (int i = 8; i > 0 && f[i] == '0'; i--) f[i] = '\0';
+    n += snprintf(out + n, cap - (size_t)n, ".%s", f);
+  }
+  if (n > 0 && (size_t)n < cap) snprintf(out + n, cap - (size_t)n, " +0000 UTC");
+}
+
 void buckets_s3_put_object_retention(s3_ctx *c) {
   if (!lock_request_prologue(c)) return;
   lock_edit e = {.c = c};
@@ -291,6 +308,12 @@ void buckets_s3_put_object_retention(s3_ctx *c) {
                                    sizeof(err))) {
     write_malformed(c, err);
     return;
+  }
+  if (c->audited) { /* the audit entry's "retention" tag (ObjectRetention.String) */
+    char when[64], tag[160];
+    go_time_string(e.until, when, sizeof(when));
+    snprintf(tag, sizeof(tag), "Mode: %s, RetainUntilDate: %s", buckets_ret_mode_name(e.mode), when);
+    buckets_audit_tag("retention", tag);
   }
   apply_edit(c, &e);
 }
@@ -389,6 +412,14 @@ void buckets_s3_put_bucket_object_lock(s3_ctx *c) {
   if (!buckets_lock_config_parse(c->doc.data ? c->doc.data : "", c->doc.len, &cfg, err, sizeof(err))) {
     buckets_s3_write_error_msg(c, BUCKETS_ERR_INVALID_ARGUMENT, err);
     return;
+  }
+  if (c->audited) { /* the "retention" tag (Config.String) */
+    char tag[160];
+    int n = snprintf(tag, sizeof(tag), "Enabled: %s", cfg.enabled ? "true" : "false");
+    if (cfg.mode) n += snprintf(tag + n, sizeof(tag) - (size_t)n, ", Mode: %s", buckets_ret_mode_name(cfg.mode));
+    if (cfg.days) n += snprintf(tag + n, sizeof(tag) - (size_t)n, ", Days: %llu", (unsigned long long)cfg.days);
+    if (cfg.years) snprintf(tag + n, sizeof(tag) - (size_t)n, ", Years: %llu", (unsigned long long)cfg.years);
+    buckets_audit_tag("retention", tag);
   }
   /* Only buckets created with object lock may change it. */
   buckets_bucket_state *st = buckets_metasys_get(c->s->meta, c->bucket);

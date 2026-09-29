@@ -28,6 +28,7 @@
 #include "bucket/quota.h"
 #include "core/log.h"
 #include "kms/kms.h"
+#include "logger/logger.h"
 #include "metrics/expo.h"
 #include "metrics/stats.h"
 #include "metrics/sys.h"
@@ -317,6 +318,16 @@ static void ttfb_rows(mctx *m, const char *name, const buckets_api_stats *api, c
   }
 }
 
+/* CurrentStats' key: "sys_<type>_<n>" for server log targets (the console
+ * is sys_console_0), "audit_<type>_<n>" for audit ones, counted by type. */
+static const char *logger_stats_id(const buckets_logger_target_info *lt, size_t n, size_t i) {
+  static _Thread_local char id[64];
+  size_t k = 0;
+  for (size_t j = 0; j < i && j < n; j++) k += lt[j].audit == lt[i].audit;
+  snprintf(id, sizeof(id), "%s_http_%zu", lt[i].audit ? "audit" : "sys", k);
+  return id;
+}
+
 /* getNotificationMetrics: event targets, lambdas (none) and audit targets */
 static void notification_metrics(mctx *m) {
   buckets_notifier_target_info *ti = NULL;
@@ -354,6 +365,15 @@ static void notification_metrics(mctx *m) {
   ADD1(m, "minio_audit_target_queue_length", 0, "target_id", "sys_console_0");
   ADD1(m, "minio_audit_total_messages", (double)buckets_log_problems(), "target_id", "sys_console_0");
   ADD1(m, "minio_audit_failed_messages", 0, "target_id", "sys_console_0");
+  buckets_logger_target_info *lt;
+  size_t nl = buckets_logger_targets(m->s->logger, &lt);
+  for (size_t i = 0; i < nl; i++) {
+    const char *id = logger_stats_id(lt, nl, i);
+    ADD1(m, "minio_audit_target_queue_length", (double)lt[i].st.queued, "target_id", id);
+    ADD1(m, "minio_audit_total_messages", (double)lt[i].st.total, "target_id", id);
+    ADD1(m, "minio_audit_failed_messages", (double)lt[i].st.failed, "target_id", id);
+  }
+  free(lt);
 }
 
 /* getMinioProcMetrics (Linux only, as MinIO) */
@@ -458,6 +478,16 @@ static void webhook_metrics(mctx *m) {
   ADD2(m, "minio_cluster_webhook_queue_length", 0, "name", "console+http", "endpoint", "");
   ADD2(m, "minio_cluster_webhook_total_messages", (double)buckets_log_problems(), "name", "console+http", "endpoint", "");
   ADD2(m, "minio_cluster_webhook_failed_messages", 0, "name", "console+http", "endpoint", "");
+  buckets_logger_target_info *lt;
+  size_t nl = buckets_logger_targets(m->s->logger, &lt);
+  for (size_t i = 0; i < nl; i++) {
+    ADD2(m, "minio_cluster_webhook_online", lt[i].st.online, "name", lt[i].name, "endpoint", lt[i].endpoint);
+    ADD2(m, "minio_cluster_webhook_queue_length", (double)lt[i].st.queued, "name", lt[i].name, "endpoint", lt[i].endpoint);
+    ADD2(m, "minio_cluster_webhook_total_messages", (double)lt[i].st.total, "name", lt[i].name, "endpoint", lt[i].endpoint);
+    ADD2(m, "minio_cluster_webhook_failed_messages", (double)lt[i].st.failed, "name", lt[i].name, "endpoint",
+         lt[i].endpoint);
+  }
+  free(lt);
 }
 
 /* getLocalStorageMetrics */
@@ -1124,6 +1154,15 @@ static void v3_audit(m3ctx *m, const char *bucket) {
   SETL(m, "minio_audit_failed_messages", 0, "target_id", "sys_console_0");
   SETL(m, "minio_audit_target_queue_length", 0, "target_id", "sys_console_0");
   SETL(m, "minio_audit_total_messages", (double)buckets_log_problems(), "target_id", "sys_console_0");
+  buckets_logger_target_info *lt;
+  size_t nl = buckets_logger_targets(m->s->logger, &lt);
+  for (size_t i = 0; i < nl; i++) {
+    const char *id = logger_stats_id(lt, nl, i);
+    SETL(m, "minio_audit_failed_messages", (double)lt[i].st.failed, "target_id", id);
+    SETL(m, "minio_audit_target_queue_length", (double)lt[i].st.queued, "target_id", id);
+    SETL(m, "minio_audit_total_messages", (double)lt[i].st.total, "target_id", id);
+  }
+  free(lt);
 }
 
 /* /cluster/config */
@@ -1295,6 +1334,14 @@ static void v3_logger_webhook(m3ctx *m, const char *bucket) {
   SETL(m, "minio_logger_webhook_failed_messages", 0, "name", "console+http", "endpoint", "");
   SETL(m, "minio_logger_webhook_queue_length", 0, "name", "console+http", "endpoint", "");
   SETL(m, "minio_logger_webhook_total_messages", (double)buckets_log_problems(), "name", "console+http", "endpoint", "");
+  buckets_logger_target_info *lt;
+  size_t nl = buckets_logger_targets(m->s->logger, &lt);
+  for (size_t i = 0; i < nl; i++) {
+    SETL(m, "minio_logger_webhook_failed_messages", (double)lt[i].st.failed, "name", lt[i].name, "endpoint", lt[i].endpoint);
+    SETL(m, "minio_logger_webhook_queue_length", (double)lt[i].st.queued, "name", lt[i].name, "endpoint", lt[i].endpoint);
+    SETL(m, "minio_logger_webhook_total_messages", (double)lt[i].st.total, "name", lt[i].name, "endpoint", lt[i].endpoint);
+  }
+  free(lt);
 }
 
 /* /notification */

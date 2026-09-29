@@ -48,6 +48,8 @@ typedef struct buckets_s3_server {
   bool iam_thread_started, ldap_thread_started;
   char host_id[65];   /* x-amz-id-2 */
   struct buckets_notifier *notifier; /* event notification targets and listeners */
+  struct buckets_logger *logger;     /* audit and server log targets */
+  int requests_max;                  /* API workers (the X-Ratelimit-* headers; 0: none) */
   char endpoint[256];  /* this server's URL, for x-minio-origin-endpoint */
   _Atomic uint64_t request_seq;
   struct buckets_scanner *_Atomic scanner; /* the data scanner, once started (for its metrics) */

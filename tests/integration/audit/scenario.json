@@ -1,0 +1,201 @@
+[
+ {
+  "method": "PUT",
+  "path": "/abkt"
+ },
+ {
+  "method": "PUT",
+  "path": "/abkt/p/a.txt",
+  "body": "hello world",
+  "headers": {
+   "X-Amz-Meta-Color": "blue",
+   "Content-Type": "text/plain",
+   "X-Amz-Tagging": "k=v"
+  },
+  "label": "put a"
+ },
+ {
+  "method": "PUT",
+  "path": "/abkt/q/skip.txt",
+  "body": "no",
+  "label": "filtered out"
+ },
+ {
+  "method": "PUT",
+  "path": "/abkt/q/app.log",
+  "body": "log line",
+  "label": "second queue"
+ },
+ {
+  "method": "GET",
+  "path": "/abkt/p/a.txt",
+  "label": "get a"
+ },
+ {
+  "method": "GET",
+  "path": "/abkt/p/a.txt",
+  "headers": {
+   "Range": "bytes=0-3"
+  },
+  "label": "range get"
+ },
+ {
+  "method": "HEAD",
+  "path": "/abkt/p/a.txt",
+  "label": "head a"
+ },
+ {
+  "method": "PUT",
+  "path": "/abkt/p/b%20c+%C3%A9.txt",
+  "headers": {
+   "X-Amz-Copy-Source": "/abkt/p/a.txt"
+  },
+  "label": "copy"
+ },
+ {
+  "method": "PUT",
+  "path": "/abkt/p/a.txt",
+  "query": "tagging",
+  "body": "<Tagging><TagSet><Tag><Key>x</Key><Value>y</Value></Tag></TagSet></Tagging>",
+  "label": "put tagging"
+ },
+ {
+  "method": "DELETE",
+  "path": "/abkt/p/a.txt",
+  "query": "tagging",
+  "label": "delete tagging"
+ },
+ {
+  "method": "POST",
+  "path": "/abkt/p/mp.bin",
+  "query": "uploads",
+  "save": {
+   "u": "xml:UploadId"
+  },
+  "label": "mpu create"
+ },
+ {
+  "method": "PUT",
+  "path": "/abkt/p/mp.bin",
+  "query": "partNumber=1&uploadId=$u",
+  "body": "part-one",
+  "save": {
+   "e": "etag"
+  },
+  "label": "mpu part"
+ },
+ {
+  "method": "POST",
+  "path": "/abkt/p/mp.bin",
+  "query": "uploadId=$u",
+  "body": "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>$e</ETag></Part></CompleteMultipartUpload>",
+  "label": "mpu complete"
+ },
+ {
+  "method": "DELETE",
+  "path": "/abkt/p/b%20c+%C3%A9.txt",
+  "label": "delete copy"
+ },
+ {
+  "method": "DELETE",
+  "path": "/abkt/p/none.txt",
+  "label": "delete missing"
+ },
+ {
+  "method": "POST",
+  "path": "/abkt",
+  "query": "delete",
+  "md5": true,
+  "body": "<Delete><Object><Key>p/a.txt</Key></Object><Object><Key>p/mp.bin</Key></Object></Delete>",
+  "label": "delete objects"
+ },
+ {
+  "method": "PUT",
+  "path": "/abkt",
+  "query": "versioning",
+  "body": "<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>",
+  "label": "enable versioning"
+ },
+ {
+  "method": "PUT",
+  "path": "/abkt/p/v.txt",
+  "body": "v1",
+  "label": "versioned put",
+  "save": {
+   "v": "x-amz-version-id"
+  }
+ },
+ {
+  "method": "DELETE",
+  "path": "/abkt/p/v.txt",
+  "label": "delete marker"
+ },
+ {
+  "method": "DELETE",
+  "path": "/abkt/p/v.txt",
+  "query": "versionId=$v",
+  "label": "delete version"
+ },
+ {
+  "method": "PUT",
+  "path": "/abkt2",
+  "label": "create bucket"
+ },
+ {
+  "method": "DELETE",
+  "path": "/abkt2",
+  "label": "remove bucket"
+ },
+ {
+  "method": "PUT",
+  "path": "/alock",
+  "headers": {
+   "X-Amz-Bucket-Object-Lock-Enabled": "true"
+  },
+  "label": "lock bucket"
+ },
+ {
+  "method": "PUT",
+  "path": "/alock/r.txt",
+  "body": "retain me",
+  "md5": true,
+  "label": "lock put"
+ },
+ {
+  "method": "PUT",
+  "path": "/alock/r.txt",
+  "query": "retention",
+  "md5": true,
+  "body": "<Retention><Mode>GOVERNANCE</Mode><RetainUntilDate>2099-01-01T00:00:00Z</RetainUntilDate></Retention>",
+  "label": "put retention"
+ },
+ {
+  "method": "GET",
+  "path": "/alock/r.txt",
+  "query": "retention",
+  "label": "get retention"
+ },
+ {
+  "method": "PUT",
+  "path": "/alock/r.txt",
+  "query": "legal-hold",
+  "md5": true,
+  "body": "<LegalHold><Status>ON</Status></LegalHold>",
+  "label": "put legal hold"
+ },
+ {
+  "method": "GET",
+  "path": "/alock/r.txt",
+  "query": "legal-hold",
+  "label": "get legal hold"
+ },
+ {
+  "method": "GET",
+  "path": "/alock/r.txt",
+  "query": "attributes",
+  "headers": {
+   "X-Amz-Object-Attributes": "ETag,ObjectSize"
+  },
+  "label": "get attributes"
+ }
+]

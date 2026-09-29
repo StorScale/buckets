@@ -1,0 +1,118 @@
+[
+ {
+  "method": "PUT",
+  "path": "/cpbkt"
+ },
+ {
+  "method": "PUT",
+  "path": "/cpbkt/plain",
+  "body": "hello world",
+  "label": "plain source"
+ },
+ {
+  "method": "PUT",
+  "path": "/cpbkt/crc32",
+  "body": "hello world",
+  "headers": {
+   "X-Amz-Checksum-Crc32": "DUoRhQ=="
+  },
+  "label": "source with CRC32"
+ },
+ {
+  "method": "PUT",
+  "path": "/cpbkt/copy1",
+  "headers": {
+   "X-Amz-Copy-Source": "/cpbkt/plain"
+  },
+  "label": "copy: CRC64NVME computed",
+  "show": [
+   "etag",
+   "x-amz-checksum-crc64nvme",
+   "x-amz-checksum-type"
+  ]
+ },
+ {
+  "method": "HEAD",
+  "path": "/cpbkt/copy1",
+  "headers": {
+   "X-Amz-Checksum-Mode": "ENABLED"
+  },
+  "show": [
+   "x-amz-checksum-crc64nvme",
+   "x-amz-checksum-type"
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/cpbkt/copy2",
+  "headers": {
+   "X-Amz-Copy-Source": "/cpbkt/crc32"
+  },
+  "label": "copy: the source's CRC32",
+  "show": [
+   "x-amz-checksum-crc32",
+   "x-amz-checksum-type"
+  ]
+ },
+ {
+  "method": "HEAD",
+  "path": "/cpbkt/copy2",
+  "headers": {
+   "X-Amz-Checksum-Mode": "ENABLED"
+  },
+  "show": [
+   "x-amz-checksum-crc32",
+   "x-amz-checksum-type"
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/cpbkt/copy3",
+  "headers": {
+   "X-Amz-Copy-Source": "/cpbkt/plain",
+   "X-Amz-Checksum-Algorithm": "SHA256"
+  },
+  "label": "copy: SHA256 asked for",
+  "show": [
+   "x-amz-checksum-sha256",
+   "x-amz-checksum-type"
+  ]
+ },
+ {
+  "method": "HEAD",
+  "path": "/cpbkt/copy3",
+  "headers": {
+   "X-Amz-Checksum-Mode": "ENABLED"
+  },
+  "show": [
+   "x-amz-checksum-sha256",
+   "x-amz-checksum-type"
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/cpbkt/copy4",
+  "headers": {
+   "X-Amz-Copy-Source": "/cpbkt/plain",
+   "X-Amz-Checksum-Algorithm": "MD5"
+  },
+  "label": "copy: unknown algorithm",
+  "show": [
+   "x-amz-checksum-crc64nvme",
+   "x-amz-checksum-type"
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/cpbkt/copy5",
+  "headers": {
+   "X-Amz-Copy-Source": "/cpbkt/crc32",
+   "X-Amz-Checksum-Algorithm": "CRC32C"
+  },
+  "label": "copy: another algorithm than the source's",
+  "show": [
+   "x-amz-checksum-crc32c",
+   "x-amz-checksum-crc32"
+  ]
+ }
+]

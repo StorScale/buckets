@@ -46,12 +46,23 @@ static void json_escape(buckets_buf *out, const char *s, size_t n) {
 }
 
 static _Atomic uint64_t g_problems;
+static buckets_log_sink_fn g_sink;
+static void *g_sink_ud;
+static _Thread_local bool g_sink_off;
+
+void buckets_log_set_sink(buckets_log_sink_fn fn, void *ud) {
+  g_sink_ud = ud;
+  g_sink = fn;
+}
+
+void buckets_log_sink_suppress(bool on) { g_sink_off = on; }
 
 uint64_t buckets_log_problems(void) { return atomic_load(&g_problems); }
 
 void buckets_log(buckets_log_level level, const char *fmt, ...) {
   if (level >= BUCKETS_LOG_WARN) atomic_fetch_add(&g_problems, 1);
-  if (level < g_level) return;
+  buckets_log_sink_fn sink = level >= BUCKETS_LOG_WARN && !g_sink_off ? g_sink : NULL;
+  if (level < g_level && !sink) return;
 
   buckets_buf msg = BUCKETS_BUF_INIT;
   va_list ap;
@@ -70,12 +81,18 @@ void buckets_log(buckets_log_level level, const char *fmt, ...) {
   char ts[BUCKETS_TIME_ISO8601_LEN + 1];
   buckets_time_iso8601(time(NULL), ts);
 
-  buckets_buf line = BUCKETS_BUF_INIT;
-  buckets_buf_appendf(&line, "{\"level\":\"%s\",\"time\":\"%s\",\"msg\":\"", level_names[level], ts);
-  json_escape(&line, msg.data ? msg.data : "", msg.len);
-  buckets_buf_append(&line, "\"}\n", 3);
-  fwrite(line.data, 1, line.len, stderr);
-
-  buckets_buf_free(&line);
+  if (level >= g_level) {
+    buckets_buf line = BUCKETS_BUF_INIT;
+    buckets_buf_appendf(&line, "{\"level\":\"%s\",\"time\":\"%s\",\"msg\":\"", level_names[level], ts);
+    json_escape(&line, msg.data ? msg.data : "", msg.len);
+    buckets_buf_append(&line, "\"}\n", 3);
+    fwrite(line.data, 1, line.len, stderr);
+    buckets_buf_free(&line);
+  }
+  if (sink) {
+    g_sink_off = true; /* whatever the sink logs is not fed back to it */
+    sink(g_sink_ud, level, msg.data ? msg.data : "", msg.len);
+    g_sink_off = false;
+  }
   buckets_buf_free(&msg);
 }

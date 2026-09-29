@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 #include "s3/server.h"
+#include "logger/logger.h"
 #include "metrics/stats.h"
 #include "s3/metrics.h"
 #include "notify/notifier.h"
@@ -326,6 +327,22 @@ static char *oidc_role_policy(void *ud, const char *arn) {
   return r;
 }
 
+/* Warnings and errors to the logger webhooks. */
+static void log_sink(void *ud, buckets_log_level level, const char *msg, size_t n) {
+  buckets_s3_server *s = ud;
+  buckets_objlayer *L = s->layer;
+  buckets_logger_entry(s->logger, L ? L->deployment_id_str : "", level, msg, n);
+}
+
+static void configure_logger(buckets_s3_server *s, const char *subsys) {
+  buckets_config *cfg = buckets_config_sys_snapshot(s->config);
+  char err[512];
+  buckets_objlayer *L = s->layer;
+  if (!buckets_logger_configure(s->logger, cfg, subsys, s->ca_path, L ? L->deployment_id_str : "", err, sizeof(err)))
+    buckets_log_error("logger: %s", err);
+  buckets_config_free(cfg);
+}
+
 static void configure_notify(buckets_s3_server *s) {
   buckets_config *cfg = buckets_config_sys_snapshot(s->config);
   char err[512];
@@ -342,6 +359,8 @@ static void config_changed(void *ud, const char *subsys, bool local) {
     rebuild_plugins(s);
   }
   if (!*subsys || strncmp(subsys, "notify_", 7) == 0) configure_notify(s);
+  if (!*subsys || strcmp(subsys, "logger_webhook") == 0 || strcmp(subsys, "audit_webhook") == 0)
+    configure_logger(s, subsys);
   if (local && s->peers) buckets_peer_notify_iam(s->peers, "config", *subsys ? subsys : "all");
 }
 
@@ -377,6 +396,10 @@ void buckets_s3_server_init(buckets_s3_server *s, buckets_objlayer *layer, const
   buckets_config_register_validator("policy_plugin", validate_plugins);
   buckets_config_register_validator("identity_plugin", validate_plugins);
   s->notifier = buckets_notifier_new();
+  s->logger = buckets_logger_new();
+  buckets_log_set_sink(log_sink, s);
+  buckets_config_register_validator("logger_webhook", buckets_logger_validate);
+  buckets_config_register_validator("audit_webhook", buckets_logger_validate);
   static const char *const notify_subsys[] = {"notify_webhook", "notify_kafka", "notify_amqp", "notify_mqtt",
                                               "notify_nats", "notify_nsq", "notify_redis", "notify_postgres",
                                               "notify_mysql", "notify_elasticsearch"};
@@ -403,6 +426,7 @@ static void *iam_start_main(void *arg) {
   rebuild_openid(s);
   rebuild_plugins(s);
   configure_notify(s);
+  configure_logger(s, NULL);
   g_ca_path = s->ca_path;
   init_ldap(s);
   delay_ms = 250;
@@ -614,7 +638,8 @@ static void common_headers(s3_ctx *c) {
   buckets_http_resp_header(r, "X-Amz-Request-Id", c->request_id);
   buckets_http_resp_header(r, "X-Amz-Id-2", c->s->host_id);
   buckets_http_resp_header(r, "Accept-Ranges", "bytes");
-  buckets_http_resp_header(r, "Vary", "Origin, Accept-Encoding");
+  buckets_http_resp_header(r, "Vary", "Origin"); /* two headers, as MinIO sends them */
+  buckets_http_resp_header(r, "Vary", "Accept-Encoding");
   buckets_http_resp_header(r, "X-Content-Type-Options", "nosniff");
   buckets_http_resp_header(r, "X-Xss-Protection", "1; mode=block");
   buckets_http_resp_header(r, "Strict-Transport-Security", "max-age=31536000; includeSubDomains");
@@ -692,7 +717,7 @@ void buckets_s3_versioning(s3_ctx *c, const char *object, bool *enabled, bool *s
 
 void buckets_s3_version_header(s3_ctx *c, const char *version_id) {
   if (version_id && *version_id && strcmp(version_id, "null") != 0)
-    buckets_http_resp_header(c->resp, "X-Amz-Version-Id", version_id);
+    buckets_http_resp_header(c->resp, "x-amz-version-id", version_id);
 }
 
 void buckets_s3_write_xml(s3_ctx *c, int status) {
@@ -1555,7 +1580,9 @@ static bool cors_preflight(buckets_s3_server *s, const buckets_http_request *req
   buckets_str rm = buckets_http_header_get(req, "Access-Control-Request-Method");
   if (!buckets_str_eq_c(req->method, "OPTIONS") || !rm.p || !rm.n) return false;
   resp->status = 204;
-  buckets_http_resp_header(resp, "Vary", "Origin, Access-Control-Request-Method, Access-Control-Request-Headers");
+  buckets_http_resp_header(resp, "Vary", "Origin"); /* one header each, as rs/cors adds them */
+  buckets_http_resp_header(resp, "Vary", "Access-Control-Request-Method");
+  buckets_http_resp_header(resp, "Vary", "Access-Control-Request-Headers");
   buckets_str origin = buckets_http_header_get(req, "Origin");
   if (!origin.p || !origin.n || !cors_method_allowed(rm)) return true;
   char *o = buckets_str_dup(origin);
@@ -1652,12 +1679,22 @@ void buckets_s3_handle(const buckets_http_request *req, buckets_http_response *r
   }
   if (!buckets_str_has_prefix(req->path, "/minio/") && !buckets_sts_matches(&c)) {
     api = buckets_s3_api_index(&c); /* collectAPIStats: after the validity filter, before auth */
+    if (api >= 0 && buckets_logger_audit_enabled(s->logger)) {
+      c.audited = true;
+      buckets_audit_tags_set(&c.tags);
+    }
     if (api >= 0 && c.bucket && s->meta) {
       buckets_bucket_state *bst = buckets_metasys_get(s->meta, c.bucket);
       if (bst->exists) stat_bucket = buckets_xstrdup(c.bucket);
       buckets_bucket_state_release(bst);
     }
     buckets_stats_begin(api, stat_bucket);
+    /* maxClients: the request pool's size and free slots (ListenNotification is not throttled) */
+    if (api >= 0 && s->requests_max > 0 && api != buckets_api_index("listennotification")) {
+      int64_t busy = buckets_stats_inflight();
+      buckets_http_resp_headerf(resp, "X-Ratelimit-Limit", "%d", s->requests_max);
+      buckets_http_resp_headerf(resp, "X-Ratelimit-Remaining", "%lld", (long long)(s->requests_max - (busy - 1) > 0 ? s->requests_max - (busy - 1) : 0));
+    }
   }
   if (!buckets_admin_is_admin_path(req->path) && s->freeze_cnt > 0) {
     /* frozen (mc admin service freeze): S3 calls wait for the unfreeze */
@@ -1723,10 +1760,17 @@ done:
                   : resp->content_length >= 0          ? (uint64_t)resp->content_length
                                                        : (uint64_t)resp->body.len;
     buckets_stats_end(api, stat_bucket, resp->status, ttfb, req->body_len > 0 ? (uint64_t)req->body_len : 0, tx);
+    if (c.audited) buckets_s3_audit(&c, api, (int64_t)(ttfb * 1e9), (int64_t)(ttfb * 1e9), tx);
     if (stat_bucket && api == buckets_api_index("deletebucket") && resp->status == 204)
       buckets_stats_forget_bucket(stat_bucket);
   }
   free(stat_bucket);
+  if (c.audited) {
+    buckets_audit_tags_set(NULL);
+    buckets_audit_tags_free(&c.tags);
+    buckets_buf_free(&c.audit_objects);
+    free(c.audit_tagging);
+  }
   buckets_query_free(&c.q);
   free(c.path);
   free(c.bucket);
