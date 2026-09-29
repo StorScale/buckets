@@ -146,3 +146,16 @@ pre.preview { overflow: auto; padding: 8px; font-size: 12px; white-space: pre-wr
 .share input.url { flex: 1; min-width: 200px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
 .or { text-align: center; color: var(--muted); margin: 12px 0 8px; font-size: 12px; }
 .login-card .sso { display: block; text-align: center; width: 100%; }
+
+/* live streams (trace, logs, events) */
+.stream-bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 12px; }
+.stream-bar .check { display: inline-flex; gap: 4px; align-items: center; font-size: 13px; }
+.stream-bar input.small { width: 170px; }
+table.dense td, table.dense th { padding: 5px 10px; font-size: 13px; }
+td.mono, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+td.ellipsis { max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+td.wrap { white-space: pre-wrap; word-break: break-word; }
+tr.clickable { cursor: pointer; }
+tr.clickable:hover td { background: var(--hover, rgba(127, 127, 127, 0.08)); }
+pre.json { max-height: 60vh; overflow: auto; font-size: 12px; }
+.pill.warn { background: rgba(214, 158, 46, 0.15); color: #b7791f; }

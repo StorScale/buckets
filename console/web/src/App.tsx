@@ -12,6 +12,9 @@ import Groups from "./pages/Groups";
 import Policies from "./pages/Policies";
 import AccessKeys from "./pages/AccessKeys";
 import Configuration from "./pages/Configuration";
+import Trace from "./pages/Trace";
+import Logs from "./pages/Logs";
+import Events from "./pages/Events";
 
 export default function App() {
   const [user, setUser] = useState<Session | null | undefined>(undefined);
@@ -64,6 +67,10 @@ export default function App() {
         <NavLink to="/identity/groups">Groups</NavLink>
         <NavLink to="/identity/policies">Policies</NavLink>
         <NavLink to="/identity/access-keys">Access Keys</NavLink>
+        <div className="nav-group">Monitoring</div>
+        <NavLink to="/monitoring/trace">Trace</NavLink>
+        <NavLink to="/monitoring/logs">Logs</NavLink>
+        <NavLink to="/monitoring/events">Events</NavLink>
         <div className="nav-group">Administration</div>
         <NavLink to="/configuration">Configuration</NavLink>
         <div className="sidebar-foot">
@@ -78,6 +85,9 @@ export default function App() {
       <main className="content">
         <Routes>
           <Route path="/" element={<Dashboard />} />
+          <Route path="/monitoring/trace" element={<Trace />} />
+          <Route path="/monitoring/logs" element={<Logs />} />
+          <Route path="/monitoring/events" element={<Events />} />
           <Route path="/buckets" element={<Buckets />} />
           <Route path="/buckets/:bucket/browse/*" element={<Browser />} />
           <Route path="/buckets/:bucket/settings" element={<BucketSettings />} />

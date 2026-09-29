@@ -278,3 +278,44 @@ test("configuration: read and change a setting", async ({ page }) => {
   await page.getByTestId("config-scanner").click();
   await expect(page.getByTestId("cfg-speed")).toHaveValue("slow");
 });
+
+test.describe("monitoring", () => {
+  test("trace shows calls as they happen", async ({ page }) => {
+    await login(page);
+    const bucket = unique("trace");
+    await page.getByRole("link", { name: "Trace" }).click();
+    await expect(page.getByRole("heading", { name: "Trace" })).toBeVisible();
+    await page.getByTestId("stream-start").click();
+    await expect(page.getByTestId("stream-stop")).toBeVisible();
+    await page.waitForTimeout(500);
+    await page.request.put(`/api/v1/s3/${bucket}`, { headers: { "X-Console-Request": "1" } });
+    await expect(page.getByTestId("trace-row").filter({ hasText: "s3.PutBucket" }).first()).toBeVisible();
+    await page.getByTestId("trace-row").filter({ hasText: "s3.PutBucket" }).first().click();
+    await expect(page.locator("pre.json")).toContainText(bucket);
+    await page.keyboard.press("Escape");
+    await page.getByTestId("stream-stop").click({ force: true });
+    await expect(page.getByTestId("stream-start")).toBeVisible();
+  });
+
+  test("logs stream the server log", async ({ page }) => {
+    await login(page);
+    await page.getByRole("link", { name: "Logs" }).click();
+    await page.getByTestId("stream-start").click();
+    await expect(page.getByTestId("log-row").first()).toBeVisible();
+    await page.getByTestId("stream-stop").click();
+  });
+
+  test("events show a bucket's changes", async ({ page }) => {
+    await login(page);
+    const bucket = unique("events");
+    await page.request.put(`/api/v1/s3/${bucket}`, { headers: { "X-Console-Request": "1" } });
+    await page.getByRole("link", { name: "Events" }).click();
+    await page.getByTestId("events-bucket").selectOption(bucket);
+    await page.getByTestId("stream-start").click();
+    await page.waitForTimeout(500);
+    await page.request.put(`/api/v1/s3/${bucket}/hello.txt`, { headers: { "X-Console-Request": "1" }, data: "hi" });
+    await expect(page.getByTestId("event-row").filter({ hasText: "hello.txt" })).toBeVisible();
+    await expect(page.getByTestId("event-row").first()).toContainText("ObjectCreated:Put");
+    await page.getByTestId("stream-stop").click();
+  });
+});

@@ -785,11 +785,9 @@ static void proxy(buckets_console *c, const buckets_http_request *req, buckets_h
         } else if (len >= 0) {
           resp->content_length = len;
           resp->stream = stream_body, resp->stream_ud = st, resp->stream_free = buckets_http_stream_free;
-        } else { /* chunked or close-delimited: buffer it */
-          char buf[65536];
-          long k;
-          while ((k = buckets_http_stream_read(st, buf, sizeof(buf))) > 0) buckets_buf_append(&resp->body, buf, (size_t)k);
-          buckets_http_stream_free(st);
+        } else { /* chunked (trace, logs, event listening): relayed as it comes */
+          resp->chunked = true;
+          resp->stream = stream_body, resp->stream_ud = st, resp->stream_free = buckets_http_stream_free;
         }
       }
       buckets_buf_free(&target);

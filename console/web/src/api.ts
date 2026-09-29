@@ -17,6 +17,7 @@ type CallOpts = {
   headers?: Record<string, string>;
   encrypt?: boolean; // madmin-encrypt the body (admin)
   decrypt?: boolean; // decrypt an encrypted admin reply
+  signal?: AbortSignal;
 };
 
 export const SESSION_EXPIRED = "buckets-session-expired";
@@ -54,7 +55,13 @@ export async function call(method: string, path: string, opts: CallOpts = {}): P
   const headers: Record<string, string> = { "X-Console-Request": "1", ...(opts.headers ?? {}) };
   if (opts.encrypt) headers["X-Console-Encrypt"] = "1";
   if (opts.decrypt) headers["X-Console-Decrypt"] = "1";
-  const res = await fetch(path + qs(opts.query), { method, headers, body: opts.body ?? undefined, credentials: "same-origin" });
+  const res = await fetch(path + qs(opts.query), {
+    method,
+    headers,
+    body: opts.body ?? undefined,
+    credentials: "same-origin",
+    signal: opts.signal,
+  });
   if (!res.ok) {
     const err = await errorFrom(res);
     if (res.status === 401 && err.code === "Unauthorized") window.dispatchEvent(new Event(SESSION_EXPIRED));
@@ -412,4 +419,97 @@ export async function getLegalHold(bucket: string, key: string): Promise<boolean
 }
 export async function setLegalHold(bucket: string, key: string, on: boolean): Promise<void> {
   await putObjectSub(bucket, key, "legal-hold", `<LegalHold><Status>${on ? "ON" : "OFF"}</Status></LegalHold>`);
+}
+
+// ---- streams (mc admin trace, mc admin logs, mc event listen) ----
+
+// Reads a never-ending JSON-lines stream until signal aborts: one object per
+// line, keep-alive spaces and empty {"Records":null} pings skipped.
+export async function readStream(
+  path: string,
+  query: Record<string, string | undefined>,
+  onItem: (item: any) => void,
+  signal: AbortSignal,
+): Promise<void> {
+  const res = await call("GET", path, { query, signal });
+  const reader = res.body!.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) return;
+      buf += dec.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line) continue;
+        let item;
+        try {
+          item = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (item && item.Records === null) continue;
+        onItem(item);
+      }
+      buf = buf.replace(/^\s+/, "");
+    }
+  } catch (e) {
+    if ((e as Error).name !== "AbortError") throw e;
+  }
+}
+
+export type TraceRecord = {
+  type: number;
+  nodename: string;
+  funcname: string;
+  time: string;
+  path?: string;
+  dur?: number;
+  error?: string;
+  http?: { request?: { method?: string; path?: string; rawquery?: string; client?: string }; response?: { statusCode?: number } };
+  custom?: Record<string, string>;
+};
+export const TRACE_TYPES = ["s3", "internal", "storage", "os", "scanner", "healing", "ilm"] as const;
+export function trace(types: string[], errorsOnly: boolean, threshold: string, onItem: (r: TraceRecord) => void, signal: AbortSignal) {
+  const q: Record<string, string | undefined> = { err: String(errorsOnly), threshold: threshold || "0s" };
+  for (const t of TRACE_TYPES) q[t] = String(types.includes(t));
+  return readStream("/api/v1/admin/trace", q, onItem, signal);
+}
+
+export type LogEntry = {
+  level?: string;
+  time?: string;
+  node?: string;
+  message?: string;
+  ConsoleMsg?: string;
+  error?: { message?: string; source?: string[] };
+  api?: { name?: string };
+};
+export function consoleLogs(node: string, logType: string, limit: number, onItem: (e: LogEntry) => void, signal: AbortSignal) {
+  return readStream("/api/v1/admin/log", { node: node || undefined, logType, limit: String(limit) }, onItem, signal);
+}
+
+export type EventRecord = {
+  eventName: string;
+  eventTime: string;
+  s3: { bucket: { name: string }; object: { key: string; size?: number; versionId?: string } };
+  source?: { host?: string; userAgent?: string };
+};
+export function listenEvents(
+  bucket: string,
+  prefix: string,
+  suffix: string,
+  events: string[],
+  onItem: (r: EventRecord) => void,
+  signal: AbortSignal,
+) {
+  const parts = [`events`, `prefix=${encodeURIComponent(prefix)}`, `suffix=${encodeURIComponent(suffix)}`, `ping=10`];
+  const q = parts.slice(1).concat(events.map((e) => `events=${encodeURIComponent(e)}`)).join("&");
+  const path = (bucket ? `/api/v1/s3/${encodeURIComponent(bucket)}` : "/api/v1/s3/") + `?${q}`;
+  return readStream(path, {}, (item) => {
+    for (const r of item.Records ?? []) onItem(r as EventRecord);
+  }, signal);
 }

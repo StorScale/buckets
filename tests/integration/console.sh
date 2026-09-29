@@ -121,6 +121,22 @@ curl -s "$URL" -o "$WORK/shared"
 cmp -s "$WORK/big" "$WORK/shared" && check "share link fetch" yes yes || check "share link fetch" no yes
 check "tampered share link" "$(code "${URL/expires=300/expires=301}X")" 403
 
+echo "== live streams (trace, logs, events) relayed as they come"
+code -b "$R" -H "$H" -X PUT "$C/api/v1/s3/streambucket" >/dev/null
+curl -s -N -b "$R" "$C/api/v1/admin/trace?s3=true&internal=false&storage=false&os=false&err=false&threshold=0s" >"$WORK/trace.out" &
+TP=$!
+curl -s -N -b "$R" "$C/api/v1/admin/log?limit=5&logType=ALL" >"$WORK/log.out" &
+LP=$!
+curl -s -N -b "$R" "$C/api/v1/s3/streambucket?events=s3:ObjectCreated:*&prefix=&suffix=&ping=10" >"$WORK/events.out" &
+EVP=$!
+sleep 1.5
+code -b "$R" -H "$H" -X PUT --data-binary "hello" "$C/api/v1/s3/streambucket/live.txt" >/dev/null
+sleep 1.5
+kill $TP $LP $EVP 2>/dev/null || true; wait $TP $LP $EVP 2>/dev/null || true
+check "trace shows the upload" "$(grep -c '"funcname":"s3.PutObject"' "$WORK/trace.out")" 1
+check "logs stream" "$(grep -c '"node"' "$WORK/log.out" | awk '{print ($1 > 0)}')" 1
+check "event of the upload" "$(grep -o '"key":"live.txt"' "$WORK/events.out" | head -1)" '"key":"live.txt"'
+
 echo "== sign out"
 check "logout" "$(code -b "$A" -c "$A" -H "$H" -X POST "$C/api/v1/logout")" 204
 check "session gone" "$(code -b "$A" "$C/api/v1/session")" 401

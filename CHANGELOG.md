@@ -62,6 +62,8 @@ All notable changes to this project are documented here. The format follows
 - Admin API calls are audited as MinIO's adminMiddleware audits them (the handler's name, no bucket or object).
 - Audit entries for what the server does on its own (MinIO's auditLogInternal): `HealObject` for each healed version (tagged `healObject: name=…,pool=…,set=…`, with MinIO's "unable to heal N missing/corrupted blocks" errors) and `ILMExpiry` for each lifecycle expiry (trigger and event `ilm:expiry`, lcAuditEvent tags). trace-interop finds them identical to MinIO's.
 
+- Console: Monitoring pages for live trace (types, errors only, threshold; each call's full record), server logs (by kind and node) and bucket events (bucket, prefix, suffix, event kinds), read as the streams come; consoled relays chunked replies as they arrive instead of buffering them. The Configuration page covers every notification target and `audit_kafka`. `tests/integration/console.sh` and the Playwright suite check all three streams.
+
 ### Changed
 - Duration settings report time.ParseDuration's errors (`missing unit`, `unknown unit`).
 - Notification and log targets are closed when the server stops.

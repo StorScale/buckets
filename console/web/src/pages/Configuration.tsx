@@ -3,7 +3,11 @@ import { configHelp, ConfigHelp, getConfig, setConfig } from "../api";
 import { ErrorBanner, Notice, Spinner, useLoad } from "../components";
 
 // The subsystems shown (MinIO's `mc admin config` names).
-const SUBSYSTEMS = ["api", "scanner", "compression", "storage_class", "site", "region", "identity_openid", "identity_ldap", "policy_opa", "notify_webhook", "logger_webhook", "audit_webhook"];
+const SUBSYSTEMS = [
+  "api", "scanner", "compression", "storage_class", "site", "region", "identity_openid", "identity_ldap", "policy_opa",
+  "notify_webhook", "notify_amqp", "notify_kafka", "notify_mqtt", "notify_nats", "notify_nsq", "notify_redis",
+  "notify_postgres", "notify_mysql", "notify_elasticsearch", "logger_webhook", "audit_webhook", "audit_kafka",
+];
 
 // "subsys[:target] k=v k2=\"v 2\"" -> {k: v}
 function parseKv(text: string): Record<string, string> {
