@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-28
+
+Phase 5: versioning, object lock, tagging, CORS, quotas, lifecycle expiry,
+SSE-S3/SSE-KMS/SSE-C with the builtin KMS, and compression. Gate: mint over
+HTTPS 149 PASS / 0 FAIL (with and without compression), and ceph s3-tests
+(`tests/conformance/s3-tests.sh`, same harness for both) 324 passed against
+MinIO RELEASE.2025-10-15's 315, with no test that MinIO passes failing.
+
 ### Added
 - Bucket versioning (Phase 5):
   - `?versioning` GET/PUT with MinIO's excluded-prefix and exclude-folders extensions; object lock prevents suspending
