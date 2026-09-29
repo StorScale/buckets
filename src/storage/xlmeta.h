@@ -127,4 +127,28 @@ void buckets_xl_part_set_index(buckets_xl_part *p, const void *index, size_t len
 void buckets_xl_version_id_string(const uint8_t id[16], char *out);
 bool buckets_xl_version_id_parse(const char *s, uint8_t id[16]);
 
+/* ---- tiering (MinIO's transition metadata and free versions) ---- */
+
+#define BUCKETS_XL_META_TIER_STATUS "x-minio-internal-transition-status"
+#define BUCKETS_XL_META_TIER_OBJECT "x-minio-internal-transitioned-object"
+#define BUCKETS_XL_META_TIER_VERSION "x-minio-internal-transitioned-versionID"
+#define BUCKETS_XL_META_TIER_NAME "x-minio-internal-transition-tier"
+#define BUCKETS_XL_META_FREE_VERSION "x-minio-internal-free-version"
+#define BUCKETS_XL_META_TIER_FVID "x-minio-internal-tier-free-versionID"
+#define BUCKETS_XL_META_TIER_FVMARKER "x-minio-internal-tier-free-marker"
+#define BUCKETS_XL_META_SKIP_TIER_FV "x-minio-internal-skip-tier-free-version"
+
+/* The version's content lives in a remote tier (transition-status "complete"). */
+bool buckets_xl_transitioned(const buckets_xl_object *o);
+/* x-amz-restore says the content is back on the drives and not yet expired. */
+bool buckets_xl_restored_on_disk(const buckets_xl_object *o);
+/* xlMetaV2Object.UsesDataDir */
+bool buckets_xl_object_uses_data_dir(const buckets_xl_object *o);
+/* A free version: what is left of a deleted transitioned version until its
+ * remote copy is removed; never shown. */
+bool buckets_xl_is_free_version(const buckets_xl_header *h);
+/* parseRestoreObjStatus: `ongoing-request="true"` or
+ * `ongoing-request="false", expiry-date="<http date>"`. */
+bool buckets_restore_parse(const char *hdr, bool *ongoing, int64_t *expiry_sec);
+
 #endif

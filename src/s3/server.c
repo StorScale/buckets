@@ -46,6 +46,8 @@
 #include "s3/internal.h"
 #include "s3/replicate.h"
 #include "siterepl/siterepl.h"
+#include "s3/tiering.h"
+#include "tier/tier.h"
 #include "s3/sigv2.h"
 #include "s3/xml.h"
 
@@ -86,6 +88,10 @@ void buckets_s3_peer_iam(void *server, const char *kind, const char *name) {
   }
   if (strcmp(kind, "config") == 0) {
     if (s->config) buckets_config_sys_reload(s->config);
+    return;
+  }
+  if (strcmp(kind, "tier") == 0) {
+    if (s->tiers) buckets_tiers_reload(s->tiers);
     return;
   }
   if (strcmp(kind, "site-replication") == 0) {
@@ -606,6 +612,11 @@ static bool expire(buckets_s3_server *s, const char *bucket, const buckets_objec
                    buckets_delete_result *r) {
   int64_t start = wall_ns();
   buckets_delete_opts o = {.version_id = version_id, .versioned = enabled, .suspended = suspended};
+  /* expireTransitionedObject: the remote copy first; once it is gone no free
+   * version is needed (a version really removed, not hidden by a marker) */
+  const char *remote, *rver, *tier = buckets_object_tier(oi, &remote, &rver);
+  if (tier && (version_id || (!enabled && !suspended)) && buckets_tiering_remove_remote_now(s, tier, remote, rver))
+    o.skip_free_version = true;
   buckets_obj_err err = buckets_obj_delete_ex(s->layer, bucket, oi->name, &o, r);
   if (err && err != BUCKETS_OBJ_ERR_NO_SUCH_KEY && err != BUCKETS_OBJ_ERR_NO_SUCH_VERSION)
     buckets_log_warn("lifecycle: expiring %s/%s: %s", bucket, oi->name, buckets_obj_strerror(err));
@@ -667,6 +678,10 @@ static void scanner_lifecycle(buckets_s3_server *s, const char *bucket, const bu
     objs[i].num_versions = n;
     objs[i].successor_mod_time_ns = i ? v[i - 1].mod_time_ns : 0;
     objs[i].locked = version_locked(&v[i], now);
+    objs[i].transitioned = buckets_object_tier(&v[i], NULL, NULL) != NULL;
+    int64_t rexp;
+    buckets_object_restore_state(&v[i], &objs[i].restore_ongoing, &rexp);
+    objs[i].restore_expires_ns = rexp * 1000000000LL;
   }
   buckets_lifecycle_eval_versions(&st->lifecycle, st->lock_enabled, objs, n, now, ev);
   for (size_t i = 0; i < n; i++)
@@ -703,12 +718,42 @@ static void scanner_lifecycle(buckets_s3_server *s, const char *bucket, const bu
       removed[i] = true;
       break;
     }
+    case BUCKETS_LC_TRANSITION:
+    case BUCKETS_LC_TRANSITION_VERSION: /* applyTransitionRule */
+      buckets_tiering_queue(s->tiering, bucket, &v[i], ev[i].storage_class, ev[i].rule_id, ev[i].due_ns,
+                            ev[i].action == BUCKETS_LC_TRANSITION_VERSION, false);
+      break;
+    case BUCKETS_LC_DELETE_RESTORED:
+    case BUCKETS_LC_DELETE_RESTORED_VERSION: { /* the restored copy expires; the remote one stays */
+      buckets_obj_err err = buckets_obj_expire_restored(s->layer, bucket, v[i].name, v[i].version_id);
+      if (err && err != BUCKETS_OBJ_ERR_NO_SUCH_KEY && err != BUCKETS_OBJ_ERR_NO_SUCH_VERSION)
+        buckets_log_warn("lifecycle: expiring the restored copy of %s/%s: %s", bucket, v[i].name, buckets_obj_strerror(err));
+      break;
+    }
     default: break;
     }
   }
   free(objs);
   free(ev);
   buckets_bucket_state_release(st);
+}
+
+/* The free-version task: the remote copy, then the free version itself. */
+static void scanner_free_version(void *ud, const char *bucket, const buckets_object_info *fv) {
+  buckets_s3_server *s = ud;
+  const buckets_xl_kv *tier = buckets_object_sys(fv, BUCKETS_XL_META_TIER_NAME);
+  const buckets_xl_kv *remote = buckets_object_sys(fv, BUCKETS_XL_META_TIER_OBJECT);
+  const buckets_xl_kv *rv = buckets_object_sys(fv, BUCKETS_XL_META_TIER_VERSION);
+  if (!tier || !remote) return;
+  if (!buckets_tiering_remove_remote_now(s, (const char *)tier->value, (const char *)remote->value,
+                                         rv ? (const char *)rv->value : ""))
+    return;
+  buckets_obj_err err = buckets_obj_delete_free_version(s->layer, bucket, fv->name, fv->version_id);
+  if (!err) {
+    const char *keys[1] = {"version-id"}, *values[1] = {fv->version_id};
+    buckets_audit_internal("ilm:free-version-delete", "ILMFreeVersionDelete", bucket, fv->name, fv->version_id, NULL,
+                           keys, values, 1);
+  }
 }
 
 void buckets_s3_scanner_hooks(buckets_s3_server *s, void *hooks) {
@@ -718,6 +763,7 @@ void buckets_s3_scanner_hooks(buckets_s3_server *s, void *hooks) {
   h->versioned = scanner_versioned;
   h->actual_size = scanner_actual_size;
   h->object = scanner_object;
+  h->free_version = scanner_free_version;
   h->ud = s;
 }
 
@@ -743,7 +789,10 @@ void buckets_s3_server_set_layer(buckets_s3_server *s, buckets_objlayer *layer) 
   buckets_metasys_set_notify(s->meta, notify_bucket, s);
   buckets_metasys_set_kms(s->meta, s->kms);
   s->repl = buckets_repl_new(s);
+  s->tiers = buckets_tiers_new(s);
+  s->tiering = buckets_tiering_new(s, layer);
   s->layer = layer; /* atomic store, after host_id and meta */
+  buckets_tiers_reload(s->tiers);
   buckets_repl_resync_resume(s->repl);
   s->sr = buckets_sr_new(s);
   buckets_sr_start(s->sr); /* loads its state once IAM is up */
@@ -765,6 +814,7 @@ void buckets_s3_server_stop(buckets_s3_server *s) {
   if (s->metrics_thread_started) pthread_join(s->metrics_thread, NULL);
   s->metrics_thread_started = false;
   buckets_sr_stop(s->sr);
+  buckets_tiering_stop(s->tiering);
   buckets_repl_stop(s->repl);
   buckets_iam_stop_refresh(s->iam);
 }

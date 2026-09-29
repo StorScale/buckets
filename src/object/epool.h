@@ -43,7 +43,7 @@ buckets_obj_err buckets_ep_update_meta(buckets_epool *P, const char *bucket, con
                                        buckets_object_info *out);
 buckets_obj_err buckets_ep_list_versions(buckets_epool *P, const char *bucket, const char *prefix,
                                          const char *key_marker, const char *version_marker, const char *delimiter,
-                                         int max_keys, buckets_obj_listing *out);
+                                         int max_keys, bool incl_free, buckets_obj_listing *out);
 buckets_obj_err buckets_ep_list(buckets_epool *P, const char *bucket, const char *prefix, const char *marker,
                                 const char *delimiter, int max_keys, buckets_obj_listing *out);
 buckets_obj_err buckets_ep_heal(buckets_epool *P, const char *bucket, const char *object, const char *version_id,
@@ -70,5 +70,15 @@ buckets_obj_err buckets_ep_mpu_stat(buckets_epool *P, const char *bucket, const 
                                     buckets_object_info *out);
 buckets_obj_err buckets_ep_mpu_list_uploads(buckets_epool *P, const char *bucket, const char *object,
                                             buckets_upload_info **uploads, size_t *n);
+
+buckets_obj_err buckets_ep_transition(buckets_epool *P, const char *bucket, const char *object, const char *version_id,
+                                      int64_t mod_time_ns, const char *etag, const char *tier,
+                                      buckets_tier_upload_fn upload, void *ud, buckets_object_info *out);
+buckets_obj_err buckets_ep_rehydrate(buckets_epool *P, const char *bucket, const char *object, const char *version_id,
+                                     buckets_read_fn rd, void *rd_ud, const char *restore_hdr);
+buckets_obj_err buckets_ep_expire_restored(buckets_epool *P, const char *bucket, const char *object,
+                                           const char *version_id);
+buckets_obj_err buckets_ep_delete_free_version(buckets_epool *P, const char *bucket, const char *object,
+                                               const char *version_id);
 
 #endif

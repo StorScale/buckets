@@ -77,6 +77,7 @@ add_library(buckets STATIC
   s3/xml.c
   s3/replicate.c
   s3/replstats.c
+  s3/tiering.c
   s3/replhandlers.c
   s3/sigv4.c
   s3/sign.c
@@ -142,8 +143,13 @@ add_library(buckets STATIC
   admin/bucket.c
   admin/replicate.c
   admin/siterepl.c
+  admin/tier.c
   siterepl/siterepl.c
   siterepl/srstatus.c
+  tier/tier.c
+  tier/warm.c
+  tier/azure.c
+  tier/gcs.c
   admin/kms.c
   config/config.c
   config/sys.c

@@ -767,6 +767,10 @@ buckets_lc_event buckets_lifecycle_eval(const buckets_lifecycle *lc, const bucke
   if (!o->mod_time_ns || !o->name || !*o->name) return none;
   buckets_lc_event ev[64];
   size_t n = 0;
+  /* the expiry of a restored copy: not governed by the rules */
+  if (o->restore_expires_ns && after(now, o->restore_expires_ns))
+    ev[n++] = (buckets_lc_event){o->is_latest ? BUCKETS_LC_DELETE_RESTORED : BUCKETS_LC_DELETE_RESTORED_VERSION, NULL,
+                                 now, NULL};
   for (size_t i = 0; i < lc->n && n + 4 < 64; i++) {
     const buckets_lc_rule *r = &lc->rules[i];
     if (!rule_applies(r, o)) continue;
@@ -793,7 +797,7 @@ buckets_lc_event buckets_lifecycle_eval(const buckets_lifecycle *lc, const bucke
       int64_t due = buckets_lc_expected_expiry(o->successor_mod_time_ns, r->nve_days);
       if (retained && after(now, due)) ev[n++] = (buckets_lc_event){BUCKETS_LC_DELETE_VERSION, r->id, due, NULL};
     }
-    if (!o->is_latest && r->nvt_class && *r->nvt_class && !o->delete_marker) {
+    if (!o->is_latest && r->nvt_class && *r->nvt_class && !o->delete_marker && !o->transitioned) {
       int64_t due = r->nvt_days ? buckets_lc_expected_expiry(o->successor_mod_time_ns, r->nvt_days) : o->successor_mod_time_ns;
       if (after(now, due)) ev[n++] = (buckets_lc_event){BUCKETS_LC_TRANSITION_VERSION, r->id, due, r->nvt_class};
     }
@@ -806,7 +810,7 @@ buckets_lc_event buckets_lifecycle_eval(const buckets_lifecycle *lc, const bucke
         if (after(now, due))
           ev[n++] = (buckets_lc_event){r->exp_all ? BUCKETS_LC_DELETE_ALL_VERSIONS : BUCKETS_LC_DELETE, r->id, due, NULL};
       }
-      if (r->tr_class && *r->tr_class) {
+      if (r->tr_class && *r->tr_class && !o->transitioned) {
         int64_t due = r->tr_date ? r->tr_date * 1000000000LL
                       : r->tr_days ? buckets_lc_expected_expiry(o->mod_time_ns, r->tr_days)
                                    : o->mod_time_ns;

@@ -172,6 +172,10 @@ void buckets_s3_get_bucket_lifecycle(s3_ctx *c);
 void buckets_s3_delete_bucket_lifecycle(s3_ctx *c);
 /* x-amz-expiration (or x-minio-transition) for an object, from the bucket's lifecycle. */
 void buckets_s3_expiration_header(s3_ctx *c, const buckets_object_info *oi);
+/* enqueueTransitionImmediate: a just-written version whose transition is already due. */
+void buckets_s3_transition_immediate(s3_ctx *c, const buckets_object_info *oi);
+/* ObjectInfo.StorageClass: a transitioned version's tier, else the stored class or STANDARD. */
+const char *buckets_s3_storage_class(const buckets_object_info *oi);
 
 /* ---- tagging (tagging.c) ---- */
 /* Writes the S3 error for a tags parse error (buckets_tags_error). */

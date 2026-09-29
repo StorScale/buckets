@@ -144,11 +144,15 @@ static bool usage_bucket(buckets_scanner *s, const char *bucket, buckets_bucket_
       ok = false;
       break;
     }
-    if (buckets_obj_list_versions(s->L, bucket, "", key_marker, ver_marker, NULL, LIST_PAGE, &l) != BUCKETS_OBJ_OK) {
+    if (buckets_obj_list_versions_all(s->L, bucket, "", key_marker, ver_marker, LIST_PAGE, &l) != BUCKETS_OBJ_OK) {
       ok = false;
       break;
     }
     for (size_t i = 0; i < l.nobjects; i++) {
+      if (l.objects[i].free_version) { /* not counted: swept */
+        if (s->hooks.free_version) s->hooks.free_version(s->hooks.ud, bucket, &l.objects[i]);
+        continue;
+      }
       if (ng && strcmp(group[0].name, l.objects[i].name) != 0) {
         scan_key(s, bucket, group, ng, bu);
         for (size_t j = 0; j < ng; j++) buckets_object_info_free(&group[j]);

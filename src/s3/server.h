@@ -41,6 +41,8 @@ typedef struct buckets_s3_server {
   struct buckets_usage_cache_s *usage; /* the stored data usage (scanner/usage.h), once the layer is up */
   struct buckets_kms *kms;             /* SSE-S3/SSE-KMS keys, or NULL when no KMS is configured */
   struct buckets_repl *repl;           /* bucket replication (targets and workers), once the layer is up */
+  struct buckets_tiering *tiering;     /* transitions and remote reads, once the layer is up */
+  struct buckets_tiers *tiers;         /* remote tiers (tier-config.bin), once the layer is up */
   struct buckets_sr *sr;               /* site replication (always set; enabled by its state) */
   /* Background threads (IAM start and refresh, LDAP sync), stopped and
    * joined by buckets_s3_server_stop before the object layer is freed. */
@@ -98,5 +100,11 @@ void buckets_s3_service(buckets_s3_server *s, const char *action, bool local);
 
 /* The LDAP identity provider (a reference to release), or NULL. */
 struct buckets_ldapidp *buckets_s3_ldap(buckets_s3_server *s);
+
+/* A configuration object under .minio.sys (path relative to it), written
+ * SSE-S3-encrypted when a KMS is configured, as MinIO saves tier-config.bin;
+ * reading decrypts either kind. */
+bool buckets_s3_config_write(buckets_s3_server *s, const char *path, const void *data, size_t n);
+buckets_obj_err buckets_s3_config_read(buckets_s3_server *s, const char *path, buckets_buf *out);
 
 #endif

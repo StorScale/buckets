@@ -1,11 +1,15 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 #include "storage/xlmeta.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+#include <time.h>
 
 #include "core/msgpack.h"
+#include "core/timefmt.h"
 #include "crypto/xxhash.h"
 
 #define XL_HEADER_VERSION 3
@@ -499,6 +503,7 @@ static void encode_delete_marker(const buckets_xl_object *o, buckets_buf *meta, 
   hdr->mod_time = o->mod_time;
   for (int i = 0; i < 4; i++) hdr->signature[i] = (uint8_t)(s32 >> (8 * i));
   hdr->type = BUCKETS_XL_TYPE_DELETE;
+  if (buckets_xl_kv_get(o->meta_sys, o->nmeta_sys, BUCKETS_XL_META_FREE_VERSION)) hdr->flags |= BUCKETS_XL_FLAG_FREE_VERSION;
 }
 
 void buckets_xl_object_encode(const buckets_xl_object *o, buckets_buf *meta, buckets_xl_header *hdr) {
@@ -527,7 +532,7 @@ void buckets_xl_object_encode(const buckets_xl_object *o, buckets_buf *meta, buc
   hdr->mod_time = o->mod_time;
   for (int i = 0; i < 4; i++) hdr->signature[i] = (uint8_t)(s32 >> (8 * i));
   hdr->type = BUCKETS_XL_TYPE_OBJECT;
-  hdr->flags = BUCKETS_XL_FLAG_USES_DATA_DIR; /* no tiering yet, so data always lives on the drive */
+  if (buckets_xl_object_uses_data_dir(o)) hdr->flags = BUCKETS_XL_FLAG_USES_DATA_DIR;
   if (buckets_xl_kv_get(o->meta_sys, o->nmeta_sys, BUCKETS_XL_META_INLINE)) hdr->flags |= BUCKETS_XL_FLAG_INLINE_DATA;
   hdr->ec_m = (uint8_t)o->ec_m;
   hdr->ec_n = (uint8_t)o->ec_n;
@@ -713,4 +718,84 @@ buckets_xl_err buckets_xl_object_decode(const buckets_xl_version *v, buckets_xl_
   }
   if (err != BUCKETS_XL_OK) buckets_xl_object_free(out);
   return err;
+}
+
+/* ---- tiering ------------------------------------------------------------------------ */
+
+bool buckets_xl_transitioned(const buckets_xl_object *o) {
+  const buckets_xl_kv *st = buckets_xl_kv_get(o->meta_sys, o->nmeta_sys, BUCKETS_XL_META_TIER_STATUS);
+  return st && st->value_len == 8 && memcmp(st->value, "complete", 8) == 0;
+}
+
+static const buckets_xl_kv *user_kv_fold(const buckets_xl_object *o, const char *key) {
+  for (size_t i = 0; i < o->nmeta_user; i++)
+    if (strcasecmp(o->meta_user[i].key, key) == 0) return &o->meta_user[i];
+  return NULL;
+}
+
+/* MinIO's http.ParseTime formats: RFC1123 ("Mon, 02 Jan 2006 15:04:05 GMT") and friends. */
+static bool parse_http_date(const char *s, int64_t *sec) {
+  time_t t;
+  buckets_str v = {s, strlen(s)};
+  if (!buckets_time_parse_http(v, &t)) return false;
+  *sec = (int64_t)t;
+  return true;
+}
+
+bool buckets_restore_parse(const char *hdr, bool *ongoing, int64_t *expiry_sec) {
+  *ongoing = false;
+  *expiry_sec = 0;
+  if (!hdr) return false;
+  const char *comma = strchr(hdr, ',');
+  size_t first = comma ? (size_t)(comma - hdr) : strlen(hdr);
+  const char *eq = memchr(hdr, '=', first);
+  if (!eq) return false;
+  /* strings.TrimSpace of the key only; the value is compared as is */
+  const char *k = hdr, *ke = eq;
+  while (k < ke && isspace((unsigned char)*k)) k++;
+  while (ke > k && isspace((unsigned char)ke[-1])) ke--;
+  if ((size_t)(ke - k) != strlen("ongoing-request") || strncmp(k, "ongoing-request", (size_t)(ke - k)) != 0) return false;
+  size_t vl = first - (size_t)(eq + 1 - hdr);
+  const char *v = eq + 1;
+  bool yes = (vl == 4 && strncmp(v, "true", 4) == 0) || (vl == 6 && strncmp(v, "\"true\"", 6) == 0);
+  bool no = (vl == 5 && strncmp(v, "false", 5) == 0) || (vl == 7 && strncmp(v, "\"false\"", 7) == 0);
+  if (yes) {
+    if (comma) return false;
+    *ongoing = true;
+    return true;
+  }
+  if (!no || !comma) return false;
+  const char *rest = comma + 1;
+  const char *eq2 = strchr(rest, '=');
+  if (!eq2) return false;
+  const char *k2 = rest, *k2e = eq2;
+  while (k2 < k2e && isspace((unsigned char)*k2)) k2++;
+  while (k2e > k2 && isspace((unsigned char)k2e[-1])) k2e--;
+  if ((size_t)(k2e - k2) != strlen("expiry-date") || strncmp(k2, "expiry-date", (size_t)(k2e - k2)) != 0) return false;
+  char date[128];
+  const char *d = eq2 + 1;
+  size_t dl = strlen(d);
+  while (dl && d[0] == '"') d++, dl--; /* strings.Trim(s, `"`) */
+  while (dl && d[dl - 1] == '"') dl--;
+  if (dl >= sizeof(date)) return false;
+  memcpy(date, d, dl);
+  date[dl] = '\0';
+  return parse_http_date(date, expiry_sec);
+}
+
+bool buckets_xl_restored_on_disk(const buckets_xl_object *o) {
+  const buckets_xl_kv *r = user_kv_fold(o, "x-amz-restore");
+  bool ongoing;
+  int64_t exp;
+  if (!r || !buckets_restore_parse((const char *)r->value, &ongoing, &exp) || ongoing) return false;
+  return (int64_t)time(NULL) < exp;
+}
+
+bool buckets_xl_object_uses_data_dir(const buckets_xl_object *o) {
+  if (o->type != BUCKETS_XL_TYPE_OBJECT) return false;
+  return !buckets_xl_transitioned(o) || buckets_xl_restored_on_disk(o);
+}
+
+bool buckets_xl_is_free_version(const buckets_xl_header *h) {
+  return h->type == BUCKETS_XL_TYPE_DELETE && (h->flags & BUCKETS_XL_FLAG_FREE_VERSION);
 }

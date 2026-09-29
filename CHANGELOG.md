@@ -30,6 +30,7 @@ All notable changes to this project are documented here. The format follows
   - `tests/integration/siterepl.sh` runs mixed three-site groups set up from a MinIO site and from a Buckets site (changes from every site, a site catching up after downtime, `replicate status` from each), and a MinIO→Buckets handover (a Buckets site joins a MinIO group, is resynced, and the MinIO sites leave).
 
 ### Fixed
+- `GetBucketLifecycle`'s `X-Minio-LifecycleConfig-UpdatedAt` is in MinIO's `20060102T150405Z` form (mc failed to parse it when adding a second rule).
 - Resync of replication targets without a reset time no longer overflows computing the reset boundary.
 
 ## [0.7.0] - 2026-09-29

@@ -47,6 +47,13 @@ void buckets_admin_list_remote_targets(s3_ctx *c);
 void buckets_admin_remove_remote_target(s3_ctx *c);
 void buckets_admin_replication_diff(s3_ctx *c);
 void buckets_admin_replication_mrf(s3_ctx *c);
+/* remote tiers (tier.c) */
+void buckets_admin_tier_add(s3_ctx *c);
+void buckets_admin_tier_edit(s3_ctx *c);
+void buckets_admin_tier_list(s3_ctx *c);
+void buckets_admin_tier_remove(s3_ctx *c);
+void buckets_admin_tier_verify(s3_ctx *c);
+void buckets_admin_tier_stats(s3_ctx *c);
 /* site replication (siterepl.c) */
 void buckets_admin_sr_add(s3_ctx *c);
 void buckets_admin_sr_remove(s3_ctx *c);

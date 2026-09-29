@@ -11,6 +11,8 @@
 #include "core/timefmt.h"
 #include "s3/internal.h"
 #include "s3/xml.h"
+#include "s3/tiering.h"
+#include "tier/tier.h"
 
 static int64_t now_ns(void) {
   struct timespec ts;
@@ -32,10 +34,10 @@ static void write_lc_error(s3_ctx *c, const buckets_lc_error *e) {
   }
 }
 
-/* No remote tiers yet: every transition storage class is unknown. */
+/* validateTransitionTier: a configured remote tier. */
 static bool tier_valid(void *ud, const char *tier) {
-  (void)ud, (void)tier;
-  return false;
+  buckets_s3_server *s = ud;
+  return buckets_tiers_valid(s->tiers, tier);
 }
 
 void buckets_s3_put_bucket_lifecycle(s3_ctx *c) {
@@ -52,7 +54,7 @@ void buckets_s3_put_bucket_lifecycle(s3_ctx *c) {
     write_lc_error(c, &e);
     return;
   }
-  if (!buckets_lifecycle_validate(&lc, st->lock_enabled, tier_valid, NULL, &e)) {
+  if (!buckets_lifecycle_validate(&lc, st->lock_enabled, tier_valid, c->s, &e)) {
     buckets_bucket_state_release(st);
     buckets_lifecycle_free(&lc);
     write_lc_error(c, &e);
@@ -109,8 +111,8 @@ void buckets_s3_get_bucket_lifecycle(s3_ctx *c) {
   buckets_lifecycle_xml(&st->lifecycle, false, &c->resp->body);
   if (with_updated_at) {
     const buckets_gotime *u = &st->meta.updated[BUCKETS_BCFG_LIFECYCLE];
-    char ts[BUCKETS_TIME_ISO8601_LEN + 1];
-    buckets_time_iso8601_ns(u->sec * 1000000000LL + u->nsec, ts);
+    char ts[BUCKETS_TIME_AMZ_LEN + 1]; /* iso8601Format: 20060102T150405Z */
+    buckets_time_amz((time_t)u->sec, ts);
     buckets_http_resp_header(c->resp, "X-Minio-LifecycleConfig-UpdatedAt", ts);
   }
   buckets_bucket_state_release(st);
@@ -150,6 +152,23 @@ void buckets_s3_expiration_header(s3_ctx *c, const buckets_object_info *oi) {
     char v[512];
     const char *h = buckets_lifecycle_prediction(&st->lifecycle, &o, v, sizeof(v));
     if (h) buckets_http_resp_header(c->resp, h, v);
+  }
+  buckets_bucket_state_release(st);
+}
+
+void buckets_s3_transition_immediate(s3_ctx *c, const buckets_object_info *oi) {
+  if (!c->s->meta || !oi->name || oi->delete_marker || buckets_tiers_empty(c->s->tiers)) return;
+  buckets_bucket_state *st = buckets_metasys_get(c->s->meta, c->bucket);
+  if (st->has_lifecycle) {
+    buckets_lc_obj o;
+    lc_obj(oi, &o);
+    if (strcmp(o.version_id, "null") == 0) o.version_id = "";
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    buckets_lc_event e = buckets_lifecycle_eval(&st->lifecycle, &o, (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec, 0);
+    if (e.action == BUCKETS_LC_TRANSITION || e.action == BUCKETS_LC_TRANSITION_VERSION)
+      buckets_tiering_queue(c->s->tiering, c->bucket, oi, e.storage_class, e.rule_id, e.due_ns,
+                            e.action == BUCKETS_LC_TRANSITION_VERSION, true);
   }
   buckets_bucket_state_release(st);
 }

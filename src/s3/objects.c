@@ -27,6 +27,7 @@
 #include "s3/sse.h"
 #include "s3/replicate.h"
 #include "s3/xml.h"
+#include "object/sysconfig.h"
 
 /* ---- error mapping -------------------------------------------------------- */
 
@@ -57,11 +58,20 @@ buckets_s3_error buckets_s3_obj_error(buckets_obj_err e) {
     case BUCKETS_OBJ_ERR_BUCKET_NOT_EMPTY: return BUCKETS_ERR_BUCKET_NOT_EMPTY;
     case BUCKETS_OBJ_ERR_TIMEOUT: return BUCKETS_ERR_REQUEST_TIMEDOUT; /* MinIO: OperationTimedOut */
     case BUCKETS_OBJ_ERR_METHOD_NOT_ALLOWED: return BUCKETS_ERR_METHOD_NOT_ALLOWED;
+    case BUCKETS_OBJ_ERR_TIER: return BUCKETS_ERR_INTERNAL_ERROR;
   }
   return BUCKETS_ERR_INTERNAL_ERROR;
 }
 
 /* ---- helpers -------------------------------------------------------------- */
+
+/* ObjectInfo.StorageClass: the tier of a transitioned version, else as stored. */
+const char *buckets_s3_storage_class(const buckets_object_info *oi) {
+  const char *tier = buckets_object_tier(oi, NULL, NULL);
+  if (tier) return tier;
+  const char *sc = buckets_object_meta(oi, "x-amz-storage-class");
+  return sc ? sc : "STANDARD";
+}
 
 /* Go's http.CanonicalHeaderKey for ASCII token names. */
 static void canonical_key(const char *in, char *out, size_t cap) {
@@ -778,6 +788,7 @@ static void put_object(s3_ctx *c) {
     c->resp->status = 200;
     buckets_s3_send_event_early(c, BUCKETS_EV_OBJECT_CREATED_PUT, c->bucket, c->object, &oi, NULL);
     buckets_repl_schedule(c->s, c->bucket, &oi, &dsc, BUCKETS_REPL_OBJECT, "replicate:incoming");
+    buckets_s3_transition_immediate(c, &oi);
     buckets_repl_dsc_free(&dsc);
     if (ri.replica) buckets_repl_stats_replica(c->bucket, b.size);
     buckets_object_info_free(&oi);
@@ -952,6 +963,10 @@ static void write_object_headers(s3_ctx *c, const buckets_object_info *oi) {
       canonical_key(k, canon, sizeof(canon));
       buckets_http_resp_header(c->resp, canon, v);
     }
+  }
+  /* a transitioned version answers with its tier as the storage class */
+  if (buckets_object_is_remote(oi)) {
+    buckets_http_resp_header_set(c->resp, "X-Amz-Storage-Class", buckets_object_tier(oi, NULL, NULL));
   }
   const char *exp = buckets_object_meta(oi, "expires");
   time_t et;
@@ -1789,6 +1804,8 @@ static void copy_object(s3_ctx *c) {
   etag_header(c->resp, oi.etag); /* setPutObjHeaders: the ETag and the object's checksums */
   if (oi.checksum && !buckets_s3_sse_encrypted(&oi)) buckets_checksum_write_headers(oi.checksum, oi.checksum_len, 0, c->resp);
   buckets_s3_send_event(c, BUCKETS_EV_OBJECT_CREATED_COPY, c->bucket, c->object, &oi, NULL);
+  oi.is_latest = true;
+  buckets_s3_transition_immediate(c, &oi);
   buckets_object_info_free(&oi);
 }
 
@@ -2494,6 +2511,8 @@ static void mpu_complete(s3_ctx *c, const char *upload_id) {
   buckets_xml_close(b, "CompleteMultipartUploadResult");
   buckets_s3_write_xml(c, 200);
   buckets_s3_send_event(c, BUCKETS_EV_OBJECT_CREATED_COMPLETE_MULTIPART_UPLOAD, c->bucket, c->object, &oi, NULL);
+  oi.is_latest = true;
+  buckets_s3_transition_immediate(c, &oi);
   if (!ri.request) {
     buckets_repl_dsc dsc;
     buckets_repl_must(c->s, c->bucket, c->object, oi.meta, oi.nmeta, oi.meta_sys, oi.nmeta_sys, NULL,
@@ -2776,8 +2795,7 @@ static void get_object_attributes(s3_ctx *c) {
     buckets_buf_free(&parts);
   }
   if (want[3]) {
-    const char *sc = buckets_object_meta(&oi, "x-amz-storage-class");
-    buckets_xml_elem(b, "StorageClass", sc ? sc : "STANDARD");
+    buckets_xml_elem(b, "StorageClass", buckets_s3_storage_class(&oi));
   }
   if (want[4] && oi.size) buckets_buf_appendf(b, "<ObjectSize>%lld</ObjectSize>", (long long)oi.size);
   buckets_xml_close(b, "getObjectAttributesResponse");
@@ -3321,8 +3339,7 @@ void buckets_s3_list_objects(s3_ctx *c, bool v2) {
       buckets_xml_elem(b, "DisplayName", BUCKETS_S3_OWNER_NAME);
       buckets_xml_close(b, "Owner");
     }
-    const char *sc = buckets_object_meta(o, "x-amz-storage-class");
-    buckets_xml_elem(b, "StorageClass", sc ? sc : "STANDARD");
+    buckets_xml_elem(b, "StorageClass", buckets_s3_storage_class(o));
     if (with_meta) {
       bool any = false;
       const char *sv, *sk = sse_list_meta(o, &sv);
@@ -3431,8 +3448,7 @@ void buckets_s3_list_object_versions(s3_ctx *c) {
     buckets_xml_elem(b, "ID", BUCKETS_S3_OWNER_ID);
     buckets_xml_elem(b, "DisplayName", BUCKETS_S3_OWNER_NAME);
     buckets_xml_close(b, "Owner");
-    const char *sc = buckets_object_meta(o, "x-amz-storage-class");
-    buckets_xml_elem(b, "StorageClass", sc ? sc : "STANDARD");
+    buckets_xml_elem(b, "StorageClass", buckets_s3_storage_class(o));
     if (with_meta && !o->delete_marker) {
       bool any = false;
       const char *sv, *sk = sse_list_meta(o, &sv);
@@ -3461,4 +3477,70 @@ void buckets_s3_list_object_versions(s3_ctx *c) {
   buckets_xml_close(b, "ListVersionsResult");
   buckets_obj_list_free(&l);
   buckets_s3_write_xml(c, 200);
+}
+
+/* ---- sealed configuration objects ----------------------------------------------------
+ * MinIO stores some configuration (tier-config.bin) with PutObject in
+ * .minio.sys, SSE-S3-encrypted when a KMS is configured (TierConfigMgr.Save),
+ * and reads it back decrypted (readConfig). */
+
+typedef struct {
+  const uint8_t *p;
+  size_t n, off;
+} mem_src;
+
+static long mem_read(void *ud, void *buf, size_t n) {
+  mem_src *m = ud;
+  size_t k = BUCKETS_MIN(n, m->n - m->off);
+  memcpy(buf, m->p + m->off, k);
+  m->off += k;
+  return (long)k;
+}
+
+bool buckets_s3_config_write(buckets_s3_server *s, const char *path, const void *data, size_t n) {
+  if (!s->layer) return false;
+  if (!s->kms) return buckets_sysconfig_write(s->layer, path, data, n) == BUCKETS_OBJ_OK;
+  s3_ctx c = {.s = s, .bucket = (char *)BUCKETS_META_BUCKET};
+  buckets_sse_req r = {.kind = BUCKETS_SSE_S3};
+  mem_src m = {data, n, 0};
+  buckets_object_info oi;
+  char etag[80];
+  buckets_s3_error e = buckets_s3_sse_put(&c, &r, path, mem_read, &m, (int64_t)n, NULL, 0, NULL, &oi, etag);
+  if (!e) buckets_object_info_free(&oi);
+  return e == BUCKETS_ERR_NONE;
+}
+
+buckets_obj_err buckets_s3_config_read(buckets_s3_server *s, const char *path, buckets_buf *out) {
+  if (!s->layer) return BUCKETS_OBJ_ERR_NO_SUCH_KEY;
+  buckets_object_info oi;
+  buckets_obj_err err = buckets_obj_stat(s->layer, BUCKETS_META_BUCKET, path, NULL, &oi);
+  if (err) return err;
+  bool encrypted = buckets_s3_sse_encrypted(&oi);
+  if (!encrypted) {
+    buckets_object_info_free(&oi);
+    return buckets_sysconfig_read(s->layer, path, out, NULL);
+  }
+  s3_ctx c = {.s = s, .bucket = (char *)BUCKETS_META_BUCKET};
+  uint8_t key[32];
+  if (buckets_s3_sse_object_key(&c, &oi, BUCKETS_META_BUCKET, path, false, key)) {
+    buckets_object_info_free(&oi);
+    return BUCKETS_OBJ_ERR_CORRUPT;
+  }
+  int64_t plain = buckets_s3_sse_actual_size(&oi), stored = oi.size;
+  buckets_sse_range rg;
+  buckets_obj_reader *rd = NULL;
+  err = plain < 0 || !buckets_s3_sse_range(&oi, 0, plain, &rg) ? BUCKETS_OBJ_ERR_CORRUPT
+        : buckets_obj_open(s->layer, BUCKETS_META_BUCKET, path, NULL, rg.enc_off, rg.enc_len, &rd, NULL);
+  if (!err) {
+    oi.size = stored;
+    buckets_sse_reader *sr = buckets_sse_reader_new(&oi, key, &rg, plain, (buckets_read_fn)reader_source, rd, reader_free);
+    char buf[16384];
+    long k;
+    while ((k = buckets_sse_reader_read(sr, buf, sizeof(buf))) > 0) buckets_buf_append(out, buf, (size_t)k);
+    if (k < 0) err = BUCKETS_OBJ_ERR_CORRUPT;
+    buckets_sse_reader_free(sr);
+  }
+  OPENSSL_cleanse(key, sizeof(key));
+  buckets_object_info_free(&oi);
+  return err;
 }

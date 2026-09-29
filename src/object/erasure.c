@@ -46,7 +46,7 @@ const char *buckets_obj_strerror(buckets_obj_err e) {
       "content-sha256 mismatch", "incomplete body", "data source failed", "corrupt data", "I/O error",
       "no such upload", "invalid part", "parts out of order", "part too small", "checksum mismatch",
       "read quorum not met", "write quorum not met", "bucket exists", "bucket not empty",
-      "namespace lock timed out", "method not allowed on a delete marker"};
+      "namespace lock timed out", "method not allowed on a delete marker", "remote tier failure"};
   return (size_t)e < BUCKETS_ARRAY_LEN(names) ? names[e] : "unknown";
 }
 
@@ -310,6 +310,13 @@ static bool same_header(const buckets_xl_header *a, const buckets_xl_header *b) 
          memcmp(a->signature, b->signature, 4) == 0 && a->type == b->type;
 }
 
+/* The newest version that is not a free version, or -1. */
+static long first_visible(const buckets_xlmeta *x) {
+  for (size_t k = 0; k < x->n; k++)
+    if (!buckets_xl_is_free_version(&x->versions[k].hdr)) return (long)k;
+  return -1;
+}
+
 /* Picks the version (latest, or by ID) that enough drives agree on.
  * vidx[i] is the version's index on drive i, or -1 if drive i disagrees. */
 static buckets_obj_err quorum_version(const dmeta *m, size_t n, const char *version_id, buckets_xl_object *out,
@@ -324,7 +331,7 @@ static buckets_obj_err quorum_version(const dmeta *m, size_t n, const char *vers
     vidx[i] = -1;
     if (m[i].missing) missing++;
     if (!m[i].loaded) continue;
-    long k = by_id ? buckets_xlmeta_find(&m[i].x, want_id) : (m[i].x.n ? 0 : -1);
+    long k = by_id ? buckets_xlmeta_find(&m[i].x, want_id) : first_visible(&m[i].x);
     if (k < 0) {
       missing++;
       continue;
@@ -367,9 +374,17 @@ static buckets_obj_err quorum_version(const dmeta *m, size_t n, const char *vers
 static void fill_position(buckets_object_info *oi, const dmeta *m, const long *vidx, size_t n) {
   for (size_t i = 0; i < n; i++) {
     if (vidx[i] < 0) continue;
-    oi->is_latest = vidx[i] == 0;
-    oi->num_versions = m[i].x.n;
-    oi->successor_mod_time_ns = vidx[i] > 0 ? m[i].x.versions[vidx[i] - 1].hdr.mod_time : 0;
+    const buckets_xlmeta *x = &m[i].x;
+    long prev = -1; /* free versions are not counted */
+    size_t visible = 0;
+    for (size_t k = 0; k < x->n; k++) {
+      if (buckets_xl_is_free_version(&x->versions[k].hdr)) continue;
+      visible++;
+      if ((long)k < vidx[i]) prev = (long)k;
+    }
+    oi->is_latest = prev < 0;
+    oi->num_versions = visible;
+    oi->successor_mod_time_ns = prev >= 0 ? x->versions[prev].hdr.mod_time : 0;
     return;
   }
 }
@@ -399,6 +414,35 @@ const char *buckets_object_meta(const buckets_object_info *oi, const char *key) 
 
 const buckets_xl_kv *buckets_object_sys(const buckets_object_info *oi, const char *key) {
   return buckets_xl_kv_get(oi->meta_sys, oi->nmeta_sys, key);
+}
+
+const char *buckets_object_tier(const buckets_object_info *oi, const char **remote, const char **version) {
+  const buckets_xl_kv *st = buckets_object_sys(oi, BUCKETS_XL_META_TIER_STATUS);
+  if (!st || st->value_len != 8 || memcmp(st->value, "complete", 8) != 0) return NULL;
+  const buckets_xl_kv *t = buckets_object_sys(oi, BUCKETS_XL_META_TIER_NAME);
+  const buckets_xl_kv *r = buckets_object_sys(oi, BUCKETS_XL_META_TIER_OBJECT);
+  const buckets_xl_kv *v = buckets_object_sys(oi, BUCKETS_XL_META_TIER_VERSION);
+  if (remote) *remote = r ? (const char *)r->value : "";
+  if (version) *version = v ? (const char *)v->value : "";
+  return t ? (const char *)t->value : "";
+}
+
+void buckets_object_restore_state(const buckets_object_info *oi, bool *ongoing, int64_t *expires) {
+  *ongoing = false;
+  *expires = 0;
+  for (size_t i = 0; i < oi->nmeta; i++) {
+    if (strcasecmp(oi->meta[i].key, "x-amz-restore") != 0) continue;
+    if (!buckets_restore_parse((const char *)oi->meta[i].value, ongoing, expires)) *ongoing = false, *expires = 0;
+    return;
+  }
+}
+
+bool buckets_object_is_remote(const buckets_object_info *oi) {
+  if (!buckets_object_tier(oi, NULL, NULL)) return false;
+  bool ongoing;
+  int64_t exp;
+  buckets_object_restore_state(oi, &ongoing, &exp);
+  return ongoing || exp <= (int64_t)time(NULL);
 }
 
 static void fill_info(buckets_object_info *oi, const char *name, const buckets_xl_object *o) {
@@ -773,8 +817,12 @@ typedef struct {
   const buckets_buf *ibuf;
   bool has_data_dir;
   char key[37], data_dir[37];
+  const uint8_t *fv_id; /* free version for a replaced transitioned version */
   bool ok[MAX_SET];
 } commit_ctx;
+
+static void new_uuid_bytes(uint8_t id[16], char str[37]);
+static void add_free_version(buckets_xlmeta *x, const buckets_xl_object *cur, const uint8_t *fv_id);
 
 static void commit_one(void *ctx, size_t i) {
   commit_ctx *c = ctx;
@@ -799,6 +847,12 @@ static void commit_one(void *ctx, size_t i) {
       if (po.type == BUCKETS_XL_TYPE_OBJECT && !buckets_xl_kv_get(po.meta_sys, po.nmeta_sys, BUCKETS_XL_META_INLINE)) {
         buckets_xl_version_id_string(po.data_dir, old_dir);
       }
+      /* an overwritten transitioned version: its remote copy is swept
+       * later (not when the same version is reinstalled: heal, restore) */
+      const buckets_xl_kv *was = buckets_xl_kv_get(po.meta_sys, po.nmeta_sys, BUCKETS_XL_META_TIER_OBJECT);
+      const buckets_xl_kv *now = buckets_xl_kv_get(c->o->meta_sys, c->o->nmeta_sys, BUCKETS_XL_META_TIER_OBJECT);
+      bool same = was && now && was->value_len == now->value_len && memcmp(was->value, now->value, was->value_len) == 0;
+      if (!same) add_free_version(&x, &po, c->fv_id);
       buckets_xl_object_free(&po);
     }
   }
@@ -834,8 +888,11 @@ static buckets_obj_err commit_version(buckets_eset *s, const char *bucket, const
                                       const int *dist, const bool *alive, const buckets_buf *ibuf,
                                       const char *src_dir, bool has_data_dir, int quorum, size_t *committed) {
   char *op = obj_path(object);
+  uint8_t fv_id[16];
+  char fv_s[37];
+  new_uuid_bytes(fv_id, fv_s);
   commit_ctx c = {.s = s, .bucket = bucket, .object = object, .op = op, .src_dir = src_dir, .o = o,
-                  .dist = dist, .alive = alive, .ibuf = ibuf, .has_data_dir = has_data_dir};
+                  .dist = dist, .alive = alive, .ibuf = ibuf, .has_data_dir = has_data_dir, .fv_id = fv_id};
   buckets_xl_version_id_string(o->version_id, c.key);
   buckets_xl_version_id_string(o->data_dir, c.data_dir);
   buckets_io_parallel(s->n, commit_one, &c);
@@ -892,6 +949,30 @@ static void init_version(buckets_xl_object *o, const uint8_t data_dir[16], int64
   o->ec_index = 1;
   for (size_t i = 0; i < n; i++) o->ec_dist[i] = (uint8_t)dist[i];
   o->ec_dist_n = n;
+}
+
+/* xlMetaV2Object.InitFreeVersion: a transitioned version that goes away
+ * leaves a free version (fv_id, same on every drive) naming its remote
+ * copy, for the scanner to delete. Nothing when fv_id is NULL (skipped). */
+static void add_free_version(buckets_xlmeta *x, const buckets_xl_object *cur, const uint8_t *fv_id) {
+  if (!fv_id || cur->type != BUCKETS_XL_TYPE_OBJECT || !buckets_xl_transitioned(cur)) return;
+  buckets_xl_object fv;
+  memset(&fv, 0, sizeof(fv));
+  fv.type = BUCKETS_XL_TYPE_DELETE;
+  memcpy(fv.version_id, fv_id, 16);
+  fv.mod_time = cur->mod_time;
+  buckets_xl_kv_set(&fv.meta_sys, &fv.nmeta_sys, BUCKETS_XL_META_FREE_VERSION, "", 0);
+  static const char *const keep[] = {BUCKETS_XL_META_TIER_NAME, BUCKETS_XL_META_TIER_OBJECT,
+                                     BUCKETS_XL_META_TIER_VERSION};
+  for (size_t k = 0; k < 3; k++) {
+    const buckets_xl_kv *kv = buckets_xl_kv_get(cur->meta_sys, cur->nmeta_sys, keep[k]);
+    if (kv) buckets_xl_kv_set(&fv.meta_sys, &fv.nmeta_sys, kv->key, kv->value, kv->value_len);
+  }
+  buckets_buf meta = BUCKETS_BUF_INIT;
+  buckets_xl_header hdr;
+  buckets_xl_object_encode(&fv, &meta, &hdr);
+  buckets_xlmeta_put_version(x, &hdr, (uint8_t *)meta.data, meta.len);
+  buckets_xl_object_free(&fv);
 }
 
 /* ---- put --------------------------------------------------------------------------- */
@@ -1034,12 +1115,17 @@ struct buckets_obj_reader {
   buckets_nslock_entry *lk; /* read lock, held until EOF or free */
   buckets_drive_file *fh[MAX_SET]; /* open part file per drive */
   int fh_part[MAX_SET];            /* the part number fh[i] has open */
+  /* a transitioned version: its bytes come from the remote tier */
+  void *remote;
+  long (*remote_read)(void *, void *, size_t);
+  void (*remote_free)(void *);
 };
 
 static bool prefetch_wait(buckets_obj_reader *r, int64_t bi);
 
 void buckets_obj_reader_free(buckets_obj_reader *r) {
   if (!r) return;
+  if (r->remote) r->remote_free(r->remote);
   prefetch_wait(r, -1);
   pthread_cond_destroy(&r->pf_cv);
   pthread_mutex_destroy(&r->pf_mu);
@@ -1071,6 +1157,11 @@ static buckets_obj_err resolve(buckets_epool *L, const char *bucket, const char 
   load_metas(*set, bucket, op, m);
   free(op);
   err = quorum_version(m, (*set)->n, version_id, o, vidx);
+  if (!err && o->type == BUCKETS_XL_TYPE_DELETE &&
+      buckets_xl_kv_get(o->meta_sys, o->nmeta_sys, BUCKETS_XL_META_FREE_VERSION)) {
+    buckets_xl_object_free(o);
+    err = BUCKETS_OBJ_ERR_NO_SUCH_VERSION;
+  }
   if (err) free_metas(m, (*set)->n);
   return err;
 }
@@ -1159,10 +1250,31 @@ static buckets_obj_err obj_open(buckets_epool *L, const char *bucket, const char
     free_metas(m, s->n);
     return version_id && *version_id ? BUCKETS_OBJ_ERR_METHOD_NOT_ALLOWED : BUCKETS_OBJ_ERR_NO_SUCH_KEY;
   }
+  bool remote = buckets_xl_transitioned(&o) && !buckets_xl_restored_on_disk(&o);
   buckets_obj_reader *r = reader_new(L, s, bucket, object, m, vidx, &o);
   if (info) {
     fill_info(info, object, &o);
     fill_position(info, m, vidx, s->n);
+  }
+  if (remote) { /* getTransitionedObjectReader */
+    const buckets_xl_kv *tier = buckets_xl_kv_get(o.meta_sys, o.nmeta_sys, BUCKETS_XL_META_TIER_NAME);
+    const buckets_xl_kv *name = buckets_xl_kv_get(o.meta_sys, o.nmeta_sys, BUCKETS_XL_META_TIER_OBJECT);
+    const buckets_xl_kv *rv = buckets_xl_kv_get(o.meta_sys, o.nmeta_sys, BUCKETS_XL_META_TIER_VERSION);
+    int64_t len = offset >= r->total_size ? 0 : BUCKETS_MIN(length, r->total_size - offset);
+    bool opened = len == 0 || (L->top->tier_open && tier && name &&
+                               L->top->tier_open(L->top->tier_ud, (const char *)tier->value, (const char *)name->value,
+                                                 rv ? (const char *)rv->value : "", offset, len, &r->remote_read,
+                                                 &r->remote_free, &r->remote));
+    buckets_xl_object_free(&o);
+    free_metas(m, s->n);
+    if (!opened) {
+      if (info) buckets_object_info_free(info);
+      buckets_obj_reader_free(r);
+      return BUCKETS_OBJ_ERR_TIER;
+    }
+    r->remaining = len;
+    *out = r;
+    return BUCKETS_OBJ_OK;
   }
   buckets_xl_object_free(&o);
   free_metas(m, s->n);
@@ -1369,6 +1481,11 @@ buckets_obj_err buckets_ep_open(buckets_epool *L, const char *bucket, const char
   /* Load the first block now: an unreadable object fails before any
    * response headers are committed, as in MinIO. */
   buckets_obj_reader *r = *out;
+  if (r->remote || !r->remaining) {
+    if (r->remaining > 0) r->lk = lk;
+    else buckets_nslock_unlock(lk);
+    return BUCKETS_OBJ_OK;
+  }
   while (r->part < r->nparts && r->part_off >= r->parts[r->part].size && r->remaining > 0) {
     r->part++;
     r->part_off = 0;
@@ -1389,6 +1506,17 @@ buckets_obj_err buckets_ep_open(buckets_epool *L, const char *bucket, const char
 }
 
 long buckets_obj_read(buckets_obj_reader *r, void *buf, size_t n) {
+  if (r->remote) {
+    if (r->remaining <= 0) return 0;
+    long k = r->remote_read(r->remote, buf, (size_t)BUCKETS_MIN((int64_t)n, r->remaining));
+    if (k > 0) r->remaining -= k;
+    else if (k == 0) return -1; /* the remote copy ended early */
+    if (r->remaining == 0) {
+      buckets_nslock_unlock(r->lk);
+      r->lk = NULL;
+    }
+    return k;
+  }
   size_t done = 0;
   while (done < n && r->remaining > 0) {
     if (r->part >= r->nparts) return -1;
@@ -1435,6 +1563,7 @@ typedef struct {
   dmeta *m;
   uint8_t id[16];
   char key[37];
+  const uint8_t *fv_id; /* NULL: SkipFreeVersion */
   bool found[MAX_SET], done[MAX_SET];
 } del_ctx;
 
@@ -1449,14 +1578,16 @@ static void delete_one(void *ctx, size_t i) {
   c->found[i] = true;
   char dd[37] = "";
   buckets_xl_object o;
-  if (buckets_xl_object_decode(&m->x.versions[k], &o) == BUCKETS_XL_OK) {
-    if (o.type == BUCKETS_XL_TYPE_OBJECT && !buckets_xl_kv_get(o.meta_sys, o.nmeta_sys, BUCKETS_XL_META_INLINE)) {
-      buckets_xl_version_id_string(o.data_dir, dd);
-    }
-    buckets_xl_object_free(&o);
+  bool decoded = buckets_xl_object_decode(&m->x.versions[k], &o) == BUCKETS_XL_OK;
+  if (decoded && o.type == BUCKETS_XL_TYPE_OBJECT && !buckets_xl_kv_get(o.meta_sys, o.nmeta_sys, BUCKETS_XL_META_INLINE)) {
+    buckets_xl_version_id_string(o.data_dir, dd);
   }
   buckets_xlmeta_remove_version(&m->x, c->id);
   buckets_xlmeta_inline_remove(&m->x, c->key);
+  if (decoded) {
+    add_free_version(&m->x, &o, c->fv_id);
+    buckets_xl_object_free(&o);
+  }
   buckets_drive *d = c->s->drives[i];
   buckets_drive_err de;
   if (m->x.n == 0) {
@@ -1477,7 +1608,8 @@ static void delete_one(void *ctx, size_t i) {
   c->done[i] = de == BUCKETS_DRIVE_OK;
 }
 
-static buckets_obj_err obj_delete(buckets_epool *L, const char *bucket, const char *object, const char *version_id) {
+static buckets_obj_err obj_delete(buckets_epool *L, const char *bucket, const char *object, const char *version_id,
+                                  bool skip_free) {
   buckets_obj_err err = buckets_ep_stat_bucket(L, bucket);
   if (err) return err;
   if ((err = buckets_obj_check_name(object)) != BUCKETS_OBJ_OK) return err;
@@ -1487,7 +1619,10 @@ static buckets_obj_err obj_delete(buckets_epool *L, const char *bucket, const ch
   char *op = obj_path(object);
   dmeta m[MAX_SET];
   load_metas(s, bucket, op, m);
-  del_ctx c = {.s = s, .bucket = bucket, .op = op, .m = m};
+  uint8_t fv_id[16];
+  char fv_s[37];
+  new_uuid_bytes(fv_id, fv_s);
+  del_ctx c = {.s = s, .bucket = bucket, .op = op, .m = m, .fv_id = skip_free ? NULL : fv_id};
   memcpy(c.id, id, 16);
   buckets_xl_version_id_string(id, c.key);
   buckets_io_parallel(s->n, delete_one, &c);
@@ -1506,7 +1641,7 @@ static buckets_obj_err obj_delete(buckets_epool *L, const char *bucket, const ch
 buckets_obj_err buckets_ep_delete(buckets_epool *L, const char *bucket, const char *object, const char *version_id) {
   buckets_nslock_entry *lk = lock_ns(L, bucket, object, true);
   if (!lk) return BUCKETS_OBJ_ERR_TIMEOUT;
-  buckets_obj_err err = obj_delete(L, bucket, object, version_id);
+  buckets_obj_err err = obj_delete(L, bucket, object, version_id, false);
   buckets_nslock_unlock(lk);
   return err;
 }
@@ -1519,6 +1654,7 @@ typedef struct {
   dmeta *m;
   const buckets_xl_object *dm;
   char key[37];
+  const uint8_t *fv_id;
   bool ok[MAX_SET];
 } marker_ctx;
 
@@ -1546,6 +1682,7 @@ static void marker_one(void *ctx, size_t i) {
       if (po.type == BUCKETS_XL_TYPE_OBJECT && !buckets_xl_kv_get(po.meta_sys, po.nmeta_sys, BUCKETS_XL_META_INLINE)) {
         buckets_xl_version_id_string(po.data_dir, old_dir);
       }
+      add_free_version(&x, &po, c->fv_id);
       buckets_xl_object_free(&po);
     }
   }
@@ -1580,7 +1717,10 @@ static buckets_obj_err add_delete_marker(buckets_epool *L, const char *bucket, c
   char *op = obj_path(object);
   dmeta m[MAX_SET];
   load_metas(s, bucket, op, m);
-  marker_ctx c = {.s = s, .bucket = bucket, .op = op, .m = m, .dm = &dm};
+  uint8_t fv_id[16];
+  char fv_s[37];
+  new_uuid_bytes(fv_id, fv_s);
+  marker_ctx c = {.s = s, .bucket = bucket, .op = op, .m = m, .dm = &dm, .fv_id = fv_id};
   buckets_xl_version_id_string(dm.version_id, c.key);
   buckets_io_parallel(s->n, marker_one, &c);
   free_metas(m, s->n);
@@ -1624,7 +1764,7 @@ buckets_obj_err buckets_ep_delete_ex(buckets_epool *L, const char *bucket, const
       buckets_object_info_free(&oi);
     }
     if (vid) buckets_xl_version_id_string(id, res->version_id);
-    err = obj_delete(L, bucket, object, vid ? vid : NULL);
+    err = obj_delete(L, bucket, object, vid ? vid : NULL, opts->skip_free_version);
   } else {
     /* MinIO's DeleteObject: a key with no versions at all gets no marker
      * (a key whose latest version is a marker does). */
@@ -1655,6 +1795,7 @@ typedef struct {
   const char *purge_internal;
   const char *const *reset_keys, *const *reset_values;
   size_t nreset;
+  const uint8_t *fv_id; /* free version of a removed transitioned version (NULL: skip) */
 } delfi;
 
 /* ReplicationState.CompositeReplicationStatus (ReplicaTimeStamp aside) */
@@ -1793,14 +1934,15 @@ static bool xl_delete_version(buckets_xlmeta *x, const delfi *f, char dd[37]) {
       bool inl = dec && buckets_xl_kv_get(cur.meta_sys, cur.nmeta_sys, BUCKETS_XL_META_INLINE);
       uint8_t ddir[16] = {0};
       if (dec) memcpy(ddir, cur.data_dir, 16);
-      if (dec) buckets_xl_object_free(&cur);
       char key[37];
       buckets_xl_version_id_string(uv, key);
       buckets_xlmeta_remove_version(x, uv);
       buckets_xlmeta_inline_remove(x, key);
+      if (dec) add_free_version(x, &cur, f->fv_id);
       if (f->deleted) put_decoded(x, &ventry);
       if (dec && !inl && !shared_data_dir(x, uv, ddir)) buckets_xl_version_id_string(ddir, dd);
       if (strcmp(dd, "null") == 0) dd[0] = '\0';
+      if (dec) buckets_xl_object_free(&cur);
       buckets_xl_object_free(&ventry);
       return true;
     }
@@ -1885,9 +2027,13 @@ static buckets_obj_err delete_repl(buckets_epool *L, const char *bucket, const c
   }
   char *dec_repl = NULL, *dec_purge = NULL;
   if (opts->decide) opts->decide(opts->decide_ud, found ? &goi : NULL, found, &dec_repl, &dec_purge);
+  uint8_t fv_id[16];
+  char fv_s[37];
+  new_uuid_bytes(fv_id, fv_s);
   delfi f = {.repl_internal = opts->repl_status, .repl_ts = opts->repl_ts_ns, .replica = opts->replica,
              .replica_ts = opts->replica ? now_ns() : 0, .purge_internal = opts->purge_status,
-             .reset_keys = opts->reset_keys, .reset_values = opts->reset_values, .nreset = opts->nreset};
+             .reset_keys = opts->reset_keys, .reset_values = opts->reset_values, .nreset = opts->nreset,
+             .fv_id = opts->skip_free_version ? NULL : fv_id};
   /* SetDeleteReplicationState */
   if (dec_repl && *dec_repl) {
     if (vid) f.purge_internal = dec_repl;
@@ -2050,6 +2196,280 @@ buckets_obj_err buckets_ep_update_meta(buckets_epool *L, const char *bucket, con
   return err;
 }
 
+/* ---- tiering ------------------------------------------------------------------------ */
+
+typedef struct {
+  buckets_eset *s;
+  const char *bucket, *op;
+  dmeta *m;
+  const long *vidx;
+  const buckets_xl_object *o; /* the version as it is to be */
+  bool drop_data;             /* its data (inline shard or data dir) goes */
+  bool ok[MAX_SET];
+} tier_ctx;
+
+/* Drive i's copy of the version becomes o (keeping its EcIndex); with
+ * drop_data, its inline shard and data dir are removed. */
+static void tier_one(void *ctx, size_t i) {
+  tier_ctx *c = ctx;
+  c->ok[i] = false;
+  if (c->vidx[i] < 0 || !c->s->drives[i] || !c->m[i].loaded) return;
+  buckets_xlmeta *x = &c->m[i].x;
+  buckets_xl_object mine;
+  if (buckets_xl_object_decode(&x->versions[c->vidx[i]], &mine) != BUCKETS_XL_OK) return;
+  bool was_inline = buckets_xl_kv_get(mine.meta_sys, mine.nmeta_sys, BUCKETS_XL_META_INLINE) != NULL;
+  char dd[37];
+  buckets_xl_version_id_string(mine.data_dir, dd);
+  kvs_copy(c->o->meta_user, c->o->nmeta_user, &mine.meta_user, &mine.nmeta_user);
+  kvs_copy(c->o->meta_sys, c->o->nmeta_sys, &mine.meta_sys, &mine.nmeta_sys);
+  buckets_buf meta = BUCKETS_BUF_INIT;
+  buckets_xl_header hdr;
+  buckets_xl_object_encode(&mine, &meta, &hdr);
+  char vkey[37];
+  buckets_xl_version_id_string(mine.version_id, vkey);
+  buckets_xl_object_free(&mine);
+  buckets_xlmeta_put_version(x, &hdr, (uint8_t *)meta.data, meta.len);
+  if (c->drop_data) buckets_xlmeta_inline_remove(x, vkey);
+  buckets_buf bytes = BUCKETS_BUF_INIT;
+  buckets_xlmeta_serialize(x, &bytes);
+  char *mp = join(c->op, XL_META);
+  c->ok[i] = buckets_drive_write_all(c->s->drives[i], c->bucket, mp, bytes.data, bytes.len) == BUCKETS_DRIVE_OK;
+  free(mp);
+  buckets_buf_free(&bytes);
+  if (c->ok[i] && c->drop_data && !was_inline && strcmp(dd, "null") != 0 && !shared_data_dir(x, c->o->version_id, c->o->data_dir)) {
+    char *dp = join(c->op, dd);
+    buckets_drive_delete(c->s->drives[i], c->bucket, dp, true, false);
+    free(dp);
+  }
+}
+
+static buckets_obj_err tier_commit(buckets_eset *s, const char *bucket, const char *object, dmeta *m, const long *vidx,
+                                   const buckets_xl_object *o, bool drop_data) {
+  char *op = obj_path(object);
+  tier_ctx c = {.s = s, .bucket = bucket, .op = op, .m = m, .vidx = vidx, .o = o, .drop_data = drop_data};
+  buckets_io_parallel(s->n, tier_one, &c);
+  free(op);
+  int ok = 0;
+  for (size_t i = 0; i < s->n; i++) ok += c.ok[i];
+  return ok >= write_quorum(o->ec_m, o->ec_n) ? BUCKETS_OBJ_OK : BUCKETS_OBJ_ERR_WRITE_QUORUM;
+}
+
+static long plain_reader(void *ud, void *buf, size_t n) { return buckets_obj_read(ud, buf, n); }
+
+buckets_obj_err buckets_ep_transition(buckets_epool *L, const char *bucket, const char *object, const char *version_id,
+                                      int64_t mod_time_ns, const char *etag, const char *tier,
+                                      buckets_tier_upload_fn upload, void *ud, buckets_object_info *out) {
+  buckets_nslock_entry *lk = lock_ns(L, bucket, object, true);
+  if (!lk) return BUCKETS_OBJ_ERR_TIMEOUT;
+  buckets_eset *s;
+  dmeta m[MAX_SET];
+  long vidx[MAX_SET];
+  buckets_xl_object o;
+  buckets_obj_err err = resolve(L, bucket, object, version_id, &s, m, vidx, &o);
+  if (err) {
+    buckets_nslock_unlock(lk);
+    return err;
+  }
+  if (o.type == BUCKETS_XL_TYPE_DELETE) {
+    err = version_id && *version_id ? BUCKETS_OBJ_ERR_METHOD_NOT_ALLOWED : BUCKETS_OBJ_ERR_NO_SUCH_KEY;
+    goto out;
+  }
+  /* the object queued for transition must be the one on disk */
+  const buckets_xl_kv *et = buckets_xl_kv_get(o.meta_user, o.nmeta_user, "etag");
+  if (o.mod_time != mod_time_ns || !et || strcasecmp((const char *)et->value, etag ? etag : "") != 0) {
+    err = BUCKETS_OBJ_ERR_NO_SUCH_KEY;
+    goto out;
+  }
+  if (buckets_xl_transitioned(&o)) goto out; /* already done */
+  buckets_obj_reader *r = reader_new(L, s, bucket, object, m, vidx, &o);
+  r->remaining = r->total_size;
+  char remote[512] = "", rv[256] = "";
+  err = upload(ud, plain_reader, r, r->total_size, remote, sizeof(remote), rv, sizeof(rv));
+  buckets_obj_reader_free(r);
+  if (err) goto out;
+  buckets_xl_kv_set(&o.meta_sys, &o.nmeta_sys, BUCKETS_XL_META_TIER_STATUS, "complete", 8);
+  buckets_xl_kv_set(&o.meta_sys, &o.nmeta_sys, BUCKETS_XL_META_TIER_OBJECT, remote, strlen(remote));
+  buckets_xl_kv_set(&o.meta_sys, &o.nmeta_sys, BUCKETS_XL_META_TIER_VERSION, rv, strlen(rv));
+  buckets_xl_kv_set(&o.meta_sys, &o.nmeta_sys, BUCKETS_XL_META_TIER_NAME, tier, strlen(tier));
+  /* ResetInlineData */
+  buckets_xl_object tmp = {0};
+  for (size_t i = 0; i < o.nmeta_sys; i++)
+    if (strcmp(o.meta_sys[i].key, BUCKETS_XL_META_INLINE) != 0)
+      buckets_xl_kv_set(&tmp.meta_sys, &tmp.nmeta_sys, o.meta_sys[i].key, o.meta_sys[i].value, o.meta_sys[i].value_len);
+  kvs_clear(&o.meta_sys, &o.nmeta_sys);
+  o.meta_sys = tmp.meta_sys;
+  o.nmeta_sys = tmp.nmeta_sys;
+  err = tier_commit(s, bucket, object, m, vidx, &o, true);
+out:
+  if (!err && out) {
+    fill_info(out, object, &o);
+    fill_position(out, m, vidx, s->n);
+  }
+  buckets_xl_object_free(&o);
+  free_metas(m, s->n);
+  buckets_nslock_unlock(lk);
+  return err;
+}
+
+/* The stored bytes of one part: a window of the remote stream. */
+typedef struct {
+  buckets_read_fn rd;
+  void *ud;
+  int64_t left;
+} part_src;
+
+static long part_read(void *ud, void *buf, size_t n) {
+  part_src *p = ud;
+  if (p->left <= 0) return 0;
+  long k = p->rd(p->ud, buf, (size_t)BUCKETS_MIN((int64_t)n, p->left));
+  if (k > 0) p->left -= k;
+  return k;
+}
+
+buckets_obj_err buckets_ep_rehydrate(buckets_epool *L, const char *bucket, const char *object, const char *version_id,
+                                     buckets_read_fn rd, void *rd_ud, const char *restore_hdr) {
+  buckets_eset *s;
+  dmeta m[MAX_SET];
+  long vidx[MAX_SET];
+  buckets_xl_object o;
+  buckets_obj_err err = resolve(L, bucket, object, version_id, &s, m, vidx, &o);
+  if (err) return err;
+  free_metas(m, s->n);
+  if (o.type != BUCKETS_XL_TYPE_OBJECT || !buckets_xl_transitioned(&o)) {
+    buckets_xl_object_free(&o);
+    return BUCKETS_OBJ_ERR_METHOD_NOT_ALLOWED;
+  }
+  encoder e = {.set = s, .parity = o.ec_n, .data = o.ec_m > 0 ? o.ec_m : 1};
+  for (size_t i = 0; i < s->n; i++) e.dist[i] = i < o.ec_dist_n ? o.ec_dist[i] : (int)i + 1;
+  e.inline_mode = o.nparts == 1 && shard_file_size(o.size, e.data) <= BUCKETS_INLINE_THRESHOLD;
+  uint8_t data_dir[16];
+  char data_dir_s[37];
+  new_uuid_bytes(data_dir, data_dir_s);
+  char *tmp_id = buckets_drive_tmp_name();
+  buckets_buf tmp_dir = BUCKETS_BUF_INIT;
+  buckets_buf_appendf(&tmp_dir, "tmp/%s", tmp_id);
+  free(tmp_id);
+  bool alive_all[MAX_SET];
+  for (size_t i = 0; i < s->n; i++) alive_all[i] = s->drives[i] != NULL;
+  for (size_t p = 0; p < o.nparts && !err; p++) {
+    buckets_buf file = BUCKETS_BUF_INIT;
+    buckets_buf_appendf(&file, "%s/%s/part.%d", tmp_dir.data, data_dir_s, o.parts[p].number);
+    part_src ps = {rd, rd_ud, o.parts[p].size};
+    source src = {.rd = part_read, .ud = &ps, .remaining = o.parts[p].size};
+    buckets_md5_init(&src.md5);
+    buckets_sha256_init(&src.sha);
+    buckets_cksum_hasher_init(&src.cks, 0);
+    err = encode_stream(&e, &src, o.parts[p].size, file.data);
+    if (!err && src.total != o.parts[p].size) err = BUCKETS_OBJ_ERR_INCOMPLETE_BODY;
+    for (size_t i = 0; i < s->n; i++) alive_all[i] &= e.alive[i];
+    buckets_buf_free(&file);
+  }
+  if (!err) {
+    memcpy(o.data_dir, data_dir, 16);
+    if (e.inline_mode) buckets_xl_kv_set(&o.meta_sys, &o.nmeta_sys, BUCKETS_XL_META_INLINE, "true", 4);
+    buckets_xl_kv_set(&o.meta_user, &o.nmeta_user, "x-amz-restore", restore_hdr, strlen(restore_hdr));
+    buckets_nslock_entry *lk = lock_ns(L, bucket, object, true);
+    size_t committed = 0;
+    err = !lk ? BUCKETS_OBJ_ERR_TIMEOUT
+              : commit_version(s, bucket, object, &o, e.dist, alive_all, e.inline_mode ? e.ibuf : NULL, tmp_dir.data,
+                               !e.inline_mode, write_quorum(e.data, e.parity), &committed);
+    buckets_nslock_unlock(lk);
+  }
+  if (!e.inline_mode || err) cleanup_tmp(s, tmp_dir.data);
+  encoder_free(&e);
+  buckets_buf_free(&tmp_dir);
+  buckets_xl_object_free(&o);
+  return err;
+}
+
+/* x-amz-restore and its companions (RemoveRestoreHdrs) */
+static void remove_restore_headers(buckets_xl_object *o) {
+  buckets_xl_object tmp = {0};
+  for (size_t i = 0; i < o->nmeta_user; i++) {
+    const char *k = o->meta_user[i].key;
+    if (strcasecmp(k, "x-amz-restore") == 0 || strcasecmp(k, "X-Amz-Restore-Expiry-Days") == 0 ||
+        strcasecmp(k, "X-Amz-Restore-Request-Date") == 0)
+      continue;
+    buckets_xl_kv_set(&tmp.meta_user, &tmp.nmeta_user, k, o->meta_user[i].value, o->meta_user[i].value_len);
+  }
+  kvs_clear(&o->meta_user, &o->nmeta_user);
+  o->meta_user = tmp.meta_user;
+  o->nmeta_user = tmp.nmeta_user;
+}
+
+buckets_obj_err buckets_ep_expire_restored(buckets_epool *L, const char *bucket, const char *object,
+                                           const char *version_id) {
+  buckets_nslock_entry *lk = lock_ns(L, bucket, object, true);
+  if (!lk) return BUCKETS_OBJ_ERR_TIMEOUT;
+  buckets_eset *s;
+  dmeta m[MAX_SET];
+  long vidx[MAX_SET];
+  buckets_xl_object o;
+  buckets_obj_err err = resolve(L, bucket, object, version_id, &s, m, vidx, &o);
+  if (err) {
+    buckets_nslock_unlock(lk);
+    return err;
+  }
+  if (o.type != BUCKETS_XL_TYPE_OBJECT || !buckets_xl_transitioned(&o)) {
+    err = BUCKETS_OBJ_ERR_METHOD_NOT_ALLOWED;
+  } else {
+    remove_restore_headers(&o);
+    /* the local copy goes with the headers (UsesDataDir is false again) */
+    buckets_xl_object tmp = {0};
+    for (size_t i = 0; i < o.nmeta_sys; i++)
+      if (strcmp(o.meta_sys[i].key, BUCKETS_XL_META_INLINE) != 0)
+        buckets_xl_kv_set(&tmp.meta_sys, &tmp.nmeta_sys, o.meta_sys[i].key, o.meta_sys[i].value, o.meta_sys[i].value_len);
+    kvs_clear(&o.meta_sys, &o.nmeta_sys);
+    o.meta_sys = tmp.meta_sys;
+    o.nmeta_sys = tmp.nmeta_sys;
+    err = tier_commit(s, bucket, object, m, vidx, &o, true);
+  }
+  buckets_xl_object_free(&o);
+  free_metas(m, s->n);
+  buckets_nslock_unlock(lk);
+  return err;
+}
+
+buckets_obj_err buckets_ep_delete_free_version(buckets_epool *L, const char *bucket, const char *object,
+                                               const char *version_id) {
+  uint8_t id[16];
+  if (!version_id || !buckets_xl_version_id_parse(version_id, id)) return BUCKETS_OBJ_ERR_NO_SUCH_VERSION;
+  buckets_nslock_entry *lk = lock_ns(L, bucket, object, true);
+  if (!lk) return BUCKETS_OBJ_ERR_TIMEOUT;
+  buckets_obj_err err = buckets_ep_stat_bucket(L, bucket);
+  if (!err) {
+    buckets_eset *s = buckets_ep_set_for(L, object);
+    char *op = obj_path(object);
+    dmeta m[MAX_SET];
+    load_metas(s, bucket, op, m);
+    /* only a free version by that ID goes */
+    bool is_free = false;
+    for (size_t i = 0; i < s->n && !is_free; i++) {
+      long k = m[i].loaded ? buckets_xlmeta_find(&m[i].x, id) : -1;
+      is_free = k >= 0 && buckets_xl_is_free_version(&m[i].x.versions[k].hdr);
+    }
+    if (!is_free) {
+      err = BUCKETS_OBJ_ERR_NO_SUCH_VERSION;
+    } else {
+      del_ctx c = {.s = s, .bucket = bucket, .op = op, .m = m};
+      memcpy(c.id, id, 16);
+      buckets_xl_version_id_string(id, c.key);
+      buckets_io_parallel(s->n, delete_one, &c);
+      size_t found = 0, done = 0;
+      for (size_t i = 0; i < s->n; i++) {
+        found += c.found[i];
+        done += c.done[i];
+      }
+      if (!found) err = BUCKETS_OBJ_ERR_NO_SUCH_VERSION;
+      else if ((int)done < write_quorum(set_data(s), s->parity) && done != found) err = BUCKETS_OBJ_ERR_WRITE_QUORUM;
+    }
+    free_metas(m, s->n);
+    free(op);
+  }
+  buckets_nslock_unlock(lk);
+  return err;
+}
+
 /* ---- listing ------------------------------------------------------------------------- */
 
 typedef struct {
@@ -2079,6 +2499,7 @@ typedef struct {
   bool done;
   char *last_prefix;
   bool versions;         /* every version of each key */
+  bool incl_free;        /* versions: free versions too (the scanner sweeps them) */
   const char *vmarker;   /* versions: resume after this version of the marker key */
 } list_ctx;
 
@@ -2100,7 +2521,10 @@ static void emit_prefix(list_ctx *lc, const char *cp, size_t n) {
 
 static void emit_versions(list_ctx *lc, const char *key, const buckets_xlmeta *x) {
   bool skipping = lc->marker && lc->vmarker && strcmp(key, lc->marker) == 0;
+  long latest = first_visible(x);
   for (size_t v = 0; v < x->n && !lc->done; v++) {
+    bool free_version = buckets_xl_is_free_version(&x->versions[v].hdr);
+    if (free_version && !lc->incl_free) continue;
     buckets_xl_object o;
     if (buckets_xl_object_decode(&x->versions[v], &o) != BUCKETS_XL_OK) continue;
     char vs[37];
@@ -2118,7 +2542,8 @@ static void emit_versions(list_ctx *lc, const char *key, const buckets_xlmeta *x
       out->objects = buckets_xrealloc(out->objects, (out->nobjects + 1) * sizeof(buckets_object_info));
       buckets_object_info *oi = &out->objects[out->nobjects++];
       fill_info(oi, key, &o);
-      oi->is_latest = v == 0;
+      oi->is_latest = (long)v == latest;
+      oi->free_version = free_version;
       lc->count++;
     }
     buckets_xl_object_free(&o);
@@ -2152,7 +2577,7 @@ static void emit_object(list_ctx *lc, const char *key, const char *dir) {
     buckets_xl_object o;
     if (lc->versions) {
       emit_versions(lc, key, &x);
-    } else if (x.n && buckets_xl_object_decode(&x.versions[0], &o) == BUCKETS_XL_OK) {
+    } else if (first_visible(&x) >= 0 && buckets_xl_object_decode(&x.versions[first_visible(&x)], &o) == BUCKETS_XL_OK) {
       if (o.type == BUCKETS_XL_TYPE_OBJECT) {
         buckets_obj_listing *out = lc->out;
         out->objects = buckets_xrealloc(out->objects, (out->nobjects + 1) * sizeof(buckets_object_info));
@@ -2220,12 +2645,12 @@ static void walk(list_ctx *lc, const char *rel, const char *name_filter) {
 
 /* Lists one drive (the first max_keys entries after the marker). */
 static void list_drive(buckets_drive *d, const char *bucket, const char *prefix, const char *marker,
-                       const char *vmarker, bool versions, const char *delimiter, int max_keys,
+                       const char *vmarker, bool versions, bool incl_free, const char *delimiter, int max_keys,
                        buckets_obj_listing *out) {
   memset(out, 0, sizeof(*out));
   list_ctx lc = {.d = d, .bucket = bucket, .prefix = prefix, .marker = marker && *marker ? marker : NULL,
                  .delim = delimiter ? delimiter : "", .delim_len = delimiter ? strlen(delimiter) : 0,
-                 .max_keys = max_keys, .out = out, .versions = versions,
+                 .max_keys = max_keys, .out = out, .versions = versions, .incl_free = incl_free,
                  .vmarker = vmarker && *vmarker ? vmarker : NULL};
   if (lc.marker && lc.delim_len) {
     size_t pl = strlen(prefix);
@@ -2282,7 +2707,7 @@ buckets_obj_err buckets_ep_list(buckets_epool *L, const char *bucket, const char
     for (size_t i = 0; i < L->sets[s].n; i++) {
       buckets_drive *d = L->sets[s].drives[i];
       if (!d) continue;
-      list_drive(d, bucket, prefix, marker, NULL, false, delimiter, max_keys, &src[nsrc]);
+      list_drive(d, bucket, prefix, marker, NULL, false, false, delimiter, max_keys, &src[nsrc]);
       any_truncated |= src[nsrc].truncated;
       nsrc++;
     }
@@ -2395,7 +2820,7 @@ void buckets_obj_listing_merge_versions(buckets_obj_listing *src, size_t nsrc, i
 
 buckets_obj_err buckets_ep_list_versions(buckets_epool *L, const char *bucket, const char *prefix,
                                          const char *key_marker, const char *version_marker, const char *delimiter,
-                                         int max_keys, buckets_obj_listing *out) {
+                                         int max_keys, bool incl_free, buckets_obj_listing *out) {
   memset(out, 0, sizeof(*out));
   buckets_obj_err err = buckets_ep_stat_bucket(L, bucket);
   if (err) return err;
@@ -2407,7 +2832,8 @@ buckets_obj_err buckets_ep_list_versions(buckets_epool *L, const char *bucket, c
     for (size_t i = 0; i < L->sets[s].n; i++) {
       buckets_drive *d = L->sets[s].drives[i];
       if (!d) continue;
-      list_drive(d, bucket, prefix ? prefix : "", key_marker, version_marker, true, delimiter, max_keys, &src[nsrc++]);
+      list_drive(d, bucket, prefix ? prefix : "", key_marker, version_marker, true, incl_free, delimiter, max_keys,
+                 &src[nsrc++]);
     }
   }
   buckets_obj_listing_merge_versions(src, nsrc, max_keys, out);
@@ -2428,7 +2854,7 @@ void buckets_obj_list_free(buckets_obj_listing *l) {
 
 buckets_obj_err buckets_ep_delete_bucket(buckets_epool *L, const char *bucket) {
   buckets_obj_listing l;
-  buckets_obj_err err = buckets_ep_list_versions(L, bucket, "", NULL, NULL, NULL, 1, &l);
+  buckets_obj_err err = buckets_ep_list_versions(L, bucket, "", NULL, NULL, NULL, 1, false, &l);
   if (err) return err;
   bool empty = l.nobjects == 0 && l.nprefixes == 0;
   buckets_obj_list_free(&l);
@@ -3172,7 +3598,7 @@ static void check_one(void *ctx, size_t i) {
   }
   c->st[i] = BUCKETS_HEAL_OK;
   const buckets_xl_object *o = c->o;
-  if (o->type != BUCKETS_XL_TYPE_OBJECT) return;
+  if (o->type != BUCKETS_XL_TYPE_OBJECT || !buckets_xl_object_uses_data_dir(o)) return; /* metadata only */
   if (c->is_inline) {
     buckets_str sh;
     if (!buckets_xlmeta_inline_get(&c->m[i].x, c->vkey, &sh) ||
@@ -3233,11 +3659,12 @@ static buckets_obj_err rebuild(buckets_epool *L, buckets_eset *s, const char *bu
   buckets_buf tmp_dir = BUCKETS_BUF_INIT;
   buckets_buf_appendf(&tmp_dir, "tmp/%s", tmp_id);
   free(tmp_id);
-  bool has_data = o->type == BUCKETS_XL_TYPE_OBJECT && !is_inline && o->nparts > 0;
+  bool with_data = o->type == BUCKETS_XL_TYPE_OBJECT && buckets_xl_object_uses_data_dir(o); /* not a remote copy */
+  bool has_data = with_data && !is_inline && o->nparts > 0;
   encoder e = {.set = s, .data = o->ec_m > 0 ? o->ec_m : 1, .parity = o->ec_n, .inline_mode = is_inline};
   memcpy(e.dist, dist, sizeof(dist));
   buckets_obj_err err = BUCKETS_OBJ_OK;
-  if (o->type == BUCKETS_XL_TYPE_OBJECT) {
+  if (with_data) {
     buckets_obj_reader *r = reader_new(L, s, bucket, object, m, vidx_good, o);
     r->quiet = true;
     for (size_t p = 0; p < r->nparts && !err; p++) {

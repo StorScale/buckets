@@ -51,6 +51,7 @@ typedef enum {
   BUCKETS_OBJ_ERR_BUCKET_NOT_EMPTY,
   BUCKETS_OBJ_ERR_TIMEOUT, /* a namespace lock was not granted in time */
   BUCKETS_OBJ_ERR_METHOD_NOT_ALLOWED, /* a delete marker asked for by its version ID */
+  BUCKETS_OBJ_ERR_TIER,               /* the remote tier holding a transitioned version failed */
 } buckets_obj_err;
 
 const char *buckets_obj_strerror(buckets_obj_err e);
@@ -77,6 +78,11 @@ typedef struct buckets_objlayer {
   void (*on_degraded)(void *ud, const char *bucket, const char *object, const char *version_id, bool deep);
   void *on_degraded_ud;
   struct buckets_mp_cache *mp_cache; /* uploads started through this node (MinIO's mpCache) */
+  /* Opens [off, off+len) of a transitioned version's remote copy (the
+   * object's stored bytes): *rd and *rd_free with *rd_ud, or false. */
+  bool (*tier_open)(void *ud, const char *tier, const char *remote, const char *remote_version, int64_t off,
+                    int64_t len, long (**rd)(void *, void *, size_t), void (**rd_free)(void *), void **rd_ud);
+  void *tier_ud;
 } buckets_objlayer;
 
 /* Called (from any thread) for objects found or left short of a drive: reads
@@ -160,6 +166,7 @@ typedef struct buckets_object_info_s {
   size_t checksum_len;
   buckets_xl_part *parts; /* numbers and sizes, in object order (etags unset) */
   int data_blocks, parity_blocks; /* the version's erasure coding (EcM, EcN) */
+  bool free_version; /* a deleted transitioned version's remnant (buckets_obj_list_versions_all only) */
 } buckets_object_info;
 
 void buckets_object_info_free(buckets_object_info *oi);
@@ -167,6 +174,14 @@ void buckets_object_info_free(buckets_object_info *oi);
 const char *buckets_object_meta(const buckets_object_info *oi, const char *key);
 /* A system-metadata entry (case-insensitive key), or NULL. */
 const buckets_xl_kv *buckets_object_sys(const buckets_object_info *oi, const char *key);
+/* The remote tier holding a transitioned version (TransitionedObject.Tier),
+ * or NULL; remote/version (may be NULL) get its remote name and version. */
+const char *buckets_object_tier(const buckets_object_info *oi, const char **remote, const char **version);
+/* ObjectInfo.IsRemote: transitioned and not restored on the drives. */
+bool buckets_object_is_remote(const buckets_object_info *oi);
+/* The restore state from x-amz-restore (RestoreOngoing, RestoreExpires in
+ * unix seconds, 0 when none). */
+void buckets_object_restore_state(const buckets_object_info *oi, bool *ongoing, int64_t *expires);
 
 struct buckets_part_info_s;
 
@@ -240,6 +255,9 @@ typedef struct {
   void (*decide)(void *ud, const struct buckets_object_info_s *goi, bool found, char **repl_status,
                  char **purge_status);
   void *decide_ud;
+  /* SkipFreeVersion: the remote copy of a transitioned version is already
+   * gone, so no free version is left to sweep it. */
+  bool skip_free_version;
 } buckets_delete_opts;
 typedef struct {
   bool delete_marker;      /* a marker was created, or the removed version was one */
@@ -281,6 +299,36 @@ buckets_obj_err buckets_obj_update_meta(buckets_objlayer *L, const char *bucket,
 buckets_obj_err buckets_obj_list_versions(buckets_objlayer *L, const char *bucket, const char *prefix,
                                           const char *key_marker, const char *version_marker, const char *delimiter,
                                           int max_keys, buckets_obj_listing *out);
+/* ---- tiering ---- */
+
+/* TransitionObject: moves a version's stored bytes to a remote tier and
+ * leaves its metadata behind (x-minio-internal-transition-*). The version
+ * must still have mod_time_ns and etag (it was not replaced since it was
+ * queued). upload gets the stored bytes (size of them) and returns the
+ * remote object's name and version ID. An already transitioned version is OK. */
+typedef buckets_obj_err (*buckets_tier_upload_fn)(void *ud, buckets_read_fn rd, void *rd_ud, int64_t size,
+                                                   char *remote, size_t rcap, char *rv, size_t rvcap);
+buckets_obj_err buckets_obj_transition(buckets_objlayer *L, const char *bucket, const char *object,
+                                       const char *version_id, int64_t mod_time_ns, const char *etag, const char *tier,
+                                       buckets_tier_upload_fn upload, void *ud, buckets_object_info *out);
+/* RestoreTransitionedObject: writes a transitioned version's stored bytes
+ * (from rd, as the remote tier holds them) back to the drives, laid out as
+ * its parts were, and sets its x-amz-restore metadata to restore_hdr. */
+buckets_obj_err buckets_obj_rehydrate(buckets_objlayer *L, const char *bucket, const char *object,
+                                      const char *version_id, buckets_read_fn rd, void *rd_ud,
+                                      const char *restore_hdr);
+/* The expiry of a restored copy (ExpireRestored): its local data goes, the
+ * restore headers are removed, the transitioned version stays. */
+buckets_obj_err buckets_obj_expire_restored(buckets_objlayer *L, const char *bucket, const char *object,
+                                            const char *version_id);
+/* Removes a free version (after its remote copy was deleted). */
+buckets_obj_err buckets_obj_delete_free_version(buckets_objlayer *L, const char *bucket, const char *object,
+                                                const char *version_id);
+
+/* The same with free versions (free_version set), for the scanner to sweep. */
+buckets_obj_err buckets_obj_list_versions_all(buckets_objlayer *L, const char *bucket, const char *prefix,
+                                              const char *key_marker, const char *version_marker, int max_keys,
+                                              buckets_obj_listing *out);
 /* Merges per-source version listings (each sorted) into out, keeping the
  * first max_keys entries; the sources are emptied. */
 void buckets_obj_listing_merge_versions(buckets_obj_listing *src, size_t n, int max_keys, buckets_obj_listing *out);

@@ -117,6 +117,9 @@ typedef struct {
   size_t num_versions;
   int64_t successor_mod_time_ns;
   bool locked; /* a legal hold, or retention in the future (Evaluator.IsObjectLocked) */
+  bool transitioned;          /* TransitionStatus complete */
+  bool restore_ongoing;       /* RestoreOngoing */
+  int64_t restore_expires_ns; /* RestoreExpires (0: none) */
 } buckets_lc_obj;
 
 typedef struct {

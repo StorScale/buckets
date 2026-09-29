@@ -2,6 +2,7 @@
 #include "crypto/base64.h"
 
 #include <stdlib.h>
+#include <string.h>
 
 static const char k_alpha[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -79,4 +80,17 @@ long buckets_base64url_raw_decode(const char *in, size_t n, uint8_t *out) {
   long r = buckets_base64_decode(tmp, len, out);
   free(tmp);
   return r;
+}
+
+void buckets_base64url_encode(const uint8_t *in, size_t n, char *out) {
+  buckets_base64url_raw_encode(in, n, out);
+  size_t len = strlen(out);
+  while (len % 4) out[len++] = '=';
+  out[len] = '\0';
+}
+
+long buckets_base64url_decode(const char *in, size_t n, uint8_t *out) {
+  if (n % 4) return -1;
+  while (n && in[n - 1] == '=') n--;
+  return buckets_base64url_raw_decode(in, n, out);
 }

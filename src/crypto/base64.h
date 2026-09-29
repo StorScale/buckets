@@ -13,5 +13,8 @@ long buckets_base64_decode(const char *in, size_t n, uint8_t *out);
 /* Go's base64.RawURLEncoding (MinIO upload IDs). out: 4*ceil(n/3)+1 bytes. */
 void buckets_base64url_raw_encode(const uint8_t *in, size_t n, char *out);
 long buckets_base64url_raw_decode(const char *in, size_t n, uint8_t *out);
+/* Go's base64.URLEncoding (padded): out must hold 4*ceil(n/3)+1 bytes. */
+void buckets_base64url_encode(const uint8_t *in, size_t n, char *out);
+long buckets_base64url_decode(const char *in, size_t n, uint8_t *out);
 
 #endif

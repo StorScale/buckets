@@ -353,7 +353,7 @@ buckets_obj_err buckets_obj_delete_bucket(buckets_objlayer *L, const char *bucke
   if (L->npools > 1) {
     for (size_t p = 0; p < L->npools; p++) {
       buckets_obj_listing l;
-      if (buckets_ep_list_versions(L->pools[p], bucket, "", NULL, NULL, NULL, 1, &l) == BUCKETS_OBJ_OK) {
+      if (buckets_ep_list_versions(L->pools[p], bucket, "", NULL, NULL, NULL, 1, false, &l) == BUCKETS_OBJ_OK) {
         bool empty = l.nobjects == 0;
         buckets_obj_list_free(&l);
         if (!empty) return BUCKETS_OBJ_ERR_BUCKET_NOT_EMPTY;
@@ -490,20 +490,34 @@ buckets_obj_err buckets_obj_update_meta(buckets_objlayer *L, const char *bucket,
   return buckets_ep_update_meta(L->pools[l.pool], bucket, object, version_id, fn, ud, out);
 }
 
-buckets_obj_err buckets_obj_list_versions(buckets_objlayer *L, const char *bucket, const char *prefix,
-                                          const char *key_marker, const char *version_marker, const char *delimiter,
-                                          int max_keys, buckets_obj_listing *out) {
+static buckets_obj_err list_versions(buckets_objlayer *L, const char *bucket, const char *prefix, const char *key_marker,
+                                     const char *version_marker, const char *delimiter, int max_keys, bool incl_free,
+                                     buckets_obj_listing *out) {
   if (L->npools == 1)
-    return buckets_ep_list_versions(L->pools[0], bucket, prefix, key_marker, version_marker, delimiter, max_keys, out);
+    return buckets_ep_list_versions(L->pools[0], bucket, prefix, key_marker, version_marker, delimiter, max_keys,
+                                    incl_free, out);
   memset(out, 0, sizeof(*out));
   buckets_obj_listing *src = buckets_xcalloc(L->npools, sizeof(*src));
   buckets_obj_err err = BUCKETS_OBJ_OK;
   for (size_t p = 0; p < L->npools && !err; p++)
-    err = buckets_ep_list_versions(L->pools[p], bucket, prefix, key_marker, version_marker, delimiter, max_keys, &src[p]);
+    err = buckets_ep_list_versions(L->pools[p], bucket, prefix, key_marker, version_marker, delimiter, max_keys,
+                                   incl_free, &src[p]);
   if (!err) buckets_obj_listing_merge_versions(src, L->npools, max_keys > BUCKETS_MAX_LIST_KEYS ? BUCKETS_MAX_LIST_KEYS : max_keys, out);
   for (size_t p = 0; p < L->npools; p++) buckets_obj_list_free(&src[p]);
   free(src);
   return err;
+}
+
+buckets_obj_err buckets_obj_list_versions(buckets_objlayer *L, const char *bucket, const char *prefix,
+                                          const char *key_marker, const char *version_marker, const char *delimiter,
+                                          int max_keys, buckets_obj_listing *out) {
+  return list_versions(L, bucket, prefix, key_marker, version_marker, delimiter, max_keys, false, out);
+}
+
+buckets_obj_err buckets_obj_list_versions_all(buckets_objlayer *L, const char *bucket, const char *prefix,
+                                              const char *key_marker, const char *version_marker, int max_keys,
+                                              buckets_obj_listing *out) {
+  return list_versions(L, bucket, prefix, key_marker, version_marker, NULL, max_keys, true, out);
 }
 
 typedef struct {
@@ -836,4 +850,51 @@ buckets_obj_err buckets_obj_list_deleted_buckets(buckets_objlayer *L, buckets_bu
   }
   free(names);
   return BUCKETS_OBJ_OK;
+}
+
+/* ---- tiering ---------------------------------------------------------------------------- */
+
+buckets_obj_err buckets_obj_transition(buckets_objlayer *L, const char *bucket, const char *object,
+                                       const char *version_id, int64_t mod_time_ns, const char *etag, const char *tier,
+                                       buckets_tier_upload_fn upload, void *ud, buckets_object_info *out) {
+  int p = 0;
+  if (L->npools > 1) {
+    lookup l = find_pool(L, bucket, object, version_id);
+    if (l.pool < 0 || l.err) return l.err;
+    p = l.pool;
+  }
+  return buckets_ep_transition(L->pools[p], bucket, object, version_id, mod_time_ns, etag, tier, upload, ud, out);
+}
+
+buckets_obj_err buckets_obj_rehydrate(buckets_objlayer *L, const char *bucket, const char *object,
+                                      const char *version_id, buckets_read_fn rd, void *rd_ud,
+                                      const char *restore_hdr) {
+  int p = 0;
+  if (L->npools > 1) {
+    lookup l = find_pool(L, bucket, object, version_id);
+    if (l.pool < 0 || l.err) return l.err;
+    p = l.pool;
+  }
+  return buckets_ep_rehydrate(L->pools[p], bucket, object, version_id, rd, rd_ud, restore_hdr);
+}
+
+buckets_obj_err buckets_obj_expire_restored(buckets_objlayer *L, const char *bucket, const char *object,
+                                            const char *version_id) {
+  int p = 0;
+  if (L->npools > 1) {
+    lookup l = find_pool(L, bucket, object, version_id);
+    if (l.pool < 0 || l.err) return l.err;
+    p = l.pool;
+  }
+  return buckets_ep_expire_restored(L->pools[p], bucket, object, version_id);
+}
+
+buckets_obj_err buckets_obj_delete_free_version(buckets_objlayer *L, const char *bucket, const char *object,
+                                                const char *version_id) {
+  buckets_obj_err first = BUCKETS_OBJ_ERR_NO_SUCH_VERSION;
+  for (size_t p = 0; p < L->npools; p++) {
+    buckets_obj_err err = buckets_ep_delete_free_version(L->pools[p], bucket, object, version_id);
+    if (err != BUCKETS_OBJ_ERR_NO_SUCH_VERSION) return err;
+  }
+  return first;
 }

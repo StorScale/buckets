@@ -29,6 +29,9 @@ typedef struct {
   /* The size a version counts with (GetActualSize: plaintext sizes of
    * compressed and encrypted objects). NULL: the stored size. */
   int64_t (*actual_size)(void *ud, const buckets_object_info *version);
+  /* A free version (a deleted transitioned version's remnant), to sweep:
+   * its remote copy and then itself. NULL: left alone. */
+  void (*free_version)(void *ud, const char *bucket, const buckets_object_info *fv);
   void *ud;
 } buckets_scanner_hooks;
 
