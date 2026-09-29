@@ -90,6 +90,8 @@ run_pair() { # source-kind target-kind
   local arn
   arn=$(MC replicate ls a/src --json | field rule.Destination.Bucket)
   check "rule destination" "${arn##*:}" dst
+  check "replication-check" "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/src?replication-check" \
+    --aws-sigv4 "aws:amz:us-east-1:s3" --user rootadmin:rootsecret123)" 200
 
   # 1. a new object with metadata and tags
   echo hello >"$dir/f"
@@ -141,6 +143,8 @@ run_pair() { # source-kind target-kind
   wait_for 10 bash -c "! '$MC_BIN' stat --version-id '$v' b/dst/big" || bad "versioned delete not replicated"
   check "purged on source" "$(versions a/src/big | wc -l | tr -d ' ')" 0
 
+  check "status replicated" "$(MC replicate status a/src --json | python3 -c 'import json,sys
+d=json.load(sys.stdin); print(sum(v.get("replicationCount",0) for v in d["replicationstats"]["currStats"]["Stats"].values()) > 0)')" True
   # 7. existing objects: resync
   MC replicate resync start a/src --remote-bucket "$arn" >/dev/null 2>&1
   wait_for 20 bash -c "'$MC_BIN' stat b/dst/existing" || bad "existing object not replicated"

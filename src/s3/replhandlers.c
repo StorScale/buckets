@@ -524,3 +524,144 @@ void buckets_s3_get_bucket_replication_metrics(s3_ctx *c, bool v2) {
   buckets_http_resp_header(c->resp, "Content-Type", "application/json");
   c->resp->status = 200;
 }
+
+/* ---- ValidateBucketReplicationCreds (?replication-check) ---- */
+
+static void validation_error(s3_ctx *c, buckets_s3_error e, const char *detail) {
+  char msg[1200];
+  const buckets_s3_error_info *info = buckets_s3_error_get(e);
+  if (detail && *detail) snprintf(msg, sizeof(msg), "%s (%s)", info->message, detail);
+  else snprintf(msg, sizeof(msg), "%s", info->message);
+  buckets_s3_write_error_msg(c, e, msg);
+}
+
+/* isReplicationPermissionCheck: the target refused the probe as it should */
+static bool permission_check(const buckets_s3c_result *r) { return strcmp(r->code, "ReplicationPermissionCheck") == 0; }
+
+void buckets_s3_validate_replication_creds(s3_ctx *c) {
+  buckets_bucket_state *st = buckets_metasys_get(c->s->meta, c->bucket);
+  bool versioned = st->versioning.status == BUCKETS_VERSIONING_ENABLED;
+  bool has = st->has_replication;
+  bool lock = st->lock_enabled;
+  buckets_replication cfg = {0};
+  char err[600];
+  if (has) {
+    buckets_buf x = BUCKETS_BUF_INIT;
+    buckets_replication_xml(&st->replication, &x);
+    has = buckets_replication_parse(x.data, x.len, &cfg, err, sizeof(err));
+    buckets_buf_free(&x);
+  }
+  buckets_bucket_state_release(st);
+  if (!versioned) {
+    if (has) buckets_replication_free(&cfg);
+    buckets_s3_write_error(c, BUCKETS_ERR_REPLICATION_NEEDS_VERSIONING_ERROR);
+    return;
+  }
+  if (!has) {
+    char d[400];
+    snprintf(d, sizeof(d), "The replication configuration was not found: %s", c->bucket);
+    validation_error(c, BUCKETS_ERR_REPLICATION_CONFIGURATION_NOT_FOUND_ERROR, d);
+    return;
+  }
+  bool same = false;
+  if (!validate_destination(c, &cfg, &same)) {
+    buckets_replication_free(&cfg);
+    return;
+  }
+  if (!buckets_replication_validate(&cfg, c->bucket, same, err, sizeof(err))) {
+    buckets_replication_free(&cfg);
+    validation_error(c, BUCKETS_ERR_REPLICATION_VALIDATION_ERROR, err);
+    return;
+  }
+  const char *ep = c->s->endpoint, *h = strstr(ep, "://");
+  char node_hex[600] = "";
+  {
+    const char *node = h ? h + 3 : ep;
+    for (size_t i = 0; node[i] && i < 200; i++) snprintf(node_hex + 2 * i, 3, "%02x", (unsigned char)node[i]);
+  }
+  for (size_t i = 0; i < cfg.n; i++) {
+    const buckets_repl_rule *r = &cfg.rules[i];
+    if (strcmp(r->status, "Disabled") == 0) continue;
+    buckets_repl_target *t = buckets_repl_target_get(c->s->repl, c->bucket, r->dest_arn);
+    if (!t) {
+      char d[400];
+      snprintf(d, sizeof(d), "replication config with rule ID %s has a stale target", r->id);
+      validation_error(c, BUCKETS_ERR_REMOTE_TARGET_NOT_FOUND_ERROR, d);
+      buckets_replication_free(&cfg);
+      return;
+    }
+    buckets_s3c *cl = buckets_repl_target_client(t);
+    const char *tb = buckets_repl_target_info(t)->target_bucket;
+    buckets_s3c_result res;
+    bool fail = false;
+    if (lock) {
+      bool ok = buckets_s3c_do(cl, "GET", tb, NULL, "object-lock=", NULL, 0, NULL, 0, &res);
+      bool enabled = ok && res.body.data && strstr(res.body.data, "<ObjectLockEnabled>Enabled</ObjectLockEnabled>");
+      if (!ok) validation_error(c, BUCKETS_ERR_REPLICATION_VALIDATION_ERROR, buckets_s3c_error(&res));
+      else if (!enabled) {
+        char d[400];
+        snprintf(d, sizeof(d), "target bucket %s is not object lock enabled", tb);
+        validation_error(c, BUCKETS_ERR_REPLICATION_DESTINATION_MISSING_LOCK, d);
+      }
+      fail = !ok || !enabled;
+      buckets_s3c_result_free(&res);
+    }
+    if (!fail) {
+      bool ok = buckets_s3c_do(cl, "GET", tb, NULL, "versioning=", NULL, 0, NULL, 0, &res);
+      bool enabled = ok && res.body.data && strstr(res.body.data, "<Status>Enabled</Status>");
+      if (!ok) validation_error(c, BUCKETS_ERR_REPLICATION_VALIDATION_ERROR, buckets_s3c_error(&res));
+      else if (!enabled) {
+        char d[400];
+        snprintf(d, sizeof(d), "target bucket %s is not versioned", tb);
+        validation_error(c, BUCKETS_ERR_REMOTE_TARGET_NOT_VERSIONED_ERROR, d);
+      }
+      fail = !ok || !enabled;
+      buckets_s3c_result_free(&res);
+    }
+    if (!fail && same && strcmp(c->bucket, tb) == 0) {
+      buckets_admin_json_error(c, 400, buckets_s3_error_get(BUCKETS_ERR_BUCKET_REMOTE_IDENTICAL_TO_SOURCE)->code,
+                               buckets_s3_error_get(BUCKETS_ERR_BUCKET_REMOTE_IDENTICAL_TO_SOURCE)->message, NULL, NULL);
+      fail = true;
+    }
+    if (!fail) {
+      /* probe writes the target refuses by design: permissions are checked first */
+      char obj[800], vid[BUCKETS_UUID_STR_LEN + 1], q[128], ts[BUCKETS_TIME_RFC3339_NANO_LEN + 1];
+      snprintf(obj, sizeof(obj), "minio/%s/deleteme", node_hex);
+      buckets_uuid_v4(vid);
+      snprintf(q, sizeof(q), "versionId=%s", vid);
+      int64_t ns = now_ns();
+      buckets_time_rfc3339_nano(ns / 1000000000LL, (long)(ns % 1000000000LL), ts);
+      buckets_http_kv ph[] = {{"Content-Type", "application/octet-stream"}, {BUCKETS_H_REPL_STATUS, BUCKETS_RS_REPLICA},
+                              {BUCKETS_H_SRC_MTIME, ts}, {BUCKETS_H_SRC_REPL_REQUEST, "true"},
+                              {BUCKETS_H_SRC_REPL_CHECK, "true"}};
+      static const char *const what[] = {"s3:ReplicateObject permissions missing for replication user: ",
+                                         "s3:ReplicateDelete permissions missing for replication user: ",
+                                         "s3:ReplicateDelete/s3:DeleteObject permissions missing for replication user: "};
+      for (int step = 0; step < 3 && !fail; step++) {
+        bool ok;
+        if (step == 0) {
+          ok = buckets_s3c_do(cl, "PUT", tb, obj, q, ph, BUCKETS_ARRAY_LEN(ph), "aaaaaaaa", 8, &res);
+        } else {
+          buckets_http_kv dh[] = {{"X-Minio-Source-Deletemarker", "true"}, {BUCKETS_H_SRC_MTIME, ts},
+                                  {BUCKETS_H_REPL_STATUS, BUCKETS_RS_REPLICA}, {BUCKETS_H_SRC_REPL_REQUEST, "true"},
+                                  {BUCKETS_H_SRC_REPL_CHECK, "true"}};
+          ok = buckets_s3c_do(cl, "DELETE", tb, obj, NULL, step == 1 ? dh : dh + 1, step == 1 ? 5 : 4, NULL, 0, &res);
+        }
+        if (!ok && !permission_check(&res)) {
+          char d[900];
+          snprintf(d, sizeof(d), "%s%s", what[step], buckets_s3c_error(&res));
+          validation_error(c, BUCKETS_ERR_REPLICATION_VALIDATION_ERROR, d);
+          fail = true;
+        }
+        buckets_s3c_result_free(&res);
+      }
+    }
+    buckets_repl_target_put(t);
+    if (fail) {
+      buckets_replication_free(&cfg);
+      return;
+    }
+  }
+  buckets_replication_free(&cfg);
+  c->resp->status = 200;
+}

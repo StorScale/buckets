@@ -13,7 +13,10 @@ All notable changes to this project are documented here. The format follows
   - replication of new versions (single-part and multipart, keeping version IDs, modification times and ETags), metadata changes (tags, retention, legal hold, as in-place metadata copies), delete markers and versioned deletes, recording per-target status in `xl.meta` as MinIO does;
   - the receiving side: `X-Minio-Source-*` requests keep the source's version ID, mtime and ETag, replicas are marked `REPLICA`, replicated delete markers are created by version ID, and metadata-only copies update the version in place;
   - active-active proxying of GET/HEAD to a target when a version is missing locally;
-  - an outbound S3 client (`src/net/s3client.c`) for replication and, later, tiering and batch jobs.
+  - an outbound S3 client (`src/net/s3client.c`) for replication and, later, tiering and batch jobs;
+  - existing-object replication: `mc replicate resync` (`?replication-reset`, its status in `.replication/resync.bin`) and the scanner's replication healing of pending, failed and never-replicated versions;
+  - replication statistics: `GetBucketReplicationMetrics(V2)` (`mc replicate status`) and the v2/v3 replication metrics, per target and per node (metric-name diff against MinIO with replication active: 0);
+  - `mc replicate diff` (`/replication/diff`), the MRF backlog (`/replication/mrf`) and `?replication-check` credential validation.
 
 ## [0.7.0] - 2026-09-29
 

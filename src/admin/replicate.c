@@ -366,3 +366,49 @@ void buckets_admin_remove_remote_target(s3_ctx *c) {
   buckets_bucket_targets_free(&ts);
   if (c->resp->status < 400) c->resp->status = 204;
 }
+
+/* ---- mc replicate diff / backlog ---- */
+
+void buckets_admin_replication_diff(s3_ctx *c) {
+  if (!buckets_admin_authorize(c, "admin:ReplicationDiff")) return;
+  const char *bucket = bucket_param(c, true);
+  if (!bucket) return;
+  const char *arn = buckets_query_get(&c->q, "arn");
+  const char *v = buckets_query_get(&c->q, "verbose");
+  const char *prefix = buckets_query_get(&c->q, "prefix");
+  if (arn && *arn) {
+    buckets_bucket_state *st = buckets_metasys_get(c->s->meta, bucket);
+    bool known = false;
+    for (size_t i = 0; i < st->targets.n; i++) known |= strcmp(st->targets.t[i].arn, arn) == 0;
+    buckets_bucket_state_release(st);
+    if (!known) {
+      char d[600];
+      snprintf(d, sizeof(d), "invalid arn : '%s'", arn);
+      with_err(c, BUCKETS_ERR_INVALID_REQUEST, d);
+      return;
+    }
+  }
+  buckets_bucket_state *st = buckets_metasys_get(c->s->meta, bucket);
+  bool has = st->has_replication;
+  bool had_targets = st->meta.config[BUCKETS_BCFG_TARGETS].len > 0;
+  buckets_bucket_state_release(st);
+  if (!has) {
+    buckets_s3_write_error(c, BUCKETS_ERR_REPLICATION_CONFIGURATION_NOT_FOUND_ERROR);
+    return;
+  }
+  if (!had_targets) {
+    buckets_s3_write_error(c, BUCKETS_ERR_REMOTE_TARGET_NOT_FOUND_ERROR);
+    return;
+  }
+  buckets_repl_diff(c->s, bucket, prefix, arn, v && strcmp(v, "true") == 0, &c->resp->body);
+  c->resp->status = 200;
+}
+
+void buckets_admin_replication_mrf(s3_ctx *c) {
+  if (!buckets_admin_authorize(c, "admin:ReplicationDiff")) return;
+  const char *bucket = bucket_param(c, false);
+  if (*bucket && !bucket_param(c, true)) return;
+  const char *ep = c->s->endpoint, *h = strstr(ep, "://");
+  buckets_repl_mrf_json(c->s->repl, bucket, h ? h + 3 : ep, &c->resp->body);
+  c->resp->status = 200;
+}

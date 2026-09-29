@@ -1,0 +1,2 @@
+invalid --address 127.0.0.1:buckets (want [HOST]:PORT)
+invalid --address 127.0.0.1:minio (want [HOST]:PORT)

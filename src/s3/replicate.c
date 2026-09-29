@@ -2414,3 +2414,246 @@ void buckets_repl_resync_resume(buckets_repl *r) {
   }
   buckets_bucket_info_free(bl, nb);
 }
+
+/* ---- healing (queueReplicationHeal, from the scanner) ---- */
+
+void buckets_repl_heal(buckets_s3_server *s, const char *bucket, const buckets_object_info *oi, int retry) {
+  if (!s->repl || !s->meta || !oi->mod_time_ns || !*oi->version_id || strcmp(oi->version_id, "null") == 0) return;
+  buckets_bucket_state *st = buckets_metasys_get(s->meta, bucket);
+  if (!st->has_replication || !st->targets.n) {
+    buckets_bucket_state_release(st);
+    return;
+  }
+  bool versioned = buckets_versioning_enabled_for(&st->versioning, oi->name);
+  const char *ps = sys_str(oi, BUCKETS_META_PURGE_STATUS);
+  bool purge = ps && *ps;
+  bool marker = oi->delete_marker && !purge;
+  const char *internal = sys_str(oi, BUCKETS_META_REPL_STATUS);
+  const char *status = buckets_repl_composite_status(internal ? internal : "");
+  const char *pstatus = purge ? buckets_repl_composite_purge(ps) : "";
+  /* the decision (checkReplicateDelete / mustReplicate for healing) */
+  buckets_repl_dsc dsc = {0};
+  if (marker || purge) {
+    buckets_repl_check_delete(s, bucket, oi->name, oi->version_id, oi, versioned, false, &dsc);
+  } else {
+    buckets_repl_obj o = {.name = oi->name, .user_tags = buckets_object_meta(oi, "X-Amz-Tagging"),
+                          .ssec = sys_ssec(oi->meta_sys, oi->nmeta_sys), .op = BUCKETS_REPL_HEAL};
+    char **arns = NULL;
+    size_t na = buckets_replication_target_arns(&st->replication, &o, &arns);
+    for (size_t i = 0; i < na; i++) {
+      o.target_arn = arns[i];
+      dsc_set(&dsc, arns[i], buckets_replication_replicate(&st->replication, &o), target_sync(st, arns[i]));
+    }
+    buckets_replication_arns_free(arns, na);
+  }
+  if (!buckets_repl_dsc_any(&dsc)) {
+    buckets_repl_dsc_free(&dsc);
+    buckets_bucket_state_release(st);
+    return;
+  }
+  /* existing-object resync, per target (rcfg.Resync) */
+  char *resync_arn = NULL;
+  size_t nresync = 0;
+  for (size_t i = 0; i < st->targets.n; i++) {
+    const buckets_bucket_target *t = &st->targets.t[i];
+    bool rep = false;
+    for (size_t k = 0; k < dsc.n; k++) rep |= strcmp(dsc.t[k].arn, t->arn) == 0 && dsc.t[k].replicate;
+    if (!rep) continue;
+    buckets_repl_obj eo = {.name = oi->name, .target_arn = t->arn, .existing = true};
+    if (marker) {
+      eo.delete_marker = true;
+      eo.version_id = oi->version_id;
+      eo.op = BUCKETS_REPL_DELETE;
+    } else {
+      eo.user_tags = buckets_object_meta(oi, "X-Amz-Tagging");
+      eo.ssec = sys_ssec(oi->meta_sys, oi->nmeta_sys);
+    }
+    if (!buckets_replication_replicate(&st->replication, &eo)) continue;
+    char tst[32];
+    buckets_repl_target_status(internal, t->arn, tst, sizeof(tst));
+    if (resync_target(oi, t, tst)) {
+      nresync++;
+      if (!resync_arn) resync_arn = buckets_xstrdup(t->arn);
+    }
+  }
+  buckets_bucket_state_release(st);
+  buckets_repl_dsc_free(&dsc);
+  bool must_resync = nresync > 0;
+  if (strcmp(status, BUCKETS_RS_COMPLETED) == 0 && !purge && !must_resync) goto out;
+  job *j = buckets_xcalloc(1, sizeof(*j));
+  j->bucket = buckets_xstrdup(bucket);
+  j->object = buckets_xstrdup(oi->name);
+  snprintf(j->version_id, sizeof(j->version_id), "%s", oi->version_id);
+  j->retry = retry;
+  j->qsize = oi->size;
+  if (marker || purge) {
+    j->kind = JOB_DELETE;
+    j->dm = marker;
+    j->dm_mtime = oi->mod_time_ns;
+    j->repl_status = buckets_xstrdup(internal ? internal : "");
+    j->purge_status = buckets_xstrdup(purge ? ps : "");
+    bool retry_it = strcmp(status, BUCKETS_RS_PENDING) == 0 || strcmp(status, BUCKETS_RS_FAILED) == 0 ||
+                    strcmp(pstatus, BUCKETS_VPS_PENDING) == 0 || strcmp(pstatus, BUCKETS_VPS_FAILED) == 0;
+    if (retry_it) {
+      j->op = BUCKETS_REPL_HEAL;
+      j->event = buckets_xstrdup("replicate:heal:delete");
+    } else if (must_resync && (strcmp(status, BUCKETS_RS_COMPLETED) == 0 || !*status)) {
+      j->op = BUCKETS_REPL_EXISTING;
+      j->event = buckets_xstrdup("replicate:existing:delete");
+      j->target_arn = resync_arn;
+      resync_arn = NULL;
+    } else {
+      job_free(j);
+      goto out;
+    }
+    enqueue(s->repl, j, false);
+    goto out;
+  }
+  j->kind = JOB_OBJECT;
+  j->op = must_resync ? BUCKETS_REPL_EXISTING : BUCKETS_REPL_HEAL;
+  if (strcmp(status, BUCKETS_RS_PENDING) == 0 || strcmp(status, BUCKETS_RS_FAILED) == 0) {
+    j->event = buckets_xstrdup("replicate:heal");
+  } else if (must_resync) {
+    j->event = buckets_xstrdup("replicate:existing");
+  } else {
+    job_free(j);
+    goto out;
+  }
+  enqueue(s->repl, j, false);
+out:
+  free(resync_arn);
+}
+
+/* ---- ReplicationDiff and the MRF backlog ---- */
+
+typedef struct {
+  char arn[256];
+  char rs[32], ds[32];
+} diff_tgt;
+
+static int diff_tgt_cmp(const void *a, const void *b) { return strcmp(((const diff_tgt *)a)->arn, ((const diff_tgt *)b)->arn); }
+
+/* getReplicationDiff: one DiffInfo line per version not (yet) replicated. */
+void buckets_repl_diff(buckets_s3_server *s, const char *bucket, const char *prefix, const char *arn, bool verbose,
+                       buckets_buf *out) {
+  char *km = NULL, *vm = NULL;
+  for (;;) {
+    buckets_obj_listing l;
+    if (buckets_obj_list_versions(s->layer, bucket, prefix ? prefix : "", km, vm, NULL, 1000, &l)) break;
+    for (size_t i = 0; i < l.nobjects; i++) {
+      buckets_object_info oi;
+      if (buckets_obj_stat(s->layer, bucket, l.objects[i].name, l.objects[i].version_id, &oi)) continue;
+      buckets_bucket_state *st = buckets_metasys_get(s->meta, bucket);
+      bool suspended = buckets_versioning_suspended_for(&st->versioning, oi.name);
+      bool must_resync = false;
+      const char *internal = sys_str(&oi, BUCKETS_META_REPL_STATUS);
+      for (size_t t = 0; t < st->targets.n && !must_resync; t++) {
+        char tst[32];
+        buckets_repl_target_status(internal, st->targets.t[t].arn, tst, sizeof(tst));
+        must_resync = version_needs_resync(s, bucket, &oi, &st->targets.t[t]);
+      }
+      buckets_bucket_state_release(st);
+      if (suspended) {
+        buckets_object_info_free(&oi);
+        continue;
+      }
+      char cst[32];
+      const char *status = buckets_repl_version_status(&oi, cst, sizeof(cst));
+      if (!status) status = "";
+      bool done = strcmp(status, BUCKETS_RS_COMPLETED) == 0 || strcmp(status, BUCKETS_RS_REPLICA) == 0;
+      if ((done && !verbose) || (!done && !*status && !must_resync)) {
+        buckets_object_info_free(&oi);
+        continue;
+      }
+      /* the targets' statuses */
+      diff_tgt *tg = NULL;
+      size_t nt = 0;
+      const char *ps = sys_str(&oi, BUCKETS_META_PURGE_STATUS);
+      for (int pass = 0; pass < 2; pass++) {
+        const char *src = pass ? (ps ? ps : "") : (internal ? internal : "");
+        const char *p = src;
+        while (*p) {
+          const char *eq = strchr(p, '='), *semi = eq ? strchr(eq, ';') : NULL;
+          if (!eq || !semi) break;
+          char a[256], v[32];
+          snprintf(a, sizeof(a), "%.*s", (int)(eq - p), p);
+          snprintf(v, sizeof(v), "%.*s", (int)(semi - eq - 1), eq + 1);
+          p = semi + 1;
+          if (arn && *arn && strcmp(arn, a) != 0) continue;
+          if (!verbose && (pass ? strcmp(v, BUCKETS_VPS_COMPLETE) == 0
+                                : (strcmp(v, BUCKETS_RS_COMPLETED) == 0 || strcmp(v, BUCKETS_RS_REPLICA) == 0)))
+            continue;
+          diff_tgt *d = NULL;
+          for (size_t k = 0; k < nt; k++)
+            if (strcmp(tg[k].arn, a) == 0) d = &tg[k];
+          if (!d) {
+            tg = buckets_xrealloc(tg, (nt + 1) * sizeof(*tg));
+            d = &tg[nt++];
+            memset(d, 0, sizeof(*d));
+            snprintf(d->arn, sizeof(d->arn), "%s", a);
+          }
+          snprintf(pass ? d->ds : d->rs, sizeof(d->rs), "%s", v);
+        }
+      }
+      if (nt > 1) qsort(tg, nt, sizeof(*tg), diff_tgt_cmp);
+      buckets_buf_append_c(out, "{\"object\":");
+      buckets_json_go_string(out, oi.name, strlen(oi.name));
+      buckets_buf_append_c(out, ",\"versionId\":");
+      buckets_json_go_string(out, oi.version_id, strlen(oi.version_id));
+      if (nt) {
+        buckets_buf_append_c(out, ",\"targets\":{");
+        for (size_t k = 0; k < nt; k++) {
+          if (k) buckets_buf_append_char(out, ',');
+          buckets_json_go_string(out, tg[k].arn, strlen(tg[k].arn));
+          buckets_buf_append_c(out, ":{");
+          if (tg[k].rs[0]) buckets_buf_appendf(out, "\"rStatus\":\"%s\"", tg[k].rs);
+          if (tg[k].ds[0]) buckets_buf_appendf(out, "%s\"drStatus\":\"%s\"", tg[k].rs[0] ? "," : "", tg[k].ds);
+          buckets_buf_append_char(out, '}');
+        }
+        buckets_buf_append_char(out, '}');
+      }
+      if (*status) buckets_buf_appendf(out, ",\"rStatus\":\"%s\"", status);
+      const char *pc = ps && *ps ? buckets_repl_composite_purge(ps) : "";
+      if (*pc) buckets_buf_appendf(out, ",\"dStatus\":\"%s\"", pc);
+      char ts[BUCKETS_TIME_RFC3339_NANO_LEN + 1], lm[BUCKETS_TIME_RFC3339_NANO_LEN + 1];
+      const char *rts = sys_str(&oi, BUCKETS_META_REPL_TS);
+      long long sec;
+      long nsec;
+      if (rts && buckets_time_parse_rfc3339(rts, &sec, &nsec)) buckets_time_rfc3339_nano(sec, nsec, ts);
+      else buckets_time_rfc3339_nano(BUCKETS_GO_ZERO_SEC, 0, ts);
+      rfc3339nano(oi.mod_time_ns, lm);
+      buckets_buf_appendf(out, ",\"replTimestamp\":\"%s\",\"lastModified\":\"%s\",\"deletemarker\":%s}\n", ts, lm,
+                          oi.delete_marker ? "true" : "false");
+      free(tg);
+      buckets_object_info_free(&oi);
+    }
+    bool more = l.truncated;
+    free(km);
+    free(vm);
+    km = more && l.next_marker ? buckets_xstrdup(l.next_marker) : NULL;
+    vm = more && l.next_version_marker ? buckets_xstrdup(l.next_version_marker) : NULL;
+    buckets_obj_list_free(&l);
+    if (!more) break;
+  }
+  free(km);
+  free(vm);
+}
+
+/* The retries waiting in the MRF queue, as madmin.ReplicationMRF lines. */
+void buckets_repl_mrf_json(buckets_repl *r, const char *bucket, const char *node_name, buckets_buf *out) {
+  if (!r) return;
+  pthread_mutex_lock(&r->mrf.mu);
+  for (job *j = r->mrf.head; j; j = j->next) {
+    if (bucket && *bucket && strcmp(j->bucket, bucket) != 0) continue;
+    buckets_buf_append_c(out, "{\"nodeName\":");
+    buckets_json_go_string(out, node_name, strlen(node_name));
+    buckets_buf_append_c(out, ",\"bucket\":");
+    buckets_json_go_string(out, j->bucket, strlen(j->bucket));
+    buckets_buf_append_c(out, ",\"object\":");
+    buckets_json_go_string(out, j->object, strlen(j->object));
+    buckets_buf_append_c(out, ",\"versionId\":");
+    buckets_json_go_string(out, j->version_id, strlen(j->version_id));
+    buckets_buf_appendf(out, ",\"retryCount\":%d}\n", j->retry);
+  }
+  pthread_mutex_unlock(&r->mrf.mu);
+}

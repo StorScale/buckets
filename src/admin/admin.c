@@ -2227,6 +2227,8 @@ static const route k_routes[] = {
     {"PUT", "/set-remote-target", buckets_admin_set_remote_target, "SetRemoteTarget"},
     {"GET", "/list-remote-targets", buckets_admin_list_remote_targets, "ListRemoteTargets"},
     {"DELETE", "/remove-remote-target", buckets_admin_remove_remote_target, "RemoveRemoteTarget"},
+    {"POST", "/replication/diff", buckets_admin_replication_diff, "ReplicationDiff"},
+    {"GET", "/replication/mrf", buckets_admin_replication_mrf, "ReplicationMRF"},
     {"POST", "/kms/status", buckets_admin_kms_status_v3, "KMSStatus"},
     {"POST", "/kms/key/create", buckets_admin_kms_create_key_v3, "KMSCreateKey"},
     {"GET", "/kms/key/status", buckets_admin_kms_key_status_v3, "KMSKeyStatus"},

@@ -70,6 +70,14 @@ int buckets_repl_resync_start(buckets_repl *r, const char *bucket, const char *a
 /* ResetBucketReplicationStatus: ResyncTargetsInfo JSON. */
 bool buckets_repl_resync_status(buckets_repl *r, const char *bucket, const char *arn, buckets_buf *out, char *err,
                                 size_t errlen);
+/* queueReplicationHeal: the scanner's check of one version (pending or
+ * failed replication, existing objects). */
+void buckets_repl_heal(struct buckets_s3_server *s, const char *bucket, const buckets_object_info *oi, int retry);
+/* ReplicationDiff: DiffInfo JSON lines for versions not replicated. */
+void buckets_repl_diff(struct buckets_s3_server *s, const char *bucket, const char *prefix, const char *arn, bool verbose,
+                       buckets_buf *out);
+/* The MRF backlog as ReplicationMRF JSON lines (bucket "" for all). */
+void buckets_repl_mrf_json(buckets_repl *r, const char *bucket, const char *node_name, buckets_buf *out);
 /* Resumes unfinished resyncs (after startup). */
 void buckets_repl_resync_resume(buckets_repl *r);
 
