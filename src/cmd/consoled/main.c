@@ -12,7 +12,10 @@
  *   BUCKETS_CONSOLE_REGION / CONSOLE_MINIO_REGION        region to sign for
  *   BUCKETS_CONSOLE_CA_DIR                                CAs for an https bucketsd
  *   BUCKETS_CONSOLE_S3_URL / CONSOLE_MINIO_SERVER_PUBLIC  S3 as browsers reach it (share links)
- *   BUCKETS_CONSOLE_LDAP / CONSOLE_LDAP_ENABLED           offer LDAP sign-in (on) */
+ *   BUCKETS_CONSOLE_LDAP / CONSOLE_LDAP_ENABLED           offer LDAP sign-in (on)
+ *   BUCKETS_CONSOLE_OIDC_CONFIG_URL, _CLIENT_ID, _CLIENT_SECRET, _SCOPES,
+ *   _REDIRECT_URI, _DISPLAY_NAME, _CA_FILE (MINIO_IDENTITY_OPENID_* too)
+ *                                                        OpenID sign-in */
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -147,6 +150,13 @@ int main(int argc, char **argv) {
       .region = env2("BUCKETS_CONSOLE_REGION", "CONSOLE_MINIO_REGION"),
       .s3_url = env2("BUCKETS_CONSOLE_S3_URL", "CONSOLE_MINIO_SERVER_PUBLIC"),
   };
+  cfg.oidc_config_url = env2("BUCKETS_CONSOLE_OIDC_CONFIG_URL", "MINIO_IDENTITY_OPENID_CONFIG_URL");
+  cfg.oidc_client_id = env2("BUCKETS_CONSOLE_OIDC_CLIENT_ID", "MINIO_IDENTITY_OPENID_CLIENT_ID");
+  cfg.oidc_client_secret = env2("BUCKETS_CONSOLE_OIDC_CLIENT_SECRET", "MINIO_IDENTITY_OPENID_CLIENT_SECRET");
+  cfg.oidc_scopes = env2("BUCKETS_CONSOLE_OIDC_SCOPES", "MINIO_IDENTITY_OPENID_SCOPES");
+  cfg.oidc_redirect_uri = env2("BUCKETS_CONSOLE_OIDC_REDIRECT_URI", "MINIO_IDENTITY_OPENID_REDIRECT_URI");
+  cfg.oidc_display_name = env2("BUCKETS_CONSOLE_OIDC_DISPLAY_NAME", "MINIO_IDENTITY_OPENID_DISPLAY_NAME");
+  cfg.oidc_ca_file = env2("BUCKETS_CONSOLE_OIDC_CA_FILE", NULL);
   const char *ldap = env2("BUCKETS_CONSOLE_LDAP", "CONSOLE_LDAP_ENABLED");
   cfg.ldap = ldap && (strcasecmp(ldap, "on") == 0 || strcasecmp(ldap, "true") == 0 || strcmp(ldap, "1") == 0);
   buckets_console *console = buckets_console_new(&cfg);

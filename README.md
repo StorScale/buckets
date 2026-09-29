@@ -73,7 +73,7 @@ CONSOLE_MINIO_SERVER=http://127.0.0.1:9000 CONSOLE_PBKDF_PASSPHRASE=some-secret 
   build/src/consoled --address :9090 --web-dir console/web/dist
 ```
 
-Sign in at http://localhost:9090 with any Buckets credentials: the console exchanges them for STS credentials and keeps those in an encrypted cookie. `CONSOLE_PBKDF_PASSPHRASE`/`CONSOLE_PBKDF_SALT` derive the cookie key; give every replica the same values.
+Sign in at http://localhost:9090 with any Buckets credentials: the console exchanges them for STS credentials and keeps those in an encrypted cookie. `CONSOLE_PBKDF_PASSPHRASE`/`CONSOLE_PBKDF_SALT` derive the cookie key; give every replica the same values. `CONSOLE_LDAP_ENABLED=on` adds LDAP sign-in, `BUCKETS_CONSOLE_OIDC_CONFIG_URL` with `_CLIENT_ID`/`_CLIENT_SECRET` adds OpenID sign-in (the redirect URI is `<console>/oauth_callback`), and `BUCKETS_CONSOLE_S3_URL` (the S3 endpoint browsers can reach) enables share links.
 
 `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD` and `MINIO_REGION` are honored as fallbacks, so existing deployments can switch over. The health endpoints are `/minio/health/{live,ready,cluster}`, also served under `/buckets/health/...`.
 

@@ -20,6 +20,19 @@ test.describe("session", () => {
     expect(res.status()).toBe(401);
   });
 
+  test("signs in through an OpenID provider", async ({ page }) => {
+    test.skip(!!process.env.CONSOLE_URL, "needs the mock provider of the local setup");
+    await page.goto("/login");
+    await page.getByTestId("oidc-login").click();
+    await expect(page.getByTestId("whoami")).toHaveText("oidcuser");
+    await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
+    // a forged callback lands back on the login page with the reason
+    await page.getByTestId("logout").click();
+    await page.goto("/oauth_callback?code=x&state=y");
+    await expect(page).toHaveURL(/\/login\?error=/);
+    await expect(page.getByTestId("error")).toContainText("did not start here");
+  });
+
   test("the API refuses unsafe requests without the CSRF header", async ({ page }) => {
     await login(page);
     const res = await page.request.put("/api/v1/s3/csrf-bucket");

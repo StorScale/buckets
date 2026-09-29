@@ -14,7 +14,9 @@
  * calls to bucketsd, signing them with the session's credentials. It holds
  * no state beyond the cookie key.
  *
- *   GET  /api/v1/login-methods                        -> {"ldap": bool, "share": bool}
+ *   GET  /api/v1/login-methods                        -> {"ldap","share","oidc": bool, "oidcName"}
+ *   GET  /api/v1/login/oidc                           -> 302 to the identity provider
+ *   GET  /oauth_callback?code=&state=                 -> session cookie, 302 to /
  *   POST /api/v1/login   {"accessKey","secretKey"[,"method":"ldap"]} -> session cookie
  *   GET  /api/v1/share?bucket=&key=[&versionId=][&expires=]  -> {"url","expiresAt"}
  *   POST /api/v1/logout
@@ -40,6 +42,13 @@ typedef struct {
   const char *region;
   const char *s3_url; /* bucketsd as browsers reach it, for share links (NULL: none) */
   bool ldap;          /* offer LDAP sign-in (AssumeRoleWithLDAPIdentity) */
+  /* OpenID sign-in (authorization code flow, then AssumeRoleWithWebIdentity):
+   * enabled with a configuration URL and client ID. */
+  const char *oidc_config_url, *oidc_client_id, *oidc_client_secret;
+  const char *oidc_scopes;       /* NULL: "openid profile email" */
+  const char *oidc_redirect_uri; /* NULL: <scheme>://<Host>/oauth_callback */
+  const char *oidc_display_name; /* the sign-in button's label */
+  const char *oidc_ca_file;
 } buckets_console_config;
 
 typedef struct buckets_console buckets_console;

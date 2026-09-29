@@ -14,7 +14,10 @@
 #include <unistd.h>
 #include <yyjson.h>
 
+#include <pthread.h>
+
 #include "core/log.h"
+#include "net/fetch.h"
 #include "core/query.h"
 #include "crypto/aead.h"
 #include "crypto/base64.h"
@@ -32,6 +35,8 @@ struct buckets_console {
   buckets_http_client *http;
   char host_header[300];
   uint8_t key[32];
+  pthread_mutex_t oidc_mu;
+  char *oidc_authorize, *oidc_token; /* from discovery, once fetched */
 };
 
 buckets_console *buckets_console_new(const buckets_console_config *cfg) {
@@ -41,6 +46,9 @@ buckets_console *buckets_console_new(const buckets_console_config *cfg) {
   if (!c->cfg.region || !*c->cfg.region) c->cfg.region = "us-east-1";
   c->http = buckets_http_client_new(cfg->upstream_host, cfg->upstream_port, cfg->upstream_tls, 5 * 60 * 1000);
   snprintf(c->host_header, sizeof(c->host_header), "%s:%d", cfg->upstream_host, cfg->upstream_port);
+  pthread_mutex_init(&c->oidc_mu, NULL);
+  if (!c->cfg.oidc_scopes || !*c->cfg.oidc_scopes) c->cfg.oidc_scopes = "openid profile email";
+  if (!c->cfg.oidc_display_name || !*c->cfg.oidc_display_name) c->cfg.oidc_display_name = "OpenID";
   /* MinIO console: the cookie key comes from CONSOLE_PBKDF_PASSPHRASE/SALT;
    * without them every restart (and every replica) gets its own key. */
   if (cfg->passphrase && *cfg->passphrase) {
@@ -58,10 +66,45 @@ void buckets_console_free(buckets_console *c) {
   if (!c) return;
   buckets_http_client_free(c->http);
   OPENSSL_cleanse(c->key, sizeof(c->key));
+  pthread_mutex_destroy(&c->oidc_mu);
+  free(c->oidc_authorize);
+  free(c->oidc_token);
   free(c);
 }
 
 /* ---- sessions ---------------------------------------------------------------- */
+
+/* AES-256-GCM under the cookie key, base64url(nonce || ciphertext || tag). */
+static bool seal_blob(const buckets_console *c, const char *ad, const void *data, size_t n, buckets_buf *out) {
+  size_t total = BUCKETS_AEAD_NONCE + n + BUCKETS_AEAD_TAG;
+  uint8_t *raw = buckets_xmalloc(total);
+  buckets_random(raw, BUCKETS_AEAD_NONCE);
+  bool ok = buckets_aead_seal1(BUCKETS_AEAD_AES_256_GCM, c->key, raw, ad, strlen(ad), data, n, raw + BUCKETS_AEAD_NONCE);
+  if (ok) {
+    char *enc = buckets_xmalloc(total * 4 / 3 + 8);
+    buckets_base64url_raw_encode(raw, total, enc);
+    buckets_buf_append_c(out, enc);
+    free(enc);
+  }
+  free(raw);
+  return ok;
+}
+
+static bool open_blob(const buckets_console *c, const char *ad, const char *in, size_t n, buckets_buf *out) {
+  if (n > 16384) return false;
+  uint8_t *raw = buckets_xmalloc(n + 4);
+  long rn = buckets_base64url_raw_decode(in, n, raw);
+  bool ok = rn > BUCKETS_AEAD_NONCE + BUCKETS_AEAD_TAG;
+  if (ok) {
+    size_t pn = (size_t)rn - BUCKETS_AEAD_NONCE - BUCKETS_AEAD_TAG;
+    buckets_buf_reserve(out, pn + 1);
+    ok = buckets_aead_open1(BUCKETS_AEAD_AES_256_GCM, c->key, raw, ad, strlen(ad), raw + BUCKETS_AEAD_NONCE,
+                            (size_t)rn - BUCKETS_AEAD_NONCE, (uint8_t *)out->data + out->len);
+    if (ok) out->len += pn, out->data[out->len] = '\0';
+  }
+  free(raw);
+  return ok;
+}
 
 bool buckets_console_seal(const buckets_console *c, const buckets_console_session *s, buckets_buf *cookie) {
   yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
@@ -131,8 +174,8 @@ bool buckets_console_open(const buckets_console *c, const char *cookie, size_t n
   return ok;
 }
 
-/* The session cookie of a request, if valid. */
-static bool request_session(const buckets_console *c, const buckets_http_request *req, buckets_console_session *s) {
+/* A cookie's value (p NULL when absent). */
+static buckets_str cookie_value(const buckets_http_request *req, const char *name) {
   for (size_t i = 0; i < req->nheaders; i++) {
     if (!buckets_str_ieq_c(req->headers[i].name, "Cookie")) continue;
     buckets_str rest = req->headers[i].value, part;
@@ -140,11 +183,16 @@ static bool request_session(const buckets_console *c, const buckets_http_request
       buckets_str_cut(rest, ';', &part, &rest);
       part = buckets_str_trim(part);
       buckets_str k, v;
-      if (buckets_str_cut(part, '=', &k, &v) && buckets_str_eq_c(k, COOKIE_NAME))
-        return buckets_console_open(c, v.p, v.n, s);
+      if (buckets_str_cut(part, '=', &k, &v) && buckets_str_eq_c(k, name)) return v;
     }
   }
-  return false;
+  return (buckets_str){NULL, 0};
+}
+
+/* The session cookie of a request, if valid. */
+static bool request_session(const buckets_console *c, const buckets_http_request *req, buckets_console_session *s) {
+  buckets_str v = cookie_value(req, COOKIE_NAME);
+  return v.p && buckets_console_open(c, v.p, v.n, s);
 }
 
 static void set_cookie(const buckets_console *c, buckets_http_response *resp, const char *value, int max_age) {
@@ -309,7 +357,225 @@ static void handle_login_methods(buckets_console *c, buckets_http_response *resp
   yyjson_mut_doc_set_root(d, o);
   yyjson_mut_obj_add_bool(d, o, "ldap", c->cfg.ldap);
   yyjson_mut_obj_add_bool(d, o, "share", c->cfg.s3_url != NULL);
+  bool oidc = c->cfg.oidc_config_url && c->cfg.oidc_client_id;
+  yyjson_mut_obj_add_bool(d, o, "oidc", oidc);
+  if (oidc) yyjson_mut_obj_add_str(d, o, "oidcName", c->cfg.oidc_display_name);
   json_reply(resp, d);
+}
+
+/* ---- OpenID sign-in ------------------------------------------------------------------ */
+
+#define OIDC_COOKIE "buckets-oidc"
+#define OIDC_AD "buckets-console-oidc-v1"
+
+/* The provider's endpoints, from its discovery document (fetched once). */
+static bool oidc_endpoints(buckets_console *c, char **authorize, char **token, char *err, size_t errlen) {
+  pthread_mutex_lock(&c->oidc_mu);
+  if (!c->oidc_authorize) {
+    buckets_http_result res;
+    if (buckets_fetch("GET", c->cfg.oidc_config_url, c->cfg.oidc_ca_file, NULL, 0, NULL, 0, 10000, &res, err, errlen)) {
+      yyjson_doc *d = res.status == 200 ? yyjson_read(res.body.data ? res.body.data : "", res.body.len, 0) : NULL;
+      yyjson_val *o = d ? yyjson_doc_get_root(d) : NULL;
+      const char *a = yyjson_get_str(yyjson_obj_get(o, "authorization_endpoint"));
+      const char *t = yyjson_get_str(yyjson_obj_get(o, "token_endpoint"));
+      if (a && t) {
+        c->oidc_authorize = buckets_xstrdup(a);
+        c->oidc_token = buckets_xstrdup(t);
+      } else {
+        snprintf(err, errlen, "the discovery document (%d) lacks authorization or token endpoints", res.status);
+      }
+      yyjson_doc_free(d);
+      buckets_http_result_free(&res);
+    }
+  }
+  bool ok = c->oidc_authorize != NULL;
+  if (ok) {
+    *authorize = buckets_xstrdup(c->oidc_authorize);
+    *token = buckets_xstrdup(c->oidc_token);
+  }
+  pthread_mutex_unlock(&c->oidc_mu);
+  return ok;
+}
+
+static void redirect_uri(const buckets_console *c, const buckets_http_request *req, buckets_buf *out) {
+  if (c->cfg.oidc_redirect_uri) {
+    buckets_buf_append_c(out, c->cfg.oidc_redirect_uri);
+    return;
+  }
+  buckets_str host = buckets_http_header_get(req, "Host"), proto = buckets_http_header_get(req, "X-Forwarded-Proto");
+  bool https = req->secure || (proto.p && buckets_str_eq_c(proto, "https"));
+  buckets_buf_appendf(out, "%s://%.*s/oauth_callback", https ? "https" : "http", (int)host.n, host.p ? host.p : "");
+}
+
+static void redirect(buckets_http_response *resp, const char *location) {
+  resp->status = 302;
+  buckets_http_resp_header(resp, "Location", location);
+  buckets_http_resp_header(resp, "Cache-Control", "no-store");
+}
+
+static void login_error_redirect(buckets_http_response *resp, const char *msg) {
+  buckets_buf loc = BUCKETS_BUF_INIT;
+  buckets_buf_append_c(&loc, "/login?error=");
+  form_escape(&loc, msg);
+  redirect(resp, loc.data);
+  buckets_buf_free(&loc);
+}
+
+static void handle_oidc_start(buckets_console *c, const buckets_http_request *req, buckets_http_response *resp) {
+  if (!c->cfg.oidc_config_url || !c->cfg.oidc_client_id) {
+    json_error(resp, 404, "NotConfigured", "OpenID sign-in is not configured");
+    return;
+  }
+  char *authorize = NULL, *token = NULL, err[512] = "";
+  if (!oidc_endpoints(c, &authorize, &token, err, sizeof(err))) {
+    buckets_log_warn("console: OpenID discovery: %s", err);
+    login_error_redirect(resp, "The identity provider cannot be reached.");
+    return;
+  }
+  uint8_t r[32];
+  char state[48], nonce[48];
+  buckets_random(r, sizeof(r));
+  buckets_base64url_raw_encode(r, 24, state);
+  buckets_random(r, sizeof(r));
+  buckets_base64url_raw_encode(r, 24, nonce);
+  char json[256];
+  int jn = snprintf(json, sizeof(json), "{\"state\":\"%s\",\"nonce\":\"%s\",\"exp\":%lld}", state, nonce,
+                    (long long)time(NULL) + 600);
+  buckets_buf ck = BUCKETS_BUF_INIT, loc = BUCKETS_BUF_INIT, ru = BUCKETS_BUF_INIT;
+  seal_blob(c, OIDC_AD, json, (size_t)jn, &ck);
+  /* Lax: the provider's redirect back is a cross-site navigation. */
+  buckets_http_resp_headerf(resp, "Set-Cookie", OIDC_COOKIE "=%s; Path=/oauth_callback; Max-Age=600; HttpOnly; SameSite=Lax%s", ck.data,
+                            c->cfg.secure_cookie ? "; Secure" : "");
+  redirect_uri(c, req, &ru);
+  buckets_buf_appendf(&loc, "%s%sresponse_type=code&client_id=", authorize, strchr(authorize, '?') ? "&" : "?");
+  form_escape(&loc, c->cfg.oidc_client_id);
+  buckets_buf_append_c(&loc, "&redirect_uri=");
+  form_escape(&loc, ru.data);
+  buckets_buf_append_c(&loc, "&scope=");
+  form_escape(&loc, c->cfg.oidc_scopes);
+  buckets_buf_appendf(&loc, "&state=%s&nonce=%s", state, nonce);
+  redirect(resp, loc.data);
+  buckets_buf_free(&ck);
+  buckets_buf_free(&loc);
+  buckets_buf_free(&ru);
+  free(authorize);
+  free(token);
+}
+
+/* A display name from the ID token's claims (bucketsd verifies the token). */
+static void token_user(const char *jwt, char *out, size_t cap) {
+  snprintf(out, cap, "openid");
+  const char *a = strchr(jwt, '.'), *b = a ? strchr(a + 1, '.') : NULL;
+  if (!b) return;
+  size_t n = (size_t)(b - a - 1);
+  uint8_t *raw = buckets_xmalloc(n + 4);
+  long rn = buckets_base64url_raw_decode(a + 1, n, raw);
+  yyjson_doc *d = rn > 0 ? yyjson_read((const char *)raw, (size_t)rn, 0) : NULL;
+  yyjson_val *o = d ? yyjson_doc_get_root(d) : NULL;
+  static const char *const claims[] = {"preferred_username", "email", "name", "sub"};
+  for (size_t i = 0; i < BUCKETS_ARRAY_LEN(claims); i++) {
+    const char *v = yyjson_get_str(yyjson_obj_get(o, claims[i]));
+    if (v && *v) {
+      snprintf(out, cap, "%s", v);
+      break;
+    }
+  }
+  yyjson_doc_free(d);
+  free(raw);
+}
+
+static void handle_oidc_callback(buckets_console *c, const buckets_http_request *req, buckets_http_response *resp) {
+  buckets_http_resp_headerf(resp, "Set-Cookie", OIDC_COOKIE "=; Path=/oauth_callback; Max-Age=0; HttpOnly; SameSite=Lax");
+  buckets_query q = {0};
+  buckets_query_parse(req->query, &q);
+  const char *code = buckets_query_get(&q, "code"), *state = buckets_query_get(&q, "state");
+  const char *perr = buckets_query_get(&q, "error_description");
+  if (!perr) perr = buckets_query_get(&q, "error");
+  buckets_buf st = BUCKETS_BUF_INIT, ru = BUCKETS_BUF_INIT, body = BUCKETS_BUF_INIT;
+  buckets_str ck = cookie_value(req, OIDC_COOKIE);
+  yyjson_doc *sd = NULL, *td = NULL;
+  char *authorize = NULL, *token = NULL;
+  buckets_http_result tres = {0}, sres = {0};
+  bool have_t = false, have_s = false;
+  if (perr) {
+    login_error_redirect(resp, perr);
+    goto out;
+  }
+  if (!code || !state || !ck.p || !open_blob(c, OIDC_AD, ck.p, ck.n, &st)) {
+    login_error_redirect(resp, "The sign-in expired or did not start here; please try again.");
+    goto out;
+  }
+  sd = yyjson_read(st.data, st.len, 0);
+  const char *want = yyjson_get_str(yyjson_obj_get(yyjson_doc_get_root(sd), "state"));
+  if (!want || strcmp(want, state) != 0 || yyjson_get_sint(yyjson_obj_get(yyjson_doc_get_root(sd), "exp")) < time(NULL)) {
+    login_error_redirect(resp, "The sign-in expired or did not start here; please try again.");
+    goto out;
+  }
+  char err[512] = "";
+  if (!oidc_endpoints(c, &authorize, &token, err, sizeof(err))) {
+    login_error_redirect(resp, "The identity provider cannot be reached.");
+    goto out;
+  }
+  /* the code for tokens */
+  redirect_uri(c, req, &ru);
+  buckets_buf_append_c(&body, "grant_type=authorization_code&code=");
+  form_escape(&body, code);
+  buckets_buf_append_c(&body, "&redirect_uri=");
+  form_escape(&body, ru.data);
+  buckets_buf_append_c(&body, "&client_id=");
+  form_escape(&body, c->cfg.oidc_client_id);
+  if (c->cfg.oidc_client_secret) {
+    buckets_buf_append_c(&body, "&client_secret=");
+    form_escape(&body, c->cfg.oidc_client_secret);
+  }
+  buckets_http_kv fh[] = {{"Content-Type", "application/x-www-form-urlencoded"}, {"Accept", "application/json"}};
+  have_t = buckets_fetch("POST", token, c->cfg.oidc_ca_file, fh, 2, body.data, body.len, 10000, &tres, err, sizeof(err));
+  td = have_t && tres.status == 200 ? yyjson_read(tres.body.data ? tres.body.data : "", tres.body.len, 0) : NULL;
+  const char *id_token = yyjson_get_str(yyjson_obj_get(yyjson_doc_get_root(td), "id_token"));
+  if (!id_token) {
+    buckets_log_warn("console: OpenID token exchange failed (%d): %s", have_t ? tres.status : 0, have_t ? "" : err);
+    login_error_redirect(resp, "The identity provider did not issue a token.");
+    goto out;
+  }
+  /* the token for credentials */
+  buckets_buf_reset(&body);
+  buckets_buf_appendf(&body, "Action=AssumeRoleWithWebIdentity&Version=2011-06-15&DurationSeconds=%d&WebIdentityToken=",
+                      c->cfg.sts_duration);
+  form_escape(&body, id_token);
+  buckets_http_kv sh[] = {{"Content-Type", "application/x-www-form-urlencoded"}};
+  have_s = buckets_http_client_do(c->http, "POST", "/", sh, 1, body.data, body.len, &sres);
+  const char *xml = have_s && sres.body.data ? sres.body.data : "";
+  buckets_console_session s = {0};
+  if (have_s && sres.status == 200 && xml_text(xml, sres.body.len, "AccessKeyId", s.access_key, sizeof(s.access_key)) &&
+      xml_text(xml, sres.body.len, "SecretAccessKey", s.secret_key, sizeof(s.secret_key)) &&
+      xml_text(xml, sres.body.len, "SessionToken", s.session_token, sizeof(s.session_token))) {
+    token_user(id_token, s.user, sizeof(s.user));
+    s.expires = (int64_t)time(NULL) + c->cfg.sts_duration;
+    buckets_buf cookie = BUCKETS_BUF_INIT;
+    if (buckets_console_seal(c, &s, &cookie)) {
+      set_cookie(c, resp, cookie.data, c->cfg.sts_duration);
+      redirect(resp, "/");
+    } else {
+      login_error_redirect(resp, "Could not create the session.");
+    }
+    buckets_buf_free(&cookie);
+  } else {
+    char msg[512] = "The storage service refused the identity.";
+    if (have_s) xml_text(xml, sres.body.len, "Message", msg, sizeof(msg));
+    login_error_redirect(resp, msg);
+  }
+  OPENSSL_cleanse(&s, sizeof(s));
+out:
+  if (have_t) buckets_http_result_free(&tres);
+  if (have_s) buckets_http_result_free(&sres);
+  yyjson_doc_free(sd);
+  yyjson_doc_free(td);
+  free(authorize);
+  free(token);
+  buckets_buf_free(&st);
+  buckets_buf_free(&ru);
+  buckets_buf_free(&body);
+  buckets_query_free(&q);
 }
 
 static void path_escape(buckets_buf *b, const char *s, bool keep_slash) {
@@ -665,6 +931,10 @@ void buckets_console_handle(const buckets_http_request *req, buckets_http_respon
     buckets_buf_append_c(&resp->body, "ok");
     return;
   }
+  if (buckets_str_eq_c(path, "/oauth_callback")) {
+    handle_oidc_callback(c, req, resp);
+    return;
+  }
   if (!buckets_str_has_prefix(path, "/api/")) {
     if (!buckets_str_eq_c(req->method, "GET") && !buckets_str_eq_c(req->method, "HEAD")) {
       json_error(resp, 405, "MethodNotAllowed", "method not allowed");
@@ -682,6 +952,10 @@ void buckets_console_handle(const buckets_http_request *req, buckets_http_respon
   if (buckets_str_eq_c(path, "/api/v1/login")) {
     if (!buckets_str_eq_c(req->method, "POST")) json_error(resp, 405, "MethodNotAllowed", "use POST");
     else handle_login(c, req, resp);
+    return;
+  }
+  if (buckets_str_eq_c(path, "/api/v1/login/oidc")) {
+    handle_oidc_start(c, req, resp);
     return;
   }
   if (buckets_str_eq_c(path, "/api/v1/login-methods")) {

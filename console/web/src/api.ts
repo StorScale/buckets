@@ -67,7 +67,7 @@ export async function call(method: string, path: string, opts: CallOpts = {}): P
 
 export type Session = { accessKey: string; expiresAt: number };
 
-export type LoginMethods = { ldap: boolean; share: boolean };
+export type LoginMethods = { ldap: boolean; share: boolean; oidc: boolean; oidcName?: string };
 export async function loginMethods(): Promise<LoginMethods> {
   return (await call("GET", "/api/v1/login-methods")).json();
 }

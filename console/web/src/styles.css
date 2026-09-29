@@ -144,3 +144,5 @@ table.kv th { width: 35%; text-transform: none; font-size: 13px; }
 pre.preview { overflow: auto; padding: 8px; font-size: 12px; white-space: pre-wrap; }
 .share { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .share input.url { flex: 1; min-width: 200px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.or { text-align: center; color: var(--muted); margin: 12px 0 8px; font-size: 12px; }
+.login-card .sso { display: block; text-align: center; width: 100%; }

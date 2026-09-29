@@ -11,6 +11,7 @@ PORT=${PORT:-19770}
 CPORT=${CPORT:-19771}
 LPORT=${LPORT:-19772}
 LSPORT=${LSPORT:-19773}
+OPORT=${OPORT:-19774}
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/buckets-console-XXXXXX")
 EP="http://127.0.0.1:$PORT"
 C="http://127.0.0.1:$CPORT"
@@ -39,6 +40,11 @@ LDAPMOCK_PATCH="$WORK/patch.json" python3 "$HERE/ldapmock.py" "$LPORT" "$LSPORT"
 PIDS+=($!)
 for _ in $(seq 50); do nc -z 127.0.0.1 "$LPORT" 2>/dev/null && break; sleep 0.1; done
 BASE=dc=example,dc=com
+ISS="http://127.0.0.1:$OPORT"
+python3 "$HERE/oidcmock.py" "$OPORT" "$WORK" console s3cr3t '{"sub":"u-42","preferred_username":"oidcuser","policy":"readwrite"}' \
+  2>"$WORK/oidc.log" &
+PIDS+=($!)
+for _ in $(seq 100); do curl -s -o /dev/null "$ISS/jwks" && break; sleep 0.1; done
 
 mkdir -p "$WORK"/d{1..4}
 env BUCKETS_ROOT_USER=rootadmin BUCKETS_ROOT_PASSWORD=rootsecret123 \
@@ -47,17 +53,21 @@ env BUCKETS_ROOT_USER=rootadmin BUCKETS_ROOT_PASSWORD=rootsecret123 \
   MINIO_IDENTITY_LDAP_USER_DN_SEARCH_BASE_DN="ou=people,$BASE" MINIO_IDENTITY_LDAP_USER_DN_SEARCH_FILTER="(uid=%s)" \
   MINIO_IDENTITY_LDAP_GROUP_SEARCH_BASE_DN="ou=groups,$BASE" \
   MINIO_IDENTITY_LDAP_GROUP_SEARCH_FILTER="(&(objectclass=groupOfNames)(member=%d))" \
+  MINIO_IDENTITY_OPENID_CONFIG_URL="$ISS/.well-known/openid-configuration" MINIO_IDENTITY_OPENID_CLIENT_ID=console \
+  MINIO_IDENTITY_OPENID_CLAIM_NAME=policy \
   "$BIN" server --address "127.0.0.1:$PORT" "$WORK/d{1...4}" 2>"$WORK/log" &
 PIDS+=($!)
 for _ in $(seq 150); do curl -s -o /dev/null "$EP/minio/health/live" && break; sleep 0.1; done
 env CONSOLE_MINIO_SERVER="$EP" CONSOLE_PBKDF_PASSPHRASE=it CONSOLE_PBKDF_SALT=it CONSOLE_LDAP_ENABLED=on \
-  BUCKETS_CONSOLE_S3_URL="$EP" "$CBIN" --address "127.0.0.1:$CPORT" 2>"$WORK/clog" &
+  BUCKETS_CONSOLE_S3_URL="$EP" BUCKETS_CONSOLE_OIDC_CONFIG_URL="$ISS/.well-known/openid-configuration" \
+  BUCKETS_CONSOLE_OIDC_CLIENT_ID=console BUCKETS_CONSOLE_OIDC_CLIENT_SECRET=s3cr3t BUCKETS_CONSOLE_OIDC_DISPLAY_NAME="Mock IdP" \
+  "$CBIN" --address "127.0.0.1:$CPORT" 2>"$WORK/clog" &
 PIDS+=($!)
 for _ in $(seq 100); do curl -s -o /dev/null "$C/healthz" && break; sleep 0.1; done
 
 echo "== health, login methods, CSRF"
 check "healthz" "$(curl -s "$C/healthz")" ok
-check "login methods" "$(curl -s "$C/api/v1/login-methods")" '{"ldap":true,"share":true}'
+check "login methods" "$(curl -s "$C/api/v1/login-methods")" '{"ldap":true,"share":true,"oidc":true,"oidcName":"Mock IdP"}'
 check "no session" "$(code "$C/api/v1/session")" 401
 check "no SPA installed" "$(code "$C/buckets")" 404
 check "login without CSRF header" "$(code -d '{"accessKey":"rootadmin","secretKey":"rootsecret123"}' "$C/api/v1/login")" 403
@@ -87,6 +97,18 @@ check "alice's session" "$(curl -s -b "$A" "$C/api/v1/session" | python3 -c 'imp
 check "alice makes a bucket" "$(code -b "$A" -H "$H" -X PUT "$C/api/v1/s3/alicebucket")" 200
 check "carol (no policy) is refused" \
   "$(code -c "$WORK/carol.jar" -H "$H" -d '{"accessKey":"carol","secretKey":"carol123","method":"ldap"}' "$C/api/v1/login")" 401
+
+echo "== OpenID: through the provider and back"
+O="$WORK/oidc.jar"
+check "redirects to the provider" \
+  "$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' "$C/api/v1/login/oidc" | cut -d'?' -f1)" "302 $ISS/authorize"
+check "round trip ends at the console" \
+  "$(curl -s -L -c "$O" -b "$O" -o /dev/null -w '%{url_effective}' "$C/api/v1/login/oidc")" "$C/"
+check "oidc session" "$(curl -s -b "$O" "$C/api/v1/session" | python3 -c 'import json,sys;print(json.load(sys.stdin)["accessKey"])')" oidcuser
+check "oidc user makes a bucket" "$(code -b "$O" -H "$H" -X PUT "$C/api/v1/s3/oidcbucket")" 200
+check "a forged callback" "$(curl -s -o /dev/null -w '%{redirect_url}' "$C/oauth_callback?code=x&state=y" | cut -d'?' -f1)" "$C/login"
+check "a provider error is shown" \
+  "$(curl -s -o /dev/null -w '%{redirect_url}' "$C/oauth_callback?error=access_denied")" "$C/login?error=access_denied"
 
 echo "== streamed round trip, share link"
 head -c 20971520 /dev/urandom >"$WORK/big"

@@ -1,18 +1,26 @@
 import { FormEvent, useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { login, loginMethods } from "../api";
+import { login, loginMethods, LoginMethods } from "../api";
 import { ErrorBanner } from "../components";
 
 export default function Login({ onLogin }: { onLogin: () => void }) {
   const [accessKey, setAccessKey] = useState("");
   const [secretKey, setSecretKey] = useState("");
-  const [error, setError] = useState<unknown>();
+  // A failed OpenID sign-in comes back as /login?error=...
+  const [error, setError] = useState<unknown>(() => {
+    const e = new URLSearchParams(window.location.search).get("error");
+    return e ? new Error(e) : undefined;
+  });
+  const [methods, setMethods] = useState<LoginMethods | null>(null);
   const [busy, setBusy] = useState(false);
   const [ldapOffered, setLdapOffered] = useState(false);
   const [useLdap, setUseLdap] = useState(false);
   useEffect(() => {
     loginMethods()
-      .then((m) => setLdapOffered(m.ldap))
+      .then((m) => {
+        setMethods(m);
+        setLdapOffered(m.ldap);
+      })
       .catch(() => undefined);
   }, []);
   const navigate = useNavigate();
@@ -60,6 +68,14 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
         <button className="primary" disabled={busy || !accessKey || !secretKey} data-testid="login">
           {busy ? "Signing in…" : "Sign in"}
         </button>
+        {methods?.oidc && (
+          <>
+            <div className="or">or</div>
+            <a className="button sso" href="/api/v1/login/oidc" data-testid="oidc-login">
+              Sign in with {methods.oidcName ?? "OpenID"}
+            </a>
+          </>
+        )}
       </form>
     </div>
   );

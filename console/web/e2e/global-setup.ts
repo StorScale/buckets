@@ -28,8 +28,20 @@ export default async function globalSetup() {
   const dir = mkdtempSync(join(tmpdir(), "buckets-e2e-"));
   for (let i = 1; i <= 4; i++) mkdirSync(join(dir, `d${i}`));
   const procs: ChildProcess[] = [];
+  // a mock OpenID provider (tests/integration/oidcmock.py)
+  const idp = spawn(
+    "python3",
+    [join(root, "tests/integration/oidcmock.py"), "19891", dir, "console", "s3cr3t", JSON.stringify({ sub: "u-7", preferred_username: "oidcuser", policy: "readwrite" })],
+    { stdio: ["ignore", "ignore", "inherit"] },
+  );
+  procs.push(idp);
+  await waitFor("http://127.0.0.1:19891/jwks");
   const bucketsd = spawn(process.env.BUCKETSD_BIN ?? join(root, "build/src/bucketsd"), ["server", "--address", "127.0.0.1:19889", `${dir}/d{1...4}`], {
-    env: { ...process.env, MINIO_ROOT_USER: ROOT_USER, MINIO_ROOT_PASSWORD: ROOT_PASSWORD, MINIO_KMS_SECRET_KEY: "e2e-key:MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=" },
+    env: { ...process.env, MINIO_ROOT_USER: ROOT_USER, MINIO_ROOT_PASSWORD: ROOT_PASSWORD, MINIO_KMS_SECRET_KEY: "e2e-key:MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+      MINIO_IDENTITY_OPENID_CONFIG_URL: "http://127.0.0.1:19891/.well-known/openid-configuration",
+      MINIO_IDENTITY_OPENID_CLIENT_ID: "console",
+      MINIO_IDENTITY_OPENID_CLAIM_NAME: "policy",
+    },
     stdio: ["ignore", "ignore", "inherit"],
   });
   procs.push(bucketsd);
@@ -38,7 +50,12 @@ export default async function globalSetup() {
     process.env.CONSOLED_BIN ?? join(root, "build/src/consoled"),
     ["--address", "127.0.0.1:19890", "--web-dir", resolve(here, "../dist")],
     {
-      env: { ...process.env, CONSOLE_MINIO_SERVER: "http://127.0.0.1:19889", CONSOLE_PBKDF_PASSPHRASE: "e2e", CONSOLE_PBKDF_SALT: "e2e", BUCKETS_CONSOLE_S3_URL: "http://127.0.0.1:19889" },
+      env: { ...process.env, CONSOLE_MINIO_SERVER: "http://127.0.0.1:19889", CONSOLE_PBKDF_PASSPHRASE: "e2e", CONSOLE_PBKDF_SALT: "e2e", BUCKETS_CONSOLE_S3_URL: "http://127.0.0.1:19889",
+        BUCKETS_CONSOLE_OIDC_CONFIG_URL: "http://127.0.0.1:19891/.well-known/openid-configuration",
+        BUCKETS_CONSOLE_OIDC_CLIENT_ID: "console",
+        BUCKETS_CONSOLE_OIDC_CLIENT_SECRET: "s3cr3t",
+        BUCKETS_CONSOLE_OIDC_DISPLAY_NAME: "Mock IdP",
+      },
       stdio: ["ignore", "ignore", "inherit"],
     },
   );
