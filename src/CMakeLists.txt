@@ -27,6 +27,7 @@ add_library(buckets STATIC
   crypto/objkey.c
   kms/kms.c
   compress/s2.c
+  console/console.c
   net/http.c
   net/tls.c
   net/client.c
@@ -36,6 +37,7 @@ add_library(buckets STATIC
   s3/errors_gen.c
   s3/xml.c
   s3/sigv4.c
+  s3/sign.c
   s3/sigv2.c
   s3/bucketname.c
   s3/server.c
@@ -109,3 +111,8 @@ add_executable(bucketsd cmd/bucketsd/main.c)
 target_link_libraries(bucketsd PRIVATE buckets)
 buckets_warnings(bucketsd)
 install(TARGETS bucketsd RUNTIME DESTINATION bin)
+
+add_executable(consoled cmd/consoled/main.c)
+target_link_libraries(consoled PRIVATE buckets)
+buckets_warnings(consoled)
+install(TARGETS consoled RUNTIME DESTINATION bin)

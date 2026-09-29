@@ -156,8 +156,12 @@ static long recv_some(hconn *h, void *buf, size_t n) {
 }
 
 const char *buckets_http_result_header(const buckets_http_result *r, const char *name, size_t *len) {
+  return buckets_http_headers_get(&r->headers, name, len);
+}
+
+const char *buckets_http_headers_get(const buckets_buf *headers, const char *name, size_t *len) {
   size_t nl = strlen(name);
-  const char *p = r->headers.data, *end = p ? p + r->headers.len : NULL;
+  const char *p = headers->data, *end = p ? p + headers->len : NULL;
   while (p && p < end) {
     const char *eol = memchr(p, '\n', (size_t)(end - p));
     if (!eol) eol = end;
@@ -312,4 +316,185 @@ bool buckets_http_client_do(buckets_http_client *c, const char *method, const ch
   }
   buckets_buf_free(&head);
   return ok;
+}
+
+/* ---- streaming ------------------------------------------------------------ */
+
+struct buckets_http_stream {
+  buckets_http_client *c;
+  hconn h;
+  buckets_buf in; /* bytes received past the headers, not yet returned */
+  size_t in_pos;
+  bool chunked, close_delimited, done, failed, reusable;
+  int64_t remaining; /* Content-Length bytes (or bytes of the current chunk) left */
+  int64_t length;
+};
+
+/* Buffered byte source over the connection. */
+static bool stream_fill(buckets_http_stream *s) {
+  if (s->in_pos == s->in.len) {
+    buckets_buf_reset(&s->in);
+    s->in_pos = 0;
+  }
+  buckets_buf_reserve(&s->in, 65536);
+  long r = recv_some(&s->h, s->in.data + s->in.len, s->in.cap - s->in.len - 1);
+  if (r <= 0) return false;
+  s->in.len += (size_t)r;
+  return true;
+}
+
+/* A CRLF-terminated line from the buffer (without the CRLF). */
+static bool stream_line(buckets_http_stream *s, char *out, size_t cap) {
+  for (;;) {
+    const char *base = s->in.data + s->in_pos;
+    size_t avail = s->in.len - s->in_pos;
+    const char *nl = avail ? memmem(base, avail, "\r\n", 2) : NULL;
+    if (nl) {
+      size_t n = (size_t)(nl - base);
+      if (n >= cap) return false;
+      memcpy(out, base, n);
+      out[n] = '\0';
+      s->in_pos += n + 2;
+      return true;
+    }
+    if (avail > 4096 || !stream_fill(s)) return false;
+  }
+}
+
+buckets_http_stream *buckets_http_client_open(buckets_http_client *c, const char *method, const char *target,
+                                              const buckets_http_kv *hdrs, size_t nhdrs, buckets_http_read_fn rd,
+                                              void *rd_ud, int64_t body_len, int *status, buckets_buf *headers) {
+  buckets_buf head = BUCKETS_BUF_INIT;
+  buckets_buf_appendf(&head, "%s %s HTTP/1.1\r\nHost: %s:%d\r\nContent-Length: %lld\r\n", method, target, c->host,
+                      c->port, (long long)(body_len > 0 ? body_len : 0));
+  for (size_t i = 0; i < nhdrs; i++) buckets_buf_appendf(&head, "%s: %s\r\n", hdrs[i].name, hdrs[i].value);
+  buckets_buf_append(&head, "\r\n", 2);
+  buckets_http_stream *s = buckets_xcalloc(1, sizeof(*s));
+  s->c = c;
+  s->h.fd = -1;
+  /* A body that cannot be replayed only goes out on a fresh connection. */
+  bool pooled = false;
+  if (body_len <= 0) {
+    pthread_mutex_lock(&c->mu);
+    if (c->nidle) {
+      s->h = c->idle[--c->nidle];
+      pooled = true;
+    }
+    pthread_mutex_unlock(&c->mu);
+  }
+  for (int attempt = 0; attempt < 2; attempt++) {
+    if (!pooled && !dial(c, &s->h)) goto fail;
+    bool sent = send_all(&s->h, head.data, head.len);
+    for (int64_t left = body_len; sent && left > 0;) {
+      char buf[65536];
+      long n = rd(rd_ud, buf, (size_t)BUCKETS_MIN(left, (int64_t)sizeof(buf)));
+      if (n <= 0) goto fail; /* the source ended early */
+      sent = send_all(&s->h, buf, (size_t)n);
+      left -= n;
+    }
+    /* status line and headers */
+    size_t hend = 0;
+    while (sent && !hend) {
+      if (s->in.len > MAX_HEADER_BYTES || !stream_fill(s)) break;
+      s->in.data[s->in.len] = '\0';
+      char *e = strstr(s->in.data, "\r\n\r\n");
+      if (e) hend = (size_t)(e - s->in.data) + 4;
+    }
+    if (!hend) {
+      bool retry = pooled && s->in.len == 0; /* a stale keep-alive connection */
+      hconn_close(&s->h);
+      buckets_buf_reset(&s->in);
+      if (!retry) goto fail;
+      pooled = false;
+      continue;
+    }
+    if (sscanf(s->in.data, "HTTP/1.%*d %d", status) != 1) goto fail;
+    const char *eol = strstr(s->in.data, "\r\n");
+    buckets_buf_reset(headers);
+    buckets_buf_append(headers, eol + 2, hend - (size_t)(eol + 2 - s->in.data) - 2);
+    s->in_pos = hend;
+    size_t n;
+    const char *te = buckets_http_headers_get(headers, "Transfer-Encoding", &n);
+    const char *cl = buckets_http_headers_get(headers, "Content-Length", NULL);
+    const char *conn = buckets_http_headers_get(headers, "Connection", &n);
+    bool conn_close = conn && n == 5 && strncasecmp(conn, "close", 5) == 0;
+    s->length = -1;
+    if (te && strstr(te, "chunked")) {
+      s->chunked = true;
+    } else if (cl) {
+      s->remaining = s->length = strtoll(cl, NULL, 10);
+    } else if (strcasecmp(method, "HEAD") == 0 || *status == 204 || *status == 304) {
+      s->remaining = 0;
+    } else {
+      s->close_delimited = true;
+    }
+    if (strcasecmp(method, "HEAD") == 0) s->remaining = 0, s->chunked = s->close_delimited = false;
+    s->reusable = !conn_close && !s->close_delimited;
+    if (!s->chunked && !s->close_delimited && s->remaining == 0) s->done = true;
+    buckets_buf_free(&head);
+    return s;
+  }
+fail:
+  buckets_buf_free(&head);
+  hconn_close(&s->h);
+  buckets_buf_free(&s->in);
+  free(s);
+  return NULL;
+}
+
+int64_t buckets_http_stream_length(const buckets_http_stream *s) { return s->length; }
+
+long buckets_http_stream_read(void *ud, void *buf, size_t n) {
+  buckets_http_stream *s = ud;
+  if (s->failed) return -1;
+  while (!s->done) {
+    if (s->chunked && s->remaining == 0) {
+      char line[128];
+      if (!stream_line(s, line, sizeof(line))) goto fail;
+      if (!*line) continue; /* the CRLF after a chunk's data */
+      s->remaining = (int64_t)strtoull(line, NULL, 16);
+      if (s->remaining == 0) { /* last chunk: skip trailers up to the empty line */
+        while (stream_line(s, line, sizeof(line)) && *line) {
+        }
+        s->done = true;
+        break;
+      }
+    }
+    if (s->in_pos == s->in.len) {
+      if (!stream_fill(s)) {
+        if (s->close_delimited) {
+          s->done = true;
+          break;
+        }
+        goto fail;
+      }
+      continue;
+    }
+    size_t k = s->in.len - s->in_pos;
+    if (k > n) k = n;
+    if (!s->close_delimited && (int64_t)k > s->remaining) k = (size_t)s->remaining;
+    memcpy(buf, s->in.data + s->in_pos, k);
+    s->in_pos += k;
+    if (!s->close_delimited) s->remaining -= (int64_t)k;
+    if (!s->chunked && !s->close_delimited && s->remaining == 0) s->done = true;
+    return (long)k;
+  }
+  return 0;
+fail:
+  s->failed = true;
+  return -1;
+}
+
+void buckets_http_stream_free(void *ud) {
+  buckets_http_stream *s = ud;
+  if (!s) return;
+  bool clean = s->done && !s->failed && s->reusable && s->in_pos == s->in.len;
+  if (clean) {
+    pthread_mutex_lock(&s->c->mu);
+    if (s->c->nidle < MAX_IDLE) s->c->idle[s->c->nidle++] = s->h, s->h.fd = -1, s->h.tls = NULL;
+    pthread_mutex_unlock(&s->c->mu);
+  }
+  hconn_close(&s->h);
+  buckets_buf_free(&s->in);
+  free(s);
 }
