@@ -1634,6 +1634,44 @@ long buckets_obj_read(buckets_obj_reader *r, void *buf, size_t n) {
   return (long)done;
 }
 
+bool buckets_obj_reader_viewable(const buckets_obj_reader *r) { return !r->remote; }
+
+long buckets_obj_view(buckets_obj_reader *r, const void **data) {
+  while (r->remaining > 0) {
+    if (r->part >= r->nparts) return -1;
+    int64_t ps = r->parts[r->part].size;
+    if (r->part_off >= ps) {
+      prefetch_wait(r, -1);
+      r->part++;
+      r->part_off = 0;
+      r->block_index = -1;
+      memset(r->bad, 0, sizeof(r->bad));
+      continue;
+    }
+    int64_t bi = r->part_off / BUCKETS_BLOCK_SIZE;
+    if (bi != r->block_index && !next_block(r, bi)) {
+      buckets_log_error("cannot read %s/%s: fewer than %d intact shards (part %d, block %lld)", r->bucket, r->op,
+                        r->data, r->parts[r->part].number, (long long)bi);
+      return -1;
+    }
+    size_t at = (size_t)(r->part_off - bi * BUCKETS_BLOCK_SIZE), k = at / r->block_sl, o = at % r->block_sl;
+    size_t n = BUCKETS_MIN(r->block_len - at, r->block_sl - o);
+    n = (size_t)BUCKETS_MIN((int64_t)n, r->remaining);
+    *data = r->shards[k] + o;
+    return (long)n;
+  }
+  return 0;
+}
+
+void buckets_obj_consume(buckets_obj_reader *r, size_t n) {
+  r->part_off += (int64_t)n;
+  r->remaining -= (int64_t)n;
+  if (r->remaining == 0 && r->lk) {
+    buckets_nslock_unlock(r->lk);
+    r->lk = NULL;
+  }
+}
+
 /* ---- delete -------------------------------------------------------------------------- */
 
 typedef struct {

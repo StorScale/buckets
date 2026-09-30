@@ -48,6 +48,8 @@ typedef struct conn {
   int64_t body_len;
   /* response body still being streamed */
   buckets_http_body_fn stream;
+  long (*stream_view)(void *ud, const void **data);
+  void (*stream_consume)(void *ud, size_t n);
   void *stream_ud;
   void (*stream_free)(void *);
   bool stream_close_after; /* close the connection when the stream ends */
@@ -62,11 +64,12 @@ typedef struct conn {
   /* A handler or stream pull runs on a worker: the loop leaves the connection
    * alone (unwatched, never closed) until the worker posts back. */
   bool busy;
-  /* Response streams are double-buffered: a worker fills `pre` with the next
-   * chunk while the loop sends `out`. */
-  buckets_buf pre;
-  long fill_got;
-  bool fill_inflight, pre_ready, waiting_fill, close_pending;
+  /* With workers, a response stream is run on one: it pulls each chunk and
+   * sends it itself, so the bytes stay on one thread (and in its caches),
+   * until the socket is full, the stream ends, or it yields. Meanwhile the
+   * loop leaves the connection alone; a close is deferred until it is back. */
+  bool fill_inflight, close_pending;
+  int stream_result; /* the worker's outcome (stream_run), read by the loop */
   buckets_tls_conn *tls;
   buckets_buf peer_certs; /* the TLS client's certificates, read once after the handshake */
   size_t npeer_certs;
@@ -340,6 +343,8 @@ static void request_reset(conn *c) {
 static void stream_end(conn *c) {
   if (c->stream_free) c->stream_free(c->stream_ud);
   c->stream = NULL;
+  c->stream_view = NULL;
+  c->stream_consume = NULL;
   c->stream_ud = NULL;
   c->stream_free = NULL;
 }
@@ -365,7 +370,6 @@ static void conn_close(conn *c) {
   atomic_fetch_sub(&c->srv->nconns, 1);
   buckets_buf_free(&c->in);
   buckets_buf_free(&c->out);
-  buckets_buf_free(&c->pre);
   buckets_buf_free(&c->method);
   buckets_buf_free(&c->url);
   buckets_buf_free(&c->hdr);
@@ -389,8 +393,9 @@ static void conn_abort(conn *c) {
 
 /* Writes as much of c->out as the socket takes. Returns false if the
  * connection was closed. */
-static void start_fill(conn *c);
+static void start_stream(conn *c);
 
+#define STREAM_CHUNK (256 * 1024)
 #define CHUNK_HDR 18 /* "<hex size>\r\n", at most 16 digits */
 
 /* Installs a pulled stream chunk into c->out. Returns -1 if the connection
@@ -437,29 +442,16 @@ static long pull_stream(conn *c, buckets_buf *buf) {
 }
 
 static bool conn_flush(conn *c) {
+  if (c->stream && c->srv->cfg.workers) { /* a worker sends it (the headers too) */
+    if (!c->fill_inflight) start_stream(c);
+    return true;
+  }
   for (;;) {
     if (c->out_off >= c->out.len) {
       if (!c->stream) break;
       buckets_buf_reset(&c->out);
       c->out_off = 0;
-      buckets_buf_reserve(&c->out, 256 * 1024);
-      if (c->srv->cfg.workers) {
-        if (c->pre_ready) { /* the next chunk is already here: send it, fetch the one after */
-          buckets_buf tmp = c->out;
-          c->out = c->pre;
-          c->pre = tmp;
-          c->pre_ready = false;
-          int r = take_chunk(c, c->fill_got);
-          if (r < 0) return false;
-          if (r == 0) break;
-          start_fill(c);
-          continue;
-        }
-        if (!c->fill_inflight) start_fill(c);
-        c->waiting_fill = true;
-        buckets_loop_watch(c->r->loop, c->fd, 0, conn_io, c);
-        return true;
-      }
+      buckets_buf_reserve(&c->out, STREAM_CHUNK);
       int r = take_chunk(c, pull_stream(c, &c->out));
       if (r < 0) return false;
       if (r == 0) break;
@@ -527,6 +519,8 @@ static void write_response(conn *c, buckets_http_response *resp, bool keep_alive
     } else {
       c->stream = resp->stream;
       c->stream_ud = resp->stream_ud;
+      c->stream_view = resp->stream_view;
+      c->stream_consume = resp->stream_consume;
       c->stream_free = resp->stream_free;
       c->chunked = chunked;
     }
@@ -560,7 +554,8 @@ static void set_busy(conn *c) {
  * any pipelined requests. */
 /* TLS may hold decrypted input the socket will never signal again. */
 static void drain_pending(conn *c) {
-  if (c->tls && !c->busy && !c->closing && !c->peer_eof && !conn_writing(c) && buckets_tls_pending(c->tls)) {
+  if (c->tls && !c->busy && !c->fill_inflight && !c->closing && !c->peer_eof && !conn_writing(c) &&
+      buckets_tls_pending(c->tls)) {
     conn_read(c);
   }
 }
@@ -570,34 +565,119 @@ static void resume(conn *c) {
   if (conn_flush(c) && conn_process(c)) drain_pending(c);
 }
 
-static void fill_done(buckets_loop *loop, void *ud) {
+/* ---- response streams on a worker -------------------------------------- */
+
+enum { SR_DONE, SR_BLOCKED, SR_YIELD, SR_ERROR };
+/* Bytes a worker sends before it gives the connection back (and its thread
+ * to others). */
+#define STREAM_YIELD (4 * 1024 * 1024)
+
+/* On the worker that owns c: pull and send until the socket is full
+ * (SR_BLOCKED), the stream has been sent (SR_DONE), it yields (SR_YIELD) or
+ * something fails (SR_ERROR). take_chunk's work, minus what only the loop may
+ * do (closing, watching). */
+static int stream_run(conn *c) {
+  for (size_t sent = 0;;) {
+    if (c->out_off >= c->out.len && c->stream && c->stream_view && !c->chunked) {
+      /* straight from the stream's own buffer: no copy into out */
+      if (sent >= STREAM_YIELD) return SR_YIELD;
+      const void *p;
+      long k = c->stream_view(c->stream_ud, &p);
+      if (k < 0) return SR_ERROR;
+      if (k > 0) {
+        long n = conn_send(c, p, (size_t)k);
+        if (n > 0) {
+          c->stream_consume(c->stream_ud, (size_t)n);
+          sent += (size_t)n;
+          c->last_write = time(NULL);
+          continue;
+        }
+        if (n == BUCKETS_TLS_WANT_WRITE || n == BUCKETS_TLS_WANT_READ) {
+          c->write_wants_read = n == BUCKETS_TLS_WANT_READ;
+          return SR_BLOCKED;
+        }
+        return SR_ERROR;
+      }
+      stream_end(c);
+      if (c->stream_close_after) c->closing = true;
+      buckets_buf_reset(&c->out);
+      c->out_off = 0;
+      return SR_DONE;
+    }
+    if (c->out_off < c->out.len) {
+      long n = conn_send(c, c->out.data + c->out_off, c->out.len - c->out_off);
+      if (n > 0) {
+        c->out_off += (size_t)n;
+        sent += (size_t)n;
+        c->last_write = time(NULL);
+        continue;
+      }
+      if (n == BUCKETS_TLS_WANT_WRITE || n == BUCKETS_TLS_WANT_READ) {
+        c->write_wants_read = n == BUCKETS_TLS_WANT_READ;
+        return SR_BLOCKED;
+      }
+      return SR_ERROR;
+    }
+    if (!c->stream) return SR_DONE;
+    if (sent >= STREAM_YIELD) return SR_YIELD;
+    buckets_buf_reset(&c->out);
+    c->out_off = 0;
+    buckets_buf_reserve(&c->out, STREAM_CHUNK);
+    long got = pull_stream(c, &c->out);
+    if (got < 0) return SR_ERROR; /* mid-body failure: the client sees a short response */
+    if (got == 0) {
+      stream_end(c);
+      if (c->stream_close_after) c->closing = true;
+      if (c->chunked) { /* the last chunk */
+        c->chunked = false;
+        buckets_buf_reset(&c->out);
+        buckets_buf_append_c(&c->out, "0\r\n\r\n");
+        continue;
+      }
+      buckets_buf_reset(&c->out);
+      return SR_DONE;
+    }
+    if (c->chunked) {
+      char hdr[CHUNK_HDR + 1];
+      int h = snprintf(hdr, sizeof(hdr), "%lx\r\n", got);
+      memcpy(c->out.data + CHUNK_HDR - h, hdr, (size_t)h);
+      memcpy(c->out.data + CHUNK_HDR + got, "\r\n", 2);
+      c->out_off = (size_t)(CHUNK_HDR - h);
+      c->out.len = (size_t)(CHUNK_HDR + got + 2);
+    } else {
+      c->out.len = (size_t)got;
+    }
+  }
+}
+
+static void stream_done(buckets_loop *loop, void *ud) {
   conn *c = ud;
   (void)loop;
   c->fill_inflight = false;
-  if (c->close_pending) {
+  if (c->close_pending || c->stream_result == SR_ERROR) {
     conn_close(c);
     return;
   }
-  c->pre_ready = true;
-  if (!c->waiting_fill) return; /* the loop is still sending the previous chunk */
-  c->waiting_fill = false;
+  if (c->stream_result == SR_BLOCKED) { /* resumed by conn_io once the socket takes more */
+    buckets_loop_watch(c->r->loop, c->fd, c->write_wants_read ? BUCKETS_EV_READ : BUCKETS_EV_WRITE, conn_io, c);
+    return;
+  }
+  /* SR_YIELD runs again (behind other work); SR_DONE finishes the response
+   * and serves any pipelined requests. */
   if (conn_flush(c) && conn_process(c)) drain_pending(c);
 }
 
-static void fill_task(void *ud, size_t i) {
+static void stream_task(void *ud, size_t i) {
   conn *c = ud;
   (void)i;
-  c->fill_got = pull_stream(c, &c->pre);
-  buckets_loop_post(c->r->loop, fill_done, c);
+  c->stream_result = stream_run(c);
+  buckets_loop_post(c->r->loop, stream_done, c);
 }
 
-/* Starts filling `pre` with the next chunk on a worker. */
-static void start_fill(conn *c) {
-  if (!c->stream || c->fill_inflight || c->pre_ready) return;
-  buckets_buf_reset(&c->pre);
-  buckets_buf_reserve(&c->pre, 256 * 1024);
+static void start_stream(conn *c) {
   c->fill_inflight = true;
-  buckets_pool_submit(c->srv->cfg.workers, fill_task, c);
+  buckets_loop_watch(c->r->loop, c->fd, 0, conn_io, c); /* the worker owns it now */
+  buckets_pool_submit(c->srv->cfg.workers, stream_task, c);
 }
 
 typedef struct {
@@ -748,8 +828,9 @@ static void pipe_resume_cb(buckets_loop *loop, void *ud) {
 /* Feeds buffered input to the parser, dispatching complete requests one at a
  * time. Stops while a response is still being written (pipelining backpressure). */
 static bool conn_process(conn *c) {
-  if (c->busy || c->read_paused) return true;
-  while (c->in.len > 0 && !conn_writing(c) && !c->closing) {
+  if (c->busy || c->read_paused || c->fill_inflight) return true;
+  /* fill_inflight: a worker took the response stream on (inside the loop too) */
+  while (c->in.len > 0 && !c->fill_inflight && !conn_writing(c) && !c->closing) {
     llhttp_errno_t err = llhttp_execute(&c->parser, c->in.data, c->in.len);
     if (err == HPE_OK) {
       buckets_buf_reset(&c->in);
@@ -839,7 +920,7 @@ static void conn_io(buckets_loop *loop, int fd, unsigned events, void *ud) {
   (void)loop;
   (void)fd;
   c->last_active = time(NULL);
-  if (c->busy) return;
+  if (c->busy || c->fill_inflight) return; /* a worker owns it: events queued before it did are stale */
   if (c->read_paused) { /* waiting for the handler to drain the body pipe */
     if (events & BUCKETS_EV_ERROR) conn_abort(c);
     return;
@@ -1087,6 +1168,7 @@ static void on_tick(reactor *r) {
   if (r == srv->rs && srv->cfg.tls && ++srv->ticks % 5 == 0) buckets_tls_reload(srv->cfg.tls);
   for (conn *c = r->conns, *next; c; c = next) {
     next = c->next;
+    if (c->fill_inflight) continue; /* a worker owns it (and waits on our own data don't count) */
     bool idle = !c->busy && !c->pipe && !c->read_paused && c->in.len == 0 && !conn_writing(c);
     if (idle && (srv->shutting_down || now - c->last_active > srv->cfg.idle_timeout_sec)) {
       conn_close(c);
@@ -1095,7 +1177,7 @@ static void on_tick(reactor *r) {
     /* A client that stops reading a response would otherwise hold its
      * stream (and the object's read lock) forever. Waits for our own data
      * (a stream fill) do not count. */
-    if (!c->busy && conn_writing(c) && !c->fill_inflight && !c->waiting_fill &&
+    if (!c->busy && conn_writing(c) &&
         now - (c->last_write ? c->last_write : c->last_active) > srv->cfg.write_timeout_sec) {
       buckets_log_warn("closing %s: response stalled for %ds", c->remote, srv->cfg.write_timeout_sec);
       conn_close(c);

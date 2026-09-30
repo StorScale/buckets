@@ -287,6 +287,8 @@ static void etag_header(buckets_http_response *r, const char *etag) {
 static long body_source(void *ud, void *buf, size_t n) { return buckets_http_body_read(ud, buf, n); }
 
 static long reader_source(void *ud, void *buf, size_t n) { return buckets_obj_read(ud, buf, n); }
+static long reader_view(void *ud, const void **data) { return buckets_obj_view(ud, data); }
+static void reader_consume(void *ud, size_t n) { buckets_obj_consume(ud, n); }
 
 /* ---- PutObject ------------------------------------------------------------ */
 
@@ -1827,6 +1829,10 @@ static void get_object_impl(s3_ctx *c, bool head, buckets_obj_reader **lr) {
     c->resp->stream = (buckets_http_body_fn)reader_source;
     c->resp->stream_ud = r;
     c->resp->stream_free = reader_free;
+    if (buckets_obj_reader_viewable(r)) {
+      c->resp->stream_view = reader_view;
+      c->resp->stream_consume = reader_consume;
+    }
   } else if (sr) {
     c->resp->stream = (buckets_http_body_fn)buckets_sse_reader_read;
     c->resp->stream_ud = sr;

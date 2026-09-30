@@ -72,6 +72,12 @@ typedef struct {
   buckets_http_body_fn stream; /* optional; replaces `body` */
   void *stream_ud;
   void (*stream_free)(void *ud); /* called once the stream is done or abandoned */
+  /* Optional, instead of copying through `stream`: stream_view points at the
+   * next ready bytes (valid until stream_consume or the next view; may
+   * block) and returns how many (0 at the end, -1 on error); stream_consume
+   * advances past n of them once sent. Not used for chunked responses. */
+  long (*stream_view)(void *ud, const void **data);
+  void (*stream_consume)(void *ud, size_t n);
   bool chunked; /* with a stream of unknown length: Transfer-Encoding: chunked */
 } buckets_http_response;
 

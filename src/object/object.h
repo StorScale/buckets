@@ -243,6 +243,13 @@ buckets_obj_err buckets_obj_open(buckets_objlayer *L, const char *bucket, const 
                                  buckets_object_info *info);
 /* Returns bytes read, 0 at the end of the range, -1 on bitrot or I/O error. */
 long buckets_obj_read(buckets_obj_reader *r, void *buf, size_t n);
+/* Zero-copy reading: whether the reader supports it (local erasure-coded
+ * data), then the next bytes in place (loading their block if needed; 0 at
+ * the end of the range, -1 on error), valid until buckets_obj_consume moves
+ * past them. */
+bool buckets_obj_reader_viewable(const buckets_obj_reader *r);
+long buckets_obj_view(buckets_obj_reader *r, const void **data);
+void buckets_obj_consume(buckets_obj_reader *r, size_t n);
 void buckets_obj_reader_free(buckets_obj_reader *r);
 
 buckets_obj_err buckets_obj_delete(buckets_objlayer *L, const char *bucket, const char *object, const char *version_id);
