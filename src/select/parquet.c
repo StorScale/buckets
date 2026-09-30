@@ -84,6 +84,10 @@ static void t_list(tr *t, int *etype, size_t *n) {
   *etype = b & 0x0f;
   size_t k = b >> 4;
   if (k == 15) k = (size_t)t_varint(t);
+  if (k > (size_t)(t->end - t->p)) { /* every element takes a byte at least */
+    t->bad = true;
+    k = 0;
+  }
   *n = k;
 }
 
@@ -243,6 +247,7 @@ static void parse_schema_el(tr *t, schema_el *s) {
       const uint8_t *p;
       size_t n;
       t_bin(t, &p, &n);
+      free(s->name); /* a repeated field: the last one wins */
       s->name = buckets_xmalloc(n + 1);
       if (n) memcpy(s->name, p, n);
       s->name[n] = 0;
@@ -282,7 +287,7 @@ static void parse_row_group(tr *t, row_group *g) {
       int et;
       size_t n;
       t_list(t, &et, &n);
-      if (n > 100000) {
+      if (n > 100000 || g->cols) { /* a repeated field too */
         t->bad = true;
         return;
       }
@@ -311,7 +316,7 @@ static bool parse_meta(sel_parquet *q, const uint8_t *m, size_t n) {
       int et;
       size_t k;
       t_list(&t, &et, &k);
-      if (k > 100000) return false;
+      if (k > 100000 || q->schema) return false;
       q->schema = buckets_xcalloc(k ? k : 1, sizeof(schema_el));
       q->nschema = k;
       for (size_t i = 0; i < k && !t.bad; i++) parse_schema_el(&t, &q->schema[i]);
@@ -319,7 +324,7 @@ static bool parse_meta(sel_parquet *q, const uint8_t *m, size_t n) {
       int et;
       size_t k;
       t_list(&t, &et, &k);
-      if (k > 1000000) return false;
+      if (k > 1000000 || q->groups) return false;
       q->groups = buckets_xcalloc(k ? k : 1, sizeof(row_group));
       q->ngroups = k;
       for (size_t i = 0; i < k && !t.bad; i++) parse_row_group(&t, &q->groups[i]);

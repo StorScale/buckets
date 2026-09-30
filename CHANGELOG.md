@@ -10,6 +10,7 @@ All notable changes to this project are documented here. The format follows
 - `tests/bench/warp.sh` and `tests/bench/s3bench`: warp-style concurrent PUT/GET benchmarks of bucketsd against MinIO on the same drives (`docs/performance.md`).
 - A Helm chart for the operator (`operator/helm/buckets-operator`): CRDs, RBAC (a Role when `watchNamespace` is set, else a ClusterRole), the leader-election Role, and the Deployment; ctest checks that its CRDs match `operator/deploy/crds`.
 - `BUCKETS_NET_THREADS`: the number of network event loops.
+- `tests/fuzz/soak.sh`: every fuzz target under libFuzzer (ASan + UBSan) in a Linux container, with the library instrumented for coverage (`BUCKETS_FUZZ_INSTRUMENT`); corpora carry over between soaks.
 - Fuzz targets for xl.meta (parse, serialize and object round trips), the msgpack reader (typed walk against skip) and S3 Select (SQL and input from the fuzzer).
 
 ### Changed
@@ -17,6 +18,8 @@ All notable changes to this project are documented here. The format follows
 - GET resolves an object's metadata once instead of twice (stat, then open).
 
 ### Fixed
+- S3 Select: SQL with deeply nested parentheses took time and memory exponential in the depth (a few hundred bytes exhausted gigabytes); the parser now memoizes its expression rules. Found by fuzzing.
+- S3 Select on Parquet: a repeated schema name or list field in the footer leaked, and list lengths are checked against the bytes left, so a small footer can no longer claim millions of row groups or columns. Found by fuzzing.
 - A node waiting for its peers retried the cluster leader lock in a tight loop, logging tens of thousands of warnings a second; it now retries once a second.
 - Stray test drive files committed by mistake (a directory named after a space-separated endpoint list) are gone.
 - A data race between startup and the resource metrics sampler, which polled the cluster description unsynchronized (found by ThreadSanitizer).

@@ -145,11 +145,36 @@ static bool lex(const char *src, size_t n, tok **out, size_t *nt, sel_err *e) {
 
 /* ---- parser ---- */
 
+/* A rule's result at a token position, once parsed (packrat): nested
+ * parentheses try several alternatives each, which without it is exponential
+ * in the depth. Results depend on the position only, and a failed
+ * alternative's nodes never reach the tree, so sharing them is safe. */
+typedef struct {
+  uint8_t st; /* 0: not tried, 1: failed, 2: parsed */
+  size_t end;
+  void *v;
+} memo;
+
 typedef struct {
   tok *t;
   size_t i, far;
   sel_arena *a;
+  memo *m_expr, *m_primary, *m_operand; /* one per token */
 } P;
+
+#define MEMOIZED(type, name, field)                     \
+  static type *name##_raw(P *p);                        \
+  static type *name(P *p) {                             \
+    size_t at = p->i;                                   \
+    memo *m = &p->field[at];                            \
+    if (!m->st) {                                       \
+      m->v = name##_raw(p);                             \
+      m->end = p->i;                                    \
+      m->st = m->v ? 2 : 1;                             \
+    }                                                   \
+    p->i = m->st == 2 ? m->end : at;                    \
+    return m->v;                                        \
+  }
 
 static tok *cur(P *p) { return &p->t[p->i]; }
 static void adv(P *p) {
@@ -500,7 +525,8 @@ fail:
   return NULL;
 }
 
-static sel_primary *p_primary(P *p) {
+MEMOIZED(sel_primary, p_primary, m_primary)
+static sel_primary *p_primary_raw(P *p) {
   size_t save = p->i;
   sel_primary *x = NEW(sel_primary);
   if ((x->lit = p_lit(p))) return x->kind = PT_VALUE, x;
@@ -553,7 +579,8 @@ static sel_multop *p_multop(P *p) {
   return m;
 }
 
-static sel_operand *p_operand(P *p) {
+MEMOIZED(sel_operand, p_operand, m_operand)
+static sel_operand *p_operand_raw(P *p) {
   sel_operand *o = NEW(sel_operand);
   if (!(o->left = p_multop(p))) return NULL;
   vec r = {0};
@@ -675,7 +702,8 @@ static sel_and *p_and(P *p) {
   return a;
 }
 
-static sel_expr *p_expr(P *p) {
+MEMOIZED(sel_expr, p_expr, m_expr)
+static sel_expr *p_expr_raw(P *p) {
   vec v = {0};
   sel_and *a = p_and(p);
   if (!a) return NULL;
@@ -953,8 +981,12 @@ sel_stmt *sel_parse(const char *src, size_t n, sel_err *e) {
     sel_stmt_free(st);
     return NULL;
   }
-  P p = {toks, 0, 0, &st->arena};
+  P p = {toks, 0, 0, &st->arena, buckets_xcalloc(nt + 1, sizeof(memo)), buckets_xcalloc(nt + 1, sizeof(memo)),
+         buckets_xcalloc(nt + 1, sizeof(memo))};
   sel_select *s = p_select(&p);
+  free(p.m_expr);
+  free(p.m_primary);
+  free(p.m_operand);
   if (!s) {
     tok *t = &toks[p.far < nt ? p.far : nt];
     if (t->k == T_EOF) sel_fail(e, "ParseSelectFailure", "%d:%d: unexpected token \"<EOF>\"", t->line, t->col);

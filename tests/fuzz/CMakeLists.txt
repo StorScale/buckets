@@ -9,6 +9,13 @@ check_c_source_compiles("
 int LLVMFuzzerTestOneInput(const uint8_t *d, size_t n) { return 0; }" BUCKETS_HAVE_LIBFUZZER)
 unset(CMAKE_REQUIRED_FLAGS)
 
+# Coverage feedback needs the code under test instrumented, not just the
+# harnesses. Opt in (it slows the library for everything else it links).
+option(BUCKETS_FUZZ_INSTRUMENT "Instrument the buckets library for libFuzzer" OFF)
+if(BUCKETS_HAVE_LIBFUZZER AND BUCKETS_FUZZ_INSTRUMENT)
+  target_compile_options(buckets PRIVATE -fsanitize=fuzzer-no-link,address,undefined)
+endif()
+
 function(buckets_fuzz_target name)
   if(BUCKETS_HAVE_LIBFUZZER)
     add_executable(${name} ${name}.c)
