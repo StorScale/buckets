@@ -110,6 +110,7 @@ add_library(buckets STATIC
   s3/postpolicy.c
   storage/drive.c
   storage/drivestats.c
+  storage/osmetrics.c
   storage/xlmeta.c
   storage/format.c
   storage/remote.c
@@ -167,6 +168,7 @@ add_library(buckets STATIC
   admin/profile.c
   admin/locks.c
   admin/netperf.c
+  admin/rtmetrics.c
   admin/config.c
   admin/iamxfer.c
   admin/bucket.c

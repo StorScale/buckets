@@ -200,7 +200,7 @@ STATUS = {
     "RemoveRemoteTargetHandler": (DONE, ""),
     "ReplicationDiffHandler": (DONE, ""),
     "ReplicationMRFHandler": (DONE, ""),
-    "MetricsHandler": (PARTIAL, "batch jobs; the scanner, disk, OS, net, memory, CPU, RPC and runtime types are not reported yet"),
+    "MetricsHandler": (DONE, "site resync metrics are not kept"),
     "ListBucketUsers": (DONE, ""),
     "ListBucketPolicies": (DONE, ""),
     "AddTierHandler": (DONE, ""),

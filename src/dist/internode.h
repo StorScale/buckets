@@ -20,5 +20,7 @@ void buckets_internode_set_secret(const char *root_user, const char *root_passwo
 /* out receives the header value. */
 void buckets_internode_sign(const char *method, const char *target, char out[96]);
 bool buckets_internode_verify(const buckets_http_request *req);
+/* Requests from peers that verified, and their body bytes (the RPC metrics). */
+void buckets_internode_incoming(uint64_t *msgs, uint64_t *bytes);
 
 #endif

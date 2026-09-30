@@ -3,6 +3,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdatomic.h>
 #include <string.h>
 #include <time.h>
 
@@ -37,6 +38,13 @@ void buckets_internode_sign(const char *method, const char *target, char out[96]
   snprintf(out, 96, "%lld:%s", ts, hex);
 }
 
+static _Atomic uint64_t g_in_msgs, g_in_bytes;
+
+void buckets_internode_incoming(uint64_t *msgs, uint64_t *bytes) {
+  *msgs = atomic_load(&g_in_msgs);
+  *bytes = atomic_load(&g_in_bytes);
+}
+
 bool buckets_internode_verify(const buckets_http_request *req) {
   buckets_str v = buckets_http_header_get(req, BUCKETS_INTERNODE_AUTH);
   if (!v.p || v.n < 66 || v.n > 90) return false;
@@ -53,5 +61,10 @@ bool buckets_internode_verify(const buckets_http_request *req) {
   if (ts < now - MAX_SKEW_SECONDS || ts > now + MAX_SKEW_SECONDS) return false;
   char want[65];
   mac(ts, req->method.p, req->method.n, req->target.p, req->target.n, want);
-  return buckets_ct_equal(want, colon + 1, 64);
+  bool ok = buckets_ct_equal(want, colon + 1, 64);
+  if (ok) {
+    atomic_fetch_add(&g_in_msgs, 1);
+    if (req->body_len > 0) atomic_fetch_add(&g_in_bytes, (uint64_t)req->body_len);
+  }
+  return ok;
 }

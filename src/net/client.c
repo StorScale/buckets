@@ -38,7 +38,8 @@ struct buckets_http_client {
   pthread_mutex_t mu;
   hconn idle[MAX_IDLE];
   size_t nidle;
-  _Atomic uint64_t sent, received, errors, dials, dial_errors, dial_ns;
+  _Atomic uint64_t sent, received, errors, dials, dial_errors, dial_ns, requests;
+  _Atomic int64_t streams, last_connect_ns;
   char dial_err[200]; /* the last failed dial, as Go's net.Dial reports it */
 };
 
@@ -149,6 +150,9 @@ static bool dial(buckets_http_client *c, hconn *out) {
     close(fd);
     return false;
   }
+  struct timespec now;
+  clock_gettime(CLOCK_REALTIME, &now);
+  atomic_store(&c->last_connect_ns, (int64_t)now.tv_sec * 1000000000LL + now.tv_nsec);
   return true;
 }
 
@@ -314,6 +318,7 @@ bad:
 bool buckets_http_client_do(buckets_http_client *c, const char *method, const char *target, const buckets_http_kv *hdrs,
                             size_t nhdrs, const void *body, size_t body_len, buckets_http_result *res) {
   memset(res, 0, sizeof(*res));
+  atomic_fetch_add(&c->requests, 1);
   buckets_buf head = BUCKETS_BUF_INIT;
   buckets_buf_appendf(&head, "%s %s HTTP/1.1\r\nHost: %s:%d\r\nContent-Length: %zu\r\n", method, target, c->host,
                       c->port, body_len);
@@ -356,6 +361,9 @@ void buckets_http_client_stats_get(buckets_http_client *c, buckets_http_client_s
   out->dials = atomic_load(&c->dials);
   out->dial_errors = atomic_load(&c->dial_errors);
   out->dial_ns = atomic_load(&c->dial_ns);
+  out->requests = atomic_load(&c->requests);
+  out->streams = atomic_load(&c->streams);
+  out->last_connect_ns = atomic_load(&c->last_connect_ns);
 }
 
 /* ---- streaming ------------------------------------------------------------ */
@@ -410,6 +418,7 @@ buckets_http_stream *buckets_http_client_open(buckets_http_client *c, const char
   for (size_t i = 0; i < nhdrs; i++) buckets_buf_appendf(&head, "%s: %s\r\n", hdrs[i].name, hdrs[i].value);
   buckets_buf_append(&head, "\r\n", 2);
   buckets_http_stream *s = buckets_xcalloc(1, sizeof(*s));
+  atomic_fetch_add(&c->requests, 1);
   s->c = c;
   s->h.fd = -1;
   /* A body that cannot be replayed only goes out on a fresh connection. */
@@ -472,6 +481,7 @@ buckets_http_stream *buckets_http_client_open(buckets_http_client *c, const char
     s->reusable = !conn_close && !s->close_delimited;
     if (!s->chunked && !s->close_delimited && s->remaining == 0) s->done = true;
     buckets_buf_free(&head);
+    atomic_fetch_add(&c->streams, 1);
     return s;
   }
 fail:
@@ -528,6 +538,7 @@ fail:
 void buckets_http_stream_free(void *ud) {
   buckets_http_stream *s = ud;
   if (!s) return;
+  atomic_fetch_sub(&s->c->streams, 1);
   bool clean = s->done && !s->failed && s->reusable && s->in_pos == s->in.len;
   if (clean) {
     pthread_mutex_lock(&s->c->mu);

@@ -78,20 +78,31 @@ static const char *const k_minio_all[] = {
     "StatInfoFile", "StatVol",    "UpdateMetadata", "VerifyFile",   "WalkDir",              "WriteAll",
     "WriteMetadata"};
 
+size_t buckets_admin_drive_calls(buckets_drive *drv, const char *const **names, uint64_t *total, uint64_t *count,
+                                 uint64_t *acc, buckets_drive_stats_view *sv) {
+  buckets_drive_stats_get(drv, sv);
+  size_t n = BUCKETS_ARRAY_LEN(k_minio_all);
+  memset(total, 0, n * sizeof(*total));
+  memset(count, 0, n * sizeof(*count));
+  memset(acc, 0, n * sizeof(*acc));
+  for (int op = 0; op < BUCKETS_DOP__N; op++) {
+    if (!k_minio_ops[op]) continue;
+    for (size_t k = 0; k < n; k++) {
+      if (strcmp(k_minio_all[k], k_minio_ops[op]) != 0) continue;
+      total[k] += sv->total[op], count[k] += sv->count[op], acc[k] += sv->acc_ns[op];
+    }
+  }
+  *names = k_minio_all;
+  return n;
+}
+
 /* madmin.DiskMetrics for a drive (xlStorageDiskIDCheck.getMetrics). */
 static void add_drive_metrics(yyjson_mut_doc *d, yyjson_mut_val *o, buckets_drive *drv) {
   yyjson_mut_val *m = yyjson_mut_obj_add_obj(d, o, "metrics");
   buckets_drive_stats_view sv;
-  buckets_drive_stats_get(drv, &sv);
-  uint64_t total[BUCKETS_ARRAY_LEN(k_minio_all)] = {0}, count[BUCKETS_ARRAY_LEN(k_minio_all)] = {0},
-           acc[BUCKETS_ARRAY_LEN(k_minio_all)] = {0};
-  for (int op = 0; op < BUCKETS_DOP__N; op++) {
-    if (!k_minio_ops[op]) continue;
-    for (size_t k = 0; k < BUCKETS_ARRAY_LEN(k_minio_all); k++) {
-      if (strcmp(k_minio_all[k], k_minio_ops[op]) != 0) continue;
-      total[k] += sv.total[op], count[k] += sv.count[op], acc[k] += sv.acc_ns[op];
-    }
-  }
+  uint64_t total[BUCKETS_ADMIN_DRIVE_CALLS], count[BUCKETS_ADMIN_DRIVE_CALLS], acc[BUCKETS_ADMIN_DRIVE_CALLS];
+  const char *const *names;
+  buckets_admin_drive_calls(drv, &names, total, count, acc, &sv);
   yyjson_mut_val *lm = NULL;
   for (size_t k = 0; k < BUCKETS_ARRAY_LEN(k_minio_all); k++) {
     if (!count[k]) continue;

@@ -2,6 +2,7 @@
 #include "scanner/scanner.h"
 
 #include <pthread.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -84,6 +85,9 @@ static void heal_bucket(buckets_scanner *s, const char *bucket) {
     buckets_obj_listing l;
     if (stopping(s) || buckets_obj_list(s->L, bucket, "", marker, NULL, LIST_PAGE, &l) != BUCKETS_OBJ_OK) break;
     for (size_t i = 0; i < l.nobjects && !stopping(s); i++) {
+      pthread_mutex_lock(&s->mu);
+      snprintf(s->st.active, sizeof(s->st.active), "%s/%s", bucket, l.objects[i].name);
+      pthread_mutex_unlock(&s->mu);
       if (leads(s->L, l.objects[i].name)) heal_object(s, bucket, l.objects[i].name);
     }
     free(marker);
@@ -118,6 +122,7 @@ static void scan_key(buckets_scanner *s, const char *bucket, buckets_object_info
   pthread_mutex_lock(&s->mu);
   s->st.objects++;
   s->st.versions += n;
+  snprintf(s->st.active, sizeof(s->st.active), "%s/%s", bucket, v[0].name);
   pthread_mutex_unlock(&s->mu);
   bool *removed = buckets_xcalloc(n, sizeof(bool));
   if (s->hooks.object) s->hooks.object(s->hooks.ud, bucket, v, n, removed);
@@ -238,6 +243,13 @@ static void scan_cycle(buckets_scanner *s) {
   bool complete = true;
   if (leader && s->hooks.tier_names) s->ntiers = s->hooks.tier_names(s->hooks.ud, &s->tiers);
   s->usage = leader ? &u : NULL;
+  if (leader) {
+    pthread_mutex_lock(&s->mu);
+    s->st.have_cycle = true;
+    s->st.current_cycle = s->next_cycle;
+    s->st.current_started_ns = start;
+    pthread_mutex_unlock(&s->mu);
+  }
   for (size_t b = 0; b < nb && !stopping(s); b++) {
     buckets_obj_heal_bucket(L, bk[b].name);
     buckets_buf meta = BUCKETS_BUF_INIT;
@@ -254,6 +266,7 @@ static void scan_cycle(buckets_scanner *s) {
     complete &= done;
     pthread_mutex_lock(&s->mu);
     s->st.bucket_scans_finished += done;
+    s->st.active[0] = '\0';
     pthread_mutex_unlock(&s->mu);
   }
   complete &= !stopping(s);
@@ -266,6 +279,14 @@ static void scan_cycle(buckets_scanner *s) {
     u.last_update_ns = now_ns();
     save_usage(s, &u);
     s->next_cycle++;
+    pthread_mutex_lock(&s->mu);
+    s->st.current_cycle = 0;
+    if (s->st.ncompleted == 16) {
+      memmove(s->st.completed_ns, s->st.completed_ns + 1, 15 * sizeof(int64_t));
+      s->st.ncompleted--;
+    }
+    s->st.completed_ns[s->st.ncompleted++] = now_ns();
+    pthread_mutex_unlock(&s->mu);
     save_cycle(s);
   }
   s->usage = NULL;

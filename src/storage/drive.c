@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 #include "storage/drive.h"
 #include "storage/drivestats.h"
+#include "storage/osmetrics.h"
 #include "core/timefmt.h"
 #include "notify/event.h"
 #include "trace/trace.h"
@@ -64,31 +65,25 @@ static int mkdir_p(const char *path) {
   for (char *s = tmp + 1; *s; s++) {
     if (*s != '/') continue;
     *s = '\0';
-    if (mkdir(tmp, 0755) != 0 && errno != EEXIST) {
+    if (buckets_os_mkdir(tmp, 0755) != 0 && errno != EEXIST) {
       free(tmp);
       return -1;
     }
     *s = '/';
   }
-  int rc = (mkdir(tmp, 0755) == 0 || errno == EEXIST) ? 0 : -1;
+  int rc = (buckets_os_mkdir(tmp, 0755) == 0 || errno == EEXIST) ? 0 : -1;
   free(tmp);
   return rc;
 }
 
 /* Data durability for file contents: fdatasync where the platform has it
  * (skips metadata-only flushes, as MinIO's Fdatasync), fsync elsewhere. */
-static int data_sync(int fd) {
-#if defined(__linux__)
-  return fdatasync(fd);
-#else
-  return fsync(fd);
-#endif
-}
+static int data_sync(int fd) { return buckets_os_fdatasync(fd); }
 
 static int fsync_dir(const char *dir) {
-  int fd = open(dir, O_RDONLY);
+  int fd = buckets_os_open(dir, O_RDONLY);
   if (fd < 0) return -1;
-  int rc = fsync(fd);
+  int rc = buckets_os_fsync(fd);
   close(fd);
   return rc;
 }
@@ -103,7 +98,7 @@ static buckets_drive_err write_atomic(buckets_drive *d, const char *dir, const c
   char *dst = path_join(dir, name);
   buckets_drive_err err = BUCKETS_DRIVE_OK;
 
-  int fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+  int fd = buckets_os_open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
   if (fd < 0) {
     err = from_errno(errno);
     goto out;
@@ -120,9 +115,9 @@ static buckets_drive_err write_atomic(buckets_drive *d, const char *dir, const c
   }
   if (err == BUCKETS_DRIVE_OK && data_sync(fd) != 0) err = BUCKETS_DRIVE_ERR_IO;
   close(fd);
-  if (err == BUCKETS_DRIVE_OK && rename(tmp, dst) != 0) err = from_errno(errno);
+  if (err == BUCKETS_DRIVE_OK && buckets_os_rename(tmp, dst) != 0) err = from_errno(errno);
   if (err == BUCKETS_DRIVE_OK) fsync_dir(dir);
-  if (err != BUCKETS_DRIVE_OK) unlink(tmp);
+  if (err != BUCKETS_DRIVE_OK) buckets_os_unlink(tmp);
 out:
   free(tmpdir);
   free(tmp);
@@ -224,7 +219,7 @@ buckets_drive_err buckets_drive_open(const char *path, buckets_drive **out) {
 
   char *fmt = path_join(d->root, BUCKETS_META_BUCKET "/format.json");
   struct stat st;
-  if (stat(fmt, &st) == 0) {
+  if (buckets_os_stat(fmt, &st) == 0) {
     err = read_format(d, fmt);
   } else if (errno == ENOENT) {
     buckets_uuid_v4(d->deployment_id);
@@ -255,7 +250,7 @@ void buckets_drive_close(buckets_drive *d) {
 static buckets_drive_err drive_make_vol(buckets_drive *d, const char *name) {
   if (d->remote) return buckets_rdrive_make_vol(d, name);
   char *p = path_join(d->root, name);
-  buckets_drive_err err = mkdir(p, 0755) == 0 ? BUCKETS_DRIVE_OK : from_errno(errno);
+  buckets_drive_err err = buckets_os_mkdir(p, 0755) == 0 ? BUCKETS_DRIVE_OK : from_errno(errno);
   if (err == BUCKETS_DRIVE_OK) fsync_dir(d->root);
   free(p);
   return err;
@@ -266,7 +261,7 @@ static buckets_drive_err drive_stat_vol(buckets_drive *d, const char *name, time
   char *p = path_join(d->root, name);
   struct stat st;
   buckets_drive_err err = BUCKETS_DRIVE_OK;
-  if (stat(p, &st) != 0) {
+  if (buckets_os_stat(p, &st) != 0) {
     err = from_errno(errno);
   } else if (!S_ISDIR(st.st_mode)) {
     err = BUCKETS_DRIVE_ERR_NOT_FOUND;
@@ -283,7 +278,7 @@ static buckets_drive_err drive_delete_vol(buckets_drive *d, const char *name) {
   if (d->remote) return buckets_rdrive_delete_vol(d, name);
   char *p = path_join(d->root, name);
   buckets_drive_err err = BUCKETS_DRIVE_OK;
-  if (rmdir(p) != 0) {
+  if (buckets_os_rmdir(p) != 0) {
     /* POSIX allows EEXIST for a non-empty directory. */
     err = errno == EEXIST ? BUCKETS_DRIVE_ERR_NOT_EMPTY : from_errno(errno);
   } else {
@@ -301,7 +296,7 @@ static buckets_drive_err drive_list_vols(buckets_drive *d, buckets_vol_info **vo
   if (d->remote) return buckets_rdrive_list_vols(d, vols, n);
   *vols = NULL;
   *n = 0;
-  DIR *dir = opendir(d->root);
+  DIR *dir = buckets_os_opendir(d->root);
   if (!dir) return from_errno(errno);
   struct dirent *ent;
   size_t cap = 0;
@@ -353,7 +348,7 @@ static void parent_mkdir(const char *path) {
 static buckets_drive_err drive_read_all(buckets_drive *d, const char *vol, const char *path, buckets_buf *out) {
   if (d->remote) return buckets_rdrive_read_all(d, vol, path, out);
   char *p = vpath(d, vol, path);
-  int fd = open(p, O_RDONLY | O_CLOEXEC);
+  int fd = buckets_os_open(p, O_RDONLY | O_CLOEXEC);
   free(p);
   if (fd < 0) return from_errno(errno == ENOTDIR ? ENOENT : errno);
   char tmp[65536];
@@ -422,7 +417,7 @@ static buckets_drive_err drive_create_file(buckets_drive *d, const char *vol, co
   if (d->remote) return buckets_rdrive_create_file(d, vol, path, w);
   char *p = vpath(d, vol, path);
   parent_mkdir(p);
-  int fd = open(p, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+  int fd = buckets_os_open(p, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
   if (fd < 0) {
     buckets_drive_err e = from_errno(errno);
     free(p);
@@ -477,7 +472,7 @@ void buckets_drive_writer_abort(buckets_drive_writer *w) {
     return;
   }
   close(w->fd);
-  unlink(w->path);
+  buckets_os_unlink(w->path);
   free(w->buf);
   free(w->path);
   free(w);
@@ -487,7 +482,7 @@ static buckets_drive_err drive_append(buckets_drive *d, const char *vol, const c
                                        const void *data, size_t n) {
   if (d->remote) return buckets_rdrive_append(d, vol, path, off, data, n);
   char *p = vpath(d, vol, path);
-  int fd = open(p, O_WRONLY | O_CLOEXEC);
+  int fd = buckets_os_open(p, O_WRONLY | O_CLOEXEC);
   free(p);
   if (fd < 0) return from_errno(errno);
   struct stat st;
@@ -515,7 +510,7 @@ static buckets_drive_err drive_append(buckets_drive *d, const char *vol, const c
 static buckets_drive_err drive_fsync_file(buckets_drive *d, const char *vol, const char *path) {
   if (d->remote) return buckets_rdrive_fsync_file(d, vol, path);
   char *p = vpath(d, vol, path);
-  int fd = open(p, O_RDONLY | O_CLOEXEC);
+  int fd = buckets_os_open(p, O_RDONLY | O_CLOEXEC);
   free(p);
   if (fd < 0) return from_errno(errno);
   buckets_drive_err err = data_sync(fd) == 0 ? BUCKETS_DRIVE_OK : BUCKETS_DRIVE_ERR_IO;
@@ -533,7 +528,7 @@ static buckets_drive_err drive_open_file(buckets_drive *d, const char *vol, cons
   int fd = -1;
   if (!d->remote) {
     char *p = vpath(d, vol, path);
-    fd = open(p, O_RDONLY | O_CLOEXEC);
+    fd = buckets_os_open(p, O_RDONLY | O_CLOEXEC);
     free(p);
     if (fd < 0) return from_errno(errno == ENOTDIR ? ENOENT : errno);
   }
@@ -572,7 +567,7 @@ static buckets_drive_err drive_read_at(buckets_drive *d, const char *vol, const 
                                         size_t n, size_t *got) {
   if (d->remote) return buckets_rdrive_read_at(d, vol, path, off, buf, n, got);
   char *p = vpath(d, vol, path);
-  int fd = open(p, O_RDONLY | O_CLOEXEC);
+  int fd = buckets_os_open(p, O_RDONLY | O_CLOEXEC);
   free(p);
   *got = 0;
   if (fd < 0) return from_errno(errno == ENOTDIR ? ENOENT : errno);
@@ -605,7 +600,7 @@ static buckets_drive_err drive_rename_data(buckets_drive *d, const char *src_vol
     buckets_buf from = BUCKETS_BUF_INIT, to = BUCKETS_BUF_INIT;
     buckets_buf_appendf(&from, "%s/%s/%s/%s", d->root, src_vol, src_dir, data_dir);
     buckets_buf_appendf(&to, "%s/%s", dst, data_dir);
-    if (rename(from.data, to.data) != 0) err = from_errno(errno);
+    if (buckets_os_rename(from.data, to.data) != 0) err = from_errno(errno);
     buckets_buf_free(&from);
     buckets_buf_free(&to);
   }
@@ -624,7 +619,7 @@ static buckets_drive_err drive_delete(buckets_drive *d, const char *vol, const c
   char *p = vpath(d, vol, path);
   buckets_drive_err err = BUCKETS_DRIVE_OK;
   struct stat st;
-  if (lstat(p, &st) != 0) {
+  if (buckets_os_lstat(p, &st) != 0) {
     err = from_errno(errno);
   } else if (S_ISDIR(st.st_mode) && recursive) {
     /* Move aside first so readers never see a half-deleted tree. */
@@ -632,7 +627,7 @@ static buckets_drive_err drive_delete(buckets_drive *d, const char *vol, const c
     buckets_buf trash = BUCKETS_BUF_INIT;
     buckets_buf_appendf(&trash, "%s/" BUCKETS_META_BUCKET "/tmp/%s", d->root, id);
     free(id);
-    if (rename(p, trash.data) != 0) err = from_errno(errno);
+    if (buckets_os_rename(p, trash.data) != 0) err = from_errno(errno);
     else nftw(trash.data, rm_entry, 16, FTW_DEPTH | FTW_PHYS);
     buckets_buf_free(&trash);
   } else if (remove(p) != 0) {
@@ -645,7 +640,7 @@ static buckets_drive_err drive_delete(buckets_drive *d, const char *vol, const c
       char *slash = strrchr(p, '/');
       if (!slash) break;
       *slash = '\0';
-      if (strlen(p) <= stop.len || rmdir(p) != 0) break;
+      if (strlen(p) <= stop.len || buckets_os_rmdir(p) != 0) break;
     }
     buckets_buf_free(&stop);
   }
@@ -657,7 +652,7 @@ static buckets_drive_err drive_list_dir(buckets_drive *d, const char *vol, const
   if (d->remote) return buckets_rdrive_list_dir(d, vol, dir, out);
   memset(out, 0, sizeof(*out));
   char *p = vpath(d, vol, dir);
-  DIR *dh = opendir(p);
+  DIR *dh = buckets_os_opendir(p);
   if (!dh) {
     buckets_drive_err e = from_errno(errno == ENOTDIR ? ENOENT : errno);
     free(p);
@@ -670,7 +665,7 @@ static buckets_drive_err drive_list_dir(buckets_drive *d, const char *vol, const
     buckets_buf child = BUCKETS_BUF_INIT;
     buckets_buf_appendf(&child, "%s/%s", p, e->d_name);
     struct stat st;
-    bool isdir = stat(child.data, &st) == 0 && S_ISDIR(st.st_mode);
+    bool isdir = buckets_os_stat(child.data, &st) == 0 && S_ISDIR(st.st_mode);
     buckets_buf_free(&child);
     if (out->n == cap) {
       cap = cap ? cap * 2 : 32;
@@ -704,7 +699,7 @@ static buckets_drive_err drive_file_size(buckets_drive *d, const char *vol, cons
   if (d->remote) return buckets_rdrive_file_size(d, vol, path, size);
   char *p = vpath(d, vol, path);
   struct stat st;
-  buckets_drive_err err = stat(p, &st) != 0 ? from_errno(errno) : S_ISREG(st.st_mode) ? BUCKETS_DRIVE_OK
+  buckets_drive_err err = buckets_os_stat(p, &st) != 0 ? from_errno(errno) : S_ISREG(st.st_mode) ? BUCKETS_DRIVE_OK
                                                                                      : BUCKETS_DRIVE_ERR_NOT_FOUND;
   if (!err) *size = (int64_t)st.st_size;
   free(p);
@@ -715,7 +710,7 @@ int buckets_drive_stat(buckets_drive *d, const char *vol, const char *path) {
   if (d->remote) return buckets_rdrive_stat(d, vol, path);
   char *p = vpath(d, vol, path);
   struct stat st;
-  int r = stat(p, &st) != 0 ? 0 : S_ISDIR(st.st_mode) ? 2 : 1;
+  int r = buckets_os_stat(p, &st) != 0 ? 0 : S_ISDIR(st.st_mode) ? 2 : 1;
   free(p);
   return r;
 }
@@ -725,7 +720,7 @@ static buckets_drive_err drive_rename_file(buckets_drive *d, const char *src_vol
   if (d->remote) return buckets_rdrive_rename_file(d, src_vol, src, dst_vol, dst);
   char *from = vpath(d, src_vol, src), *to = vpath(d, dst_vol, dst);
   parent_mkdir(to);
-  buckets_drive_err err = rename(from, to) == 0 ? BUCKETS_DRIVE_OK : from_errno(errno);
+  buckets_drive_err err = buckets_os_rename(from, to) == 0 ? BUCKETS_DRIVE_OK : from_errno(errno);
   free(from);
   free(to);
   return err;
@@ -1061,7 +1056,7 @@ static void walk_match(const char *volroot, const char *rel, const char *pat, st
   if (depth > 64 || l->n > 100000) return;
   buckets_buf path = BUCKETS_BUF_INIT;
   buckets_buf_appendf(&path, "%s%s%s", volroot, *rel ? "/" : "", rel);
-  DIR *dh = opendir(path.data);
+  DIR *dh = buckets_os_opendir(path.data);
   buckets_buf_free(&path);
   if (!dh) return;
   struct dirent *de;
@@ -1071,7 +1066,7 @@ static void walk_match(const char *volroot, const char *rel, const char *pat, st
     buckets_buf_appendf(&child, "%s%s%s", rel, *rel ? "/" : "", de->d_name);
     buckets_buf_appendf(&full, "%s/%s", volroot, child.data);
     struct stat st;
-    if (lstat(full.data, &st) == 0) {
+    if (buckets_os_lstat(full.data, &st) == 0) {
       if (match_path(pat, child.data)) stat_add(l, child.data, &st);
       if (S_ISDIR(st.st_mode)) walk_match(volroot, child.data, pat, l, depth + 1);
     }
@@ -1096,7 +1091,7 @@ buckets_drive_err buckets_drive_stat_info(buckets_drive *d, const char *vol, con
     buckets_buf full = BUCKETS_BUF_INIT;
     buckets_buf_appendf(&full, "%s/%s", volroot, path);
     struct stat st;
-    if (lstat(full.data, &st) == 0) {
+    if (buckets_os_lstat(full.data, &st) == 0) {
       /* filepath.Rel of the cleaned path */
       const char *name = path;
       while (*name == '/') name++;
@@ -1126,7 +1121,7 @@ buckets_drive_err buckets_drive_stat_info(buckets_drive *d, const char *vol, con
       buckets_buf full = BUCKETS_BUF_INIT;
       buckets_buf_appendf(&full, "%s/%s", volroot, start.data);
       struct stat st;
-      if (lstat(full.data, &st) == 0 && match_path(p, start.data)) stat_add(&l, start.data, &st);
+      if (buckets_os_lstat(full.data, &st) == 0 && match_path(p, start.data)) stat_add(&l, start.data, &st);
       buckets_buf_free(&full);
     }
     walk_match(volroot, start.data, p, &l, 0);

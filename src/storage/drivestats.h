@@ -38,7 +38,7 @@ void buckets_drive_stats_begin(buckets_drive *d);
 void buckets_drive_stats_end(buckets_drive *d, buckets_drive_op op, int64_t ns, buckets_drive_err err);
 void buckets_drive_stats_free(buckets_drive *d);
 
-typedef struct {
+typedef struct buckets_drive_stats_view {
   uint64_t errors_availability, errors_timeout;
   int64_t waiting;
   uint64_t count[BUCKETS_DOP__N];  /* calls in the last minute */

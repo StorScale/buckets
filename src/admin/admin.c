@@ -2532,6 +2532,8 @@ void buckets_admin_peer(buckets_s3_server *s, const buckets_http_request *req, c
     /* profiling */
   } else if (op && buckets_admin_netperf_peer(s, op, req, q, resp)) {
     /* netperf, or its devnull */
+  } else if (op && buckets_admin_rtmetrics_peer(s, op, q, resp)) {
+    /* a node's realtime metrics */
   } else {
     resp->status = 400;
   }

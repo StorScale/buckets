@@ -246,5 +246,42 @@ for side, root in SIDES:
     res.append(port_view(side, v))
 compare("health info across nodes", *res)
 
+# ---- realtime metrics (mc admin scanner status, mc support top ...) ------------------------------------
+
+def rt_shape(v, path=""):
+    """Keys and types in order; the names of counted calls and drive paths left out."""
+    if isinstance(v, dict):
+        if path.endswith((".life_time_ops", ".operations", ".actions", ".ilm", ".ilm_ops", ".Jobs")):
+            return "map"
+        if path.endswith((".by_disk", ".by_host")):
+            return [rt_shape(x, path + ".*") for x in v.values()]
+        # counted calls appear once they happen
+        return [(k, rt_shape(x, f"{path}.{k}")) for k, x in v.items()
+                if k not in ("life_time_ops", "ilm_ops", "operations", "actions", "ilm", "active")]
+    if path.endswith(".cycle_complete_times"):
+        return "times"  # null until a cycle completes
+    if isinstance(v, list):
+        return [rt_shape(v[0], path)] if v else []
+    return "num" if isinstance(v, (int, float)) and not isinstance(v, bool) else type(v).__name__
+
+
+def rt_lines(b):
+    return [json.loads(x) for x in b.decode().split("\n") if x.strip()]
+
+
+RTQ = [("everything by host and drive", "?n=1&by-host=true&by-disk=true"),
+       ("scanner only", "?n=1&types=1"), ("drives by drive", "?n=1&types=2&by-disk=true"),
+       ("os and cpu by host", "?n=1&types=132&by-host=true"), ("two records", "?n=2&types=1"),
+       ("no such host", "?n=1&hosts=nowhere:1&by-host=true"), ("bad interval and n", "?n=x&interval=5ms&types=4")]
+for name, q in RTQ:
+    res = []
+    for side, _ in SIDES:
+        c, h, b = admin(node(side, 1), "GET", "/metrics" + q.replace("n=x", "n=1"))
+        lines = port_view(side, rt_lines(b)) if c == 200 else []
+        v = [(x.get("final"), x.get("hosts"), rt_shape(x)) for x in lines]
+        errs = sorted(e for x in lines for e in x.get("errors") or [])
+        res.append((c, h.get("content-type"), v, errs))
+    compare(f"realtime metrics across nodes, {name}", *res)
+
 print(f"adminops-dist: {Score.passed} passed, {Score.failed} failed")
 sys.exit(1 if Score.failed else 0)

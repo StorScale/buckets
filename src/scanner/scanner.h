@@ -47,6 +47,14 @@ typedef struct {
   uint64_t objects, versions, folders;
   uint64_t bucket_scans_started, bucket_scans_finished;
   int64_t last_activity_ns; /* the last cycle's end (0: none yet) */
+  /* currentScannerCycle, on the node running the cycles (the leader) once
+   * one started: its number (0 between cycles), start and the last 16 ends */
+  bool have_cycle;
+  uint64_t current_cycle;
+  int64_t current_started_ns;
+  int64_t completed_ns[16];
+  size_t ncompleted;
+  char active[1024]; /* "<bucket>/<key>" being scanned now, "" between buckets */
 } buckets_scanner_stats;
 
 buckets_scanner *buckets_scanner_start(buckets_objlayer *L, const buckets_scanner_hooks *hooks);

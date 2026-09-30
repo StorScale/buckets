@@ -67,6 +67,9 @@ void buckets_http_client_reset(buckets_http_client *c);
  * requests, and connection attempts with their total time. */
 typedef struct {
   uint64_t sent, received, errors, dials, dial_errors, dial_ns;
+  uint64_t requests;       /* requests sent */
+  int64_t streams;         /* streamed responses being read */
+  int64_t last_connect_ns; /* the last connection made (wall clock), 0: none */
 } buckets_http_client_stats;
 void buckets_http_client_stats_get(buckets_http_client *c, buckets_http_client_stats *out);
 

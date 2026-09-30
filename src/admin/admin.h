@@ -2,6 +2,8 @@
 #ifndef BUCKETS_ADMIN_ADMIN_H
 #define BUCKETS_ADMIN_ADMIN_H
 
+#include <yyjson.h>
+
 #include "s3/internal.h"
 
 /* The madmin-compatible admin API under /minio/admin/v3. The request has
@@ -15,6 +17,19 @@ void buckets_admin_json_error(s3_ctx *c, int status, const char *code, const cha
 
 /* ServerInfo (info.c). */
 void buckets_admin_server_info(s3_ctx *c);
+/* A drive's calls under MinIO's storage API names (sorted; names gets the
+ * list): calls since start, and the last minute's count and total latency. */
+#define BUCKETS_ADMIN_DRIVE_CALLS 31
+struct buckets_drive_stats_view;
+size_t buckets_admin_drive_calls(buckets_drive *drv, const char *const **names, uint64_t *total, uint64_t *count,
+                                 uint64_t *acc, struct buckets_drive_stats_view *sv);
+/* madmin.MemInfo of this host (GetMemInfo), addr its node name. */
+yyjson_mut_val *buckets_admin_mem_info(yyjson_mut_doc *d, const char *addr);
+/* The network interface holding addr's IP (the first non-loopback one otherwise). */
+void buckets_admin_node_interface(const char *addr, char *out, size_t cap);
+/* The realtime metrics (mc admin scanner status, mc support top ...). */
+bool buckets_admin_rtmetrics_peer(buckets_s3_server *s, const char *op, const buckets_query *q,
+                                  buckets_http_response *resp);
 void buckets_admin_storage_info(s3_ctx *c);
 void buckets_admin_background_heal_status(s3_ctx *c);
 /* mc admin heal (heal.c); the peer side of a status request forwarded to

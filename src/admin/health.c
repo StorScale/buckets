@@ -235,7 +235,7 @@ static yyjson_mut_val *sec_partitions(yyjson_mut_doc *d, const char *addr, const
 }
 
 /* the interface carrying this node's address (globalInternodeInterface) */
-static void node_interface(const char *addr, char *out, size_t cap) {
+void buckets_admin_node_interface(const char *addr, char *out, size_t cap) {
   *out = '\0';
   char host[256];
   snprintf(host, sizeof(host), "%s", addr);
@@ -259,7 +259,7 @@ static void node_interface(const char *addr, char *out, size_t cap) {
 
 static yyjson_mut_val *sec_netinfo(yyjson_mut_doc *d, const char *addr) {
   char ifname[64];
-  node_interface(addr, ifname, sizeof(ifname));
+  buckets_admin_node_interface(addr, ifname, sizeof(ifname));
 #ifdef __linux__
   char err[256] = "", driver[64] = "", fw[64] = "";
   int fd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -360,7 +360,7 @@ static yyjson_mut_val *sec_osinfo(yyjson_mut_doc *d, const char *addr) {
 #endif
 }
 
-static yyjson_mut_val *sec_meminfo(yyjson_mut_doc *d, const char *addr) {
+yyjson_mut_val *buckets_admin_mem_info(yyjson_mut_doc *d, const char *addr) {
   uint64_t total = 0, freeb = 0, avail = 0, shared = 0, cache = 0, buffers = 0, swap_t = 0, swap_f = 0, limit = 0;
 #ifdef __linux__
   char *mi = read_file("/proc/meminfo", 1 << 16);
@@ -749,7 +749,7 @@ static const section k_sections[] = {
     {"sysdrivehw", "partitions", "partitions", sec_partitions_local},
     {"sysnet", "netinfo", "netinfo", sec_netinfo},
     {"sysosinfo", "osinfo", "osinfo", sec_osinfo},
-    {"sysmem", "meminfo", "meminfo", sec_meminfo},
+    {"sysmem", "meminfo", "meminfo", buckets_admin_mem_info},
     {"sysprocess", "procinfo", "procinfo", sec_procinfo},
 };
 static const section k_late_sections[] = {
