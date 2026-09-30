@@ -16,27 +16,31 @@ come from the page cache.
 
 **PUT floor.** A single-stream PUT cannot finish before the whole object's MD5 is computed for the ETag. MD5's 64 dependent rounds per block leave no parallelism, and OpenSSL's assembly MD5 runs at about 1.03 GB/s here, which is roughly 1.04 s per GiB. Buckets sits at that floor on one drive and within a few percent of it on 16. MinIO is bound by the same floor. Concurrent PUTs scale across cores.
 
-## Concurrent load (warp-style)
+## Concurrent load (warp)
 
-`tests/bench/warp.sh` runs bucketsd, then MinIO, on the same drives and
-drives each with `tests/bench/s3bench` (minio-go, as warp does). Each case
-PUTs for a fixed time, uploads a fixed set of objects (`-objects`, 64 by
-default) untimed, and GETs that set for a fixed time, so both servers read the
-same working set.
+`tests/bench/warp.sh` runs bucketsd, then MinIO, on the same drive layout and
+load-tests each with [warp](https://github.com/minio/warp) (v1.3.1, `WARP=`) or
+with `tests/bench/s3bench` (minio-go, as warp uses; `S3BENCH=`). Each case
+runs `warp put` for a fixed time, then `warp get` over a fixed set of 64
+objects, so both servers read the same working set.
 
 ```bash
-S3BENCH=$T/s3bench MINIO_BIN=$T/minio-bin DURATION=10s tests/bench/warp.sh build-rel/src/bucketsd
+WARP=$T/bin/warp MINIO_BIN=$T/minio-bin DURATION=15s tests/bench/warp.sh build-rel/src/bucketsd
 ```
 
-Apple M-series laptop, 4 drives (EC 2+2) on one SSD, release build, 10 s per phase; two runs, worst of each:
+Apple M-series laptop (12 cores, shared with warp), 4 drives (EC 2+2) on one SSD, release build, 15 s per phase:
 
 | Case | Buckets PUT | MinIO PUT | Buckets GET | MinIO GET |
 |---|---|---|---|---|
-| 10 MiB × 16 clients | 965 MiB/s | 145–317 MiB/s | 10595 MiB/s | 11237 MiB/s (−6%) |
-| 1 MiB × 32 clients | 533 MiB/s | 294–544 MiB/s (−2%) | 7812 MiB/s | 7912 MiB/s (−1%) |
-| 64 KiB × 32 clients | 2590 op/s | 1481 op/s | 23372 op/s | 20866 op/s |
+| 10 MiB × 16 clients | 714 MiB/s | 314 MiB/s | 13287 MiB/s ¹ | 14519 MiB/s ¹ (Buckets −8.5%) |
+| 1 MiB × 32 clients | 630 MiB/s | 512 MiB/s | 9070 MiB/s | 8501 MiB/s |
+| 64 KiB × 32 clients | 2622 op/s | 1341 op/s | 23559 op/s | 19462 op/s |
 
-PUTs are bound by the one disk and vary run to run for both servers. GETs come from the page cache and measure the servers.
+¹ Mean of four alternating runs (Buckets 13071–13470, MinIO 14157–14819).
+
+- **PUTs** are bound by the one disk and vary by ±30% from run to run for both servers. Buckets' throughput leads, but its median latency on 10 MiB PUTs is higher than MinIO's (415 ms vs 143 ms), while its p99 is similar.
+- **GETs** come from the page cache and measure the servers. With fewer clients Buckets leads on 10 MiB GETs too: +29% with 1 client, +10% with 4.
+- At 16 clients the server and warp saturate the machine together. Buckets then spends more kernel time than MinIO, in thread wake-ups (about 2.8× MinIO's involuntary context switches) handing each 256 KiB chunk between a worker and an event loop. Goroutines park in user space instead.
 
 ## What moved the numbers
 
@@ -56,8 +60,12 @@ The starting point was PUT at 0.80–1.03 s per 256 MiB (2.6–3.3× MinIO) and 
 12. **GET read-ahead.** The reader loads and verifies block N+1 in the background, into a second set of shard buffers, while block N is sent.
 13. **One metadata read per GET.** GET resolved `xl.meta` on every drive twice (stat, then open). It now takes the lock and resolves once, and positions the reader from that result. 1 MiB GETs went from 5400 to 6700 MiB/s and small GETs from 14.9k to 21k op/s.
 14. **Several event loops.** One loop thread moved every byte for every connection, and under 16 large GETs it was busy 99% of the time in `sendto`. Accepted connections are now dealt round-robin across `BUCKETS_NET_THREADS` loops (CPUs / 2 by default, at most 16). The first loop, which also accepts, is the caller's.
+15. **No thundering herds in the worker pool.** A parallel batch woke every idle worker, and every finished batch woke every waiting caller. Now it wakes as many as it has tasks, and each caller has its own condition variable.
+16. **Fewer drive syscalls per PUT.** Directories are created leaf first, as MinIO's osMkdirAll does, and xl.meta writes no longer fsync their directory. On 4 drives a 1 MiB PUT went from 80 mkdir calls and 4 directory syncs to 16 and none, and 1 MiB PUTs moved from behind MinIO to ahead.
 
 ## Known headroom
+
+- **Hand-offs per chunk:** a streamed response moves between an event loop and a worker for every 256 KiB. Under full CPU saturation this costs about 8% against MinIO on large GETs. Several fixes measured worse and were dropped: filling chunks on the loop thread, 1 MiB chunks, and reading shards directly into the response buffer.
 
 - **Single-stream PUT:** bound by MD5, as it is for MinIO. The only ways around it would change the ETag's meaning, which S3 clients rely on.
 - **AVX2:** the x86 paths use SSSE3 (128-bit). AVX2 versions would roughly double RS and HighwayHash throughput on x86 servers.
