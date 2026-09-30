@@ -124,6 +124,7 @@ static void t_skip(tr *t, int type, int depth) {
     for (size_t i = 0; i < n && !t->bad; i++) {
       if (et == T_TRUE || et == T_FALSE) {
         if (t->p < t->end) t->p++; /* booleans in lists take a byte */
+        else t->bad = true;
       } else {
         t_skip(t, et, depth + 1);
       }
@@ -138,9 +139,20 @@ static void t_skip(tr *t, int type, int depth) {
       break;
     }
     uint8_t kv = *t->p++;
+    if (n > (uint64_t)(t->end - t->p)) { /* every entry takes a byte at least */
+      t->bad = true;
+      break;
+    }
     for (uint64_t i = 0; i < n && !t->bad; i++) {
-      t_skip(t, kv >> 4, depth + 1);
-      t_skip(t, kv & 0x0f, depth + 1);
+      for (int k = 0; k < 2 && !t->bad; k++) {
+        int et = k ? kv & 0x0f : kv >> 4;
+        if (et == T_TRUE || et == T_FALSE) { /* booleans in maps take a byte, as in lists */
+          if (t->p < t->end) t->p++;
+          else t->bad = true;
+        } else {
+          t_skip(t, et, depth + 1);
+        }
+      }
     }
     break;
   }
