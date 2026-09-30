@@ -30,7 +30,7 @@ run() { # kind binary size clients
   local out
   if [[ -n $WARP ]]; then
     local w=(--host "127.0.0.1:$PORT" --access-key $AK --secret-key $SK --obj.size "$3" --concurrent "$4"
-      --duration "$DURATION" --no-color --noclear)
+      --duration "$DURATION" --no-color --noclear --benchdata "$W/warp")
     out=$( ("$WARP" put "${w[@]}" --bucket warp-put; "$WARP" get "${w[@]}" --bucket warp-get --objects 64) 2>&1 | python3 "$(dirname "$0")/warpfmt.py" --warp)
   else
     out=$("$S3BENCH" -endpoint "127.0.0.1:$PORT" -access $AK -secret $SK -size "$3" -concurrent "$4" -duration "$DURATION")

@@ -13,3 +13,6 @@ timeout-*
 /.conformance/
 /.deps/
 /*.log
+
+# warp result files
+warp-*.json.zst

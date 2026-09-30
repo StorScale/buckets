@@ -45,6 +45,7 @@ struct buckets_loop {
   } ticks[BUCKETS_LOOP_MAX_TICKS];
   size_t nticks;
   pthread_mutex_t post_mu;
+  bool post_wake_pending; /* the pipe already has a wake for the queue */
   post *post_head, *post_tail;
   volatile bool stopping;
 };
@@ -67,9 +68,10 @@ static watcher *get_watcher(buckets_loop *loop, int fd) {
 
 static void drain_wake_pipe(buckets_loop *loop, int fd, unsigned events, void *ud) {
   char tmp[64];
-  while (read(fd, tmp, sizeof(tmp)) > 0) {
+  while (read(fd, tmp, sizeof(tmp)) == (ssize_t)sizeof(tmp)) {
   }
   pthread_mutex_lock(&loop->post_mu);
+  loop->post_wake_pending = false; /* posts from here on wake the loop again */
   post *p = loop->post_head;
   loop->post_head = loop->post_tail = NULL;
   pthread_mutex_unlock(&loop->post_mu);
@@ -122,6 +124,7 @@ void buckets_loop_free(buckets_loop *loop) {
 
 #ifdef BUCKETS_USE_EPOLL
 static int backend_update(buckets_loop *loop, int fd, unsigned old_ev, unsigned new_ev, bool was_active) {
+  if (was_active && old_ev == new_ev) return 0; /* nothing to change: no syscall */
   struct epoll_event ev = {0};
   ev.data.fd = fd;
   if (new_ev & BUCKETS_EV_READ) ev.events |= EPOLLIN | EPOLLRDHUP;
@@ -196,8 +199,11 @@ void buckets_loop_post(buckets_loop *loop, buckets_tick_cb cb, void *ud) {
   if (loop->post_tail) loop->post_tail->next = p;
   else loop->post_head = p;
   loop->post_tail = p;
+  /* One wake per batch: posts made before the loop drains share it. */
+  bool wake = !loop->post_wake_pending;
+  loop->post_wake_pending = true;
   pthread_mutex_unlock(&loop->post_mu);
-  buckets_loop_wake(loop);
+  if (wake) buckets_loop_wake(loop);
 }
 
 void buckets_loop_stop(buckets_loop *loop) {
