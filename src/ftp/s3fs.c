@@ -205,12 +205,6 @@ bool buckets_fs_check_password(const char *user, const char *password, char *err
   return ok;
 }
 
-bool buckets_fs_check_pubkey(const char *user, const uint8_t *key, size_t keylen, char *err, size_t errlen) {
-  (void)user, (void)key, (void)keylen;
-  seterr(err, errlen, "public key authentication is not configured");
-  return false;
-}
-
 /* ---- sessions ---- */
 
 struct buckets_fs {
@@ -277,6 +271,8 @@ out:
   return cred;
 }
 
+static buckets_fs *fs_new(const char *ak, const char *sk, const char *token, const char *remote_ip);
+
 buckets_fs *buckets_fs_open(const char *user, const char *remote_ip, char *err, size_t errlen) {
   buckets_iam_ident *id = NULL;
   bool found = buckets_iam_get_key(g_s->iam, user, &id) == BUCKETS_IAM_KEY_OK && id;
@@ -296,11 +292,16 @@ buckets_fs *buckets_fs_open(const char *user, const char *remote_ip, char *err, 
     seterr(err, errlen, "Authentication failed, check your access credentials");
     return NULL;
   }
-  buckets_fs *fs = buckets_xcalloc(1, sizeof(*fs));
-  fs->ak = buckets_xstrdup(id->access_key);
-  fs->sk = buckets_xstrdup(id->secret_key);
-  fs->token = id->session_token && *id->session_token ? buckets_xstrdup(id->session_token) : NULL;
+  buckets_fs *fs = fs_new(id->access_key, id->secret_key, id->session_token, remote_ip);
   buckets_iam_ident_release(id);
+  return fs;
+}
+
+static buckets_fs *fs_new(const char *ak, const char *sk, const char *token, const char *remote_ip) {
+  buckets_fs *fs = buckets_xcalloc(1, sizeof(*fs));
+  fs->ak = buckets_xstrdup(ak);
+  fs->sk = buckets_xstrdup(sk);
+  fs->token = token && *token ? buckets_xstrdup(token) : NULL;
   snprintf(fs->fwd, sizeof(fs->fwd), "%s", remote_ip ? remote_ip : "");
   buckets_s3c_config cfg = {.endpoint = g_endpoint,
                             .secure = g_secure,
@@ -311,6 +312,158 @@ buckets_fs *buckets_fs_open(const char *user, const char *remote_ip, char *err, 
                             .tls = g_tls};
   fs->c = buckets_s3c_new(&cfg);
   return fs;
+}
+
+buckets_fs *buckets_fs_open_creds(const char *ak, const char *sk, const char *token, const char *remote_ip) {
+  return fs_new(ak, sk, token, remote_ip);
+}
+
+const char *buckets_fs_access_key(const buckets_fs *fs) { return fs->ak; }
+
+static void out_creds(const buckets_iam_ident *id, bool with_token, char **ak, char **sk, char **token) {
+  *ak = buckets_xstrdup(id->access_key);
+  *sk = buckets_xstrdup(id->secret_key);
+  *token = with_token && id->session_token && *id->session_token ? buckets_xstrdup(id->session_token) : NULL;
+}
+
+/* processLDAPAuthentication */
+static int ldap_login(const char *user, const buckets_fs_ssh_auth *a, char **ak, char **sk, char **token, char *err,
+                      size_t errlen) {
+  if (!a->password && !a->key_matches) return seterr(err, errlen, "Authentication failed, check your access credentials"), -1;
+  buckets_ldapidp *ldap = buckets_s3_ldap(g_s);
+  buckets_ldap_dnres dn = {0};
+  char **groups = NULL;
+  size_t ng = 0;
+  int rc = -1;
+  bool found;
+  if (a->password) {
+    buckets_iam_ident *sa = buckets_iam_get_ident(g_s->iam, user);
+    if (sa && buckets_iam_ident_is_svc(sa)) {
+      bool ok = strlen(sa->secret_key) == strlen(a->password) &&
+                buckets_ct_equal(sa->secret_key, a->password, strlen(a->password));
+      if (ok) out_creds(sa, false, ak, sk, token), rc = 0;
+      else seterr(err, errlen, "Authentication failed, check your access credentials");
+      buckets_iam_ident_release(sa);
+      buckets_ldapidp_release(ldap);
+      return rc;
+    }
+    buckets_iam_ident_release(sa);
+    found = buckets_ldapidp_bind(ldap, user, a->password, &dn, &groups, &ng, err, errlen);
+  } else {
+    found = buckets_ldapidp_lookup_user(ldap, user, &dn, &groups, &ng, err, errlen) == 1;
+  }
+  if (!found) goto out;
+  {
+    char *pol = buckets_iam_policy_db_get(g_s->iam, dn.norm_dn, groups, ng);
+    bool any = pol && *pol;
+    free(pol);
+    if (!any) {
+      seterr(err, errlen, "no policies present on this account");
+      goto out;
+    }
+  }
+  yyjson_mut_doc *claims = yyjson_mut_doc_new(NULL);
+  yyjson_mut_val *root = yyjson_mut_obj(claims);
+  yyjson_mut_doc_set_root(claims, root);
+  bool have_key = false;
+  for (size_t i = 0; i < dn.nattrs; i++) {
+    if (dn.attrs[i].nvalues != 1) continue;
+    const char *v = dn.attrs[i].values[0];
+    if (!strcmp(dn.attrs[i].name, "sshPublicKey") && !a->password) {
+      if (!a->key_matches(a->ud, v)) {
+        seterr(err, errlen, "Authentication failed, check your access credentials");
+        yyjson_mut_doc_free(claims);
+        goto out;
+      }
+      have_key = true;
+    }
+    char k[256];
+    snprintf(k, sizeof(k), "ldapAttrib_%s", dn.attrs[i].name);
+    yyjson_mut_obj_add(root, yyjson_mut_strcpy(claims, k), yyjson_mut_strcpy(claims, v));
+  }
+  if (!a->password && !have_key) {
+    seterr(err, errlen, "Authentication failed, check your access credentials");
+    yyjson_mut_doc_free(claims);
+    goto out;
+  }
+  long long dur = buckets_ldapidp_expiry(ldap, "");
+  if (dur < 0) {
+    seterr(err, errlen, "invalid token expiry");
+    yyjson_mut_doc_free(claims);
+    goto out;
+  }
+  yyjson_mut_obj_add_int(claims, root, "exp", (long long)time(NULL) + dur);
+  yyjson_mut_obj_add_strcpy(claims, root, "ldapUsername", user);
+  yyjson_mut_obj_add_strcpy(claims, root, "ldapUser", dn.norm_dn);
+  {
+    char *cj = yyjson_mut_write(claims, 0, NULL);
+    yyjson_mut_doc_free(claims);
+    char nak[21], nsk[41];
+    buckets_iam_generate_credentials(nak, nsk);
+    buckets_iam_ident *cred = NULL;
+    buckets_iam_err e = buckets_iam_set_temp_user(g_s->iam, nak, nsk, dn.norm_dn, (const char *const *)groups, ng,
+                                                  (buckets_iam_time){(long long)time(NULL) + dur, 0}, cj, NULL, &cred);
+    free(cj);
+    if (e) {
+      seterr(err, errlen, buckets_iam_strerror(e));
+      goto out;
+    }
+    buckets_sr_iam_sts(g_s->sr, cred->access_key, NULL);
+    out_creds(cred, true, ak, sk, token);
+    buckets_iam_ident_release(cred);
+    rc = 0;
+  }
+out:
+  buckets_ldap_strv_free(groups, ng);
+  buckets_ldap_dnres_free(&dn);
+  buckets_ldapidp_release(ldap);
+  return rc;
+}
+
+bool buckets_fs_ssh_login(const char *user, const buckets_fs_ssh_auth *a, char **ak, char **sk, char **token,
+                          char *err, size_t errlen) {
+  *ak = *sk = *token = NULL;
+  *err = '\0';
+  size_t n = strlen(user);
+  char *u = buckets_xstrdup(user);
+  bool svc = false;
+  if (n > 5 && !strcmp(user + n - 5, "=ldap")) {
+    u[n - 5] = '\0';
+    bool ok = false;
+    if (!ldap_on()) seterr(err, errlen, "ldap authentication is not enabled");
+    else ok = ldap_login(u, a, ak, sk, token, err, errlen) == 0;
+    free(u);
+    return ok;
+  }
+  if (n > 4 && !strcmp(user + n - 4, "=svc")) {
+    u[n - 4] = '\0';
+    svc = true;
+  }
+  if (!svc && ldap_on()) {
+    char e2[512];
+    if (ldap_login(u, a, ak, sk, token, e2, sizeof(e2)) == 0) {
+      free(u);
+      return true;
+    }
+  }
+  /* internalAuth */
+  buckets_iam_ident *id = NULL;
+  bool ok = false;
+  if (buckets_iam_get_key(g_s->iam, u, &id) != BUCKETS_IAM_KEY_OK || !id) {
+    seterr(err, errlen, "Specified user does not exist");
+  } else if (a->cert_trusted && !a->password) {
+    if (!a->cert_trusted(a->ud, u)) seterr(err, errlen, "Authentication failed, check your access credentials");
+    else ok = true;
+  } else if (buckets_iam_ident_is_temp(id) || !a->password || strlen(id->secret_key) != strlen(a->password) ||
+             !buckets_ct_equal(id->secret_key, a->password, strlen(a->password))) {
+    seterr(err, errlen, "Authentication failed, check your access credentials");
+  } else {
+    ok = true;
+  }
+  if (ok) out_creds(id, buckets_iam_ident_is_temp(id), ak, sk, token);
+  buckets_iam_ident_release(id);
+  free(u);
+  return ok;
 }
 
 void buckets_fs_close(buckets_fs *fs) {

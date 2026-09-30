@@ -34,15 +34,31 @@ void buckets_fs_init(struct buckets_s3_server *s, int port, bool secure);
  * LDAP bind whose user or groups have policies). false with err "" for a
  * wrong password; err set for a failure checking it. */
 bool buckets_fs_check_password(const char *user, const char *password, char *err, size_t errlen);
-/* The public key authentication of SFTP: a user whose ssh-public-keys
- * (IAM) or LDAP sshPublicKey attribute holds key (the wire form). */
-bool buckets_fs_check_pubkey(const char *user, const uint8_t *key, size_t keylen, char *err, size_t errlen);
+/* SFTP's authenticateSSHConnection: user may end in "=ldap" or "=svc";
+ * password, or a public key whose checks the SSH layer does (the LDAP
+ * user's sshPublicKey attribute; a certificate signed by the trusted user
+ * CA). On success the session's credentials (to free); err in Go's words. */
+typedef struct {
+  const char *password; /* NULL: public key authentication */
+  /* the presented key matches an authorized_keys line */
+  bool (*key_matches)(void *ud, const char *authorized_key);
+  /* a trusted-user-ca-key is configured (else NULL); the presented key is a
+   * certificate it signed, valid now for principal user */
+  bool (*cert_trusted)(void *ud, const char *user);
+  void *ud;
+} buckets_fs_ssh_auth;
+bool buckets_fs_ssh_login(const char *user, const buckets_fs_ssh_auth *a, char **ak, char **sk, char **token,
+                          char *err, size_t errlen);
 
 typedef struct buckets_fs buckets_fs;
 /* The session of a logged-in user (getMinIOClient). NULL with err set:
  * "Specified user does not exist", "Authentication failed, ..." */
 buckets_fs *buckets_fs_open(const char *user, const char *remote_ip, char *err, size_t errlen);
 void buckets_fs_close(buckets_fs *fs);
+/* A session with these credentials (SFTP: decided at login). */
+buckets_fs *buckets_fs_open_creds(const char *ak, const char *sk, const char *token, const char *remote_ip);
+/* The access key the session acts as. */
+const char *buckets_fs_access_key(const buckets_fs *fs);
 
 /* The operations, returning false with err in Go's words. */
 bool buckets_fs_stat(buckets_fs *fs, const char *path, buckets_fs_info *out, char *err, size_t errlen);

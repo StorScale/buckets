@@ -26,6 +26,7 @@
 #include "admin/admin.h"
 #include "ftp/ftp.h"
 #include "ftp/s3fs.h"
+#include "ftp/sftp.h"
 #include "admin/info.h"
 #include "dist/storage_server.h"
 #include "storage/remote.h"
@@ -134,6 +135,9 @@ static void usage(FILE *f) {
           "               then ~/.minio/certs); subdirectories add certificates chosen by SNI\n"
           "  --ftp:       serve FTP (MinIO's --ftp keys: address=[HOST]:PORT, passive-port-range=LO-HI,\n"
           "               tls-private-key=FILE, tls-public-cert=FILE, force-tls=BOOL); repeat per key\n"
+          "  --sftp:      serve SFTP (MinIO's --sftp keys: address, ssh-private-key=FILE (required),\n"
+          "               pub-key-algos, kex-algos, cipher-algos, mac-algos, trusted-user-ca-key=FILE,\n"
+          "               disable-password-auth=BOOL)\n"
           "\n"
           "Environment:\n"
           "  BUCKETS_ROOT_USER / MINIO_ROOT_USER          root access key (default minioadmin)\n"
@@ -562,8 +566,14 @@ int main(int argc, char **argv) {
   size_t ndrive_args = 0;
   char **ftp_args = buckets_xcalloc((size_t)argc, sizeof(char *));
   size_t nftp_args = 0;
+  char **sftp_args = buckets_xcalloc((size_t)argc, sizeof(char *));
+  size_t nsftp_args = 0;
   for (int i = 2; i < argc; i++) {
-    if (strncmp(argv[i], "--ftp=", 6) == 0) {
+    if (strncmp(argv[i], "--sftp=", 7) == 0) {
+      sftp_args[nsftp_args++] = argv[i] + 7;
+    } else if (strcmp(argv[i], "--sftp") == 0 && i + 1 < argc) {
+      sftp_args[nsftp_args++] = argv[++i];
+    } else if (strncmp(argv[i], "--ftp=", 6) == 0) {
       ftp_args[nftp_args++] = argv[i] + 6;
     } else if (strcmp(argv[i], "--ftp") == 0 && i + 1 < argc) {
       ftp_args[nftp_args++] = argv[++i];
@@ -835,6 +845,15 @@ int main(int argc, char **argv) {
     if (!buckets_ftp_parse(ftp_args, nftp_args, &fo, ferr, sizeof(ferr)) ||
         !buckets_ftp_start(&fo, tls != NULL, certs_dir, ferr, sizeof(ferr))) {
       buckets_log_error("unable to start FTP server: %s", ferr);
+      return 1;
+    }
+  }
+  if (nsftp_args) {
+    buckets_sftp_opts so;
+    char serr[1024];
+    if (!buckets_sftp_parse(sftp_args, nsftp_args, &so, serr, sizeof(serr)) ||
+        !buckets_sftp_start(&so, serr, sizeof(serr))) {
+      buckets_log_error("unable to start SFTP server: %s", serr);
       return 1;
     }
   }

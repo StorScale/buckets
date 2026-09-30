@@ -2814,7 +2814,16 @@ static void list_drive(buckets_drive *d, const char *bucket, const char *prefix,
       buckets_buf_free(&fo);
       buckets_buf_free(&meta);
     }
-    walk(&lc, base, *filter ? filter : NULL);
+    /* an object's directory holds its data, not keys: no walking into it
+     * (the prefix names an object, or a path below one) */
+    bool inside = false;
+    for (const char *q = base; !inside && (q = strchr(q, '/')) != NULL; q++) {
+      buckets_buf meta = BUCKETS_BUF_INIT;
+      buckets_buf_appendf(&meta, "%.*s/" XL_META, (int)(q - base), base);
+      inside = buckets_drive_stat(d, bucket, meta.data) == 1;
+      buckets_buf_free(&meta);
+    }
+    if (!inside) walk(&lc, base, *filter ? filter : NULL);
   }
   free(base);
   free(lc.last_prefix);

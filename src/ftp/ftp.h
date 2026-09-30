@@ -23,4 +23,9 @@ bool buckets_ftp_parse(char *const *args, size_t n, buckets_ftp_opts *o, char *e
  * certificate, used when --ftp gives none. */
 bool buckets_ftp_start(buckets_ftp_opts *o, bool s3_tls, const char *certs_dir, char *err, size_t errlen);
 
+/* Go's net.SplitHostPort (its error words), strconv.Atoi and ParseBool. */
+bool buckets_ftp_split_host_port(const char *a, char **host, char **port, char *err, size_t errlen);
+bool buckets_ftp_atoi(const char *s, int *out);
+bool buckets_ftp_parse_bool(const char *s, bool *out);
+
 #endif

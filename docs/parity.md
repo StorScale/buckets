@@ -288,9 +288,9 @@ ZSTD, LZ4, S2 and SNAPPY input compression, scan ranges and the event stream; ch
 snowball uploads, the Veeam SOS objects, inspect, speedtests, profiling, health info, top locks and
 bucket metadata export/import, each compared with MinIO.
 
-FTP (`--ftp`, `tests/integration/ftp.sh`).
+FTP (`--ftp`, `tests/integration/ftp.sh`) and SFTP (`--sftp`, `tests/integration/sftp.sh`).
 
-Open: KES/MinIO KMS backends, SFTP.
+Open: KES/MinIO KMS backends.
 
 Known deviations from MinIO, kept on purpose:
 - batch keyrotate keeps the version's modification time (MinIO's metadata-only copy sets it to now,

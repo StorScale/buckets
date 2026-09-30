@@ -96,3 +96,4 @@ list(TRANSFORM _s PREPEND ${lz4_SOURCE_DIR}/lib/)
 buckets_static_lib(buckets_lz4 ${_s})
 target_include_directories(buckets_lz4 SYSTEM PUBLIC ${lz4_SOURCE_DIR}/lib)
 target_compile_definitions(buckets_lz4 PRIVATE XXH_NAMESPACE=LZ4_)
+

@@ -171,6 +171,8 @@ add_library(buckets STATIC
   admin/rtmetrics.c
   ftp/s3fs.c
   ftp/ftp.c
+  ftp/sftp.c
+  ftp/sshcert.c
   admin/config.c
   admin/iamxfer.c
   admin/bucket.c
@@ -200,7 +202,7 @@ if(RESOLV_LIB)
   target_link_libraries(buckets PUBLIC ${RESOLV_LIB})
 endif()
 target_link_libraries(buckets PUBLIC llhttp::llhttp yyjson libdeflate::libdeflate_static buckets_libyaml
-  buckets_zlib buckets_bzip2 buckets_zstd buckets_lz4 OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
+  buckets_zlib buckets_bzip2 buckets_zstd buckets_lz4 buckets_libssh OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
 buckets_warnings(buckets)
 
 add_executable(bucketsd cmd/bucketsd/main.c)

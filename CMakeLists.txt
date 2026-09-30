@@ -21,6 +21,7 @@ include(Warnings)
 include(Sanitizers)
 include(Dependencies)
 include(OpenSSL)
+include(LibSSH)
 
 if(BUCKETS_BUILD_TESTS)
   enable_testing() # before any add_test, in any directory

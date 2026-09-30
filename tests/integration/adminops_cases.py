@@ -562,6 +562,8 @@ def shape(v, path=""):
                 continue  # MinIO's legacy subsystems
             if path == ".minio.config.config":
                 continue  # the subsystems themselves (compared by the config tests)
+            if k in ("totalWaiting", "totalErrorsAvailability", "totalErrorsTimeout"):
+                continue  # only while a drive call is in flight or failing
             out.append((k, shape(x, p)))
         return out
     if isinstance(v, list):

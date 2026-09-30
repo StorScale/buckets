@@ -37,7 +37,7 @@
 static char *xdup(const char *s) { return s ? buckets_xstrdup(s) : NULL; }
 
 /* net.SplitHostPort, for the errors Go gives */
-static bool split_host_port(const char *a, char **host, char **port, char *err, size_t errlen) {
+bool buckets_ftp_split_host_port(const char *a, char **host, char **port, char *err, size_t errlen) {
   const char *colon = strrchr(a, ':');
   if (!colon) {
     snprintf(err, errlen, "address %s: missing port in address", a);
@@ -61,7 +61,7 @@ static bool split_host_port(const char *a, char **host, char **port, char *err, 
   return true;
 }
 
-static bool go_atoi(const char *s, int *out) {
+bool buckets_ftp_atoi(const char *s, int *out) {
   char *end;
   errno = 0;
   long v = strtol(s, &end, 10);
@@ -70,7 +70,7 @@ static bool go_atoi(const char *s, int *out) {
   return true;
 }
 
-static bool go_parse_bool(const char *s, bool *out) {
+bool buckets_ftp_parse_bool(const char *s, bool *out) {
   static const char *const t[] = {"1", "t", "T", "TRUE", "true", "True"};
   static const char *const f[] = {"0", "f", "F", "FALSE", "false", "False"};
   for (int i = 0; i < 6; i++) {
@@ -94,10 +94,10 @@ bool buckets_ftp_parse(char *const *args, size_t n, buckets_ftp_opts *o, char *e
     bool ok = true;
     if (!strcmp(key, "address")) {
       char *host = NULL, *port = NULL;
-      if (!split_host_port(val, &host, &port, e2, sizeof(e2))) {
+      if (!buckets_ftp_split_host_port(val, &host, &port, e2, sizeof(e2))) {
         snprintf(err, errlen, "invalid arguments passed to --ftp=%s (%s)", args[i], e2);
         ok = false;
-      } else if (!go_atoi(port, &o->port)) {
+      } else if (!buckets_ftp_atoi(port, &o->port)) {
         snprintf(err, errlen, "invalid arguments passed to --ftp=%s (strconv.Atoi: parsing \"%s\": invalid syntax)",
                  args[i], port);
         ok = false;
@@ -121,7 +121,7 @@ bool buckets_ftp_parse(char *const *args, size_t n, buckets_ftp_opts *o, char *e
       free(o->cert);
       o->cert = xdup(val);
     } else if (!strcmp(key, "force-tls")) {
-      if (!go_parse_bool(val, &o->force_tls)) {
+      if (!buckets_ftp_parse_bool(val, &o->force_tls)) {
         snprintf(err, errlen, "invalid arguments passed to --ftp=%s (strconv.ParseBool: parsing \"%s\": invalid syntax)",
                  args[i], val);
         ok = false;
@@ -652,7 +652,7 @@ static void c_eprt(session *s, const char *param) {
     }
   }
   int af, port;
-  if (np < 4 || !go_atoi(parts[1], &af) || (af != 1 && af != 2) || !go_atoi(parts[3], &port)) {
+  if (np < 4 || !buckets_ftp_atoi(parts[1], &af) || (af != 1 && af != 2) || !buckets_ftp_atoi(parts[3], &port)) {
     reply(s, 522, "Network protocol not supported, use (1,2)");
   } else if (!active_open(s, parts[2], port)) {
     reply(s, 425, "Data connection failed");
@@ -672,10 +672,10 @@ static void c_lprt(session *s, const char *param) {
     parts[np++] = tok;
   }
   int af, al, pl;
-  if (!go_atoi(parts[0], &af) || af != 4) reply(s, 522, "Network protocol not supported, use 4");
-  else if (np < 2 || !go_atoi(parts[1], &al)) reply(s, 522, "Network protocol not supported, use 4");
+  if (!buckets_ftp_atoi(parts[0], &af) || af != 4) reply(s, 522, "Network protocol not supported, use 4");
+  else if (np < 2 || !buckets_ftp_atoi(parts[1], &al)) reply(s, 522, "Network protocol not supported, use 4");
   else if (al != 4) reply(s, 522, "Network IP length not supported, use 4");
-  else if (np < 7 || !go_atoi(parts[6], &pl)) reply(s, 522, "Network protocol not supported, use 4");
+  else if (np < 7 || !buckets_ftp_atoi(parts[6], &pl)) reply(s, 522, "Network protocol not supported, use 4");
   else {
     char host[64];
     snprintf(host, sizeof(host), "%s.%s.%s.%s", parts[2], parts[3], parts[4], parts[5]);
