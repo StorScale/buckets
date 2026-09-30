@@ -16,6 +16,8 @@ All notable changes to this project are documented here. The format follows
 ### Changed
 - The HTTP server runs several event loops (CPUs / 2 by default) and deals connections across them; one loop saturated on large concurrent GETs.
 - GET resolves an object's metadata once instead of twice (stat, then open).
+- Drive directories are created leaf first, parents only when missing (MinIO's osMkdirAll): a PUT made 20 mkdir calls per drive, now 4.
+- Writing an object's xl.meta no longer fsyncs its directory, which MinIO does not do either; format.json still does.
 - The worker pool wakes only as many threads as a parallel batch has tasks, and each waiting caller has its own condition variable, instead of waking every idle worker and every waiter (lock contention under concurrent GETs).
 
 ### Fixed

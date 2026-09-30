@@ -60,20 +60,18 @@ static char *path_join(const char *a, const char *b) {
   return p.data;
 }
 
+/* The leaf first, its parents only when missing (MinIO's osMkdirAll): an
+ * object's directory usually needs one mkdir, not one per path element. */
 static int mkdir_p(const char *path) {
-  char *tmp = buckets_xstrdup(path);
-  for (char *s = tmp + 1; *s; s++) {
-    if (*s != '/') continue;
-    *s = '\0';
-    if (buckets_os_mkdir(tmp, 0755) != 0 && errno != EEXIST) {
-      free(tmp);
-      return -1;
-    }
-    *s = '/';
-  }
-  int rc = (buckets_os_mkdir(tmp, 0755) == 0 || errno == EEXIST) ? 0 : -1;
-  free(tmp);
-  return rc;
+  if (buckets_os_mkdir(path, 0755) == 0 || errno == EEXIST) return 0;
+  if (errno != ENOENT) return -1;
+  const char *slash = strrchr(path, '/');
+  if (!slash || slash == path) return -1;
+  char *parent = buckets_xstrndup(path, (size_t)(slash - path));
+  int rc = mkdir_p(parent);
+  free(parent);
+  if (rc != 0) return -1;
+  return buckets_os_mkdir(path, 0755) == 0 || errno == EEXIST ? 0 : -1;
 }
 
 /* Data durability for file contents: fdatasync where the platform has it
@@ -88,9 +86,11 @@ static int fsync_dir(const char *dir) {
   return rc;
 }
 
-/* Writes data to <dir>/<name> atomically via a temp file + rename + fsync. */
+/* Writes data to <dir>/<name> atomically via a temp file (synced) and a
+ * rename. sync_dir also syncs the directory: format.json. Object metadata
+ * does without, as MinIO's writes of xl.meta do. */
 static buckets_drive_err write_atomic(buckets_drive *d, const char *dir, const char *name, const char *data,
-                                      size_t n) {
+                                      size_t n, bool sync_dir) {
   char tmpname[BUCKETS_UUID_STR_LEN + 1];
   buckets_uuid_v4(tmpname);
   char *tmpdir = path_join(d->root, BUCKETS_META_BUCKET "/tmp");
@@ -116,7 +116,7 @@ static buckets_drive_err write_atomic(buckets_drive *d, const char *dir, const c
   if (err == BUCKETS_DRIVE_OK && data_sync(fd) != 0) err = BUCKETS_DRIVE_ERR_IO;
   close(fd);
   if (err == BUCKETS_DRIVE_OK && buckets_os_rename(tmp, dst) != 0) err = from_errno(errno);
-  if (err == BUCKETS_DRIVE_OK) fsync_dir(dir);
+  if (err == BUCKETS_DRIVE_OK && sync_dir) fsync_dir(dir);
   if (err != BUCKETS_DRIVE_OK) buckets_os_unlink(tmp);
 out:
   free(tmpdir);
@@ -145,7 +145,7 @@ static buckets_drive_err write_format(buckets_drive *d) {
   yyjson_mut_doc_free(doc);
   if (!json) return BUCKETS_DRIVE_ERR_IO;
   char *meta = path_join(d->root, BUCKETS_META_BUCKET);
-  buckets_drive_err err = write_atomic(d, meta, "format.json", json, len);
+  buckets_drive_err err = write_atomic(d, meta, "format.json", json, len, true);
   free(meta);
   free(json);
   return err;
@@ -376,7 +376,7 @@ static buckets_drive_err drive_write_all(buckets_drive *d, const char *vol, cons
   char *slash = strrchr(dir, '/');
   if (slash) *slash = '\0';
   const char *name = slash ? slash + 1 : dst;
-  buckets_drive_err err = write_atomic(d, dir, name, data, n);
+  buckets_drive_err err = write_atomic(d, dir, name, data, n, false);
   free(dir);
   free(dst);
   return err;
@@ -604,7 +604,7 @@ static buckets_drive_err drive_rename_data(buckets_drive *d, const char *src_vol
     buckets_buf_free(&from);
     buckets_buf_free(&to);
   }
-  if (!err) err = write_atomic(d, dst, "xl.meta", xlmeta, xlmeta_len);
+  if (!err) err = write_atomic(d, dst, "xl.meta", xlmeta, xlmeta_len, false);
   free(dst);
   return err;
 }
