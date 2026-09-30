@@ -12,10 +12,13 @@ COPY . .
 RUN cmake -S . -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release \
       -DBUCKETS_BUILD_TESTS=OFF -DBUCKETS_BUILD_FUZZ=OFF \
  && ninja -C /build bucketsd \
- && strip /build/src/bucketsd
+ && strip /build/src/bucketsd \
+ && mkdir -p /data
 
 FROM gcr.io/distroless/cc-debian13:nonroot
 COPY --from=build /build/src/bucketsd /usr/local/bin/bucketsd
+# owned by nonroot, so a volume Docker creates for it is writable
+COPY --from=build --chown=65532:65532 /data /data
 EXPOSE 9000
 VOLUME ["/data"]
 USER nonroot:nonroot

@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-30
+
+Phase 10: hardening. Against MinIO under warp (same machine and drives), every PUT and GET case is ahead except 10 MiB GETs at 16 clients (−8.5%), inside the 10% gate. Fuzzing ran all targets under libFuzzer with coverage. Also: a Helm chart for the operator.
+
 ### Added
 - `tests/bench/warp.sh` and `tests/bench/s3bench`: warp-style concurrent PUT/GET benchmarks of bucketsd against MinIO on the same drives (`docs/performance.md`); with `WARP` set it drives MinIO's warp itself.
 - A Helm chart for the operator (`operator/helm/buckets-operator`): CRDs, RBAC (a Role when `watchNamespace` is set, else a ClusterRole), the leader-election Role, and the Deployment; ctest checks that its CRDs match `operator/deploy/crds`.
@@ -27,6 +31,7 @@ All notable changes to this project are documented here. The format follows
 - S3 Select: expressions nested more than 127 levels deep overflowed a worker's stack; they now fail with ParseSelectFailure. Found by fuzzing.
 - S3 Select on Parquet: a column chunk may claim at most 4096 values per byte and a page at most 256 MiB uncompressed, and a v2 page's level lengths must fit its uncompressed size, so a small file can no longer demand gigabytes. Found by fuzzing.
 - S3 Select on Parquet: a repeated schema name or list field in the footer leaked, and list lengths are checked against the bytes left, so a small footer can no longer claim millions of row groups or columns; a footer map of booleans claiming 2^64 entries no longer spins forever. Found by fuzzing.
+- The bucketsd image ships /data owned by its nonroot user, so `docker run` without a writable host directory no longer finds no drives.
 - Linux builds failed to link since 0.9.0 (libm was not linked; macOS includes it), which broke the container images.
 - libssh's one-time build failed where OpenSSL has no static libraries (Debian); it now builds against the very OpenSSL libraries Buckets links.
 - Worker threads get 8 MiB stacks everywhere (macOS gave 512 KiB).
