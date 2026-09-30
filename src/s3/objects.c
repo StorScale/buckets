@@ -1586,7 +1586,17 @@ static bool proxy_to_target(s3_ctx *c, const char *version, bool head, buckets_s
   return true;
 }
 
+static void get_object_impl(s3_ctx *c, bool head, buckets_obj_reader **lr);
+
+/* GetObject / HeadObject: *lr is the looked-up reader until the response
+ * takes it; whatever is left is freed (with its read lock) here. */
 static void get_object(s3_ctx *c, bool head) {
+  buckets_obj_reader *lr = NULL;
+  get_object_impl(c, head, &lr);
+  if (lr) buckets_obj_reader_free(lr);
+}
+
+static void get_object_impl(s3_ctx *c, bool head, buckets_obj_reader **lr) {
   /* "If SSE-S3 or SSE-KMS present -> AWS fails with undefined error" */
   if (buckets_s3_sse_s3_or_kms_requested(c)) {
     buckets_s3_write_error(c, BUCKETS_ERR_BAD_REQUEST);
@@ -1636,7 +1646,7 @@ static void get_object(s3_ctx *c, bool head) {
     buckets_xl_kv_set(&oi.meta, &oi.nmeta, "content-type", "application/xml", 15);
     err = BUCKETS_OBJ_OK;
   } else {
-    err = buckets_obj_stat(c->s->layer, c->bucket, c->object, version, &oi);
+    err = buckets_obj_lookup(c->s->layer, c->bucket, c->object, version, lr, &oi);
   }
   if ((err == BUCKETS_OBJ_ERR_NO_SUCH_KEY || err == BUCKETS_OBJ_ERR_NO_SUCH_VERSION ||
        err == BUCKETS_OBJ_ERR_READ_QUORUM) &&
@@ -1747,7 +1757,6 @@ static void get_object(s3_ctx *c, bool head) {
     if (!head) buckets_buf_append(&c->resp->body, sos.data + off, (size_t)len);
     buckets_buf_free(&sos);
   } else if (!head) {
-    buckets_object_info oi2;
     int64_t roff = off, rlen = len;
     buckets_sse_range rg;
     buckets_comp_range crg;
@@ -1762,13 +1771,14 @@ static void get_object(s3_ctx *c, bool head) {
       oi.size = plain;
       roff = rg.enc_off, rlen = rg.enc_len;
     }
-    err = buckets_obj_open(c->s->layer, c->bucket, c->object, version, roff, rlen, &r, &oi2);
+    err = *lr ? buckets_obj_reader_position(*lr, roff, rlen) : BUCKETS_OBJ_ERR_NO_SUCH_KEY;
     if (err) {
       buckets_object_info_free(&oi);
       buckets_s3_write_error(c, buckets_s3_obj_error(err));
       return;
     }
-    buckets_object_info_free(&oi2);
+    r = *lr;
+    *lr = NULL;
     if (compressed) {
       cr = buckets_comp_reader_new(&oi, stored_size, have_key ? key : NULL, &crg, len, (buckets_read_fn)reader_source, r,
                                    reader_free);

@@ -1,0 +1,43 @@
+# Two replicas: one leader (a Lease in the release namespace), one standby.
+replicaCount: 2
+
+image:
+  repository: ghcr.io/buckets-io/buckets-operator
+  tag: "" # defaults to the chart's appVersion
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# Watch BucketsClusters in one namespace only (RBAC then becomes a Role
+# there instead of a ClusterRole). Empty: all namespaces.
+watchNamespace: ""
+
+logLevel: info # debug|info|warn|error
+
+serviceAccount:
+  create: true
+  name: "" # defaults to the release's full name
+  annotations: {}
+
+rbac:
+  create: true
+
+resources:
+  requests: {cpu: 50m, memory: 32Mi}
+  limits: {memory: 128Mi}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  seccompProfile: {type: RuntimeDefault}
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities: {drop: [ALL]}
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+priorityClassName: ""
+extraEnv: []

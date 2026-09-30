@@ -119,6 +119,10 @@ typedef struct {
    * as they arrive (body_len -1; read until buckets_http_body_read returns
    * 0) instead of spooled whole (the network speedtests' endless bodies). */
   bool (*stream_chunked)(buckets_str path);
+  /* Loop threads moving connection bytes, the caller's included (0 or 1:
+   * the caller's only). Handlers run inline (no workers) must then be
+   * thread-safe. */
+  int reactors;
 } buckets_http_config;
 
 typedef struct buckets_http_server buckets_http_server;

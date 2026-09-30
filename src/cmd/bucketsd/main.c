@@ -147,6 +147,7 @@ static void usage(FILE *f) {
           "  *_ROOT_USER_FILE / *_ROOT_PASSWORD_FILE      read the root credentials from files\n"
           "  BUCKETS_LOG_LEVEL                            debug|info|warn|error\n"
           "  BUCKETS_API_THREADS                          request handler threads (default: 2 x CPUs, min 8)\n"
+          "  BUCKETS_NET_THREADS                          network loop threads (default: CPUs / 2, max 16)\n"
           "  BUCKETS_IO_THREADS                           drive I/O threads (default: set size + 2)\n");
 }
 
@@ -735,6 +736,11 @@ int main(int argc, char **argv) {
   buckets_pool *api_pool = napi > 0 ? buckets_pool_new((int)BUCKETS_MIN(napi, 4096L)) : NULL;
   s3.requests_max = napi > 0 ? (int)BUCKETS_MIN(napi, 4096L) : 0; /* X-Ratelimit-Limit */
   hcfg.workers = api_pool;
+  /* Loop threads moving the bytes (one saturates on large GETs). Inline
+   * handlers (BUCKETS_API_THREADS=0) keep the single loop. */
+  const char *nett = getenv("BUCKETS_NET_THREADS");
+  long nnet = nett ? strtol(nett, NULL, 10) : BUCKETS_MIN(16L, BUCKETS_MAX(1L, ncpu / 2));
+  hcfg.reactors = api_pool ? (int)BUCKETS_MIN(BUCKETS_MAX(nnet, 1L), 256L) : 1;
   /* The admin API and health probes get their own workers: a frozen S3 API
    * (mc admin service freeze) parks its requests, which must not block the
    * unfreeze or the kubelet's probes. */

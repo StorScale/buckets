@@ -1117,6 +1117,7 @@ struct buckets_obj_reader {
   buckets_drive_file *fh[MAX_SET]; /* open part file per drive */
   int fh_part[MAX_SET];            /* the part number fh[i] has open */
   /* a transitioned version: its bytes come from the remote tier */
+  char *tier, *tier_obj, *tier_ver; /* lookup: opened once positioned */
   void *remote;
   long (*remote_read)(void *, void *, size_t);
   void (*remote_free)(void *);
@@ -1141,6 +1142,9 @@ void buckets_obj_reader_free(buckets_obj_reader *r) {
   }
 
   free(r->parts);
+  free(r->tier);
+  free(r->tier_obj);
+  free(r->tier_ver);
   free(r->bucket);
   free(r->object);
   free(r->op);
@@ -1505,6 +1509,76 @@ buckets_obj_err buckets_ep_open(buckets_epool *L, const char *bucket, const char
    * itself) never blocks that write's commit. */
   if ((*out)->remaining > 0) (*out)->lk = lk;
   else buckets_nslock_unlock(lk);
+  return BUCKETS_OBJ_OK;
+}
+
+/* GetObjectNInfo in two steps: the metadata is read once, under a read lock
+ * the reader keeps, and the reader is positioned afterwards. */
+buckets_obj_err buckets_ep_lookup(buckets_epool *L, const char *bucket, const char *object, const char *version_id,
+                                   buckets_obj_reader **out, buckets_object_info *info) {
+  *out = NULL;
+  buckets_nslock_entry *lk = lock_ns(L, bucket, object, false);
+  if (!lk) return BUCKETS_OBJ_ERR_TIMEOUT;
+  buckets_eset *s;
+  dmeta m[MAX_SET];
+  long vidx[MAX_SET];
+  buckets_xl_object o;
+  buckets_obj_err err = resolve(L, bucket, object, version_id, &s, m, vidx, &o);
+  if (err) {
+    buckets_nslock_unlock(lk);
+    return err;
+  }
+  fill_info(info, object, &o);
+  fill_position(info, m, vidx, s->n);
+  if (o.type != BUCKETS_XL_TYPE_DELETE) { /* a delete marker has nothing to read */
+    buckets_obj_reader *r = reader_new(L, s, bucket, object, m, vidx, &o);
+    if (buckets_xl_transitioned(&o) && !buckets_xl_restored_on_disk(&o)) {
+      const buckets_xl_kv *tier = buckets_xl_kv_get(o.meta_sys, o.nmeta_sys, BUCKETS_XL_META_TIER_NAME);
+      const buckets_xl_kv *name = buckets_xl_kv_get(o.meta_sys, o.nmeta_sys, BUCKETS_XL_META_TIER_OBJECT);
+      const buckets_xl_kv *rv = buckets_xl_kv_get(o.meta_sys, o.nmeta_sys, BUCKETS_XL_META_TIER_VERSION);
+      r->tier = tier ? buckets_xstrndup((const char *)tier->value, tier->value_len) : buckets_xstrdup("");
+      r->tier_obj = name ? buckets_xstrndup((const char *)name->value, name->value_len) : buckets_xstrdup("");
+      r->tier_ver = rv ? buckets_xstrndup((const char *)rv->value, rv->value_len) : buckets_xstrdup("");
+    }
+    r->lk = lk;
+    lk = NULL;
+    *out = r;
+  }
+  buckets_xl_object_free(&o);
+  free_metas(m, s->n);
+  buckets_nslock_unlock(lk);
+  return BUCKETS_OBJ_OK;
+}
+
+buckets_obj_err buckets_obj_reader_position(buckets_obj_reader *r, int64_t offset, int64_t length) {
+  int64_t len = offset >= r->total_size ? 0 : BUCKETS_MIN(length, r->total_size - offset);
+  if (r->tier) { /* getTransitionedObjectReader */
+    buckets_epool *L = r->L;
+    bool opened = len == 0 || (L->top->tier_open && *r->tier && *r->tier_obj &&
+                               L->top->tier_open(L->top->tier_ud, r->tier, r->tier_obj, r->tier_ver, offset, len,
+                                                 &r->remote_read, &r->remote_free, &r->remote));
+    if (!opened) return BUCKETS_OBJ_ERR_TIER;
+    r->remaining = len;
+    if (!len) buckets_nslock_unlock(r->lk), r->lk = NULL;
+    return BUCKETS_OBJ_OK;
+  }
+  int64_t off = offset;
+  while (r->part < r->nparts && off >= r->parts[r->part].size && r->parts[r->part].size > 0) {
+    off -= r->parts[r->part].size;
+    r->part++;
+  }
+  r->part_off = off;
+  r->remaining = len;
+  while (r->part < r->nparts && r->part_off >= r->parts[r->part].size && r->remaining > 0) {
+    r->part++;
+    r->part_off = 0;
+  }
+  if (r->remaining > 0 && (r->part >= r->nparts || !next_block(r, r->part_off / BUCKETS_BLOCK_SIZE))) {
+    buckets_log_error("cannot read %s/%s: fewer than %d intact shards", r->bucket, r->object, r->data);
+    r->degraded = true;
+    return BUCKETS_OBJ_ERR_READ_QUORUM;
+  }
+  if (r->remaining == 0) buckets_nslock_unlock(r->lk), r->lk = NULL;
   return BUCKETS_OBJ_OK;
 }
 

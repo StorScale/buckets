@@ -1,0 +1,10 @@
+apiVersion: v2
+name: buckets-operator
+description: "The Buckets operator: BucketsCluster, BucketsUser, BucketsPolicy and Bucket resources on Kubernetes."
+type: application
+version: 0.10.0
+appVersion: "0.10.0"
+annotations:
+  licenses: AGPL-3.0-or-later
+keywords: [s3, object-storage, buckets, operator]
+home: https://github.com/buckets-io/buckets

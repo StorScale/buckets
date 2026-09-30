@@ -442,6 +442,18 @@ buckets_obj_err buckets_obj_open(buckets_objlayer *L, const char *bucket, const 
   return buckets_ep_open(L->pools[l.pool], bucket, object, version_id, offset, length, out, info);
 }
 
+buckets_obj_err buckets_obj_lookup(buckets_objlayer *L, const char *bucket, const char *object, const char *version_id,
+                                   buckets_obj_reader **out, buckets_object_info *info) {
+  if (L->npools == 1) {
+    audit_op(L, "GetObject", bucket, object, 0);
+    return buckets_ep_lookup(L->pools[0], bucket, object, version_id, out, info);
+  }
+  lookup l = find_pool(L, bucket, object, version_id);
+  if (l.pool < 0 || l.err) return l.err;
+  audit_op(L, "GetObject", bucket, object, l.pool);
+  return buckets_ep_lookup(L->pools[l.pool], bucket, object, version_id, out, info);
+}
+
 /* Deletes from every pool holding the object, so a duplicate left by racing
  * writers to different pools cannot resurface. */
 buckets_obj_err buckets_obj_delete(buckets_objlayer *L, const char *bucket, const char *object, const char *version_id) {

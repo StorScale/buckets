@@ -1,0 +1,9 @@
+The Buckets operator is running in {{ .Release.Namespace }}{{ if .Values.watchNamespace }}, watching namespace {{ .Values.watchNamespace }}{{ else }}, watching all namespaces{{ end }}.
+
+Create a cluster (see operator/examples in the Buckets repository):
+
+  kubectl apply -f bucketscluster.yaml
+  kubectl get bucketsclusters -w
+
+CRDs in the chart's crds/ directory are installed on first install only;
+upgrade them with: kubectl apply -f <chart>/crds/

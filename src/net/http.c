@@ -9,6 +9,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -79,22 +80,33 @@ typedef struct conn {
   bool dead;         /* failed while a handler ran: close once it returns */
   bool write_wants_read; /* TLS: a send is blocked until the socket is readable */
   bool read_wants_write; /* TLS: a receive is blocked until it is writable */
+  struct reactor *r; /* the loop thread that owns it */
   time_t last_active;
   time_t last_write; /* the last time response bytes left, or a write began */
   char remote[INET6_ADDRSTRLEN + 8];
 } conn;
 
-struct buckets_http_server {
+/* A loop thread and the connections it owns. The first is the caller's
+ * loop, which also accepts; accepted connections are dealt round-robin. */
+typedef struct reactor {
+  buckets_http_server *srv;
   buckets_loop *loop;
+  pthread_t thread;
+  bool started;
+  conn *conns;
+} reactor;
+
+struct buckets_http_server {
   buckets_http_config cfg;
   buckets_http_handler handler;
   void *ud;
   int listen_fd;
   int port;
   llhttp_settings_t settings;
-  conn *conns;
-  size_t nconns;
-  bool shutting_down;
+  reactor *rs;
+  size_t nrs, next_rs;
+  atomic_size_t nconns;
+  atomic_bool shutting_down;
   unsigned ticks;
 };
 
@@ -333,24 +345,24 @@ static void stream_end(conn *c) {
 }
 
 static void conn_close(conn *c) {
-  buckets_http_server *srv = c->srv;
+  reactor *r = c->r;
   if (c->fill_inflight) { /* a worker is still reading the stream: close when it is back */
     c->close_pending = true;
-    buckets_loop_unwatch(srv->loop, c->fd);
+    buckets_loop_unwatch(r->loop, c->fd);
     return;
   }
   stream_end(c);
   if (c->body_fd >= 0) close(c->body_fd);
-  buckets_loop_unwatch(srv->loop, c->fd);
+  buckets_loop_unwatch(r->loop, c->fd);
   buckets_tls_conn_free(c->tls);
   buckets_buf_free(&c->peer_certs);
   c->npeer_certs = 0;
   c->peer_loaded = false;
   close(c->fd);
   if (c->prev) c->prev->next = c->next;
-  else srv->conns = c->next;
+  else r->conns = c->next;
   if (c->next) c->next->prev = c->prev;
-  srv->nconns--;
+  atomic_fetch_sub(&c->srv->nconns, 1);
   buckets_buf_free(&c->in);
   buckets_buf_free(&c->out);
   buckets_buf_free(&c->pre);
@@ -445,7 +457,7 @@ static bool conn_flush(conn *c) {
         }
         if (!c->fill_inflight) start_fill(c);
         c->waiting_fill = true;
-        buckets_loop_watch(c->srv->loop, c->fd, 0, conn_io, c);
+        buckets_loop_watch(c->r->loop, c->fd, 0, conn_io, c);
         return true;
       }
       int r = take_chunk(c, pull_stream(c, &c->out));
@@ -461,7 +473,7 @@ static bool conn_flush(conn *c) {
     }
     if (n == BUCKETS_TLS_WANT_WRITE || n == BUCKETS_TLS_WANT_READ) {
       c->write_wants_read = n == BUCKETS_TLS_WANT_READ;
-      buckets_loop_watch(c->srv->loop, c->fd, c->write_wants_read ? BUCKETS_EV_READ : BUCKETS_EV_WRITE, conn_io, c);
+      buckets_loop_watch(c->r->loop, c->fd, c->write_wants_read ? BUCKETS_EV_READ : BUCKETS_EV_WRITE, conn_io, c);
       return true;
     }
     conn_close(c);
@@ -474,7 +486,7 @@ static bool conn_flush(conn *c) {
     return false;
   }
   /* After EOF there is nothing left to read; don't poll a readable-forever fd. */
-  buckets_loop_watch(c->srv->loop, c->fd, c->peer_eof ? 0 : BUCKETS_EV_READ, conn_io, c);
+  buckets_loop_watch(c->r->loop, c->fd, c->peer_eof ? 0 : BUCKETS_EV_READ, conn_io, c);
   return true;
 }
 
@@ -541,7 +553,7 @@ static void split_target(buckets_str target, buckets_str *path, buckets_str *que
 
 static void set_busy(conn *c) {
   c->busy = true;
-  buckets_loop_unwatch(c->srv->loop, c->fd); /* even HUP/ERR: nothing may close it now */
+  buckets_loop_unwatch(c->r->loop, c->fd); /* even HUP/ERR: nothing may close it now */
 }
 
 /* Back on the loop thread after a worker finished: resume sending, then
@@ -576,7 +588,7 @@ static void fill_task(void *ud, size_t i) {
   conn *c = ud;
   (void)i;
   c->fill_got = pull_stream(c, &c->pre);
-  buckets_loop_post(c->srv->loop, fill_done, c);
+  buckets_loop_post(c->r->loop, fill_done, c);
 }
 
 /* Starts filling `pre` with the next chunk on a worker. */
@@ -648,9 +660,9 @@ static void job_done(buckets_loop *loop, void *ud) {
 static void job_task(void *ud, size_t i) {
   job *j = ud;
   (void)i;
-  buckets_http_server *srv = j->c->srv;
+  reactor *r = j->c->r;
   j->handler(&j->req, &j->resp, j->ud);
-  buckets_loop_post(srv->loop, job_done, j);
+  buckets_loop_post(r->loop, job_done, j);
 }
 
 /* streamed: the body is still arriving (c->pipe); the loop keeps reading. */
@@ -729,7 +741,7 @@ static void pipe_resume_cb(buckets_loop *loop, void *ud) {
   if (!c->read_paused || c->busy) return;
   c->read_paused = false;
   llhttp_resume(&c->parser);
-  buckets_loop_watch(c->srv->loop, c->fd, BUCKETS_EV_READ, conn_io, c);
+  buckets_loop_watch(c->r->loop, c->fd, BUCKETS_EV_READ, conn_io, c);
   if (conn_process(c)) drain_pending(c);
 }
 
@@ -749,7 +761,7 @@ static bool conn_process(conn *c) {
       if (c->backpressure) { /* the pipe is full: stop until the handler drains it */
         c->backpressure = false;
         c->read_paused = true;
-        buckets_loop_watch(c->srv->loop, c->fd, 0, conn_io, c);
+        buckets_loop_watch(c->r->loop, c->fd, 0, conn_io, c);
         return true;
       }
       if (c->pipe) { /* a streamed body is complete; its handler is running */
@@ -807,7 +819,7 @@ static void conn_read(conn *c) {
     if (n == BUCKETS_TLS_WANT_READ) break;
     if (n == BUCKETS_TLS_WANT_WRITE) { /* TLS handshake output is blocked */
       c->read_wants_write = true;
-      buckets_loop_watch(c->srv->loop, c->fd, BUCKETS_EV_READ | BUCKETS_EV_WRITE, conn_io, c);
+      buckets_loop_watch(c->r->loop, c->fd, BUCKETS_EV_READ | BUCKETS_EV_WRITE, conn_io, c);
       break;
     }
     if (n < 0) { /* reset or error: nobody is listening for responses */
@@ -816,7 +828,7 @@ static void conn_read(conn *c) {
     }
     /* Orderly EOF: requests may already be buffered, so answer them first. */
     c->peer_eof = true;
-    buckets_loop_watch(c->srv->loop, c->fd, conn_writing(c) ? BUCKETS_EV_WRITE : 0, conn_io, c);
+    buckets_loop_watch(c->r->loop, c->fd, conn_writing(c) ? BUCKETS_EV_WRITE : 0, conn_io, c);
     break;
   }
   conn_process(c);
@@ -926,7 +938,7 @@ static int on_headers_complete(llhttp_t *p) {
     }
   }
   if (stream) { /* the handler starts now and reads the body as it arrives */
-    c->pipe = pipe_new(c->srv->loop, c);
+    c->pipe = pipe_new(c->r->loop, c);
     dispatch_request_mode(c, true);
   }
   return 0;
@@ -967,6 +979,16 @@ static int on_message_complete(llhttp_t *p) { return HPE_PAUSED; }
 
 /* ---- accept / listen ----------------------------------------------------- */
 
+/* On the connection's own loop thread. */
+static void adopt(buckets_loop *loop, void *ud) {
+  conn *c = ud;
+  reactor *r = c->r;
+  c->next = r->conns;
+  if (r->conns) r->conns->prev = c;
+  r->conns = c;
+  if (buckets_loop_watch(loop, c->fd, BUCKETS_EV_READ, conn_io, c) != 0) conn_close(c);
+}
+
 static void on_accept(buckets_loop *loop, int fd, unsigned events, void *ud) {
   buckets_http_server *srv = ud;
   for (;;) {
@@ -1002,11 +1024,10 @@ static void on_accept(buckets_loop *loop, int fd, unsigned events, void *ud) {
     }
     llhttp_init(&c->parser, HTTP_REQUEST, &srv->settings);
     c->parser.data = c;
-    c->next = srv->conns;
-    if (srv->conns) srv->conns->prev = c;
-    srv->conns = c;
-    srv->nconns++;
-    if (buckets_loop_watch(loop, cfd, BUCKETS_EV_READ, conn_io, c) != 0) conn_close(c);
+    c->r = &srv->rs[srv->next_rs++ % srv->nrs];
+    atomic_fetch_add(&srv->nconns, 1);
+    if (c->r->loop == loop) adopt(loop, c);
+    else buckets_loop_post(c->r->loop, adopt, c);
   }
 }
 
@@ -1060,10 +1081,11 @@ static int listen_socket(const char *host, int port, int *bound_port) {
   return fd;
 }
 
-static void on_tick(buckets_http_server *srv) {
+static void on_tick(reactor *r) {
+  buckets_http_server *srv = r->srv;
   time_t now = time(NULL);
-  if (srv->cfg.tls && ++srv->ticks % 5 == 0) buckets_tls_reload(srv->cfg.tls);
-  for (conn *c = srv->conns, *next; c; c = next) {
+  if (r == srv->rs && srv->cfg.tls && ++srv->ticks % 5 == 0) buckets_tls_reload(srv->cfg.tls);
+  for (conn *c = r->conns, *next; c; c = next) {
     next = c->next;
     bool idle = !c->busy && !c->pipe && !c->read_paused && c->in.len == 0 && !conn_writing(c);
     if (idle && (srv->shutting_down || now - c->last_active > srv->cfg.idle_timeout_sec)) {
@@ -1083,10 +1105,17 @@ static void on_tick(buckets_http_server *srv) {
 
 static void tick_cb(buckets_loop *loop, void *ud) { on_tick(ud); }
 
+static void stop_cb(buckets_loop *loop, void *ud) { buckets_loop_stop(loop); }
+
+static void *reactor_main(void *ud) {
+  reactor *r = ud;
+  buckets_loop_run(r->loop);
+  return NULL;
+}
+
 buckets_http_server *buckets_http_server_start(buckets_loop *loop, const buckets_http_config *cfg,
                                                buckets_http_handler handler, void *ud) {
   buckets_http_server *srv = buckets_xcalloc(1, sizeof(*srv));
-  srv->loop = loop;
   srv->cfg = *cfg;
   if (!srv->cfg.server_header) srv->cfg.server_header = "Buckets";
   if (srv->cfg.idle_timeout_sec <= 0) srv->cfg.idle_timeout_sec = 30;
@@ -1108,23 +1137,36 @@ buckets_http_server *buckets_http_server_start(buckets_loop *loop, const buckets
     free(srv);
     return NULL;
   }
+  srv->nrs = cfg->reactors > 1 ? (size_t)cfg->reactors : 1;
+  srv->rs = buckets_xcalloc(srv->nrs, sizeof(*srv->rs));
+  for (size_t i = 0; i < srv->nrs; i++) {
+    reactor *r = &srv->rs[i];
+    r->srv = srv;
+    r->loop = i == 0 ? loop : buckets_loop_new();
+    buckets_loop_add_tick(r->loop, tick_cb, r);
+    if (i > 0 && !(r->started = pthread_create(&r->thread, NULL, reactor_main, r) == 0)) {
+      buckets_log_error("http: starting loop thread %zu: %s", i, strerror(errno));
+      buckets_loop_free(r->loop);
+      srv->nrs = i;
+      break;
+    }
+  }
   buckets_loop_watch(loop, srv->listen_fd, BUCKETS_EV_READ, on_accept, srv);
-  buckets_loop_add_tick(loop, tick_cb, srv);
   return srv;
 }
 
 void buckets_http_server_shutdown(buckets_http_server *srv) {
-  if (srv->shutting_down) return;
-  srv->shutting_down = true;
+  if (atomic_exchange(&srv->shutting_down, true)) return;
   if (srv->listen_fd >= 0) {
-    buckets_loop_unwatch(srv->loop, srv->listen_fd);
+    buckets_loop_unwatch(srv->rs[0].loop, srv->listen_fd);
     close(srv->listen_fd);
     srv->listen_fd = -1;
   }
-  on_tick(srv);
+  on_tick(&srv->rs[0]);
+  for (size_t i = 1; i < srv->nrs; i++) buckets_loop_post(srv->rs[i].loop, tick_cb, &srv->rs[i]);
 }
 
-size_t buckets_http_server_connections(const buckets_http_server *srv) { return srv->nconns; }
+size_t buckets_http_server_connections(const buckets_http_server *srv) { return atomic_load(&srv->nconns); }
 
 int buckets_http_server_port(const buckets_http_server *srv) { return srv->port; }
 
@@ -1132,10 +1174,19 @@ void buckets_http_server_free(buckets_http_server *srv) {
   if (!srv) return;
   /* The worker pools are gone by now: a fill still marked in flight will
    * never come back (its completion is never run), so close regardless. */
-  while (srv->conns) {
-    srv->conns->fill_inflight = false;
-    conn_close(srv->conns);
+  for (size_t i = 1; i < srv->nrs; i++) {
+    buckets_loop_post(srv->rs[i].loop, stop_cb, NULL);
+    pthread_join(srv->rs[i].thread, NULL);
+  }
+  for (size_t i = 0; i < srv->nrs; i++) {
+    reactor *r = &srv->rs[i];
+    while (r->conns) {
+      r->conns->fill_inflight = false;
+      conn_close(r->conns);
+    }
+    if (i > 0) buckets_loop_free(r->loop);
   }
   if (srv->listen_fd >= 0) close(srv->listen_fd);
+  free(srv->rs);
   free(srv);
 }

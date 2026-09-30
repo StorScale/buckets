@@ -16,6 +16,28 @@ come from the page cache.
 
 **PUT floor.** A single-stream PUT cannot finish before the whole object's MD5 is computed for the ETag. MD5's 64 dependent rounds per block leave no parallelism, and OpenSSL's assembly MD5 runs at about 1.03 GB/s here, which is roughly 1.04 s per GiB. Buckets sits at that floor on one drive and within a few percent of it on 16. MinIO is bound by the same floor. Concurrent PUTs scale across cores.
 
+## Concurrent load (warp-style)
+
+`tests/bench/warp.sh` runs bucketsd, then MinIO, on the same drives and
+drives each with `tests/bench/s3bench` (minio-go, as warp does). Each case
+PUTs for a fixed time, uploads a fixed set of objects (`-objects`, 64 by
+default) untimed, and GETs that set for a fixed time, so both servers read the
+same working set.
+
+```bash
+S3BENCH=$T/s3bench MINIO_BIN=$T/minio-bin DURATION=10s tests/bench/warp.sh build-rel/src/bucketsd
+```
+
+Apple M-series laptop, 4 drives (EC 2+2) on one SSD, release build, 10 s per phase; two runs, worst of each:
+
+| Case | Buckets PUT | MinIO PUT | Buckets GET | MinIO GET |
+|---|---|---|---|---|
+| 10 MiB × 16 clients | 965 MiB/s | 145–317 MiB/s | 10595 MiB/s | 11237 MiB/s (−6%) |
+| 1 MiB × 32 clients | 533 MiB/s | 294–544 MiB/s (−2%) | 7812 MiB/s | 7912 MiB/s (−1%) |
+| 64 KiB × 32 clients | 2590 op/s | 1481 op/s | 23372 op/s | 20866 op/s |
+
+PUTs are bound by the one disk and vary run to run for both servers. GETs come from the page cache and measure the servers.
+
 ## What moved the numbers
 
 The starting point was PUT at 0.80–1.03 s per 256 MiB (2.6–3.3× MinIO) and GET within 2×. In order of impact:
@@ -32,9 +54,10 @@ The starting point was PUT at 0.80–1.03 s per 256 MiB (2.6–3.3× MinIO) and 
 10. **Buffered drive writers.** Writers buffer 1 MiB, so a block no longer costs two `write()` calls per drive (hash, then shard). Shard writes are grouped four drives per pool task.
 11. **Direct GET copies.** GETs copy straight out of the verified shard buffers instead of assembling each block first.
 12. **GET read-ahead.** The reader loads and verifies block N+1 in the background, into a second set of shard buffers, while block N is sent.
+13. **One metadata read per GET.** GET resolved `xl.meta` on every drive twice (stat, then open). It now takes the lock and resolves once, and positions the reader from that result. 1 MiB GETs went from 5400 to 6700 MiB/s and small GETs from 14.9k to 21k op/s.
+14. **Several event loops.** One loop thread moved every byte for every connection, and under 16 large GETs it was busy 99% of the time in `sendto`. Accepted connections are now dealt round-robin across `BUCKETS_NET_THREADS` loops (CPUs / 2 by default, at most 16). The first loop, which also accepts, is the caller's.
 
 ## Known headroom
 
 - **Single-stream PUT:** bound by MD5, as it is for MinIO. The only ways around it would change the ETag's meaning, which S3 clients rely on.
-- **Event loop:** one event-loop thread per node moves every byte for all connections. It is not the bottleneck for one stream (GET reaches ~9 GB/s), but it will matter under many concurrent clients. Multiple reactors are planned.
 - **AVX2:** the x86 paths use SSSE3 (128-bit). AVX2 versions would roughly double RS and HighwayHash throughput on x86 servers.

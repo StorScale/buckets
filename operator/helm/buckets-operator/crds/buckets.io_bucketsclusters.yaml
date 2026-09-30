@@ -1,0 +1,194 @@
+# BucketsCluster: one Buckets deployment -- server pools of StatefulSets, the
+# S3 Service, root credentials, TLS. Reconciled by buckets-operator.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: bucketsclusters.buckets.io
+spec:
+  group: buckets.io
+  scope: Namespaced
+  names:
+    kind: BucketsCluster
+    listKind: BucketsClusterList
+    plural: bucketsclusters
+    singular: bucketscluster
+    shortNames: [bc]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Servers
+          type: string
+          jsonPath: .status.readyServersText
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              required: [pools]
+              properties:
+                image:
+                  type: string
+                  description: bucketsd container image.
+                  default: ghcr.io/buckets-io/bucketsd:0.3.0
+                imagePullPolicy:
+                  type: string
+                  enum: [Always, IfNotPresent, Never]
+                  default: IfNotPresent
+                imagePullSecrets:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      name: {type: string}
+                credsSecret:
+                  type: object
+                  description: >-
+                    Secret with keys rootUser and rootPassword. When omitted, the
+                    operator creates <name>-root with generated credentials.
+                  properties:
+                    name: {type: string}
+                pools:
+                  type: array
+                  minItems: 1
+                  description: >-
+                    Server pools. Pools may be appended to expand the cluster; the
+                    whole cluster restarts together when its topology changes.
+                  items:
+                    type: object
+                    required: [servers, volumesPerServer]
+                    properties:
+                      name:
+                        type: string
+                        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+                        maxLength: 20
+                      servers:
+                        type: integer
+                        minimum: 1
+                      volumesPerServer:
+                        type: integer
+                        minimum: 1
+                      volumeClaimTemplate:
+                        type: object
+                        description: PersistentVolumeClaim spec for each drive.
+                        x-kubernetes-preserve-unknown-fields: true
+                      resources:
+                        type: object
+                        x-kubernetes-preserve-unknown-fields: true
+                      nodeSelector:
+                        type: object
+                        additionalProperties: {type: string}
+                      tolerations:
+                        type: array
+                        items:
+                          type: object
+                          x-kubernetes-preserve-unknown-fields: true
+                      affinity:
+                        type: object
+                        x-kubernetes-preserve-unknown-fields: true
+                parity:
+                  type: integer
+                  minimum: 0
+                  description: Parity drives per erasure set (EC:N). Default depends on the set size.
+                erasureSetDriveCount:
+                  type: integer
+                  minimum: 2
+                  maximum: 16
+                tls:
+                  type: object
+                  properties:
+                    certSecret:
+                      type: object
+                      description: A kubernetes.io/tls Secret (tls.crt, tls.key) for S3 and internode traffic.
+                      properties:
+                        name: {type: string}
+                    caSecret:
+                      type: object
+                      description: A Secret whose ca.crt nodes trust (defaults to the certificate's own ca.crt).
+                      properties:
+                        name: {type: string}
+                env:
+                  type: array
+                  description: Extra environment for bucketsd.
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                serviceType:
+                  type: string
+                  enum: [ClusterIP, NodePort, LoadBalancer]
+                  default: ClusterIP
+                console:
+                  type: object
+                  description: The web console (consoled and the SPA), a Deployment of its own apart from storage.
+                  properties:
+                    enabled: {type: boolean, default: false}
+                    replicas: {type: integer, minimum: 1, default: 1}
+                    image: {type: string, description: "Defaults to ghcr.io/buckets-io/buckets-console at the operator's version."}
+                    serviceType:
+                      type: string
+                      enum: [ClusterIP, NodePort, LoadBalancer]
+                      default: ClusterIP
+                    s3URL:
+                      type: string
+                      description: >-
+                        The S3 endpoint as browsers reach it (for example the S3 Ingress URL).
+                        Share links are signed for it; without it the console offers none.
+                    resources:
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
+                    ingress:
+                      type: object
+                      description: Expose the console at a host name.
+                      required: [host]
+                      properties:
+                        host: {type: string}
+                        ingressClassName: {type: string}
+                        tlsSecret:
+                          type: object
+                          properties:
+                            name: {type: string}
+                        annotations:
+                          type: object
+                          additionalProperties: {type: string}
+            status:
+              type: object
+              properties:
+                phase: {type: string}
+                observedGeneration: {type: integer}
+                servers: {type: integer}
+                readyServers: {type: integer}
+                readyServersText: {type: string}
+                topology: {type: string}
+                credsSecret: {type: string}
+                pools:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      name: {type: string}
+                      statefulSet: {type: string}
+                      replicas: {type: integer}
+                      readyReplicas: {type: integer}
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required: [type, status]
+                    properties:
+                      type: {type: string}
+                      status: {type: string}
+                      reason: {type: string}
+                      message: {type: string}
+                      lastTransitionTime: {type: string, format: date-time}
+                      observedGeneration: {type: integer}

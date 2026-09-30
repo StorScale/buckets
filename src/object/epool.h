@@ -33,6 +33,8 @@ buckets_obj_err buckets_ep_put(buckets_epool *P, const char *bucket, const char 
                                int64_t size, const buckets_put_opts *opts, buckets_object_info *out);
 buckets_obj_err buckets_ep_stat(buckets_epool *P, const char *bucket, const char *object, const char *version_id,
                                 buckets_object_info *out);
+buckets_obj_err buckets_ep_lookup(buckets_epool *P, const char *bucket, const char *object, const char *version_id,
+                                   buckets_obj_reader **out, buckets_object_info *info);
 buckets_obj_err buckets_ep_open(buckets_epool *P, const char *bucket, const char *object, const char *version_id,
                                 int64_t offset, int64_t length, buckets_obj_reader **out, buckets_object_info *info);
 buckets_obj_err buckets_ep_delete(buckets_epool *P, const char *bucket, const char *object, const char *version_id);

@@ -1,0 +1,87 @@
+{{- if .Values.rbac.create }}
+{{- $fullname := include "buckets-operator.fullname" . }}
+{{- $kind := ternary "Role" "ClusterRole" (ne .Values.watchNamespace "") }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: {{ $kind }}
+metadata:
+  name: {{ $fullname }}
+  {{- if .Values.watchNamespace }}
+  namespace: {{ .Values.watchNamespace }}
+  {{- end }}
+  labels: {{- include "buckets-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [buckets.io]
+    resources: [bucketsclusters, buckets]
+    verbs: [get, list, watch]
+  - apiGroups: [buckets.io] # patch: the cleanup finalizer
+    resources: [bucketsusers, bucketspolicies]
+    verbs: [get, list, watch, patch]
+  - apiGroups: [buckets.io]
+    resources: [bucketsclusters/status, bucketsusers/status, bucketspolicies/status, buckets/status]
+    verbs: [get, patch, update]
+  - apiGroups: [apps]
+    resources: [statefulsets]
+    verbs: [get, list, watch, create, patch, update]
+  - apiGroups: [apps] # the console
+    resources: [deployments]
+    verbs: [get, list, watch, create, patch, update, delete]
+  - apiGroups: [networking.k8s.io] # the console's Ingress
+    resources: [ingresses]
+    verbs: [get, list, watch, create, patch, update, delete]
+  - apiGroups: [""]
+    resources: [services]
+    verbs: [get, list, watch, create, patch, update, delete]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, create]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch, delete]
+  - apiGroups: [policy]
+    resources: [poddisruptionbudgets]
+    verbs: [get, list, watch, create, patch, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: {{ $kind }}Binding
+metadata:
+  name: {{ $fullname }}
+  {{- if .Values.watchNamespace }}
+  namespace: {{ .Values.watchNamespace }}
+  {{- end }}
+  labels: {{- include "buckets-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: {{ $kind }}
+  name: {{ $fullname }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "buckets-operator.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+# Leader election lease, in the release namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $fullname }}-leader
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "buckets-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, create, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $fullname }}-leader
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "buckets-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $fullname }}-leader
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "buckets-operator.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

@@ -230,6 +230,14 @@ buckets_obj_err buckets_obj_stat(buckets_objlayer *L, const char *bucket, const 
 typedef struct buckets_obj_reader buckets_obj_reader;
 
 /* Opens [offset, offset+length) of an object for reading. */
+/* GetObjectNInfo's single metadata read: the object's info (delete markers
+ * included, *out NULL for them), and a reader holding a read lock, to be
+ * positioned with buckets_obj_reader_position (or freed). */
+buckets_obj_err buckets_obj_lookup(buckets_objlayer *L, const char *bucket, const char *object, const char *version_id,
+                                   buckets_obj_reader **out, buckets_object_info *info);
+/* Positions a looked-up reader at offset for length bytes (clamped to the
+ * object), loading the first block: an unreadable object fails here. */
+buckets_obj_err buckets_obj_reader_position(buckets_obj_reader *r, int64_t offset, int64_t length);
 buckets_obj_err buckets_obj_open(buckets_objlayer *L, const char *bucket, const char *object, const char *version_id,
                                  int64_t offset, int64_t length, buckets_obj_reader **out,
                                  buckets_object_info *info);
