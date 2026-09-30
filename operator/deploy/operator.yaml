@@ -107,7 +107,7 @@ spec:
         seccompProfile: {type: RuntimeDefault}
       containers:
         - name: operator
-          image: ghcr.io/buckets-io/buckets-operator:0.3.0
+          image: ghcr.io/buckets-io/buckets-operator:0.10.0
           imagePullPolicy: IfNotPresent
           env:
             - name: POD_NAME

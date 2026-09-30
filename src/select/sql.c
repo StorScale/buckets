@@ -160,13 +160,20 @@ typedef struct {
   size_t i, far;
   sel_arena *a;
   memo *m_expr, *m_primary, *m_operand; /* one per token */
+  int depth; /* expression nesting, bounded: the parser recurses per level */
+  bool too_deep; /* the bound was hit: the whole parse fails (no memo is trusted) */
 } P;
+
+/* Deeper nesting fails to parse rather than overflow a worker's stack
+ * (MinIO's goroutine stacks grow instead). */
+#define MAX_NESTING 128
 
 #define MEMOIZED(type, name, field)                     \
   static type *name##_raw(P *p);                        \
   static type *name(P *p) {                             \
     size_t at = p->i;                                   \
     memo *m = &p->field[at];                            \
+    if (p->too_deep) return NULL;                       \
     if (!m->st) {                                       \
       m->v = name##_raw(p);                             \
       m->end = p->i;                                    \
@@ -703,7 +710,19 @@ static sel_and *p_and(P *p) {
 }
 
 MEMOIZED(sel_expr, p_expr, m_expr)
+static sel_expr *p_expr_nested(P *p);
 static sel_expr *p_expr_raw(P *p) {
+  if (p->too_deep || p->depth >= MAX_NESTING) {
+    p->too_deep = true;
+    return NULL;
+  }
+  p->depth++;
+  sel_expr *x = p_expr_nested(p);
+  p->depth--;
+  return x;
+}
+
+static sel_expr *p_expr_nested(P *p) {
   vec v = {0};
   sel_and *a = p_and(p);
   if (!a) return NULL;
@@ -981,9 +1000,10 @@ sel_stmt *sel_parse(const char *src, size_t n, sel_err *e) {
     sel_stmt_free(st);
     return NULL;
   }
-  P p = {toks, 0, 0, &st->arena, buckets_xcalloc(nt + 1, sizeof(memo)), buckets_xcalloc(nt + 1, sizeof(memo)),
-         buckets_xcalloc(nt + 1, sizeof(memo))};
+  P p = {.t = toks, .a = &st->arena, .m_expr = buckets_xcalloc(nt + 1, sizeof(memo)),
+         .m_primary = buckets_xcalloc(nt + 1, sizeof(memo)), .m_operand = buckets_xcalloc(nt + 1, sizeof(memo))};
   sel_select *s = p_select(&p);
+  if (p.too_deep) s = NULL;
   free(p.m_expr);
   free(p.m_primary);
   free(p.m_operand);

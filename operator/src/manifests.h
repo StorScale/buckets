@@ -13,7 +13,7 @@
 #define BC_KIND "BucketsCluster"
 #define BC_S3_PORT 9000
 #define BC_CONSOLE_PORT 9090
-#define BC_CONSOLE_IMAGE "ghcr.io/buckets-io/buckets-console:0.6.0"
+#define BC_CONSOLE_IMAGE "ghcr.io/buckets-io/buckets-console:0.10.0"
 #define BC_MAX_POOLS 32
 
 typedef struct {

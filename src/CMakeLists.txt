@@ -204,6 +204,10 @@ if(RESOLV_LIB)
 endif()
 target_link_libraries(buckets PUBLIC llhttp::llhttp yyjson libdeflate::libdeflate_static buckets_libyaml
   buckets_zlib buckets_bzip2 buckets_zstd buckets_lz4 buckets_libssh OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
+find_library(MATH_LIB m) # glibc keeps libm apart (macOS has it in libSystem)
+if(MATH_LIB)
+  target_link_libraries(buckets PUBLIC ${MATH_LIB})
+endif()
 buckets_warnings(buckets)
 
 add_executable(bucketsd cmd/bucketsd/main.c)

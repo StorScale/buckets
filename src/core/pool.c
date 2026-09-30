@@ -73,10 +73,17 @@ buckets_pool *buckets_pool_new(int nthreads) {
   pthread_mutex_init(&p->mu, NULL);
   pthread_cond_init(&p->work, NULL);
   p->threads = buckets_xcalloc((size_t)(nthreads > 0 ? nthreads : 1), sizeof(pthread_t));
+  /* 8 MiB stacks, as Linux gives by default and macOS does not (512 KiB):
+   * handlers recurse (S3 Select's parser up to its nesting bound). Only
+   * what is touched is committed. */
+  pthread_attr_t attr;
+  pthread_attr_init(&attr);
+  pthread_attr_setstacksize(&attr, 8u << 20);
   for (int t = 0; t < nthreads; t++) {
-    if (pthread_create(&p->threads[t], NULL, worker, p) != 0) break;
+    if (pthread_create(&p->threads[t], &attr, worker, p) != 0) break;
     p->nthreads++;
   }
+  pthread_attr_destroy(&attr);
   return p;
 }
 

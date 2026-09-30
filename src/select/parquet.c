@@ -20,6 +20,13 @@
 
 #define MAX_META (64 << 20)
 #define MAX_CHUNK ((int64_t)1 << 31)
+/* Limits on what a footer or page header may claim before anything is
+ * allocated for it: levels and values are sized from num_values, which a
+ * few bytes of run-length encoding can make large, but not unboundedly so
+ * per byte of chunk; pages are far smaller than this in practice (parquet-mr
+ * writes 1 MiB). */
+#define MAX_VALUES_PER_BYTE 4096
+#define MAX_PAGE ((int32_t)256 << 20)
 
 static bool perr(sel_err *e) {
   return sel_fail(e, "ParquetParsingError", "Error parsing Parquet file. Please check the file and try again.");
@@ -868,7 +875,7 @@ static bool parse_page_header(tr *t, page_header *h) {
     default: t_skip(t, ft, 0);
     }
   }
-  return !t->bad && h->csize >= 0 && h->usize >= 0;
+  return !t->bad && h->csize >= 0 && h->usize >= 0 && h->usize <= MAX_PAGE;
 }
 
 /* Levels of a v1 page: a length-prefixed RLE run (or BIT_PACKED). */
@@ -925,6 +932,7 @@ static bool levels_raw(const uint8_t *p, size_t len, int max, size_t n, int16_t 
 static bool load_chunk(sel_parquet *q, leaf *l, const chunk_meta *c, sel_err *e) {
   int64_t start = c->dict_off > 0 && c->dict_off < c->data_off ? c->dict_off : c->data_off;
   if (start < 4 || c->size <= 0 || c->size > MAX_CHUNK || start + c->size > q->src->size - 8 || c->num_values < 0 ||
+      c->num_values > c->size * MAX_VALUES_PER_BYTE ||
       c->num_values > (int64_t)1 << 31)
     return perr(e);
   uint8_t *buf = buckets_xmalloc((size_t)c->size);
@@ -952,7 +960,7 @@ static bool load_chunk(sel_parquet *q, leaf *l, const chunk_meta *c, sel_err *e)
     p = t.p + h.csize;
     if (h.type == 2) { /* dictionary */
       uint8_t *u = NULL;
-      if (h.dict_n < 0 || !decompress(c->codec, body, (size_t)h.csize, (size_t)h.usize, &u)) {
+      if (h.dict_n < 0 || (int64_t)h.dict_n > (int64_t)h.usize * 8 + 1 || !decompress(c->codec, body, (size_t)h.csize, (size_t)h.usize, &u)) {
         free(u);
         ok = false;
         break;
@@ -986,7 +994,8 @@ static bool load_chunk(sel_parquet *q, leaf *l, const chunk_meta *c, sel_err *e)
         for (size_t i = 0; i < n; i++) repl[i] = 0;
       vr = r;
     } else {
-      if (h.rep_len < 0 || h.def_len < 0 || (size_t)h.rep_len + (size_t)h.def_len > (size_t)h.csize) {
+      if (h.rep_len < 0 || h.def_len < 0 || (size_t)h.rep_len + (size_t)h.def_len > (size_t)h.csize ||
+          (int64_t)h.rep_len + h.def_len > (int64_t)h.usize) {
         ok = false;
         break;
       }

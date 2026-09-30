@@ -14,6 +14,7 @@ All notable changes to this project are documented here. The format follows
 - Fuzz targets for xl.meta (parse, serialize and object round trips), the msgpack reader (typed walk against skip) and S3 Select (SQL and input from the fuzzer).
 
 ### Changed
+- Default images (`BucketsCluster` `spec.image`, the console, the operator manifest and examples) are 0.10.0.
 - The HTTP server runs several event loops (CPUs / 2 by default) and deals connections across them; one loop saturated on large concurrent GETs.
 - GET resolves an object's metadata once instead of twice (stat, then open).
 - Drive directories are created leaf first, parents only when missing (MinIO's osMkdirAll): a PUT made 20 mkdir calls per drive, now 4.
@@ -23,7 +24,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 - S3 Select: SQL with deeply nested parentheses took time and memory exponential in the depth (a few hundred bytes exhausted gigabytes); the parser now memoizes its expression rules. Found by fuzzing.
+- S3 Select: expressions nested more than 127 levels deep overflowed a worker's stack; they now fail with ParseSelectFailure. Found by fuzzing.
+- S3 Select on Parquet: a column chunk may claim at most 4096 values per byte and a page at most 256 MiB uncompressed, and a v2 page's level lengths must fit its uncompressed size, so a small file can no longer demand gigabytes. Found by fuzzing.
 - S3 Select on Parquet: a repeated schema name or list field in the footer leaked, and list lengths are checked against the bytes left, so a small footer can no longer claim millions of row groups or columns; a footer map of booleans claiming 2^64 entries no longer spins forever. Found by fuzzing.
+- Linux builds failed to link since 0.9.0 (libm was not linked; macOS includes it), which broke the container images.
+- libssh's one-time build failed where OpenSSL has no static libraries (Debian); it now builds against the very OpenSSL libraries Buckets links.
+- Worker threads get 8 MiB stacks everywhere (macOS gave 512 KiB).
 - A node waiting for its peers retried the cluster leader lock in a tight loop, logging tens of thousands of warnings a second; it now retries once a second.
 - warp's result files, committed by mistake, are gone and ignored; `tests/bench/warp.sh` keeps them in its temp directory.
 - Stray test drive files committed by mistake (a directory named after a space-separated endpoint list) are gone.
