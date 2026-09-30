@@ -483,6 +483,8 @@ void buckets_s3_server_init(buckets_s3_server *s, buckets_objlayer *layer, const
   s->kms = buckets_kms_from_env(kerr, sizeof(kerr));
   if (!s->kms && *kerr) buckets_fatal("%s", kerr);
   if (s->kms) buckets_log_info("kms: %s, default key %s", buckets_kms_type(s->kms), buckets_kms_default_key(s->kms));
+  buckets_iam_set_kms(s->iam, s->kms);
+  buckets_config_sys_set_kms(s->config, s->kms);
   buckets_config_sys_set_hook(s->config, config_changed, s);
   pthread_mutex_init(&s->oidc_mu, NULL);
   pthread_mutex_init(&s->freeze_mu, NULL);
@@ -972,6 +974,18 @@ void buckets_s3_write_error_msg(s3_ctx *c, buckets_s3_error e, const char *messa
   }
   if (e == BUCKETS_SSE_ERR_KMS_DECRYPT) {
     buckets_s3_write_custom_error(c, 400, "kms:InvalidCiphertextException", "failed to decrypt ciphertext");
+    return;
+  }
+  if (e == BUCKETS_SSE_ERR_KMS_NOT_AUTHORIZED) {
+    buckets_s3_write_custom_error(c, 403, "kms:NotAuthorized", "insufficient permissions to perform KMS operation");
+    return;
+  }
+  if (e == BUCKETS_SSE_ERR_KMS_GENERATE_FAILED) {
+    buckets_s3_write_custom_error(c, 500, "kms:KeyGenerationFailed", "failed to generate data key with KMS key");
+    return;
+  }
+  if (e == BUCKETS_SSE_ERR_KMS_DECRYPT_FAILED) {
+    buckets_s3_write_custom_error(c, 500, "kms:DecryptionFailed", "failed to decrypt ciphertext with KMS key");
     return;
   }
   const buckets_s3_error_info *info = buckets_s3_error_get(e);

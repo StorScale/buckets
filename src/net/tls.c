@@ -458,6 +458,63 @@ bool buckets_tls_client_use_cert(buckets_tls_client *t, const char *cert_file, c
   return true;
 }
 
+static int given_password_cb(char *buf, int size, int rwflag, void *ud) {
+  (void)rwflag;
+  const char *pw = ud;
+  int n = pw ? (int)strlen(pw) : 0;
+  if (n > size) n = size;
+  if (n) memcpy(buf, pw, (size_t)n);
+  return n;
+}
+
+bool buckets_tls_client_use_cert_password(buckets_tls_client *t, const char *cert_file, const char *key_file,
+                                          const char *password, char *err, size_t errlen) {
+  SSL_CTX_set_default_passwd_cb(t->ctx, given_password_cb);
+  SSL_CTX_set_default_passwd_cb_userdata(t->ctx, (void *)password);
+  bool ok = buckets_tls_client_use_cert(t, cert_file, key_file, err, errlen);
+  SSL_CTX_set_default_passwd_cb_userdata(t->ctx, NULL);
+  return ok;
+}
+
+bool buckets_tls_client_use_ed25519(buckets_tls_client *t, const uint8_t seed[32], const char *cn, char *err,
+                                    size_t errlen) {
+  EVP_PKEY *key = EVP_PKEY_new_raw_private_key(EVP_PKEY_ED25519, NULL, seed, 32);
+  X509 *x = X509_new();
+  bool ok = false;
+  if (!key || !x) goto out;
+  ASN1_INTEGER *serial = ASN1_INTEGER_new();
+  BIGNUM *bn = BN_new();
+  BN_rand(bn, 128, BN_RAND_TOP_ANY, BN_RAND_BOTTOM_ANY);
+  BN_to_ASN1_INTEGER(bn, serial);
+  X509_set_serialNumber(x, serial);
+  ASN1_INTEGER_free(serial);
+  BN_free(bn);
+  X509_set_version(x, 2);
+  X509_gmtime_adj(X509_getm_notBefore(x), 0);
+  X509_gmtime_adj(X509_getm_notAfter(x), 90L * 24 * 3600);
+  X509_NAME *name = X509_get_subject_name(x);
+  X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC, (const unsigned char *)cn, -1, -1, 0);
+  X509_set_issuer_name(x, name);
+  X509_set_pubkey(x, key);
+  X509V3_CTX v3;
+  X509V3_set_ctx_nodb(&v3);
+  X509V3_set_ctx(&v3, x, x, NULL, NULL, 0);
+  static const char *const exts[][2] = {{"keyUsage", "critical,digitalSignature"},
+                                        {"extendedKeyUsage", "clientAuth"},
+                                        {"basicConstraints", "critical,CA:FALSE"}};
+  for (size_t i = 0; i < 3; i++) {
+    X509_EXTENSION *e = X509V3_EXT_conf(NULL, &v3, exts[i][0], exts[i][1]);
+    if (e) X509_add_ext(x, e, -1), X509_EXTENSION_free(e);
+  }
+  if (X509_sign(x, key, NULL) <= 0) goto out;
+  ok = SSL_CTX_use_certificate(t->ctx, x) == 1 && SSL_CTX_use_PrivateKey(t->ctx, key) == 1;
+out:
+  if (!ok) ssl_err(err, errlen, "create client certificate for", "API key");
+  X509_free(x);
+  EVP_PKEY_free(key);
+  return ok;
+}
+
 bool buckets_tls_client_add_ca_file(buckets_tls_client *t, const char *file) {
   FILE *f = fopen(file, "r");
   if (!f) return false;

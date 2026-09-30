@@ -41,6 +41,9 @@ void buckets_sse_req_free(buckets_sse_req *r);
  * with buckets_s3_sse_write_error. */
 #define BUCKETS_SSE_ERR_KMS_KEY_NOT_FOUND ((buckets_s3_error)0x10001)
 #define BUCKETS_SSE_ERR_KMS_DECRYPT ((buckets_s3_error)0x10002)
+#define BUCKETS_SSE_ERR_KMS_NOT_AUTHORIZED ((buckets_s3_error)0x10003)
+#define BUCKETS_SSE_ERR_KMS_GENERATE_FAILED ((buckets_s3_error)0x10004)
+#define BUCKETS_SSE_ERR_KMS_DECRYPT_FAILED ((buckets_s3_error)0x10005)
 void buckets_s3_sse_write_error(s3_ctx *c, buckets_s3_error e);
 
 /* The encryption a write asks for, validated as MinIO's PutObject does

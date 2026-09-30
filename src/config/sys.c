@@ -9,6 +9,7 @@
 #include "core/log.h"
 #include "core/uuid.h"
 #include "crypto/madmin.h"
+#include "kms/cfgcrypt.h"
 #include "object/sysconfig.h"
 
 #define CONFIG_FILE "config/config.json"
@@ -16,6 +17,7 @@
 
 struct buckets_config_sys {
   buckets_objlayer *layer;
+  buckets_kms *kms; /* seals the configuration when set (config.EncryptBytes) */
   char *password; /* "ak:sk": the key of legacy encrypted config files */
   pthread_rwlock_t lock;
   buckets_config *cfg;
@@ -60,11 +62,25 @@ static bool utf8_valid(const uint8_t *p, size_t n) {
 }
 
 /* readConfig + decryptData. */
+void buckets_config_sys_set_kms(buckets_config_sys *s, buckets_kms *k) { s->kms = k; }
+
+/* saveConfig with the KMS's seal when there is one */
+static buckets_obj_err write_sealed(buckets_config_sys *s, const char *path, const char *data, size_t n) {
+  if (!s->kms) return buckets_sysconfig_write(s->layer, path, data, n);
+  buckets_buf sealed = BUCKETS_BUF_INIT;
+  buckets_obj_err e = buckets_cfgcrypt_seal(s->kms, path, data, n, &sealed)
+                          ? buckets_sysconfig_write(s->layer, path, sealed.data, sealed.len)
+                          : BUCKETS_OBJ_ERR_IO;
+  buckets_buf_free(&sealed);
+  return e;
+}
+
 static buckets_obj_err read_decrypted(buckets_config_sys *s, const char *path, buckets_buf *out, int64_t *mtime) {
   buckets_obj_err e = buckets_sysconfig_read(s->layer, path, out, mtime);
   if (e || utf8_valid((const uint8_t *)out->data, out->len)) return e;
   buckets_buf plain = BUCKETS_BUF_INIT;
-  if (!buckets_madmin_decrypt(s->password, out->data, out->len, &plain)) {
+  if (!buckets_madmin_decrypt(s->password, out->data, out->len, &plain) &&
+      !(s->kms && (buckets_buf_reset(&plain), buckets_cfgcrypt_open(s->kms, path, out->data, out->len, &plain)))) {
     buckets_buf_free(&plain);
     return BUCKETS_OBJ_ERR_CORRUPT;
   }
@@ -131,13 +147,13 @@ bool buckets_config_sys_update(buckets_config_sys *s, buckets_config *cfg, const
     return false;
   }
   char *json = buckets_config_to_json(cfg);
-  buckets_obj_err e = buckets_sysconfig_write(s->layer, CONFIG_FILE, json, strlen(json));
+  buckets_obj_err e = write_sealed(s, CONFIG_FILE, json, strlen(json));
   free(json);
   if (!e && history_kv) {
     char id[BUCKETS_UUID_STR_LEN + 1], path[128];
     buckets_uuid_v4(id);
     snprintf(path, sizeof(path), HISTORY_PREFIX "%s.kv", id);
-    e = buckets_sysconfig_write(s->layer, path, history_kv, strlen(history_kv));
+    e = write_sealed(s, path, history_kv, strlen(history_kv));
   }
   if (e) {
     snprintf(err, errlen, "saving the configuration: %s", buckets_obj_strerror(e));

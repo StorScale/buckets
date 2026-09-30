@@ -91,6 +91,13 @@ void buckets_tls_client_skip_verify(buckets_tls_client *t);
 /* Presents a client certificate (PEM chain and key files). */
 bool buckets_tls_client_use_cert(buckets_tls_client *t, const char *cert_file, const char *key_file, char *err,
                                  size_t errlen);
+/* The same, the key file encrypted with password. */
+bool buckets_tls_client_use_cert_password(buckets_tls_client *t, const char *cert_file, const char *key_file,
+                                          const char *password, char *err, size_t errlen);
+/* A self-signed client certificate for an Ed25519 key (KES API keys:
+ * kes.GenerateCertificate), valid 90 days, CN cn. */
+bool buckets_tls_client_use_ed25519(buckets_tls_client *t, const uint8_t seed[32], const char *cn, char *err,
+                                    size_t errlen);
 /* Also trusts the certificates in a PEM file; false if it held none. */
 bool buckets_tls_client_add_ca_file(buckets_tls_client *t, const char *file);
 /* Handshakes on a connected blocking socket, verifying host; NULL on failure. */

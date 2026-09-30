@@ -58,6 +58,35 @@ void buckets_sio_stream_seal(const uint8_t key[32], const uint8_t nonce[8], cons
   sio_seal(key, nonce, data, n, append_fragment, out);
 }
 
+bool buckets_sio_stream_open(int alg, const uint8_t key[32], const uint8_t nonce[8], const void *data, size_t n,
+                             buckets_buf *out) {
+  buckets_aead *a = buckets_aead_new((buckets_aead_alg)alg, key);
+  if (!a) return false;
+  uint8_t ad[1 + BUCKETS_AEAD_TAG], nb[12];
+  sio_nonce(nb, nonce, 0);
+  ad[0] = 0x00;
+  buckets_aead_seal(a, nb, NULL, 0, NULL, 0, ad + 1);
+  const uint8_t *p = data;
+  uint8_t *pt = buckets_xmalloc(SIO_BUF);
+  uint32_t seq = 1;
+  bool ok = true;
+  while (ok && n > SIO_BUF + BUCKETS_AEAD_TAG) {
+    sio_nonce(nb, nonce, seq++);
+    ok = buckets_aead_open(a, nb, ad, sizeof(ad), p, SIO_BUF + BUCKETS_AEAD_TAG, pt);
+    if (ok) buckets_buf_append(out, pt, SIO_BUF);
+    p += SIO_BUF + BUCKETS_AEAD_TAG, n -= SIO_BUF + BUCKETS_AEAD_TAG;
+  }
+  if (ok) {
+    ad[0] = 0x80;
+    sio_nonce(nb, nonce, seq);
+    ok = n >= BUCKETS_AEAD_TAG && buckets_aead_open(a, nb, ad, sizeof(ad), p, n, pt);
+    if (ok) buckets_buf_append(out, pt, n - BUCKETS_AEAD_TAG);
+  }
+  free(pt);
+  buckets_aead_free(a);
+  return ok;
+}
+
 /* ---- RSA ----------------------------------------------------------------------------------------- */
 
 static EVP_PKEY *rsa_from_der(const uint8_t *der, size_t n) {

@@ -32,6 +32,9 @@ bool buckets_config_sys_reload(buckets_config_sys *s);
 /* local: the change was made here (tell peers); else it came from a peer. */
 typedef void (*buckets_config_changed_fn)(void *ud, const char *subsys, bool local);
 void buckets_config_sys_set_hook(buckets_config_sys *s, buckets_config_changed_fn fn, void *ud);
+/* With a KMS, the configuration is written sealed by it (and read either way). */
+struct buckets_kms;
+void buckets_config_sys_set_kms(buckets_config_sys *s, struct buckets_kms *k);
 
 /* History (mc admin config history / restore). */
 typedef struct {

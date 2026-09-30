@@ -15,6 +15,7 @@
 #include <yyjson.h>
 
 #include "admin/admin.h"
+#include "kms/kms.h"
 #include "dist/peer.h"
 #include "heal/healer.h"
 #include "iam/ldapidp.h"
@@ -362,15 +363,20 @@ void buckets_admin_server_info(s3_ctx *c) {
   yyjson_mut_obj_add_uint(d, b, "size", have_du ? du.total_size : 0);
   yyjson_mut_val *services = yyjson_mut_obj_add_obj(d, root, "services");
   yyjson_mut_obj_add_obj(d, services, "kms"); /* the deprecated field, always there */
-  if (s->kms) { /* fetchKMSStatus: the built-in KMS answers here */
+  if (s->kms) { /* fetchKMSStatus */
     yyjson_mut_val *ks = yyjson_mut_obj_add_arr(d, services, "kmsStatus");
-    yyjson_mut_val *k1 = yyjson_mut_arr_add_obj(d, ks);
-    char host[256];
-    snprintf(host, sizeof(host), "%s", ci->self);
-    char *colon = strrchr(host, ':');
-    if (colon) *colon = '\0';
-    yyjson_mut_obj_add_str(d, k1, "status", "online");
-    yyjson_mut_obj_add_strcpy(d, k1, "endpoint", host);
+    buckets_buf eps = BUCKETS_BUF_INIT;
+    buckets_kms_status_endpoints(s->kms, "127.0.0.1", &eps);
+    yyjson_doc *ed = yyjson_read(eps.data, eps.len, 0);
+    yyjson_obj_iter it = yyjson_obj_iter_with(ed ? yyjson_doc_get_root(ed) : NULL);
+    yyjson_val *k;
+    while (ed && (k = yyjson_obj_iter_next(&it))) {
+      yyjson_mut_val *k1 = yyjson_mut_arr_add_obj(d, ks);
+      yyjson_mut_obj_add_strcpy(d, k1, "status", yyjson_get_str(yyjson_obj_iter_get_val(k)));
+      yyjson_mut_obj_add_strcpy(d, k1, "endpoint", yyjson_get_str(k));
+    }
+    yyjson_doc_free(ed);
+    buckets_buf_free(&eps);
   }
   yyjson_mut_val *ldap = yyjson_mut_obj_add_obj(d, services, "ldap");
   buckets_ldapidp *lp = buckets_s3_ldap(s);

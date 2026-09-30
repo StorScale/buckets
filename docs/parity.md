@@ -290,7 +290,9 @@ bucket metadata export/import, each compared with MinIO.
 
 FTP (`--ftp`, `tests/integration/ftp.sh`) and SFTP (`--sftp`, `tests/integration/sftp.sh`).
 
-Open: KES/MinIO KMS backends.
+KES (`tests/integration/kes.sh`).
+
+Open: MinIO KMS (`MINIO_KMS_SERVER`, the commercial KMS) as a backend.
 
 Known deviations from MinIO, kept on purpose:
 - batch keyrotate keeps the version's modification time (MinIO's metadata-only copy sets it to now,

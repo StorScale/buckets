@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 #include "iam/iam.h"
+#include "kms/cfgcrypt.h"
 
 #include <openssl/crypto.h>
 #include <openssl/rand.h>
@@ -402,6 +403,7 @@ static void cache_free(cache *c) {
 }
 
 struct buckets_iam {
+  buckets_kms *kms; /* seals the IAM files when set (saveIAMConfig) */
   buckets_iam_ident *root;
   char *root_password; /* "ak:sk", the madmin password for legacy encrypted IAM files */
   buckets_objlayer *layer;
@@ -518,7 +520,8 @@ static buckets_obj_err iam_read(buckets_iam *iam, const char *path, buckets_buf 
   if (err) return err;
   if (utf8_valid((const uint8_t *)out->data, out->len)) return BUCKETS_OBJ_OK;
   buckets_buf plain = BUCKETS_BUF_INIT;
-  if (!buckets_madmin_decrypt(iam->root_password, out->data, out->len, &plain)) {
+  if (!buckets_madmin_decrypt(iam->root_password, out->data, out->len, &plain) &&
+      !(iam->kms && (buckets_buf_reset(&plain), buckets_cfgcrypt_open(iam->kms, path, out->data, out->len, &plain)))) {
     buckets_buf_free(&plain);
     buckets_log_warn("iam: %s is encrypted with a key this server does not have", path);
     return BUCKETS_OBJ_ERR_CORRUPT;
@@ -528,8 +531,19 @@ static buckets_obj_err iam_read(buckets_iam *iam, const char *path, buckets_buf 
   return BUCKETS_OBJ_OK;
 }
 
+void buckets_iam_set_kms(buckets_iam *iam, buckets_kms *k) { iam->kms = k; }
+
 static bool iam_write(buckets_iam *iam, const char *path, const buckets_buf *data) {
-  buckets_obj_err err = buckets_sysconfig_write(iam->layer, path, data->data, data->len);
+  buckets_obj_err err;
+  if (iam->kms) {
+    buckets_buf sealed = BUCKETS_BUF_INIT;
+    err = buckets_cfgcrypt_seal(iam->kms, path, data->data, data->len, &sealed)
+              ? buckets_sysconfig_write(iam->layer, path, sealed.data, sealed.len)
+              : BUCKETS_OBJ_ERR_IO;
+    buckets_buf_free(&sealed);
+  } else {
+    err = buckets_sysconfig_write(iam->layer, path, data->data, data->len);
+  }
   if (err) buckets_log_warn("iam: saving %s: %s", path, buckets_obj_strerror(err));
   return err == BUCKETS_OBJ_OK;
 }

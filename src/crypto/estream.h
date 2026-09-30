@@ -20,6 +20,9 @@ void buckets_sio_stream_seal(const uint8_t key[32], const uint8_t nonce[8], cons
 
 /* An RSA public key (PKCS #1 DER, or PEM around it) re-encoded as PKCS #1
  * DER; false when it is not one (x509.ParsePKCS1PublicKey). */
+/* Opens a sio-go STREAM (alg: buckets_aead_alg); false when not authentic. */
+bool buckets_sio_stream_open(int alg, const uint8_t key[32], const uint8_t nonce[8], const void *data, size_t n,
+                             buckets_buf *out);
 bool buckets_rsa_public_key_der(const void *in, size_t n, buckets_buf *der);
 
 typedef struct buckets_estream buckets_estream;

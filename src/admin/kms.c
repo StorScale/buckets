@@ -7,6 +7,7 @@
 
 #include "admin/admin.h"
 #include "kms/kms.h"
+#include "notify/event.h"
 
 #define KMS_PREFIX "/minio/kms/v1"
 
@@ -33,6 +34,8 @@ static const char *kms_err_text(buckets_kms_err e) {
   case BUCKETS_KMS_ERR_DECRYPT: return "failed to decrypt ciphertext";
   case BUCKETS_KMS_ERR_NOT_SUPPORTED: return "requested functionality is not supported";
   case BUCKETS_KMS_ERR_KEY_EXISTS: return "key with given key ID already exits";
+  case BUCKETS_KMS_ERR_PERMISSION: return "insufficient permissions to perform KMS operation";
+  case BUCKETS_KMS_ERR_FAILED: return "failed to create KMS key";
   default: return "kms is unavailable";
   }
 }
@@ -54,8 +57,10 @@ static bool key_allowed(s3_ctx *c, const char *action, const char *key) {
 static void status(s3_ctx *c, const char *action) {
   if (!kms_ready(c, action)) return;
   buckets_buf b = BUCKETS_BUF_INIT;
-  buckets_buf_appendf(&b, "{\"name\":\"%s\",\"default-key-id\":\"%s\",\"endpoints\":{\"127.0.0.1\":\"online\"},",
-                      buckets_kms_type(c->s->kms), buckets_kms_default_key(c->s->kms));
+  buckets_buf_appendf(&b, "{\"name\":\"%s\",\"default-key-id\":\"%s\",\"endpoints\":", buckets_kms_type(c->s->kms),
+                      buckets_kms_default_key(c->s->kms));
+  buckets_kms_status_endpoints(c->s->kms, "127.0.0.1", &b);
+  buckets_buf_append_char(&b, ',');
   buckets_buf_append_c(&b, "\"state\":{\"Version\":\"\",\"KeyStoreLatency\":0,\"KeyStoreReachable\":false,"
                            "\"KeystoreAvailable\":false,\"OS\":\"\",\"Arch\":\"\",\"UpTime\":0,\"CPUs\":0,\"UsableCPUs\":0,"
                            "\"HeapAlloc\":0,\"StackAlloc\":0}}");
@@ -89,13 +94,26 @@ static void metrics(s3_ctx *c) {
 }
 
 static void apis(s3_ctx *c) {
-  if (kms_ready(c, "kms:API")) kms_error(c, BUCKETS_KMS_ERR_NOT_SUPPORTED); /* the builtin KMS has none */
+  if (!kms_ready(c, "kms:API")) return;
+  buckets_buf b = BUCKETS_BUF_INIT;
+  buckets_kms_err e = buckets_kms_apis_json(c->s->kms, &b); /* the builtin KMS has none */
+  if (e) kms_error(c, e);
+  else json_reply(c, &b);
+  buckets_buf_free(&b);
 }
 
 static void version(s3_ctx *c) {
   if (!kms_ready(c, "kms:Version")) return;
+  char v[256];
+  buckets_kms_err e = buckets_kms_version(c->s->kms, v, sizeof(v));
+  if (e) {
+    kms_error(c, e);
+    return;
+  }
   buckets_buf b = BUCKETS_BUF_INIT;
-  buckets_buf_append_c(&b, "{\"version\":\"v1\"}");
+  buckets_buf_append_c(&b, "{\"version\":");
+  buckets_json_go_string(&b, v, strlen(v));
+  buckets_buf_append_char(&b, '}');
   json_reply(c, &b);
   buckets_buf_free(&b);
 }

@@ -199,20 +199,20 @@ static buckets_s3_error parse(s3_ctx *c, buckets_sse_req *r, bool copy) {
 buckets_s3_error buckets_s3_sse_parse(s3_ctx *c, buckets_sse_req *r) { return parse(c, r, false); }
 buckets_s3_error buckets_s3_sse_parse_copy_dest(s3_ctx *c, buckets_sse_req *r) { return parse(c, r, true); }
 
-static buckets_s3_error kms_error(buckets_kms_err e) {
+/* kms.Error to its API error; failed requests as the operation names them */
+static buckets_s3_error kms_error_op(buckets_kms_err e, bool decrypting) {
   switch (e) {
   case BUCKETS_KMS_ERR_KEY_NOT_FOUND: return BUCKETS_SSE_ERR_KMS_KEY_NOT_FOUND;
   case BUCKETS_KMS_ERR_DECRYPT: return BUCKETS_SSE_ERR_KMS_DECRYPT;
+  case BUCKETS_KMS_ERR_PERMISSION: return BUCKETS_SSE_ERR_KMS_NOT_AUTHORIZED;
+  case BUCKETS_KMS_ERR_FAILED: return decrypting ? BUCKETS_SSE_ERR_KMS_DECRYPT_FAILED : BUCKETS_SSE_ERR_KMS_GENERATE_FAILED;
   default: return BUCKETS_ERR_INTERNAL_ERROR;
   }
 }
+#define kms_error(e) kms_error_op(e, false)
 
 void buckets_s3_sse_write_error(s3_ctx *c, buckets_s3_error e) {
-  if (e == BUCKETS_SSE_ERR_KMS_KEY_NOT_FOUND)
-    buckets_s3_write_custom_error(c, 404, "kms:KeyNotFound", "key with given key ID does not exist");
-  else if (e == BUCKETS_SSE_ERR_KMS_DECRYPT)
-    buckets_s3_write_custom_error(c, 400, "kms:InvalidCiphertextException", "failed to decrypt ciphertext");
-  else buckets_s3_write_error(c, e);
+  buckets_s3_write_error(c, e); /* the KMS codes are written there */
 }
 
 /* kms.Context{bucket: path.Join(bucket, object)} plus a user context. */
@@ -379,7 +379,7 @@ buckets_s3_error buckets_s3_sse_object_key(s3_ctx *c, const buckets_object_info 
     buckets_buf_free(&ctx);
     free(user_ctx);
     free(dek);
-    if (ke) return kms_error(ke);
+    if (ke) return kms_error_op(ke, true);
   }
   bool ok = buckets_objkey_unseal(ext, sealed, iv, alg, domain, bucket, object, key);
   OPENSSL_cleanse(ext, sizeof(ext));

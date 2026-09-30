@@ -112,6 +112,9 @@ void buckets_iam_refresh_stats_get(buckets_iam_refresh_stats *out);
  * "policydb-sts", "policydb-group". */
 typedef void (*buckets_iam_notify_fn)(void *ud, const char *kind, const char *name);
 void buckets_iam_set_notify(buckets_iam *iam, buckets_iam_notify_fn fn, void *ud);
+/* With a KMS, the IAM files are written sealed by it (and read either way). */
+struct buckets_kms;
+void buckets_iam_set_kms(buckets_iam *iam, struct buckets_kms *k);
 /* Applies a peer's notification: reloads that item from storage. */
 void buckets_iam_on_notify(buckets_iam *iam, const char *kind, const char *name);
 

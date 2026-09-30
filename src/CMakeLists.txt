@@ -40,6 +40,7 @@ add_library(buckets STATIC
   crypto/estream.c
   crypto/objkey.c
   kms/kms.c
+  kms/cfgcrypt.c
   compress/s2.c
   compress/stream.c
   select/value.c
