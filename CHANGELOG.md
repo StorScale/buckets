@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-30
+
 ### Added
 - S3 Select (Phase 9): `SelectObjectContent` as MinIO answers it, request for request:
   - MinIO's SQL (its participle grammar, parsed by backtracking recursive descent taking the same alternatives), query analysis and errors, value inference, comparison and arithmetic, the string, date and conversion functions, and COUNT/SUM/AVG/MIN/MAX;
