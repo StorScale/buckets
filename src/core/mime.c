@@ -3,7 +3,9 @@
  * not read) and net/http's DetectContentType. */
 #include "core/mime.h"
 
+#include <ctype.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 
@@ -174,4 +176,27 @@ const char *buckets_mime_sniff(const void *data, size_t n) {
     if (b <= 0x08 || b == 0x0b || (b >= 0x0e && b <= 0x1a) || (b >= 0x1c && b <= 0x1f)) return "application/octet-stream";
   }
   return "text/plain; charset=utf-8";
+}
+
+/* ---- minio/pkg mimedb ---- */
+
+typedef struct {
+  const char *ext, *type;
+} mimedb_ent;
+
+static const mimedb_ent k_mimedb[] = {
+#include "core/mimedb.inc"
+};
+
+static int mimedb_cmp(const void *key, const void *ent) { return strcmp(key, ((const mimedb_ent *)ent)->ext); }
+
+const char *buckets_mimedb_type(const char *ext) {
+  if (!ext || !*ext) return "application/octet-stream";
+  if (*ext == '.') ext++;
+  char low[64];
+  size_t i = 0;
+  for (; ext[i] && i + 1 < sizeof(low); i++) low[i] = (char)tolower((unsigned char)ext[i]);
+  low[i] = '\0';
+  const mimedb_ent *e = bsearch(low, k_mimedb, sizeof(k_mimedb) / sizeof(k_mimedb[0]), sizeof(k_mimedb[0]), mimedb_cmp);
+  return e ? e->type : "application/octet-stream";
 }

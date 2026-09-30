@@ -104,12 +104,13 @@ static size_t order_of(const char *const *order, const char *key) {
   return SIZE_MAX;
 }
 
-static void set_field(yyjson_mut_doc *d, yyjson_mut_val *obj, const char *const *order, const char *key,
-                      yyjson_mut_val *val) {
+/* The value as stored: obj_replace copies into the existing node. */
+static yyjson_mut_val *set_field(yyjson_mut_doc *d, yyjson_mut_val *obj, const char *const *order, const char *key,
+                                 yyjson_mut_val *val) {
   yyjson_mut_val *k = yyjson_mut_strcpy(d, key);
   if (yyjson_mut_obj_get(obj, key)) {
     yyjson_mut_obj_replace(obj, k, val);
-    return;
+    return yyjson_mut_obj_get(obj, key);
   }
   size_t want = order_of(order, key), idx = 0;
   yyjson_mut_obj_iter it = yyjson_mut_obj_iter_with(obj);
@@ -117,6 +118,7 @@ static void set_field(yyjson_mut_doc *d, yyjson_mut_val *obj, const char *const 
   while ((ek = yyjson_mut_obj_iter_next(&it)))
     if (order_of(order, yyjson_mut_get_str(ek)) < want) idx++;
   yyjson_mut_obj_insert(obj, k, val, idx);
+  return val;
 }
 
 static const char *const k_metrics_order[] = {"scanner", "disk", "os", "batchJobs", "siteResync", "net",
@@ -186,7 +188,7 @@ static void sum_map(yyjson_mut_doc *d, yyjson_mut_val *dst, const char *const *o
   yyjson_mut_val *sm = yyjson_mut_obj_get(src, key);
   if (!yyjson_mut_is_obj(sm) || !yyjson_mut_obj_size(sm)) return;
   yyjson_mut_val *dm = yyjson_mut_obj_get(dst, key);
-  if (!yyjson_mut_is_obj(dm)) set_field(d, dst, order, key, dm = yyjson_mut_obj(d));
+  if (!yyjson_mut_is_obj(dm)) dm = set_field(d, dst, order, key, yyjson_mut_obj(d));
   yyjson_mut_obj_iter it = yyjson_mut_obj_iter_with(sm);
   yyjson_mut_val *k;
   while ((k = yyjson_mut_obj_iter_next(&it))) {
@@ -222,7 +224,7 @@ static void timed_map(yyjson_mut_doc *d, yyjson_mut_val *dst, const char *const 
   yyjson_mut_val *sm = yyjson_mut_obj_get(src, key);
   if (!yyjson_mut_is_obj(sm) || !yyjson_mut_obj_size(sm)) return;
   yyjson_mut_val *dm = yyjson_mut_obj_get(dst, key);
-  if (!yyjson_mut_is_obj(dm)) set_field(d, dst, order, key, dm = yyjson_mut_obj(d));
+  if (!yyjson_mut_is_obj(dm)) dm = set_field(d, dst, order, key, yyjson_mut_obj(d));
   yyjson_mut_obj_iter it = yyjson_mut_obj_iter_with(sm);
   yyjson_mut_val *k;
   while ((k = yyjson_mut_obj_iter_next(&it))) {
@@ -285,7 +287,7 @@ static void scanner_merge(yyjson_mut_doc *d, yyjson_mut_val *s, yyjson_mut_val *
   yyjson_mut_val *opb = yyjson_mut_obj_get(o, "per_bucket_stats");
   if (yyjson_mut_is_obj(opb) && yyjson_mut_obj_size(opb)) {
     yyjson_mut_val *spb = yyjson_mut_obj_get(s, "per_bucket_stats");
-    if (!spb) set_field(d, s, k_scanner_order, "per_bucket_stats", spb = yyjson_mut_obj(d));
+    if (!spb) spb = set_field(d, s, k_scanner_order, "per_bucket_stats", yyjson_mut_obj(d));
     yyjson_mut_obj_iter it = yyjson_mut_obj_iter_with(opb);
     yyjson_mut_val *k;
     while ((k = yyjson_mut_obj_iter_next(&it))) {
@@ -310,7 +312,7 @@ static void scanner_merge(yyjson_mut_doc *d, yyjson_mut_val *s, yyjson_mut_val *
   yyjson_mut_val *oa = yyjson_mut_obj_get(o, "active");
   if (yyjson_mut_arr_size(oa)) {
     yyjson_mut_val *sa = yyjson_mut_obj_get(s, "active");
-    if (!sa) set_field(d, s, k_scanner_order, "active", sa = yyjson_mut_arr(d));
+    if (!sa) sa = set_field(d, s, k_scanner_order, "active", yyjson_mut_arr(d));
     yyjson_mut_arr_iter it = yyjson_mut_arr_iter_with(oa);
     yyjson_mut_val *v;
     while ((v = yyjson_mut_arr_iter_next(&it))) yyjson_mut_arr_append(sa, yyjson_mut_val_mut_copy(d, v));
@@ -343,7 +345,11 @@ static void batch_merge(yyjson_mut_doc *d, yyjson_mut_val *s, yyjson_mut_val *o)
   if (!yyjson_mut_is_obj(oj) || !yyjson_mut_obj_size(oj)) return;
   latest(d, s, o, "collected");
   yyjson_mut_val *sj = yyjson_mut_obj_get(s, "Jobs");
-  if (!yyjson_mut_is_obj(sj)) yyjson_mut_obj_replace(s, yyjson_mut_str(d, "Jobs"), sj = yyjson_mut_obj(d));
+  if (!yyjson_mut_is_obj(sj)) {
+    /* obj_replace copies the value into the existing node: use that node */
+    yyjson_mut_obj_replace(s, yyjson_mut_str(d, "Jobs"), yyjson_mut_obj(d));
+    sj = yyjson_mut_obj_get(s, "Jobs");
+  }
   yyjson_mut_obj_iter it = yyjson_mut_obj_iter_with(oj);
   yyjson_mut_val *k;
   while ((k = yyjson_mut_obj_iter_next(&it))) {
@@ -381,7 +387,7 @@ static void rpc_merge(yyjson_mut_doc *d, yyjson_mut_val *m, yyjson_mut_val *o) {
     yyjson_mut_val *k;
     while (yyjson_mut_is_obj(om) && (k = yyjson_mut_obj_iter_next(&it))) {
       yyjson_mut_val *mm = yyjson_mut_obj_get(m, maps[i]);
-      if (!mm) set_field(d, m, k_rpc_order, maps[i], mm = yyjson_mut_obj(d));
+      if (!mm) mm = set_field(d, m, k_rpc_order, maps[i], yyjson_mut_obj(d));
       const char *name = yyjson_mut_get_str(k);
       yyjson_mut_val *ex = yyjson_mut_obj_get(mm, name);
       if (!ex) yyjson_mut_obj_add(mm, yyjson_mut_strcpy(d, name), ex = zero_of(d, "rpc"));
@@ -397,7 +403,7 @@ static void metrics_merge(yyjson_mut_doc *d, yyjson_mut_val *r, yyjson_mut_val *
     yyjson_mut_val *ov = yyjson_mut_obj_get(o, types[i]);
     if (!ov || yyjson_mut_is_null(ov)) continue;
     yyjson_mut_val *rv = yyjson_mut_obj_get(r, types[i]);
-    if (!rv) set_field(d, r, k_metrics_order, types[i], rv = zero_of(d, types[i]));
+    if (!rv) rv = set_field(d, r, k_metrics_order, types[i], zero_of(d, types[i]));
     if (!strcmp(types[i], "scanner")) scanner_merge(d, rv, ov);
     else if (!strcmp(types[i], "disk")) disk_merge(d, rv, ov);
     else if (!strcmp(types[i], "os")) os_merge(d, rv, ov);

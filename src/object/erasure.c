@@ -3437,7 +3437,8 @@ static buckets_obj_err mpu_complete(buckets_epool *L, const char *bucket, const 
   bool full = (ctype & (BUCKETS_CKSUM_FULL_OBJECT | BUCKETS_CKSUM_CRC64NVME)) != 0;
   size_t clen = buckets_cksum_raw_len(ctype);
   buckets_buf combined = BUCKETS_BUF_INIT;
-  uint8_t merged_ck[32];
+  uint8_t merged_ck[32] = {0};
+  bool merged_set = false; /* Checksum.AddPart: empty parts add nothing */
 
   buckets_xl_object o;
   init_version(&o, u.up.data_dir, 0, u.up.ec_m, u.up.ec_n, u.dist, u.set->n);
@@ -3478,8 +3479,11 @@ static buckets_obj_err mpu_complete(buckets_epool *L, const char *bucket, const 
         err = BUCKETS_OBJ_ERR_INVALID_PART;
         break;
       }
-      if (full && combined.len) buckets_cksum_combine(ctype, merged_ck, p->cksum.raw, p->actual_size);
-      else if (full) memcpy(merged_ck, p->cksum.raw, clen);
+      if (full && p->actual_size > 0) {
+        if (merged_set) buckets_cksum_combine(ctype, merged_ck, p->cksum.raw, p->actual_size);
+        else memcpy(merged_ck, p->cksum.raw, clen);
+        merged_set = true;
+      }
       buckets_buf_append(&combined, p->cksum.raw, clen);
     }
     if (i + 1 < nreq && p->actual_size < BUCKETS_MIN_PART_SIZE) {
@@ -3525,7 +3529,8 @@ static buckets_obj_err mpu_complete(buckets_epool *L, const char *bucket, const 
         buckets_cksum_hasher_final(&h, fin.raw);
       }
       if (want && want->type) {
-        bool ok = want->raw_len == clen && memcmp(want->raw, fin.raw, clen) == 0 &&
+        /* a full-object checksum of empty parts only is unset: nothing matches it */
+        bool ok = want->raw_len == clen && memcmp(want->raw, fin.raw, clen) == 0 && (!full || merged_set) &&
                   (full || want->want_parts == 0 || want->want_parts == (int)nreq);
         if (!ok) err = BUCKETS_OBJ_ERR_BAD_CHECKSUM;
       }

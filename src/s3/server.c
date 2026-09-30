@@ -956,6 +956,14 @@ static void common_headers(s3_ctx *c) {
   buckets_http_resp_header(r, "Strict-Transport-Security", "max-age=31536000; includeSubDomains");
 }
 
+/* writeErrorResponseHeadersOnly: a HEAD's error goes in headers, bodiless */
+static bool head_error(s3_ctx *c, const char *code, const char *message) {
+  if (!c->req || !buckets_str_eq_c(c->req->method, "HEAD")) return false;
+  buckets_http_resp_header(c->resp, "X-Minio-Error-Code", code);
+  buckets_http_resp_headerf(c->resp, "X-Minio-Error-Desc", "\"%s\"", message);
+  return true;
+}
+
 void buckets_s3_write_error_msg(s3_ctx *c, buckets_s3_error e, const char *message) {
   /* KMS failures carry MinIO's kms.Error codes, outside the table */
   if (e == BUCKETS_SSE_ERR_KMS_KEY_NOT_FOUND) {
@@ -968,8 +976,9 @@ void buckets_s3_write_error_msg(s3_ctx *c, buckets_s3_error e, const char *messa
   }
   const buckets_s3_error_info *info = buckets_s3_error_get(e);
   c->resp->status = info->status;
-  buckets_http_resp_header(c->resp, "Content-Type", "application/xml");
   buckets_buf_reset(&c->resp->body);
+  if (head_error(c, info->code, message ? message : info->message)) return;
+  buckets_http_resp_header(c->resp, "Content-Type", "application/xml");
   buckets_s3_error_xml_msg(&c->resp->body, e, message, c->path ? c->path : "/",
                            c->err_bucket ? c->err_bucket : c->bucket, c->err_object ? c->err_object : c->object,
                            c->request_id, c->s->host_id);
@@ -995,9 +1004,10 @@ static bool pending_subresource(const s3_ctx *c, bool put) {
 
 void buckets_s3_write_custom_error(s3_ctx *c, int status, const char *code, const char *message) {
   c->resp->status = status;
-  buckets_http_resp_header(c->resp, "Content-Type", "application/xml");
   buckets_buf *b = &c->resp->body;
   buckets_buf_reset(b);
+  if (head_error(c, code, message)) return;
+  buckets_http_resp_header(c->resp, "Content-Type", "application/xml");
   buckets_xml_header(b);
   buckets_xml_open(b, "Error");
   buckets_xml_elem(b, "Code", code);
@@ -1226,12 +1236,14 @@ static void list_buckets(s3_ctx *c) {
   buckets_xml_elem(b, "DisplayName", BUCKETS_S3_OWNER_NAME);
   buckets_xml_close(b, "Owner");
   buckets_xml_open(b, "Buckets");
+  size_t kept = 0;
   for (size_t i = 0; i < n; i++) {
     if (buckets_bucket_name_reserved(vols[i].name) || !buckets_bucket_name_valid(vols[i].name)) continue;
     if (filter && !buckets_s3_allowed(c, "s3:ListBucket", vols[i].name, NULL, false) &&
         !buckets_s3_allowed(c, "s3:GetBucketLocation", vols[i].name, NULL, false)) {
       continue;
     }
+    kept++;
     /* Creation time comes from bucket metadata (as in MinIO), else the directory. */
     int64_t created_ns = (int64_t)vols[i].created * 1000000000LL;
     buckets_bucket_meta bm;
@@ -1250,6 +1262,11 @@ static void list_buckets(s3_ctx *c) {
   buckets_xml_close(b, "Buckets");
   buckets_xml_close(b, "ListAllMyBucketsResult");
   buckets_bucket_info_free(vols, n);
+  if (filter && !kept) { /* no bucket passed the filter */
+    buckets_buf_reset(b);
+    buckets_s3_write_error(c, BUCKETS_ERR_ACCESS_DENIED);
+    return;
+  }
   buckets_s3_write_xml(c, 200);
 }
 

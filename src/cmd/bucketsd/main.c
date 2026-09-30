@@ -24,6 +24,8 @@
 #include "dist/internode.h"
 #include "dist/peer.h"
 #include "admin/admin.h"
+#include "ftp/ftp.h"
+#include "ftp/s3fs.h"
 #include "admin/info.h"
 #include "dist/storage_server.h"
 #include "storage/remote.h"
@@ -126,10 +128,12 @@ static const char *env_secret(const char *primary, const char *compat) {
 
 static void usage(FILE *f) {
   fprintf(f,
-          "Usage: bucketsd server [--address [HOST]:PORT] [--certs-dir DIR] DRIVE...\n"
+          "Usage: bucketsd server [--address [HOST]:PORT] [--certs-dir DIR] [--ftp KEY=VALUE]... DRIVE...\n"
           "  DRIVE may use MinIO ellipses, e.g. /mnt/disk{1...16}; each ellipsis argument is a pool\n"
           "  --certs-dir: public.crt + private.key enable HTTPS (default ~/.buckets/certs,\n"
           "               then ~/.minio/certs); subdirectories add certificates chosen by SNI\n"
+          "  --ftp:       serve FTP (MinIO's --ftp keys: address=[HOST]:PORT, passive-port-range=LO-HI,\n"
+          "               tls-private-key=FILE, tls-public-cert=FILE, force-tls=BOOL); repeat per key\n"
           "\n"
           "Environment:\n"
           "  BUCKETS_ROOT_USER / MINIO_ROOT_USER          root access key (default minioadmin)\n"
@@ -556,8 +560,14 @@ int main(int argc, char **argv) {
   const char *certs_dir = NULL;
   char **drive_args = buckets_xcalloc((size_t)argc, sizeof(char *));
   size_t ndrive_args = 0;
+  char **ftp_args = buckets_xcalloc((size_t)argc, sizeof(char *));
+  size_t nftp_args = 0;
   for (int i = 2; i < argc; i++) {
-    if (strcmp(argv[i], "--address") == 0 && i + 1 < argc) {
+    if (strncmp(argv[i], "--ftp=", 6) == 0) {
+      ftp_args[nftp_args++] = argv[i] + 6;
+    } else if (strcmp(argv[i], "--ftp") == 0 && i + 1 < argc) {
+      ftp_args[nftp_args++] = argv[++i];
+    } else if (strcmp(argv[i], "--address") == 0 && i + 1 < argc) {
       address = argv[++i];
     } else if ((strcmp(argv[i], "--certs-dir") == 0 || strcmp(argv[i], "-S") == 0) && i + 1 < argc) {
       certs_dir = argv[++i];
@@ -818,6 +828,16 @@ int main(int argc, char **argv) {
   app.http = buckets_http_server_start(g_loop, &hcfg, buckets_s3_handle, &s3);
   if (!app.http) return 1;
   origin_endpoint(s3.endpoint, sizeof(s3.endpoint), host, buckets_http_server_port(app.http), tls != NULL);
+  buckets_fs_init(&s3, buckets_http_server_port(app.http), tls != NULL);
+  if (nftp_args) {
+    buckets_ftp_opts fo;
+    char ferr[512];
+    if (!buckets_ftp_parse(ftp_args, nftp_args, &fo, ferr, sizeof(ferr)) ||
+        !buckets_ftp_start(&fo, tls != NULL, certs_dir, ferr, sizeof(ferr))) {
+      buckets_log_error("unable to start FTP server: %s", ferr);
+      return 1;
+    }
+  }
   buckets_loop_set_wake(g_loop, on_wake, &app);
   buckets_loop_add_tick(g_loop, on_tick, &app);
 

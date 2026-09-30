@@ -169,6 +169,8 @@ add_library(buckets STATIC
   admin/locks.c
   admin/netperf.c
   admin/rtmetrics.c
+  ftp/s3fs.c
+  ftp/ftp.c
   admin/config.c
   admin/iamxfer.c
   admin/bucket.c

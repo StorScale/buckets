@@ -66,6 +66,7 @@ run tests/integration/zip.sh build-ci-asan/src/bucketsd
 run tests/integration/lambda.sh build-ci-asan/src/bucketsd
 run tests/integration/adminops.sh build-ci-asan/src/bucketsd
 run tests/integration/adminops-dist.sh build-ci-asan/src/bucketsd
+run tests/integration/ftp.sh build-ci-asan/src/bucketsd
 run tests/integration/console.sh build-ci-asan/src/bucketsd build-ci-asan/src/consoled
 # The console: SPA build, typecheck and Playwright e2e against the sanitized
 # bucketsd and consoled (skipped without npm).
@@ -102,6 +103,7 @@ run tests/integration/zip.sh build-ci/src/bucketsd
 run tests/integration/lambda.sh build-ci/src/bucketsd
 run tests/integration/adminops.sh build-ci/src/bucketsd
 run tests/integration/adminops-dist.sh build-ci/src/bucketsd
+run tests/integration/ftp.sh build-ci/src/bucketsd
 
 # kind end to end (needs docker, kind and kubectl; see tests/e2e-k8s/README.md)
 if [[ -n "${KIND_E2E:-}" ]]; then
