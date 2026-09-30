@@ -54,6 +54,12 @@ kubectl apply -f operator/examples/cluster.yaml     # 4 servers x 4 drives
 kubectl get bucketsclusters                          # SERVERS 4/4, PHASE Ready
 ```
 
+Or install the operator with Helm (`watchNamespace` limits it, and its RBAC, to one namespace):
+
+```bash
+helm install buckets-operator operator/helm/buckets-operator -n buckets-system --create-namespace
+```
+
 Root credentials land in the Secret `<name>-root` unless `spec.credsSecret` names your own. `spec.console.enabled` adds the web console as a Deployment of its own (`<name>-console`, port 9090, optionally behind an Ingress); sign in with any Buckets credentials. Pools can be appended to expand a cluster; the operator then restarts every server together. Image changes roll one server at a time. `operator/examples/cluster-tls.yaml` shows TLS with cert-manager.
 
 Any S3 client works:
@@ -94,6 +100,8 @@ Sign in at http://localhost:9090 with any Buckets credentials: the console excha
 | `tests/integration/snowball.sh` | Snowball archives (plain and compressed) extracted by MinIO and Buckets alike |
 | `tests/e2e-k8s/multisite.sh` | Two Buckets clusters and a MinIO site on kind: Buckets↔MinIO bucket replication, three-site site replication, a forwarded multi-server decommission |
 | `console/web: npx playwright test` | The console end to end: starts bucketsd and consoled (or `CONSOLE_URL`) and drives the SPA in Chromium |
+| `tests/bench/warp.sh` | warp-style concurrent PUT/GET throughput, Buckets then MinIO on the same drives (`S3BENCH`, `MINIO_BIN`; see `docs/performance.md`) |
+| `tests/fuzz/soak.sh` | Every fuzz target under libFuzzer with ASan/UBSan in a Linux container, for `SECONDS` each (needs docker) |
 | `scripts/ci.sh` | The full gate: release, ASan/UBSan and TSan builds, unit, smoke and interop tests |
 
 ## Layout
