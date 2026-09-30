@@ -6,6 +6,9 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- A server stopped while it still waited for its LDAP directory at startup now exits, instead of retrying forever.
+
 ## [0.9.0] - 2026-09-30
 
 ### Added

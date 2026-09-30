@@ -154,8 +154,11 @@ static bool validate_ldap(const buckets_config *cfg, char *err, size_t errlen) {
 }
 
 /* identity_ldap is read once, before IAM starts (it decides how users are
- * stored); like MinIO, keep trying until the directory can be used. */
-static void init_ldap(buckets_s3_server *s) {
+ * stored); like MinIO, keep trying until the directory can be used, or the
+ * server stops (false). */
+static bool bg_sleep(buckets_s3_server *s, long ms);
+
+static bool init_ldap(buckets_s3_server *s) {
   int delay_ms = 250;
   for (;;) {
     buckets_config *cfg = buckets_config_sys_snapshot(s->config);
@@ -168,11 +171,10 @@ static void init_ldap(buckets_s3_server *s) {
       pthread_mutex_unlock(&s->oidc_mu);
       if (buckets_ldapidp_enabled(p)) buckets_log_info("identity_ldap: LDAP configured; users are LDAP DNs");
       buckets_iam_set_ldap_mode(s->iam, buckets_ldapidp_enabled(p));
-      return;
+      return true;
     }
     buckets_log_warn("identity_ldap: unable to load the LDAP configuration: %s; retrying", err);
-    struct timespec ts = {delay_ms / 1000, (delay_ms % 1000) * 1000000L};
-    nanosleep(&ts, NULL);
+    if (!bg_sleep(s, delay_ms)) return false;
     if (delay_ms < 3000) delay_ms *= 2;
   }
 }
@@ -531,7 +533,7 @@ static void *iam_start_main(void *arg) {
   configure_notify(s);
   configure_logger(s, NULL);
   g_ca_path = s->ca_path;
-  init_ldap(s);
+  if (!init_ldap(s)) return NULL;
   delay_ms = 250;
   while (!buckets_iam_start(s->iam, s->layer)) {
     buckets_log_warn("iam: unable to load IAM data yet, retrying");
