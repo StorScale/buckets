@@ -92,6 +92,7 @@ add_library(buckets STATIC
   s3/xml.c
   s3/zipindex.c
   s3/lambda.c
+  s3/veeam.c
   s3/replicate.c
   s3/replstats.c
   s3/tiering.c

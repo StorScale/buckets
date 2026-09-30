@@ -503,7 +503,9 @@ static void write_response(conn *c, buckets_http_response *resp, bool keep_alive
   buckets_buf_appendf(&c->out, "HTTP/1.1 %d %s\r\nServer: %s\r\nDate: %s\r\n", resp->status,
                       buckets_http_status_text(resp->status), srv->cfg.server_header, date);
   if (chunked) buckets_buf_append_c(&c->out, "Transfer-Encoding: chunked\r\n");
-  else buckets_buf_appendf(&c->out, "Content-Length: %lld\r\n", clen);
+  /* net/http: no length on the statuses that have no body */
+  else if (resp->status >= 200 && resp->status != 204 && resp->status != 304)
+    buckets_buf_appendf(&c->out, "Content-Length: %lld\r\n", clen);
   if (!keep_alive) buckets_buf_append_c(&c->out, "Connection: close\r\n");
   buckets_buf_append(&c->out, resp->headers.data, resp->headers.len);
   buckets_buf_append(&c->out, "\r\n", 2);

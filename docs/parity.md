@@ -284,7 +284,9 @@ and the console, each run on kind (`tests/e2e-k8s/kind.sh`, `multisite.sh`).
 
 S3 Select (Phase 9): the SQL grammar, functions and aggregates, CSV, JSON and Parquet input, GZIP, BZIP2,
 ZSTD, LZ4, S2 and SNAPPY input compression, scan ranges and the event stream; checked against MinIO case by case
-(`tests/integration/select.sh`) and byte for byte on MinIO's own stream tests.
+(`tests/integration/select.sh`) and byte for byte on MinIO's own stream tests. Object lambda, zip extract,
+snowball uploads, the Veeam SOS objects, inspect, speedtests, profiling, health info, top locks and
+bucket metadata export/import, each compared with MinIO.
 
 Open: KES/MinIO KMS backends, SFTP/FTP.
 

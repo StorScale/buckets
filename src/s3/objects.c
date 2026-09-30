@@ -1498,7 +1498,7 @@ static void write_object_headers(s3_ctx *c, const buckets_object_info *oi) {
   }
   /* a transitioned version answers with its tier as the storage class */
   if (buckets_object_is_remote(oi)) {
-    buckets_http_resp_header_set(c->resp, "X-Amz-Storage-Class", buckets_object_tier(oi, NULL, NULL));
+    buckets_http_resp_header_set(c->resp, "X-Amz-Storage-Class", buckets_s3_filter_storage_class(c, buckets_object_tier(oi, NULL, NULL)));
   }
   const char *exp = buckets_object_meta(oi, "expires");
   time_t et;
@@ -1619,7 +1619,25 @@ static void get_object(s3_ctx *c, bool head) {
     return;
   }
   buckets_object_info oi;
-  buckets_obj_err err = buckets_obj_stat(c->s->layer, c->bucket, c->object, version, &oi);
+  buckets_obj_err err;
+  /* GetObjectNInfo tries the Veeam SOS objects first, whatever the version */
+  buckets_buf sos = BUCKETS_BUF_INIT;
+  bool is_sos = false;
+  if (buckets_s3_is_veeam_object(c->object)) {
+    memset(&oi, 0, sizeof(oi));
+    is_sos = buckets_s3_veeam_object(c, c->bucket, c->object, &sos, oi.etag);
+    oi.name = buckets_xstrdup(c->object);
+    oi.size = (int64_t)sos.len;
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    oi.mod_time_ns = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+    oi.is_latest = true;
+    oi.num_versions = 1;
+    buckets_xl_kv_set(&oi.meta, &oi.nmeta, "content-type", "application/xml", 15);
+    err = BUCKETS_OBJ_OK;
+  } else {
+    err = buckets_obj_stat(c->s->layer, c->bucket, c->object, version, &oi);
+  }
   if ((err == BUCKETS_OBJ_ERR_NO_SUCH_KEY || err == BUCKETS_OBJ_ERR_NO_SUCH_VERSION ||
        err == BUCKETS_OBJ_ERR_READ_QUORUM) &&
       proxy_to_target(c, version, head, buckets_http_header_get(c->req, "Range")))
@@ -1657,6 +1675,7 @@ static void get_object(s3_ctx *c, bool head) {
       }
     }
     buckets_s3_write_error(c, version && *version ? BUCKETS_ERR_METHOD_NOT_ALLOWED : BUCKETS_ERR_NO_SUCH_KEY);
+    buckets_buf_free(&sos);
     buckets_object_info_free(&oi);
     return;
   }
@@ -1676,6 +1695,7 @@ static void get_object(s3_ctx *c, bool head) {
     have_key = !serr;
   }
   if (serr) {
+    buckets_buf_free(&sos);
     buckets_object_info_free(&oi);
     buckets_s3_sse_write_error(c, serr);
     return;
@@ -1692,12 +1712,14 @@ static void get_object(s3_ctx *c, bool head) {
     bool found = false;
     for (size_t i = 0; i < oi.nparts; i++) found |= oi.parts[i].number == part_number;
     if (!found || (size_t)part_number > oi.nparts) {
+      buckets_buf_free(&sos);
       buckets_object_info_free(&oi);
       buckets_s3_write_error(c, BUCKETS_ERR_INVALID_PART_NUMBER);
       return;
     }
   }
   if (check_preconditions(c, &oi)) {
+    buckets_buf_free(&sos);
     buckets_object_info_free(&oi);
     return;
   }
@@ -1712,6 +1734,7 @@ static void get_object(s3_ctx *c, bool head) {
   }
   if (!resolve_range(&rs, oi.size, &off, &len)) {
     write_invalid_range(c, &rs, oi.size);
+    buckets_buf_free(&sos);
     buckets_object_info_free(&oi);
     return;
   }
@@ -1720,7 +1743,10 @@ static void get_object(s3_ctx *c, bool head) {
   buckets_sse_reader *sr = NULL;
   buckets_comp_reader *cr = NULL;
   compressed = compressed && len > 0;
-  if (!head) {
+  if (is_sos) {
+    if (!head) buckets_buf_append(&c->resp->body, sos.data + off, (size_t)len);
+    buckets_buf_free(&sos);
+  } else if (!head) {
     buckets_object_info oi2;
     int64_t roff = off, rlen = len;
     buckets_sse_range rg;
@@ -3843,7 +3869,7 @@ static void get_object_attributes(s3_ctx *c) {
     buckets_buf_free(&parts);
   }
   if (want[3]) {
-    buckets_xml_elem(b, "StorageClass", buckets_s3_storage_class(&oi));
+    buckets_xml_elem(b, "StorageClass", buckets_s3_filter_storage_class(c, buckets_s3_storage_class(&oi)));
   }
   if (want[4] && oi.size) buckets_buf_appendf(b, "<ObjectSize>%lld</ObjectSize>", (long long)oi.size);
   buckets_xml_close(b, "getObjectAttributesResponse");
@@ -4697,7 +4723,7 @@ void buckets_s3_list_objects(s3_ctx *c, bool v2) {
       buckets_xml_elem(b, "DisplayName", BUCKETS_S3_OWNER_NAME);
       buckets_xml_close(b, "Owner");
     }
-    buckets_xml_elem(b, "StorageClass", buckets_s3_storage_class(o));
+    buckets_xml_elem(b, "StorageClass", buckets_s3_filter_storage_class(c, buckets_s3_storage_class(o)));
     if (with_meta) {
       bool any = false;
       const char *sv, *sk = sse_list_meta(o, &sv);
@@ -4807,7 +4833,7 @@ void buckets_s3_list_object_versions(s3_ctx *c) {
     buckets_xml_elem(b, "ID", BUCKETS_S3_OWNER_ID);
     buckets_xml_elem(b, "DisplayName", BUCKETS_S3_OWNER_NAME);
     buckets_xml_close(b, "Owner");
-    buckets_xml_elem(b, "StorageClass", buckets_s3_storage_class(o));
+    buckets_xml_elem(b, "StorageClass", buckets_s3_filter_storage_class(c, buckets_s3_storage_class(o)));
     if (with_meta && !o->delete_marker) {
       bool any = false;
       const char *sv, *sk = sse_list_meta(o, &sv);

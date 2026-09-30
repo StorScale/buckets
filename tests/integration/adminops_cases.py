@@ -687,5 +687,28 @@ for base, root in SERVERS:
 if res[0] and res[1]:
     compare("account info histogram bins", *res)
 
+# ---- Veeam SOS: the virtual system.xml and capacity.xml ----------------------------------------------
+SOS = ".system-d26a9498-cb7c-4a87-a44a-8ae204f5ba6c/"
+for base, root in SERVERS:
+    curl(f"{base}/sosq", "PUT")
+    admin(base, "PUT", "/set-bucket-quota?bucket=sosq", b'{"quota":1073741824,"quotatype":"hard"}')
+for name, path, hdrs in [("system.xml", "acctv/" + SOS + "system.xml", ()),
+                         ("capacity.xml with a quota", "sosq/" + SOS + "capacity.xml", ()),
+                         ("capacity.xml, ranged", "sosq/" + SOS + "capacity.xml", ("Range: bytes=10-40",)),
+                         ("capacity.xml, not modified", "sosq/" + SOS + "capacity.xml",
+                          ('If-None-Match: "c09b2732902add6d9e27d9496c486967"',)),
+                         ("capacity.xml, no bucket", "nosuchsos/" + SOS + "capacity.xml", ()),
+                         ("another name", "sosq/" + SOS + "other.xml", ())]:
+    res = []
+    for base, root in SERVERS:
+        c, h, b = curl(f"{base}/{path}", headers=hdrs)
+        b = re.sub(rb"&#34;(MinIO|Buckets) [^&]*&#34;", b"<model>", b)
+        b = re.sub(rb"<Capacity>\d+</Capacity><Available>\d+</Available>", b"<space/>", b) if b"nosuchsos" in path.encode() else b
+        v = [c, h.get("content-type"), h.get("content-range"), h.get("accept-ranges")]
+        if name != "system.xml" and "no bucket" not in name:
+            v += [h.get("etag"), h.get("content-length")]
+        res.append((v, err_view(c, b) if c >= 400 else b))
+    compare(f"veeam sos, {name}", *res)
+
 print(f"adminops: {Score.passed} passed, {Score.failed} failed")
 sys.exit(1 if Score.failed else 0)

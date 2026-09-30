@@ -176,6 +176,12 @@ void buckets_s3_expiration_header(s3_ctx *c, const buckets_object_info *oi);
 void buckets_s3_transition_immediate(s3_ctx *c, const buckets_object_info *oi);
 /* ObjectInfo.StorageClass: a transitioned version's tier, else the stored class or STANDARD. */
 const char *buckets_s3_storage_class(const buckets_object_info *oi);
+/* Veeam SOS (veeam.c): the virtual system.xml and capacity.xml objects. */
+bool buckets_s3_is_veeam_object(const char *object);
+/* The object's body and its ETag; false for any other name. */
+bool buckets_s3_veeam_object(s3_ctx *c, const char *bucket, const char *object, buckets_buf *out, char etag[33]);
+/* filterStorageClass: _MINIO_VEEAM_FORCE_SC for Veeam clients. */
+const char *buckets_s3_filter_storage_class(s3_ctx *c, const char *sc);
 
 /* ---- tagging (tagging.c) ---- */
 /* Writes the S3 error for a tags parse error (buckets_tags_error). */
