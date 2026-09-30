@@ -417,7 +417,13 @@ static void *leader_run(void *arg) {
   while (!atomic_load(&l->stop)) {
     void *h = buckets_dsync_lock_src(l->d, BUCKETS_META_BUCKET "/leader.lock", true, 2000,
                                      "[shared-lock.go:38:sharedLock.backgroundRoutine()]");
-    if (!h) continue;
+    if (!h) { /* too few lock servers answer, which fails at once: wait before retrying */
+      for (int i = 0; i < 10 && !atomic_load(&l->stop); i++) {
+        struct timespec ts = {0, 100000000L};
+        nanosleep(&ts, NULL);
+      }
+      continue;
+    }
     atomic_store(&l->held, true);
     while (!atomic_load(&l->stop)) {
       struct timespec ts = {0, 100000000L};

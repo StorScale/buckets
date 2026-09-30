@@ -218,8 +218,9 @@ static bool parse_dsn(const char *s, dsn *d, char *err, size_t errlen) {
       return false;
     }
   } else if (!strcmp(d->net, "tcp") && !strrchr(d->addr, ':')) {
-    char *a = buckets_xmalloc(strlen(d->addr) + 6);
-    sprintf(a, "%s:3306", d->addr);
+    size_t an = strlen(d->addr) + 6;
+    char *a = buckets_xmalloc(an);
+    snprintf(a, an, "%s:3306", d->addr);
     free(d->addr);
     d->addr = a;
   }
