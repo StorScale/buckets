@@ -16,6 +16,7 @@ All notable changes to this project are documented here. The format follows
 - GET resolves an object's metadata once instead of twice (stat, then open).
 
 ### Fixed
+- A data race between startup and the resource metrics sampler, which polled the cluster description unsynchronized (found by ThreadSanitizer).
 - A server stopped while it still waited for its LDAP directory at startup now exits, instead of retrying forever.
 
 ## [0.9.0] - 2026-09-30

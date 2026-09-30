@@ -884,7 +884,7 @@ void buckets_s3_scanner_hooks(buckets_s3_server *s, void *hooks) {
 /* The resource metrics' sampler (startResourceMetricsCollection). */
 static void *metrics_main(void *arg) {
   buckets_s3_server *s = arg;
-  while (!s->cluster) /* a single node describes its drives after bootstrap */
+  while (!__atomic_load_n(&s->cluster, __ATOMIC_ACQUIRE)) /* a single node describes its drives after bootstrap */
     if (!bg_sleep(s, 100)) return NULL;
   do buckets_metrics_resource_collect(s);
   while (bg_sleep(s, 60000));

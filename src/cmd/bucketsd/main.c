@@ -825,7 +825,7 @@ int main(int argc, char **argv) {
       return 1;
     }
   }
-  s3.cluster = cluster_describe(&topo, host, tls != NULL);
+  __atomic_store_n(&s3.cluster, cluster_describe(&topo, host, tls != NULL), __ATOMIC_RELEASE); /* metrics_main polls it */
   s3.internode_tls = topo.tls_client;
   buckets_trace_set_node(s3.cluster->self);
   if (topo.distributed) {
