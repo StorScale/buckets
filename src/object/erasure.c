@@ -240,11 +240,13 @@ buckets_obj_err buckets_ep_list_buckets(buckets_epool *L, buckets_bucket_info **
  * writer outlasts a stalled reader (dropped after 60s) as with MinIO.
  * BUCKETS_LOCK_TIMEOUT (seconds) overrides it. */
 static int lock_timeout_ms(void) {
-  static int ms;
+  static int cached; /* racing first calls compute the same value */
+  int ms = __atomic_load_n(&cached, __ATOMIC_RELAXED);
   if (!ms) {
     const char *e = getenv("BUCKETS_LOCK_TIMEOUT");
     int v = e ? atoi(e) : 0;
     ms = v > 0 ? v * 1000 : 5 * 60 * 1000;
+    __atomic_store_n(&cached, ms, __ATOMIC_RELAXED);
   }
   return ms;
 }

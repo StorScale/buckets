@@ -16,12 +16,14 @@ All notable changes to this project are documented here. The format follows
 ### Changed
 - The HTTP server runs several event loops (CPUs / 2 by default) and deals connections across them; one loop saturated on large concurrent GETs.
 - GET resolves an object's metadata once instead of twice (stat, then open).
+- The worker pool wakes only as many threads as a parallel batch has tasks, and each waiting caller has its own condition variable, instead of waking every idle worker and every waiter (lock contention under concurrent GETs).
 
 ### Fixed
 - S3 Select: SQL with deeply nested parentheses took time and memory exponential in the depth (a few hundred bytes exhausted gigabytes); the parser now memoizes its expression rules. Found by fuzzing.
 - S3 Select on Parquet: a repeated schema name or list field in the footer leaked, and list lengths are checked against the bytes left, so a small footer can no longer claim millions of row groups or columns; a footer map of booleans claiming 2^64 entries no longer spins forever. Found by fuzzing.
 - A node waiting for its peers retried the cluster leader lock in a tight loop, logging tens of thousands of warnings a second; it now retries once a second.
 - Stray test drive files committed by mistake (a directory named after a space-separated endpoint list) are gone.
+- A data race on the lazily read namespace lock timeout (found by ThreadSanitizer).
 - A data race between startup and the resource metrics sampler, which polled the cluster description unsynchronized (found by ThreadSanitizer).
 - A server stopped while it still waited for its LDAP directory at startup now exits, instead of retrying forever.
 
