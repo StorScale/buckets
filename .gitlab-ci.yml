@@ -50,14 +50,14 @@ build:
         DOCKERFILE: docker/Dockerfile.console
   script:
     - |
-      if [ -z "$HARBOR_USERNAME" ] || [ -z "$HARBOR_PASSWORD" ]; then
-        echo "ERROR: HARBOR_USERNAME / HARBOR_PASSWORD are empty."
+      if [ -z "$HARBOR_USER" ] || [ -z "$HARBOR_PASSWORD" ]; then
+        echo "ERROR: HARBOR_USER / HARBOR_PASSWORD are empty."
         echo "Set them in Settings > CI/CD > Variables. If they are 'Protected',"
         echo "either protect this branch/tag or untick Protected."
         exit 1
       fi
     - |
-      AUTH=$(printf '%s:%s' "$HARBOR_USERNAME" "$HARBOR_PASSWORD" | base64 | tr -d '\n')
+      AUTH=$(printf '%s:%s' "$HARBOR_USER" "$HARBOR_PASSWORD" | base64 | tr -d '\n')
       mkdir -p /kaniko/.docker
       cat > /kaniko/.docker/config.json <<EOF
       { "auths": { "$REGISTRY_HOST": { "auth": "$AUTH" } } }
