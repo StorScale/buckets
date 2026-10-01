@@ -144,6 +144,15 @@ spec:
                       description: >-
                         The S3 endpoint as browsers reach it (for example the S3 Ingress URL).
                         Share links are signed for it; without it the console offers none.
+                    tls:
+                      type: object
+                      description: HTTPS for the console itself (consoled), for example behind a LoadBalancer on 443.
+                      properties:
+                        certSecret:
+                          type: object
+                          description: A kubernetes.io/tls Secret (tls.crt, tls.key) that consoled serves.
+                          properties:
+                            name: {type: string}
                     resources:
                       type: object
                       x-kubernetes-preserve-unknown-fields: true

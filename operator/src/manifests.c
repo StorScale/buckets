@@ -68,6 +68,7 @@ bool bc_parse(yyjson_val *obj, const char *cluster_domain, bc_spec *out, char *e
   out->console.annotations = yyjson_obj_get(ing, "annotations");
   out->console.resources = yyjson_obj_get(con, "resources");
   out->console.s3_url = str_at(con, "s3URL");
+  out->console.tls_secret = str_at(yyjson_obj_get(yyjson_obj_get(con, "tls"), "certSecret"), "name");
 
   yyjson_val *pools = yyjson_obj_get(spec, "pools");
   size_t n = yyjson_arr_size(pools);
@@ -443,7 +444,7 @@ static bc_object console_service(const bc_spec *s) {
   ADD_STR(d, spec, "type", s->console.service_type);
   ADD_STR(d, ADD_OBJ(d, spec, "selector"), "buckets.io/console", s->name);
   mval *port = yyjson_mut_arr_add_obj(d, ADD_ARR(d, spec, "ports"));
-  ADD_STR(d, port, "name", "http-console");
+  ADD_STR(d, port, "name", s->console.tls_secret ? "https-console" : "http-console");
   ADD_INT(d, port, "port", BC_CONSOLE_PORT);
   ADD_INT(d, port, "targetPort", BC_CONSOLE_PORT);
   ADD_STR(d, port, "protocol", "TCP");
@@ -475,8 +476,12 @@ static bc_object console_deployment(const bc_spec *s) {
   yyjson_mut_arr_add_str(d, args, ":9090");
   yyjson_mut_arr_add_str(d, args, "--web-dir");
   yyjson_mut_arr_add_str(d, args, "/usr/share/buckets-console");
+  if (s->console.tls_secret) {
+    yyjson_mut_arr_add_str(d, args, "--certs-dir");
+    yyjson_mut_arr_add_str(d, args, "/etc/buckets/console-certs");
+  }
   mval *port = yyjson_mut_arr_add_obj(d, ADD_ARR(d, c, "ports"));
-  ADD_STR(d, port, "name", "http");
+  ADD_STR(d, port, "name", s->console.tls_secret ? "https" : "http");
   ADD_INT(d, port, "containerPort", BC_CONSOLE_PORT);
   mval *env = ADD_ARR(d, c, "env");
   char url[512];
@@ -493,6 +498,7 @@ static bc_object console_deployment(const bc_spec *s) {
     mval *get = ADD_OBJ(d, p, "httpGet");
     ADD_STR(d, get, "path", "/healthz");
     ADD_INT(d, get, "port", BC_CONSOLE_PORT);
+    ADD_STR(d, get, "scheme", s->console.tls_secret ? "HTTPS" : "HTTP");
     ADD_INT(d, p, "periodSeconds", i ? 20 : 5);
   }
   if (s->console.resources) yyjson_mut_obj_add_val(d, c, "resources", yyjson_val_mut_copy(d, s->console.resources));
@@ -528,6 +534,23 @@ static bc_object console_deployment(const bc_spec *s) {
     ADD_STR(d, it, "key", "ca.crt");
     ADD_STR(d, it, "path", "ca.crt");
   }
+  if (s->console.tls_secret) { /* consoled's own HTTPS: public.crt and private.key, as bucketsd lays them out */
+    m = yyjson_mut_arr_add_obj(d, mounts);
+    ADD_STR(d, m, "name", "console-certs");
+    ADD_STR(d, m, "mountPath", "/etc/buckets/console-certs");
+    ADD_BOOL(d, m, "readOnly", true);
+    v = yyjson_mut_arr_add_obj(d, vols);
+    ADD_STR(d, v, "name", "console-certs");
+    mval *src = ADD_OBJ(d, v, "secret");
+    ADD_STR(d, src, "secretName", s->console.tls_secret);
+    mval *items = ADD_ARR(d, src, "items");
+    const char *map[][2] = {{"tls.crt", "public.crt"}, {"tls.key", "private.key"}};
+    for (int i = 0; i < 2; i++) {
+      mval *it = yyjson_mut_arr_add_obj(d, items);
+      ADD_STR(d, it, "key", map[i][0]);
+      ADD_STR(d, it, "path", map[i][1]);
+    }
+  }
   return (bc_object){path_of("/apis/apps/v1", s, "deployments", name), d};
 }
 
@@ -536,8 +559,16 @@ static bc_object console_ingress(const bc_spec *s) {
   char name[128];
   bc_console_secret_name(s, name, sizeof(name));
   mval *root = console_object(d, "networking.k8s.io/v1", "Ingress", s, name);
-  if (s->console.annotations)
-    yyjson_mut_obj_add_val(d, yyjson_mut_obj_get(root, "metadata"), "annotations", yyjson_val_mut_copy(d, s->console.annotations));
+  mval *ann = NULL;
+  if (s->console.annotations) {
+    ann = yyjson_val_mut_copy(d, s->console.annotations);
+    yyjson_mut_obj_add_val(d, yyjson_mut_obj_get(root, "metadata"), "annotations", ann);
+  }
+  /* consoled on HTTPS: ingress-nginx must speak HTTPS to it too */
+  if (s->console.tls_secret && !yyjson_mut_obj_get(ann, "nginx.ingress.kubernetes.io/backend-protocol")) {
+    if (!ann) ann = ADD_OBJ(d, yyjson_mut_obj_get(root, "metadata"), "annotations");
+    ADD_STR(d, ann, "nginx.ingress.kubernetes.io/backend-protocol", "HTTPS");
+  }
   mval *spec = ADD_OBJ(d, root, "spec");
   if (s->console.ingress_class) ADD_STR(d, spec, "ingressClassName", s->console.ingress_class);
   if (s->console.ingress_tls_secret) {

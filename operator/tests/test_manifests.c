@@ -215,11 +215,54 @@ static void test_console(void **state) {
   yyjson_doc_free(d);
 }
 
+static void test_console_tls(void **state) {
+  (void)state;
+  const char *json = "{\"metadata\":{\"name\":\"store\",\"namespace\":\"data\",\"uid\":\"u\"},"
+                     "\"spec\":{\"pools\":[{\"servers\":2,\"volumesPerServer\":2}],"
+                     "\"console\":{\"enabled\":true,\"tls\":{\"certSecret\":{\"name\":\"console-tls\"}},"
+                     "\"ingress\":{\"host\":\"console.example.com\"}}}}";
+  bc_spec s;
+  yyjson_doc *d = parse(json, &s, true);
+  bc_object *o;
+  size_t n = bc_desired(&s, &o);
+  assert_int_equal(n, 2 + 2 + 3);
+  assert_string_equal(yyjson_mut_get_str(yyjson_mut_obj_get(
+                          yyjson_mut_arr_get_first(AT(yyjson_mut_doc_get_root(o[4].doc), "spec", "ports")), "name")),
+                      "https-console");
+  yyjson_mut_val *pod = AT(yyjson_mut_doc_get_root(o[5].doc), "spec", "template", "spec");
+  yyjson_mut_val *c = yyjson_mut_arr_get_first(yyjson_mut_obj_get(pod, "containers"));
+  yyjson_mut_val *args = yyjson_mut_obj_get(c, "args");
+  assert_string_equal(yyjson_mut_get_str(yyjson_mut_arr_get(args, 4)), "--certs-dir");
+  assert_string_equal(yyjson_mut_get_str(yyjson_mut_arr_get(args, 5)), "/etc/buckets/console-certs");
+  assert_string_equal(yyjson_mut_get_str(AT(c, "readinessProbe", "httpGet", "scheme")), "HTTPS");
+  assert_string_equal(yyjson_mut_get_str(AT(c, "livenessProbe", "httpGet", "scheme")), "HTTPS");
+  yyjson_mut_val *vol = yyjson_mut_arr_get_last(yyjson_mut_obj_get(pod, "volumes"));
+  assert_string_equal(yyjson_mut_get_str(yyjson_mut_obj_get(vol, "name")), "console-certs");
+  assert_string_equal(yyjson_mut_get_str(AT(vol, "secret", "secretName")), "console-tls");
+  yyjson_mut_val *key = yyjson_mut_arr_get(AT(vol, "secret", "items"), 1);
+  assert_string_equal(yyjson_mut_get_str(yyjson_mut_obj_get(key, "path")), "private.key");
+  yyjson_mut_val *ing = yyjson_mut_doc_get_root(o[6].doc);
+  assert_string_equal(
+      yyjson_mut_get_str(AT(ing, "metadata", "annotations", "nginx.ingress.kubernetes.io/backend-protocol")), "HTTPS");
+  bc_objects_free(o, n);
+  yyjson_doc_free(d);
+
+  /* without console TLS: plain HTTP, as before */
+  d = parse(k_console, &s, true);
+  n = bc_desired(&s, &o);
+  c = yyjson_mut_arr_get_first(AT(yyjson_mut_doc_get_root(o[5].doc), "spec", "template", "spec", "containers"));
+  assert_int_equal(yyjson_mut_arr_size(yyjson_mut_obj_get(c, "args")), 4);
+  assert_string_equal(yyjson_mut_get_str(AT(c, "readinessProbe", "httpGet", "scheme")), "HTTP");
+  assert_null(AT(yyjson_mut_doc_get_root(o[6].doc), "metadata", "annotations"));
+  bc_objects_free(o, n);
+  yyjson_doc_free(d);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_volumes_and_topology), cmocka_unit_test(test_desired_objects), cmocka_unit_test(test_tls),
       cmocka_unit_test(test_root_secret_not_owned), cmocka_unit_test(test_invalid),
-      cmocka_unit_test(test_console),
+      cmocka_unit_test(test_console), cmocka_unit_test(test_console_tls),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }
