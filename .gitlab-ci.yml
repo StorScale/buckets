@@ -24,7 +24,7 @@ variables:
 
 default:
   tags:
-    - hc-infra-k8s-dev
+    - sa1x-k8s-dev-1a
 
 workflow:
   rules:
