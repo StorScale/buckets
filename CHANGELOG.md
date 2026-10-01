@@ -6,6 +6,9 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- Test data committed by mistake with the batch jobs (`src/sb`, about 19 MB of random bytes) is gone.
+
 ### Changed
 - Streamed responses are sent by the worker that produces them, straight from the stream's own buffer when it offers one (`stream_view`/`stream_consume`; object GETs send from the verified shard buffers without a copy), until the socket is full, the response ends or 4 MiB have gone. They no longer cross three threads per 256 KiB. Under warp, 10 MiB GETs at 16 clients went from 8.5% behind MinIO to 3% behind, and 1 MiB GETs from 7% to 23% ahead.
 
