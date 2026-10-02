@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <cmocka.h>
 
@@ -95,11 +96,59 @@ static void test_json(void **state) {
   buckets_config_free(c2);
 }
 
+
+/* MINIO_CONFIG_ENV_FILE lines, as MinIO's parsEnvEntry reads them. */
+static void test_env_file(void **state) {
+  (void)state;
+  struct {
+    const char *line, *key, *value;
+    bool ok, skip;
+  } cases[] = {
+      {"export MINIO_ROOT_USER=minio", "MINIO_ROOT_USER", "minio", true, false},
+      {"  export MINIO_ROOT_PASSWORD=\"s3cr3t=x\"  \n", "MINIO_ROOT_PASSWORD", "s3cr3t=x", true, false},
+      {"MINIO_REGION='eu-west-1'", "MINIO_REGION", "eu-west-1", true, false},
+      {"K=\"unbalanced'", "K", "\"unbalanced'", true, false},
+      {"K=", "K", "", true, false},
+      {"exportK=v", "K", "v", true, false}, /* TrimPrefix needs no space */
+      {"", NULL, NULL, true, true},
+      {"   ", NULL, NULL, true, true},
+      {"# export K=v", NULL, NULL, true, true},
+      {"export K", NULL, NULL, false, false},
+  };
+  for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    char *k, *v;
+    bool skip;
+    bool ok = buckets_config_env_line(cases[i].line, &k, &v, &skip);
+    assert_int_equal(ok, cases[i].ok);
+    assert_int_equal(skip, cases[i].skip);
+    if (cases[i].key) {
+      assert_string_equal(k, cases[i].key);
+      assert_string_equal(v, cases[i].value);
+    }
+    free(k);
+    free(v);
+  }
+  char path[] = "/tmp/buckets-envfile-XXXXXX";
+  int fd = mkstemp(path);
+  assert_true(fd >= 0);
+  const char *body = "# MinIO Operator\nexport BUCKETS_TEST_ENVFILE_A=one\n\nexport BUCKETS_TEST_ENVFILE_B=\"two\"\n";
+  assert_int_equal(write(fd, body, strlen(body)), (ssize_t)strlen(body));
+  close(fd);
+  setenv("BUCKETS_TEST_ENVFILE_A", "before", 1);
+  char err[256];
+  assert_true(buckets_config_load_env_file(path, err, sizeof(err)));
+  assert_string_equal(getenv("BUCKETS_TEST_ENVFILE_A"), "one"); /* the file overrides */
+  assert_string_equal(getenv("BUCKETS_TEST_ENVFILE_B"), "two");
+  unlink(path);
+  assert_true(buckets_config_load_env_file(path, err, sizeof(err))); /* missing: ignored */
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_set_get),
       cmocka_unit_test(test_env),
       cmocka_unit_test(test_json),
+      cmocka_unit_test(test_env_file),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

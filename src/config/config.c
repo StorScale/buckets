@@ -5,6 +5,7 @@
 #include "core/log.h"
 
 #include <ctype.h>
+#include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1031,4 +1032,58 @@ void buckets_config_kvsrc_free(buckets_config_kvsrc *v, size_t n) {
     free(v[i].value);
   }
   free(v);
+}
+
+bool buckets_config_env_line(const char *line, char **key, char **value, bool *skip) {
+  *key = *value = NULL;
+  *skip = false;
+  /* strings.TrimSpace, then TrimPrefix "export" and TrimSpace again */
+  while (isspace((unsigned char)*line)) line++;
+  size_t n = strlen(line);
+  while (n && isspace((unsigned char)line[n - 1])) n--;
+  if (!n || line[0] == '#') {
+    *skip = true;
+    return true;
+  }
+  if (n >= 6 && strncmp(line, "export", 6) == 0) {
+    line += 6;
+    n -= 6;
+    while (n && isspace((unsigned char)*line)) line++, n--;
+  }
+  const char *eq = memchr(line, '=', n);
+  if (!eq) return false;
+  size_t kn = (size_t)(eq - line), vn = n - kn - 1;
+  const char *v = eq + 1;
+  if (vn >= 2 && (v[0] == '"' || v[0] == '\'') && v[vn - 1] == v[0]) v++, vn -= 2;
+  *key = strndup(line, kn);
+  *value = strndup(v, vn);
+  return true;
+}
+
+bool buckets_config_load_env_file(const char *path, char *err, size_t errlen) {
+  FILE *f = fopen(path, "r");
+  if (!f) {
+    if (errno == ENOENT) return true;
+    snprintf(err, errlen, "cannot read %s: %s", path, strerror(errno));
+    return false;
+  }
+  char *line = NULL;
+  size_t cap = 0;
+  bool ok = true;
+  while (ok && getline(&line, &cap, f) >= 0) {
+    char *k, *v;
+    bool skip;
+    if (!buckets_config_env_line(line, &k, &v, &skip)) {
+      line[strcspn(line, "\r\n")] = 0;
+      snprintf(err, errlen, "envEntry malformed; %s, expected to be of form 'KEY=value'", line);
+      ok = false;
+    } else if (!skip) {
+      setenv(k, v, 1);
+    }
+    free(k);
+    free(v);
+  }
+  free(line);
+  fclose(f);
+  return ok;
 }

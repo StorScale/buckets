@@ -283,11 +283,101 @@ static void test_console_env(void **state) {
   yyjson_doc_free(d);
 }
 
+/* A MinIO Operator tenant's layout, to adopt its volumes in place: the same
+ * StatefulSet, headless Service and claim names, its drive paths, user,
+ * config.env credentials and Service port. */
+static const char *k_tenant =
+    "{\"metadata\":{\"name\":\"minio\",\"namespace\":\"data\",\"uid\":\"u\"},"
+    "\"spec\":{\"tls\":{\"certSecret\":{\"name\":\"tls-minio\"}},"
+    "\"configuration\":{\"name\":\"myminio-env-configuration\"},"
+    "\"drives\":{\"mountPath\":\"/export\",\"subPath\":\"/data\"},"
+    "\"securityContext\":{\"runAsUser\":1000,\"runAsGroup\":1000,\"fsGroup\":1000},"
+    "\"servicePort\":443,"
+    "\"volumes\":[{\"name\":\"kes-client\",\"secret\":{\"secretName\":\"minio-kes-tls\"}}],"
+    "\"volumeMounts\":[{\"name\":\"kes-client\",\"mountPath\":\"/etc/buckets/kes\"}],"
+    "\"pools\":[{\"name\":\"pool-0\",\"servers\":3,\"volumesPerServer\":6}]}}";
+
+static yyjson_mut_val *find_named(yyjson_mut_val *arr, const char *name) {
+  size_t i, max;
+  yyjson_mut_val *e;
+  yyjson_mut_arr_foreach(arr, i, max, e) {
+    const char *n = yyjson_mut_get_str(yyjson_mut_obj_get(e, "name"));
+    if (n && !strcmp(n, name)) return e;
+  }
+  return NULL;
+}
+
+static void test_minio_tenant_layout(void **state) {
+  (void)state;
+  bc_spec s;
+  yyjson_doc *d = parse(k_tenant, &s, true);
+  char *v = bc_volumes(&s);
+  assert_string_equal(v, "https://minio-pool-0-{0...2}.minio-hl.data.svc.cluster.local:9000/export{0...5}/data");
+  free(v);
+  bc_object *o;
+  size_t n = bc_desired(&s, &o);
+  assert_string_equal(o[0].path, "/api/v1/namespaces/data/services/minio-hl");
+  assert_int_equal(yyjson_mut_get_int(yyjson_mut_obj_get(yyjson_mut_arr_get_first(AT(yyjson_mut_doc_get_root(o[0].doc), "spec", "ports")), "port")), 9000);
+  assert_int_equal(yyjson_mut_get_int(yyjson_mut_obj_get(yyjson_mut_arr_get_first(AT(yyjson_mut_doc_get_root(o[1].doc), "spec", "ports")), "port")), 443);
+  assert_string_equal(o[2].path, "/apis/apps/v1/namespaces/data/statefulsets/minio-pool-0");
+  yyjson_mut_val *sts = yyjson_mut_doc_get_root(o[2].doc);
+  yyjson_mut_val *pod = AT(sts, "spec", "template", "spec");
+  assert_int_equal(yyjson_mut_get_int(AT(pod, "securityContext", "runAsUser")), 1000);
+  assert_int_equal(yyjson_mut_get_int(AT(pod, "securityContext", "fsGroup")), 1000);
+  yyjson_mut_val *c = yyjson_mut_arr_get_first(yyjson_mut_obj_get(pod, "containers"));
+  yyjson_mut_val *env = yyjson_mut_obj_get(c, "env");
+  assert_string_equal(yyjson_mut_get_str(yyjson_mut_obj_get(find_named(env, "BUCKETS_CONFIG_ENV_FILE"), "value")),
+                      "/etc/buckets/config/config.env");
+  assert_null(find_named(env, "BUCKETS_ROOT_USER")); /* config.env carries them */
+  yyjson_mut_val *mounts = yyjson_mut_obj_get(c, "volumeMounts");
+  assert_string_equal(yyjson_mut_get_str(yyjson_mut_obj_get(find_named(mounts, "data5"), "mountPath")), "/export5");
+  assert_string_equal(yyjson_mut_get_str(yyjson_mut_obj_get(find_named(mounts, "config"), "mountPath")), "/etc/buckets/config");
+  assert_non_null(find_named(mounts, "kes-client"));
+  yyjson_mut_val *vols = yyjson_mut_obj_get(pod, "volumes");
+  assert_string_equal(yyjson_mut_get_str(AT(find_named(vols, "config"), "secret", "secretName")), "myminio-env-configuration");
+  assert_non_null(find_named(vols, "kes-client"));
+  assert_non_null(find_named(vols, "certs"));
+  yyjson_mut_val *claims = AT(sts, "spec", "volumeClaimTemplates");
+  assert_int_equal(yyjson_mut_arr_size(claims), 6); /* data0..data5: PVCs data<n>-minio-pool-0-<i> */
+  assert_string_equal(yyjson_mut_get_str(AT(yyjson_mut_arr_get_first(claims), "metadata", "name")), "data0");
+  char cn[128];
+  bc_creds_secret_name(&s, cn, sizeof(cn));
+  assert_string_equal(cn, "myminio-env-configuration");
+  bc_objects_free(o, n);
+  yyjson_doc_free(d);
+
+  /* defaults are unchanged: nonroot, /data<n>, port 9000, no pod volumes without TLS */
+  d = parse(k_cluster, &s, true);
+  n = bc_desired(&s, &o);
+  pod = AT(yyjson_mut_doc_get_root(o[2].doc), "spec", "template", "spec");
+  assert_int_equal(yyjson_mut_get_int(AT(pod, "securityContext", "runAsUser")), 65532);
+  assert_null(yyjson_mut_obj_get(pod, "volumes"));
+  c = yyjson_mut_arr_get_first(yyjson_mut_obj_get(pod, "containers"));
+  assert_string_equal(yyjson_mut_get_str(yyjson_mut_obj_get(find_named(yyjson_mut_obj_get(c, "volumeMounts"), "data1"), "mountPath")), "/data1");
+  assert_non_null(find_named(yyjson_mut_obj_get(c, "env"), "BUCKETS_ROOT_USER"));
+  assert_int_equal(yyjson_mut_get_int(yyjson_mut_obj_get(yyjson_mut_arr_get_first(AT(yyjson_mut_doc_get_root(o[1].doc), "spec", "ports")), "port")), 9000);
+  bc_objects_free(o, n);
+  yyjson_doc_free(d);
+
+  const char *bad[] = {
+      "{\"metadata\":{\"name\":\"m\",\"namespace\":\"n\",\"uid\":\"u\"},\"spec\":{\"credsSecret\":{\"name\":\"a\"},"
+      "\"configuration\":{\"name\":\"b\"},\"pools\":[{\"servers\":2,\"volumesPerServer\":2}]}}",
+      "{\"metadata\":{\"name\":\"m\",\"namespace\":\"n\",\"uid\":\"u\"},\"spec\":{\"drives\":{\"mountPath\":\"export\"},"
+      "\"pools\":[{\"servers\":2,\"volumesPerServer\":2}]}}",
+      "{\"metadata\":{\"name\":\"m\",\"namespace\":\"n\",\"uid\":\"u\"},\"spec\":{\"drives\":{\"mountPath\":\"/e{0...3}\"},"
+      "\"pools\":[{\"servers\":2,\"volumesPerServer\":2}]}}",
+      "{\"metadata\":{\"name\":\"m\",\"namespace\":\"n\",\"uid\":\"u\"},\"spec\":{\"securityContext\":{\"runAsUser\":0},"
+      "\"pools\":[{\"servers\":2,\"volumesPerServer\":2}]}}",
+  };
+  for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) yyjson_doc_free(parse(bad[i], &s, false));
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_volumes_and_topology), cmocka_unit_test(test_desired_objects), cmocka_unit_test(test_tls),
       cmocka_unit_test(test_root_secret_not_owned), cmocka_unit_test(test_invalid),
       cmocka_unit_test(test_console), cmocka_unit_test(test_console_tls), cmocka_unit_test(test_console_env),
+      cmocka_unit_test(test_minio_tenant_layout),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

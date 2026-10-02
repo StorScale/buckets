@@ -145,6 +145,8 @@ static void usage(FILE *f) {
           "  BUCKETS_REGION / MINIO_REGION                server region (default: accept any)\n"
           "  BUCKETS_VOLUMES / MINIO_VOLUMES              drives, space separated, when none are given\n"
           "  *_ROOT_USER_FILE / *_ROOT_PASSWORD_FILE      read the root credentials from files\n"
+          "  BUCKETS_CONFIG_ENV_FILE / MINIO_CONFIG_ENV_FILE  a file of KEY=value lines (\"export\" allowed) that\n"
+          "                                               override the environment\n"
           "  BUCKETS_LOG_LEVEL                            debug|info|warn|error\n"
           "  BUCKETS_API_THREADS                          request handler threads (default: 2 x CPUs, min 8)\n"
           "  BUCKETS_NET_THREADS                          network loop threads (default: CPUs / 2, max 16)\n"
@@ -554,6 +556,16 @@ static void exe_path(const char *argv0, char *out, size_t cap) {
 int main(int argc, char **argv) {
   static char self_exe[4096];
   exe_path(argv[0], self_exe, sizeof(self_exe));
+  /* MINIO_CONFIG_ENV_FILE (the MinIO Operator's config.env): its settings
+   * override the environment, before anything reads it. */
+  const char *envfile = env2("BUCKETS_CONFIG_ENV_FILE", "MINIO_CONFIG_ENV_FILE");
+  if (envfile) {
+    char err[512];
+    if (!buckets_config_load_env_file(envfile, err, sizeof(err))) {
+      fprintf(stderr, "bucketsd: unable to read the config environment file: %s\n", err);
+      return 1;
+    }
+  }
   const char *level_s = getenv("BUCKETS_LOG_LEVEL");
   buckets_log_level level;
   if (level_s && buckets_log_parse_level(level_s, &level)) buckets_log_set_level(level);

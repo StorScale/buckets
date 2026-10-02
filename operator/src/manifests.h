@@ -28,6 +28,16 @@ typedef struct {
   const char *image, *pull_policy;
   yyjson_val *pull_secrets, *env;
   const char *creds_secret; /* NULL: operator-managed <name>-root */
+  /* MinIO Operator compatibility, for adopting a tenant's volumes in place:
+   * config_secret = a Secret whose config.env (export KEY=value lines, root
+   * credentials included) bucketsd reads; drive mounts at <mount_path><n>
+   * with data under <mount_path><n><sub_path>; the pods' user and groups;
+   * the S3 Service's port; extra pod volumes and container mounts. */
+  const char *config_secret;
+  const char *mount_path, *sub_path; /* "/data", "" */
+  long long run_as_user, run_as_group, fs_group; /* 65532 */
+  int service_port;                              /* BC_S3_PORT */
+  yyjson_val *volumes, *volume_mounts;
   bc_pool pools[BC_MAX_POOLS];
   size_t npools;
   int parity, set_drive_count; /* 0: default */
@@ -51,6 +61,8 @@ bool bc_parse(yyjson_val *obj, const char *cluster_domain, bc_spec *out, char *e
 
 /* Names. */
 void bc_root_secret_name(const bc_spec *s, char *out, size_t cap);
+/* Where the root credentials are: spec.configuration, spec.credsSecret, else <name>-root. */
+void bc_creds_secret_name(const bc_spec *s, char *out, size_t cap);
 void bc_statefulset_name(const bc_spec *s, size_t pool, char *out, size_t cap);
 void bc_headless_name(const bc_spec *s, char *out, size_t cap);
 

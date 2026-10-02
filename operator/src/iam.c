@@ -2,6 +2,7 @@
 /* BucketsUser, BucketsPolicy and Bucket: declarative IAM and buckets,
  * applied to their BucketsCluster through its admin and S3 APIs. */
 #include "iam.h"
+#include "config/config.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -61,6 +62,49 @@ static char *secret_value(yyjson_val *secret, const char *key) {
   return out;
 }
 
+/* The root credentials in a MinIO-style config.env, as bucketsd reads them:
+ * BUCKETS_ROOT_* over MINIO_ROOT_*, a later line over an earlier one. */
+static void config_env_creds(const char *env, char **ak, char **sk) {
+  char *bu = NULL, *bp = NULL, *mu = NULL, *mp = NULL;
+  const char *p = env;
+  while (*p) {
+    size_t n = strcspn(p, "\n");
+    char *line = strndup(p, n);
+    char *k, *v;
+    bool skip;
+    if (buckets_config_env_line(line, &k, &v, &skip) && !skip) {
+      char **slot = !strcmp(k, "BUCKETS_ROOT_USER")       ? &bu
+                    : !strcmp(k, "BUCKETS_ROOT_PASSWORD") ? &bp
+                    : !strcmp(k, "MINIO_ROOT_USER")       ? &mu
+                    : !strcmp(k, "MINIO_ROOT_PASSWORD")   ? &mp
+                                                          : NULL;
+      if (slot) {
+        free(*slot);
+        *slot = v;
+        v = NULL;
+      }
+    }
+    free(k);
+    free(v);
+    free(line);
+    p += n + (p[n] == '\n');
+  }
+  if (bu && *bu) {
+    *ak = bu;
+    free(mu);
+  } else {
+    *ak = mu;
+    free(bu);
+  }
+  if (bp && *bp) {
+    *sk = bp;
+    free(mp);
+  } else {
+    *sk = mp;
+    free(bp);
+  }
+}
+
 static yyjson_doc *get_secret(op_ctx *o, const char *ns, const char *name) {
   buckets_buf p = BUCKETS_BUF_INIT;
   buckets_buf_appendf(&p, "/api/v1/namespaces/%s/secrets/%s", ns, name);
@@ -80,11 +124,17 @@ static bool cluster_connect(op_ctx *o, yyjson_val *bc, conn *cn, char *err, size
   bc_spec s;
   if (!bc_parse(bc, o->cluster_domain, &s, err, errlen)) return false;
   char secret_name[128];
-  if (s.creds_secret) snprintf(secret_name, sizeof(secret_name), "%s", s.creds_secret);
-  else bc_root_secret_name(&s, secret_name, sizeof(secret_name));
+  bc_creds_secret_name(&s, secret_name, sizeof(secret_name));
   yyjson_doc *sd = get_secret(o, s.ns, secret_name);
-  char *ak = sd ? secret_value(yyjson_doc_get_root(sd), "rootUser") : NULL;
-  char *sk = sd ? secret_value(yyjson_doc_get_root(sd), "rootPassword") : NULL;
+  char *ak = NULL, *sk = NULL;
+  if (sd && s.config_secret) {
+    char *env = secret_value(yyjson_doc_get_root(sd), "config.env");
+    if (env) config_env_creds(env, &ak, &sk);
+    free(env);
+  } else if (sd) {
+    ak = secret_value(yyjson_doc_get_root(sd), "rootUser");
+    sk = secret_value(yyjson_doc_get_root(sd), "rootPassword");
+  }
   yyjson_doc_free(sd);
   if (!ak || !sk) {
     snprintf(err, errlen, "root credentials Secret %s is missing or incomplete", secret_name);

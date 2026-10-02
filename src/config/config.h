@@ -91,3 +91,12 @@ int buckets_config_parse_bool(const char *s);
 const char *buckets_config_getenv(const char *minio_name);
 
 #endif
+
+/* MINIO_CONFIG_ENV_FILE (parsEnvEntry): one line of an environment file.
+ * Blank and "#" lines set *skip. Otherwise a leading "export" is dropped,
+ * the line splits at its first '=', and a value wrapped in matching ' or "
+ * loses them; key and value are malloc'd. False: no '=' (malformed). */
+bool buckets_config_env_line(const char *line, char **key, char **value, bool *skip);
+/* Sets every KEY=value of the file in the environment, overriding what is
+ * there, as MinIO does. A missing file is not an error; a malformed line is. */
+bool buckets_config_load_env_file(const char *path, char *err, size_t errlen);

@@ -57,13 +57,19 @@ static void random_token(char *out, size_t n, bool upper_only) {
 /* Makes sure the root credentials exist. Returns false (why in msg) if not. */
 static bool ensure_creds(op_ctx *o, const bc_spec *s, char *msg, size_t cap) {
   char name[128];
-  if (s->creds_secret) snprintf(name, sizeof(name), "%s", s->creds_secret);
-  else bc_root_secret_name(s, name, sizeof(name));
+  bc_creds_secret_name(s, name, sizeof(name));
   buckets_buf path = BUCKETS_BUF_INIT;
   buckets_buf_appendf(&path, "/api/v1/namespaces/%s/secrets/%s", s->ns, name);
-  int st = kube_get(o->k, path.data, NULL);
+  yyjson_doc *got = NULL;
+  int st = kube_get(o->k, path.data, s->config_secret ? &got : NULL);
   bool ok = st == 200;
-  if (st == 404 && !s->creds_secret) {
+  if (ok && s->config_secret &&
+      !yyjson_obj_get(yyjson_obj_get(yyjson_doc_get_root(got), "data"), "config.env")) {
+    snprintf(msg, cap, "configuration Secret %s has no config.env", name);
+    ok = false;
+  }
+  yyjson_doc_free(got);
+  if (st == 404 && !s->creds_secret && !s->config_secret) {
     char user[21], pass[41];
     random_token(user, 20, true); /* MinIO operator's shapes: 20 and 40 characters */
     random_token(pass, 40, false);
@@ -238,8 +244,7 @@ static void write_status(op_ctx *o, yyjson_val *bc, const bc_spec *s, const char
       readyn += rr;
     }
     char creds[128];
-    if (s->creds_secret) snprintf(creds, sizeof(creds), "%s", s->creds_secret);
-    else bc_root_secret_name(s, creds, sizeof(creds));
+    bc_creds_secret_name(s, creds, sizeof(creds));
     yyjson_mut_obj_add_strcpy(d, st, "credsSecret", creds);
   }
   yyjson_mut_obj_add_int(d, st, "servers", servers);

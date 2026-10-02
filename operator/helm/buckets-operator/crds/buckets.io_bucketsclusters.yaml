@@ -118,6 +118,46 @@ spec:
                       description: A Secret whose ca.crt nodes trust (defaults to the certificate's own ca.crt).
                       properties:
                         name: {type: string}
+                configuration:
+                  type: object
+                  description: >-
+                    A Secret with a config.env of export KEY=value lines, as the MinIO Operator
+                    keeps a tenant's; bucketsd reads it (root credentials included). Replaces
+                    credsSecret, for adopting a MinIO tenant.
+                  properties:
+                    name: {type: string}
+                drives:
+                  type: object
+                  description: >-
+                    Where drives are mounted: <mountPath><n>, with data in <mountPath><n><subPath>.
+                    The MinIO Operator uses /export and /data.
+                  properties:
+                    mountPath: {type: string, default: /data}
+                    subPath: {type: string}
+                securityContext:
+                  type: object
+                  description: The servers' user and groups (65532 by default); a MinIO tenant's files belong to 1000.
+                  properties:
+                    runAsUser: {type: integer}
+                    runAsGroup: {type: integer}
+                    fsGroup: {type: integer}
+                servicePort:
+                  type: integer
+                  description: The S3 Service's port (9000 by default; a MinIO tenant's is 443 with TLS, else 80).
+                  minimum: 1
+                  maximum: 65535
+                volumes:
+                  type: array
+                  description: Extra pod volumes for the servers, such as a KES client certificate.
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                volumeMounts:
+                  type: array
+                  description: Where the extra volumes are mounted in the bucketsd container.
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
                 env:
                   type: array
                   description: Extra environment for bucketsd.

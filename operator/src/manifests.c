@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 #include "manifests.h"
 
+#include <ctype.h>
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,6 +23,22 @@ static bool valid_dns_label(const char *s) {
     if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-')) return false;
   }
   return true;
+}
+
+/* A drive path goes into BUCKETS_VOLUMES' ellipsis syntax: keep it plain. */
+static bool drive_path_ok(const char *p, bool may_be_empty) {
+  if (!*p) return may_be_empty;
+  if (p[0] != '/' || strstr(p, "//") || strstr(p, "..")) return false;
+  for (; *p; p++)
+    if (!isalnum((unsigned char)*p) && !strchr("._-/", *p)) return false;
+  return true;
+}
+
+/* A user or group ID; 65532 (nonroot) when absent, -1 when not a number. */
+static long long id_at(yyjson_val *o, const char *key) {
+  yyjson_val *v = yyjson_obj_get(o, key);
+  if (!v) return 65532;
+  return yyjson_is_int(v) ? yyjson_get_sint(v) : -1;
 }
 
 bool bc_parse(yyjson_val *obj, const char *cluster_domain, bc_spec *out, char *err, size_t errlen) {
@@ -46,6 +64,40 @@ bool bc_parse(yyjson_val *obj, const char *cluster_domain, bc_spec *out, char *e
   out->pull_secrets = yyjson_obj_get(spec, "imagePullSecrets");
   out->env = yyjson_obj_get(spec, "env");
   out->creds_secret = str_at(yyjson_obj_get(spec, "credsSecret"), "name");
+  out->config_secret = str_at(yyjson_obj_get(spec, "configuration"), "name");
+  if (out->creds_secret && out->config_secret) {
+    snprintf(err, errlen, "set spec.credsSecret or spec.configuration (whose config.env holds the root credentials), not both");
+    return false;
+  }
+  yyjson_val *drives = yyjson_obj_get(spec, "drives");
+  out->mount_path = str_at(drives, "mountPath");
+  if (!out->mount_path) out->mount_path = "/data";
+  out->sub_path = str_at(drives, "subPath");
+  if (!out->sub_path) out->sub_path = "";
+  if (!drive_path_ok(out->mount_path, false) || !drive_path_ok(out->sub_path, true)) {
+    snprintf(err, errlen, "spec.drives: mountPath must be an absolute path and subPath empty or absolute, "
+                          "of letters, digits and . _ - / only");
+    return false;
+  }
+  yyjson_val *sc = yyjson_obj_get(spec, "securityContext");
+  out->run_as_user = id_at(sc, "runAsUser");
+  out->run_as_group = id_at(sc, "runAsGroup");
+  out->fs_group = id_at(sc, "fsGroup");
+  if (out->run_as_user == 0 || out->run_as_group < 0 || out->run_as_user < 0 || out->fs_group < 0) {
+    snprintf(err, errlen, "spec.securityContext: runAsUser must be a non-root user ID, and the group IDs 0 or more");
+    return false;
+  }
+  out->service_port = BC_S3_PORT;
+  if (yyjson_obj_get(spec, "servicePort")) {
+    long long sp = yyjson_get_sint(yyjson_obj_get(spec, "servicePort"));
+    if (sp < 1 || sp > 65535) {
+      snprintf(err, errlen, "spec.servicePort must be a port number");
+      return false;
+    }
+    out->service_port = (int)sp;
+  }
+  out->volumes = yyjson_obj_get(spec, "volumes");
+  out->volume_mounts = yyjson_obj_get(spec, "volumeMounts");
   out->parity = (int)yyjson_get_int(yyjson_obj_get(spec, "parity"));
   out->set_drive_count = (int)yyjson_get_int(yyjson_obj_get(spec, "erasureSetDriveCount"));
   yyjson_val *tls = yyjson_obj_get(spec, "tls");
@@ -117,6 +169,11 @@ bool bc_parse(yyjson_val *obj, const char *cluster_domain, bc_spec *out, char *e
 /* ---- names -------------------------------------------------------------------- */
 
 void bc_root_secret_name(const bc_spec *s, char *out, size_t cap) { snprintf(out, cap, "%s-root", s->name); }
+void bc_creds_secret_name(const bc_spec *s, char *out, size_t cap) {
+  if (s->config_secret) snprintf(out, cap, "%s", s->config_secret);
+  else if (s->creds_secret) snprintf(out, cap, "%s", s->creds_secret);
+  else bc_root_secret_name(s, out, cap);
+}
 void bc_statefulset_name(const bc_spec *s, size_t pool, char *out, size_t cap) {
   snprintf(out, cap, "%s-%s", s->name, s->pools[pool].name);
 }
@@ -139,9 +196,10 @@ char *bc_volumes(const bc_spec *s) {
     buckets_buf_appendf(&b, "%s://%s-", s->tls_secret ? "https" : "http", sts);
     if (bp->servers > 1) buckets_buf_appendf(&b, "{0...%d}", bp->servers - 1);
     else buckets_buf_append_char(&b, '0');
-    buckets_buf_appendf(&b, ".%s.%s.svc.%s:%d/data", hl, s->ns, s->cluster_domain, BC_S3_PORT);
+    buckets_buf_appendf(&b, ".%s.%s.svc.%s:%d%s", hl, s->ns, s->cluster_domain, BC_S3_PORT, s->mount_path);
     if (bp->volumes > 1) buckets_buf_appendf(&b, "{0...%d}", bp->volumes - 1);
     else buckets_buf_append_char(&b, '0');
+    buckets_buf_append_c(&b, s->sub_path);
   }
   return b.data;
 }
@@ -221,7 +279,7 @@ static bc_object service(const bc_spec *s, bool headless) {
   ADD_STR(d, sel, "buckets.io/cluster", s->name);
   mval *port = yyjson_mut_arr_add_obj(d, ADD_ARR(d, spec, "ports"));
   ADD_STR(d, port, "name", s->tls_secret ? "https-s3" : "http-s3");
-  ADD_INT(d, port, "port", BC_S3_PORT);
+  ADD_INT(d, port, "port", headless ? BC_S3_PORT : s->service_port);
   ADD_INT(d, port, "targetPort", BC_S3_PORT);
   ADD_STR(d, port, "protocol", "TCP");
   return (bc_object){path_of("/api/v1", s, "services", name), d};
@@ -277,9 +335,9 @@ static bc_object statefulset(const bc_spec *s, size_t pi, const char *volumes, c
   ADD_STR(d, ADD_OBJ(d, tmeta, "annotations"), "buckets.io/topology", topology);
   mval *pod = ADD_OBJ(d, tmpl, "spec");
   mval *sec = ADD_OBJ(d, pod, "securityContext");
-  ADD_INT(d, sec, "runAsUser", 65532);
-  ADD_INT(d, sec, "runAsGroup", 65532);
-  ADD_INT(d, sec, "fsGroup", 65532);
+  ADD_INT(d, sec, "runAsUser", s->run_as_user);
+  ADD_INT(d, sec, "runAsGroup", s->run_as_group);
+  ADD_INT(d, sec, "fsGroup", s->fs_group);
   ADD_BOOL(d, sec, "runAsNonRoot", true);
   ADD_STR(d, sec, "fsGroupChangePolicy", "OnRootMismatch");
   ADD_INT(d, pod, "terminationGracePeriodSeconds", 30);
@@ -314,9 +372,13 @@ static bc_object statefulset(const bc_spec *s, size_t pi, const char *volumes, c
   }
   mval *env = ADD_ARR(d, c, "env");
   env_value(d, env, "BUCKETS_VOLUMES", volumes);
-  const char *cn = creds_name(s, creds, sizeof(creds));
-  env_secret(d, env, "BUCKETS_ROOT_USER", cn, "rootUser");
-  env_secret(d, env, "BUCKETS_ROOT_PASSWORD", cn, "rootPassword");
+  if (s->config_secret) { /* the root credentials come with config.env */
+    env_value(d, env, "BUCKETS_CONFIG_ENV_FILE", "/etc/buckets/config/config.env");
+  } else {
+    const char *cn = creds_name(s, creds, sizeof(creds));
+    env_secret(d, env, "BUCKETS_ROOT_USER", cn, "rootUser");
+    env_secret(d, env, "BUCKETS_ROOT_PASSWORD", cn, "rootPassword");
+  }
   if (s->parity) {
     char ec[16];
     snprintf(ec, sizeof(ec), "EC:%d", s->parity);
@@ -341,11 +403,11 @@ static bc_object statefulset(const bc_spec *s, size_t pi, const char *volumes, c
   ADD_BOOL(d, csec, "readOnlyRootFilesystem", true);
   yyjson_mut_arr_add_str(d, ADD_ARR(d, ADD_OBJ(d, csec, "capabilities"), "drop"), "ALL");
 
-  mval *mounts = ADD_ARR(d, c, "volumeMounts");
+  mval *mounts = ADD_ARR(d, c, "volumeMounts"), *vols = ADD_ARR(d, pod, "volumes");
   for (int v = 0; v < bp->volumes; v++) {
-    char vn[16], mp[16];
+    char vn[16], mp[256];
     snprintf(vn, sizeof(vn), "data%d", v);
-    snprintf(mp, sizeof(mp), "/data%d", v);
+    snprintf(mp, sizeof(mp), "%s%d", s->mount_path, v);
     mval *m = yyjson_mut_arr_add_obj(d, mounts);
     ADD_STR(d, m, "name", vn);
     ADD_STR(d, m, "mountPath", mp);
@@ -357,7 +419,7 @@ static bc_object statefulset(const bc_spec *s, size_t pi, const char *volumes, c
     ADD_BOOL(d, m, "readOnly", true);
     /* A projected volume lays the Secret out the way bucketsd expects:
      * public.crt, private.key, and CAs/ca.crt for internode trust. */
-    mval *vol = yyjson_mut_arr_add_obj(d, ADD_ARR(d, pod, "volumes"));
+    mval *vol = yyjson_mut_arr_add_obj(d, vols);
     ADD_STR(d, vol, "name", "certs");
     mval *sources = ADD_ARR(d, ADD_OBJ(d, vol, "projected"), "sources");
     mval *src = ADD_OBJ(d, yyjson_mut_arr_add_obj(d, sources), "secret");
@@ -375,6 +437,24 @@ static bc_object statefulset(const bc_spec *s, size_t pi, const char *volumes, c
     ADD_STR(d, ci, "key", "ca.crt");
     ADD_STR(d, ci, "path", "CAs/ca.crt");
   }
+  if (s->config_secret) {
+    mval *m = yyjson_mut_arr_add_obj(d, mounts);
+    ADD_STR(d, m, "name", "config");
+    ADD_STR(d, m, "mountPath", "/etc/buckets/config");
+    ADD_BOOL(d, m, "readOnly", true);
+    mval *vol = yyjson_mut_arr_add_obj(d, vols);
+    ADD_STR(d, vol, "name", "config");
+    mval *src = ADD_OBJ(d, vol, "secret");
+    ADD_STR(d, src, "secretName", s->config_secret);
+    mval *it = yyjson_mut_arr_add_obj(d, ADD_ARR(d, src, "items"));
+    ADD_STR(d, it, "key", "config.env");
+    ADD_STR(d, it, "path", "config.env");
+  }
+  size_t xi, xmax;
+  yyjson_val *xv;
+  yyjson_arr_foreach(s->volumes, xi, xmax, xv) yyjson_mut_arr_append(vols, yyjson_val_mut_copy(d, xv));
+  yyjson_arr_foreach(s->volume_mounts, xi, xmax, xv) yyjson_mut_arr_append(mounts, yyjson_val_mut_copy(d, xv));
+  if (!yyjson_mut_arr_size(vols)) yyjson_mut_obj_remove_key(pod, "volumes"); /* as before: none without TLS */
 
   mval *claims = ADD_ARR(d, spec, "volumeClaimTemplates");
   for (int v = 0; v < bp->volumes; v++) {
