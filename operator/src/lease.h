@@ -2,7 +2,7 @@
 #ifndef BUCKETS_OPERATOR_LEASE_H
 #define BUCKETS_OPERATOR_LEASE_H
 
-#include "kube.h"
+#include "k8s/kube.h"
 
 /* Leader election on a coordination.k8s.io/v1 Lease, like client-go's: the
  * holder renews it; anyone may take it over once it has gone unrenewed for

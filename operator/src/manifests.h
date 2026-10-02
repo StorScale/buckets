@@ -15,6 +15,11 @@
 #define BC_CONSOLE_PORT 9090
 #define BC_CONSOLE_IMAGE "ghcr.io/buckets-io/buckets-console:0.10.0"
 #define BC_MAX_POOLS 32
+#define BC_KES_PORT 7373
+/* The KES release bucketsd is tested with; BUCKETS_KES_IMAGE (the operator's
+ * environment) or spec.kms.kes.image point elsewhere, e.g. a registry mirror. */
+#define BC_KES_IMAGE "quay.io/minio/kes:2024-09-11T07-22-50Z"
+#define BC_KES_DEFAULT_KEY "buckets-default"
 
 typedef struct {
   char name[32];
@@ -54,6 +59,16 @@ typedef struct {
     yyjson_val *resources, *annotations;
     yyjson_val *env; /* extra environment for consoled, e.g. its OpenID sign-in */
   } console;
+  /* spec.kms.kes: a KES server the operator runs for the cluster, its key
+   * store settings in Secret <name>-kms (settings.json, written by the
+   * console; see kms/kesutil.h). */
+  struct {
+    bool enabled;
+    int replicas;
+    const char *image, *key_name;
+    yyjson_val *resources;
+    bool active; /* set by the reconciler once KES serves the default key: bucketsd uses it */
+  } kes;
 } bc_spec;
 
 /* Reads and validates a BucketsCluster; strings point into the document. */
@@ -91,6 +106,38 @@ size_t bc_console_stale(const bc_spec *s, char ***paths);
 /* The console's cookie-key Secret (<name>-console), owned by the cluster. */
 void bc_console_secret_name(const bc_spec *s, char *out, size_t cap);
 yyjson_mut_doc *bc_console_secret(const bc_spec *s, const char *passphrase, const char *salt);
+
+/* ---- KES ------------------------------------------------------------------------- */
+
+/* <name>-kes, or <name>-kes-test for a trial of new settings. */
+void bc_kes_name(const bc_spec *s, bool trial, char *out, size_t cap);
+void bc_kes_endpoint(const bc_spec *s, bool trial, char *out, size_t cap);
+/* <name>-kms: the key store settings in use (settings.json); <name>-kms-candidate:
+ * settings to try (candidate.json: {"settings", "keyName", "createKey",
+ * "requiredKeys"}). Neither owned by the cluster: they outlive it, as the root
+ * credentials do. */
+void bc_kms_settings_secret_name(const bc_spec *s, char *out, size_t cap);
+void bc_kms_candidate_secret_name(const bc_spec *s, char *out, size_t cap);
+/* <name>-kes-tls (tls.crt, tls.key: KES's certificate, its own CA) and
+ * <name>-kes-identity (admin, client: API keys), owned by the cluster. */
+void bc_kes_tls_secret_name(const bc_spec *s, char *out, size_t cap);
+void bc_kes_identity_secret_name(const bc_spec *s, char *out, size_t cap);
+
+/* KES's configuration (JSON, which KES reads as YAML) for key store settings;
+ * NULL and why on settings that do not hold up. Caller frees. ca_pem gets the
+ * Vault CA certificate to mount beside it, if any (caller frees). */
+char *bc_kes_config(const bc_spec *s, yyjson_val *settings, const char *admin_identity, const char *client_identity,
+                    char **ca_pem, char *err, size_t errlen);
+/* A KES server's objects for a configuration: the live server's
+ * ServiceAccount (which Vault's Kubernetes sign-in names; a trial runs as it
+ * too), its config Secret, Deployment and Service. */
+size_t bc_kes_objects(const bc_spec *s, bool trial, const char *config, const char *ca_pem, bc_object **out);
+/* Paths of a KES server's objects, to delete them. Caller frees each and the array. */
+size_t bc_kes_paths(const bc_spec *s, bool trial, char ***paths);
+/* An empty Secret the console fills in (not owned), and the operator's own KES Secrets. */
+yyjson_mut_doc *bc_kms_empty_secret(const bc_spec *s, const char *name);
+yyjson_mut_doc *bc_kes_tls_secret(const bc_spec *s, const char *cert, const char *key);
+yyjson_mut_doc *bc_kes_identity_secret(const bc_spec *s, const char *admin, const char *client);
 
 /* The operator-managed root credentials Secret (deliberately not owned by the
  * cluster, so it outlives it like the data does). */

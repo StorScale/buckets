@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "kms.h"
 #include "manifests.h"
 
 static const char *k_cluster =
@@ -166,25 +167,26 @@ static void test_console(void **state) {
   bc_objects_free(o, n);
   char **stale;
   size_t ns = bc_console_stale(&s, &stale);
-  assert_int_equal(ns, 3);
+  assert_int_equal(ns, 6);
   assert_string_equal(stale[0], "/apis/apps/v1/namespaces/data/deployments/store-console");
+  assert_string_equal(stale[4], "/api/v1/namespaces/data/serviceaccounts/store-console");
   for (size_t i = 0; i < ns; i++) free(stale[i]);
   free(stale);
   yyjson_doc_free(d);
 
   d = parse(k_console, &s, true);
   n = bc_desired(&s, &o);
-  assert_int_equal(n, 2 + 2 + 3);
-  assert_string_equal(o[4].path, "/api/v1/namespaces/data/services/store-console");
-  assert_string_equal(o[5].path, "/apis/apps/v1/namespaces/data/deployments/store-console");
-  assert_string_equal(o[6].path, "/apis/networking.k8s.io/v1/namespaces/data/ingresses/store-console");
-  yyjson_mut_val *dep = yyjson_mut_doc_get_root(o[5].doc);
+  assert_int_equal(n, 2 + 2 + 3 + 3); /* + its ServiceAccount, Role, RoleBinding */
+  assert_string_equal(o[7].path, "/api/v1/namespaces/data/services/store-console");
+  assert_string_equal(o[8].path, "/apis/apps/v1/namespaces/data/deployments/store-console");
+  assert_string_equal(o[9].path, "/apis/networking.k8s.io/v1/namespaces/data/ingresses/store-console");
+  yyjson_mut_val *dep = yyjson_mut_doc_get_root(o[8].doc);
   assert_int_equal(yyjson_mut_get_int(AT(dep, "spec", "replicas")), 2);
   /* console pods never match the storage Service's selector */
   yyjson_mut_val *pl = AT(dep, "spec", "template", "metadata", "labels");
   assert_null(yyjson_mut_obj_get(pl, "buckets.io/cluster"));
   assert_string_equal(yyjson_mut_get_str(yyjson_mut_obj_get(pl, "buckets.io/console")), "store");
-  assert_string_equal(yyjson_mut_get_str(AT(yyjson_mut_doc_get_root(o[4].doc), "spec", "selector", "buckets.io/console")), "store");
+  assert_string_equal(yyjson_mut_get_str(AT(yyjson_mut_doc_get_root(o[7].doc), "spec", "selector", "buckets.io/console")), "store");
   yyjson_mut_val *c = yyjson_mut_arr_get_first(AT(dep, "spec", "template", "spec", "containers"));
   assert_string_equal(yyjson_mut_get_str(yyjson_mut_obj_get(c, "image")), "console:test");
   yyjson_mut_val *env = yyjson_mut_obj_get(c, "env");
@@ -202,7 +204,7 @@ static void test_console(void **state) {
       pass = !strcmp(yyjson_mut_get_str(AT(e, "valueFrom", "secretKeyRef", "name")), "store-console");
   }
   assert_true(server && ca && secure && pass && s3);
-  yyjson_mut_val *ing = yyjson_mut_doc_get_root(o[6].doc);
+  yyjson_mut_val *ing = yyjson_mut_doc_get_root(o[9].doc);
   assert_string_equal(yyjson_mut_get_str(AT(ing, "spec", "ingressClassName")), "nginx");
   assert_string_equal(yyjson_mut_get_str(yyjson_mut_obj_get(yyjson_mut_arr_get_first(AT(ing, "spec", "rules")), "host")), "console.example.com");
   bc_objects_free(o, n);
@@ -225,11 +227,11 @@ static void test_console_tls(void **state) {
   yyjson_doc *d = parse(json, &s, true);
   bc_object *o;
   size_t n = bc_desired(&s, &o);
-  assert_int_equal(n, 2 + 2 + 3);
+  assert_int_equal(n, 2 + 2 + 3 + 3); /* + its ServiceAccount, Role, RoleBinding */
   assert_string_equal(yyjson_mut_get_str(yyjson_mut_obj_get(
-                          yyjson_mut_arr_get_first(AT(yyjson_mut_doc_get_root(o[4].doc), "spec", "ports")), "name")),
+                          yyjson_mut_arr_get_first(AT(yyjson_mut_doc_get_root(o[7].doc), "spec", "ports")), "name")),
                       "https-console");
-  yyjson_mut_val *pod = AT(yyjson_mut_doc_get_root(o[5].doc), "spec", "template", "spec");
+  yyjson_mut_val *pod = AT(yyjson_mut_doc_get_root(o[8].doc), "spec", "template", "spec");
   yyjson_mut_val *c = yyjson_mut_arr_get_first(yyjson_mut_obj_get(pod, "containers"));
   yyjson_mut_val *args = yyjson_mut_obj_get(c, "args");
   assert_string_equal(yyjson_mut_get_str(yyjson_mut_arr_get(args, 4)), "--certs-dir");
@@ -241,7 +243,7 @@ static void test_console_tls(void **state) {
   assert_string_equal(yyjson_mut_get_str(AT(vol, "secret", "secretName")), "console-tls");
   yyjson_mut_val *key = yyjson_mut_arr_get(AT(vol, "secret", "items"), 1);
   assert_string_equal(yyjson_mut_get_str(yyjson_mut_obj_get(key, "path")), "private.key");
-  yyjson_mut_val *ing = yyjson_mut_doc_get_root(o[6].doc);
+  yyjson_mut_val *ing = yyjson_mut_doc_get_root(o[9].doc);
   assert_string_equal(
       yyjson_mut_get_str(AT(ing, "metadata", "annotations", "nginx.ingress.kubernetes.io/backend-protocol")), "HTTPS");
   bc_objects_free(o, n);
@@ -250,10 +252,10 @@ static void test_console_tls(void **state) {
   /* without console TLS: plain HTTP, as before */
   d = parse(k_console, &s, true);
   n = bc_desired(&s, &o);
-  c = yyjson_mut_arr_get_first(AT(yyjson_mut_doc_get_root(o[5].doc), "spec", "template", "spec", "containers"));
+  c = yyjson_mut_arr_get_first(AT(yyjson_mut_doc_get_root(o[8].doc), "spec", "template", "spec", "containers"));
   assert_int_equal(yyjson_mut_arr_size(yyjson_mut_obj_get(c, "args")), 4);
   assert_string_equal(yyjson_mut_get_str(AT(c, "readinessProbe", "httpGet", "scheme")), "HTTP");
-  assert_null(AT(yyjson_mut_doc_get_root(o[6].doc), "metadata", "annotations"));
+  assert_null(AT(yyjson_mut_doc_get_root(o[9].doc), "metadata", "annotations"));
   bc_objects_free(o, n);
   yyjson_doc_free(d);
 }
@@ -270,7 +272,7 @@ static void test_console_env(void **state) {
   yyjson_doc *d = parse(json, &s, true);
   bc_object *o;
   size_t n = bc_desired(&s, &o);
-  yyjson_mut_val *c = yyjson_mut_arr_get_first(AT(yyjson_mut_doc_get_root(o[5].doc), "spec", "template", "spec", "containers"));
+  yyjson_mut_val *c = yyjson_mut_arr_get_first(AT(yyjson_mut_doc_get_root(o[8].doc), "spec", "template", "spec", "containers"));
   yyjson_mut_val *env = yyjson_mut_obj_get(c, "env");
   /* the operator's own first, then the spec's, as given */
   assert_string_equal(yyjson_mut_get_str(yyjson_mut_obj_get(yyjson_mut_arr_get_first(env), "name")), "BUCKETS_CONSOLE_SERVER");
@@ -372,12 +374,185 @@ static void test_minio_tenant_layout(void **state) {
   for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) yyjson_doc_free(parse(bad[i], &s, false));
 }
 
+
+static const char *k_kes =
+    "{\"apiVersion\":\"buckets.io/v1alpha1\",\"kind\":\"BucketsCluster\","
+    "\"metadata\":{\"name\":\"store\",\"namespace\":\"data\",\"uid\":\"u-1\"},"
+    "\"spec\":{\"image\":\"bucketsd:test\",\"console\":{\"enabled\":true},\"kms\":{\"kes\":{\"image\":\"kes:test\"}},"
+    "\"pools\":[{\"servers\":4,\"volumesPerServer\":1}]}}";
+
+static const char *env_value_of(yyjson_mut_val *c, const char *name) {
+  size_t i, max;
+  yyjson_mut_val *e;
+  yyjson_mut_arr_foreach(yyjson_mut_obj_get(c, "env"), i, max, e) {
+    if (!strcmp(yyjson_mut_get_str(yyjson_mut_obj_get(e, "name")), name)) {
+      const char *v = yyjson_mut_get_str(yyjson_mut_obj_get(e, "value"));
+      return v ? v : "(from a Secret)";
+    }
+  }
+  return NULL;
+}
+
+static void test_kes_spec(void **state) {
+  (void)state;
+  bc_spec s;
+  yyjson_doc *d = parse(k_kes, &s, true);
+  assert_true(s.kes.enabled);
+  assert_int_equal(s.kes.replicas, 2);
+  assert_string_equal(s.kes.key_name, BC_KES_DEFAULT_KEY);
+  assert_string_equal(s.kes.image, "kes:test");
+  char ep[256];
+  bc_kes_endpoint(&s, false, ep, sizeof(ep));
+  assert_string_equal(ep, "https://store-kes.data.svc.cluster.local:7373");
+  bc_kes_endpoint(&s, true, ep, sizeof(ep));
+  assert_string_equal(ep, "https://store-kes-test.data.svc.cluster.local:7373");
+
+  /* bucketsd uses KES only once the reconciler says it may */
+  bc_object *o;
+  size_t n = bc_desired(&s, &o);
+  yyjson_mut_val *c = yyjson_mut_arr_get_first(AT(yyjson_mut_doc_get_root(o[2].doc), "spec", "template", "spec", "containers"));
+  assert_null(env_value_of(c, "MINIO_KMS_KES_ENDPOINT"));
+  bc_objects_free(o, n);
+  s.kes.active = true;
+  n = bc_desired(&s, &o);
+  yyjson_mut_val *pod = AT(yyjson_mut_doc_get_root(o[2].doc), "spec", "template", "spec");
+  c = yyjson_mut_arr_get_first(yyjson_mut_obj_get(pod, "containers"));
+  assert_string_equal(env_value_of(c, "MINIO_KMS_KES_ENDPOINT"), "https://store-kes.data.svc.cluster.local:7373");
+  assert_string_equal(env_value_of(c, "MINIO_KMS_KES_KEY_NAME"), BC_KES_DEFAULT_KEY);
+  assert_string_equal(env_value_of(c, "MINIO_KMS_KES_API_KEY"), "(from a Secret)");
+  assert_string_equal(env_value_of(c, "MINIO_KMS_KES_CAPATH"), "/etc/buckets/kes/ca.crt");
+  bool vol = false;
+  size_t i, max;
+  yyjson_mut_val *v;
+  yyjson_mut_arr_foreach(yyjson_mut_obj_get(pod, "volumes"), i, max, v) {
+    if (!strcmp(yyjson_mut_get_str(yyjson_mut_obj_get(v, "name")), "kes-ca"))
+      vol = !strcmp(yyjson_mut_get_str(AT(v, "secret", "secretName")), "store-kes-tls");
+  }
+  assert_true(vol);
+  /* the console runs as its own account, which may touch its cluster and the KMS Secrets only */
+  yyjson_mut_val *role = NULL;
+  for (size_t k = 0; k < n; k++)
+    if (strstr(o[k].path, "/roles/store-console")) role = yyjson_mut_doc_get_root(o[k].doc);
+  assert_non_null(role);
+  yyjson_mut_val *r0 = yyjson_mut_arr_get(yyjson_mut_obj_get(role, "rules"), 0);
+  yyjson_mut_val *r1 = yyjson_mut_arr_get(yyjson_mut_obj_get(role, "rules"), 1);
+  assert_string_equal(yyjson_mut_get_str(yyjson_mut_arr_get_first(yyjson_mut_obj_get(r0, "resourceNames"))), "store");
+  assert_int_equal(yyjson_mut_arr_size(yyjson_mut_obj_get(r1, "resourceNames")), 2);
+  assert_string_equal(yyjson_mut_get_str(yyjson_mut_arr_get(yyjson_mut_obj_get(r1, "resourceNames"), 1)), "store-kms-candidate");
+  for (size_t k = 0; k < n; k++) {
+    if (!strstr(o[k].path, "/deployments/store-console")) continue;
+    yyjson_mut_val *cp = AT(yyjson_mut_doc_get_root(o[k].doc), "spec", "template", "spec");
+    assert_string_equal(yyjson_mut_get_str(yyjson_mut_obj_get(cp, "serviceAccountName")), "store-console");
+    assert_string_equal(env_value_of(yyjson_mut_arr_get_first(yyjson_mut_obj_get(cp, "containers")), "BUCKETS_CONSOLE_CLUSTER"), "store");
+  }
+  bc_objects_free(o, n);
+  yyjson_doc_free(d);
+
+  /* KMS settings in two places is a mistake */
+  d = parse("{\"metadata\":{\"name\":\"store\",\"namespace\":\"data\",\"uid\":\"u\"},\"spec\":{\"kms\":{\"kes\":{}},"
+            "\"env\":[{\"name\":\"MINIO_KMS_SECRET_KEY\",\"value\":\"k:x\"}],\"pools\":[{\"servers\":4,\"volumesPerServer\":1}]}}",
+            &s, false);
+  yyjson_doc_free(d);
+}
+
+static void test_kes_objects(void **state) {
+  (void)state;
+  bc_spec s;
+  yyjson_doc *d = parse(k_kes, &s, true);
+  const char *settings = "{\"backend\":\"vault\",\"vault\":{\"endpoint\":\"https://vault:8200\",\"approle\":{\"id\":\"r\","
+                         "\"secret\":\"x\"},\"caCert\":\"-----BEGIN CERTIFICATE-----\\nA\\n-----END CERTIFICATE-----\\n\"}}";
+  yyjson_doc *sd = yyjson_read(settings, strlen(settings), 0);
+  char *ca = NULL, err[256];
+  char *config = bc_kes_config(&s, yyjson_doc_get_root(sd), "aaaa", "bbbb", &ca, err, sizeof(err));
+  assert_non_null(config);
+  assert_non_null(ca);
+  yyjson_doc *cd = yyjson_read(config, strlen(config), 0);
+  yyjson_val *cr = yyjson_doc_get_root(cd);
+  assert_string_equal(yyjson_get_str(yyjson_obj_get(yyjson_obj_get(cr, "admin"), "identity")), "aaaa");
+  yyjson_val *pol = yyjson_obj_get(yyjson_obj_get(cr, "policy"), "buckets");
+  assert_string_equal(yyjson_get_str(yyjson_arr_get_first(yyjson_obj_get(pol, "identities"))), "bbbb");
+  assert_true(yyjson_get_bool(yyjson_obj_get(yyjson_obj_get(yyjson_obj_get(cr, "api"), "/v1/ready"), "skip_auth")));
+  yyjson_val *vault = yyjson_obj_get(yyjson_obj_get(cr, "keystore"), "vault");
+  assert_string_equal(yyjson_get_str(yyjson_obj_get(yyjson_obj_get(vault, "tls"), "ca")), "/etc/kes/config/keystore-ca.pem");
+  yyjson_doc_free(cd);
+
+  bc_object *o;
+  size_t n = bc_kes_objects(&s, false, config, ca, &o);
+  assert_int_equal(n, 4);
+  assert_string_equal(o[0].path, "/api/v1/namespaces/data/serviceaccounts/store-kes");
+  assert_string_equal(o[1].path, "/api/v1/namespaces/data/secrets/store-kes-config");
+  assert_string_equal(o[2].path, "/apis/apps/v1/namespaces/data/deployments/store-kes");
+  assert_string_equal(o[3].path, "/api/v1/namespaces/data/services/store-kes");
+  yyjson_mut_val *dep = yyjson_mut_doc_get_root(o[2].doc);
+  assert_int_equal(yyjson_mut_get_int(AT(dep, "spec", "replicas")), 2);
+  yyjson_mut_val *labels = AT(dep, "spec", "template", "metadata", "labels");
+  assert_null(yyjson_mut_obj_get(labels, "buckets.io/cluster")); /* never behind the S3 Service */
+  const char *hash = yyjson_mut_get_str(AT(dep, "spec", "template", "metadata", "annotations", "buckets.io/config-hash"));
+  char h1[17];
+  snprintf(h1, sizeof(h1), "%s", hash);
+  yyjson_mut_val *c = yyjson_mut_arr_get_first(AT(dep, "spec", "template", "spec", "containers"));
+  assert_string_equal(yyjson_mut_get_str(yyjson_mut_obj_get(c, "image")), "kes:test");
+  assert_string_equal(yyjson_mut_get_str(AT(c, "readinessProbe", "httpGet", "path")), "/v1/ready");
+  assert_string_equal(yyjson_mut_get_str(AT(dep, "spec", "template", "spec", "serviceAccountName")), "store-kes");
+  assert_non_null(AT(yyjson_mut_doc_get_root(o[1].doc), "stringData", "keystore-ca.pem"));
+  bc_objects_free(o, n);
+
+  /* a trial: one replica of its own, the live account; new settings, a new hash */
+  n = bc_kes_objects(&s, true, "{\"other\":1}", NULL, &o);
+  assert_string_equal(o[2].path, "/apis/apps/v1/namespaces/data/deployments/store-kes-test");
+  dep = yyjson_mut_doc_get_root(o[2].doc);
+  assert_int_equal(yyjson_mut_get_int(AT(dep, "spec", "replicas")), 1);
+  assert_string_equal(yyjson_mut_get_str(AT(dep, "spec", "template", "spec", "serviceAccountName")), "store-kes");
+  assert_string_not_equal(yyjson_mut_get_str(AT(dep, "spec", "template", "metadata", "annotations", "buckets.io/config-hash")), h1);
+  bc_objects_free(o, n);
+  char **paths;
+  n = bc_kes_paths(&s, true, &paths);
+  assert_int_equal(n, 3); /* a trial's cleanup leaves the live account */
+  for (size_t i = 0; i < n; i++) free(paths[i]);
+  free(paths);
+  free(config);
+  free(ca);
+  yyjson_doc_free(sd);
+
+  /* settings that do not hold up say why */
+  const char *bad = "{\"backend\":\"vault\",\"vault\":{}}";
+  sd = yyjson_read(bad, strlen(bad), 0);
+  assert_null(bc_kes_config(&s, yyjson_doc_get_root(sd), "a", "b", &ca, err, sizeof(err)));
+  assert_non_null(strstr(err, "Vault server's address"));
+  yyjson_doc_free(sd);
+  yyjson_doc_free(d);
+}
+
+/* what KES 2024-09-11 prints, as captured */
+static void test_kes_log_reason(void **state) {
+  (void)state;
+  char r[300];
+  op_kes_log_reason("Version  <unknown>\n\nError: Error making API request.\n\nURL: PUT http://v:8200/v1/auth/approle/login\n"
+                    "Code: 400. Errors:\n\n* invalid role or secret ID\n",
+                    r, sizeof(r));
+  assert_string_equal(r, "Error making API request. URL: PUT http://v:8200/v1/auth/approle/login Code: 400. Errors: * "
+                         "invalid role or secret ID");
+  op_kes_log_reason("Error: Put \"http://127.0.0.1:18299/v1/auth/approle/login\": dial tcp 127.0.0.1:18299: connect: "
+                    "connection refused\n",
+                    r, sizeof(r));
+  assert_string_equal(r, "Put \"http://127.0.0.1:18299/v1/auth/approle/login\": dial tcp 127.0.0.1:18299: connect: connection refused");
+  op_kes_log_reason("=> Server is up and running...\n"
+                    "time=2026-10-02T14:43:01.187-05:00 level=ERROR msg=\"vault: failed to create 'kv/data/buckets/x/t1': "
+                    "Error making API request.\\n\\nURL: GET http://v/v1/kv/data/buckets/x/t1\\nCode: 403. Errors:\\n\\n* 1 "
+                    "error occurred:\\n\\t* permission denied\\n\\n\" req.method=POST req.path=/v1/key/create/t1\n",
+                    r, sizeof(r));
+  assert_string_equal(r, "vault: failed to create 'kv/data/buckets/x/t1': Error making API request. URL: GET "
+                         "http://v/v1/kv/data/buckets/x/t1 Code: 403. Errors: * 1 error occurred: * permission denied");
+  op_kes_log_reason("=> Server is up and running...\n", r, sizeof(r));
+  assert_string_equal(r, "");
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_volumes_and_topology), cmocka_unit_test(test_desired_objects), cmocka_unit_test(test_tls),
       cmocka_unit_test(test_root_secret_not_owned), cmocka_unit_test(test_invalid),
       cmocka_unit_test(test_console), cmocka_unit_test(test_console_tls), cmocka_unit_test(test_console_env),
-      cmocka_unit_test(test_minio_tenant_layout),
+      cmocka_unit_test(test_minio_tenant_layout), cmocka_unit_test(test_kes_spec), cmocka_unit_test(test_kes_objects), cmocka_unit_test(test_kes_log_reason),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

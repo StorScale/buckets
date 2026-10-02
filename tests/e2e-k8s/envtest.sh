@@ -42,6 +42,8 @@ openssl genrsa -out "$WORK/sa.key" 2048 2>/dev/null
 echo "envtest-token,admin,1,system:masters" >"$WORK/tokens.csv"
 # The operator runs as its own ServiceAccount, so a missing RBAC rule fails the test.
 echo "operator-token,system:serviceaccount:buckets-system:buckets-operator,2,system:serviceaccounts" >>"$WORK/tokens.csv"
+# ... and so does a console, as the Role the operator gives it allows
+echo "console-token,system:serviceaccount:tenant:kmsc-console,3,system:serviceaccounts" >>"$WORK/tokens.csv"
 "$BIN/etcd" --data-dir "$WORK/etcd" --listen-client-urls "http://127.0.0.1:$EPORT" \
   --advertise-client-urls "http://127.0.0.1:$EPORT" --listen-peer-urls "http://127.0.0.1:$((EPORT + 1))" \
   >"$WORK/etcd.log" 2>&1 &
@@ -232,6 +234,81 @@ spec: {cluster: store, credsSecret: {name: bob-creds}}
 YAML
 until_true '[[ $(jp bucketsuser/bob {.status.phase}) == Pending ]]' || true
 expect "missing Secret is reported" "$(jp bucketsuser/bob '{.status.phase}')" Pending
+
+echo "== the KMS: Secrets, the console's Role, trials, KES"
+k apply -f - >/dev/null <<YAML
+apiVersion: buckets.io/v1alpha1
+kind: BucketsCluster
+metadata: {name: kmsc, namespace: tenant}
+spec:
+  image: bucketsd:test
+  console: {enabled: true}
+  kms: {kes: {image: kes:test}}
+  pools: [{servers: 4, volumesPerServer: 1}]
+YAML
+until_true '[[ $(jp bc/kmsc "{.status.kms.phase}") == NotConfigured ]]' || true
+expect "KMS waits for settings" "$(jp bc/kmsc '{.status.kms.phase}')" NotConfigured
+for s in kmsc-kms kmsc-kms-candidate kmsc-kes-tls kmsc-kes-identity; do
+  expect "Secret $s" "$(k -n tenant get secret $s -o name 2>/dev/null)" "secret/$s"
+done
+expect "KES's certificate names its Service" \
+  "$(jp secret/kmsc-kes-tls '{.data.tls\.crt}' | base64 -d | openssl x509 -noout -ext subjectAltName | grep -o 'kmsc-kes.tenant.svc.cluster.local' | head -1)" \
+  kmsc-kes.tenant.svc.cluster.local
+expect "API keys" "$(jp secret/kmsc-kes-identity '{.data.client}' | base64 -d | cut -c1-7)" "kes:v1:"
+expect "the console's account" "$(jp deploy/kmsc-console '{.spec.template.spec.serviceAccountName}')" kmsc-console
+ck() { "$BIN/kubectl" --server "https://127.0.0.1:$APORT" --token console-token --insecure-skip-tls-verify -n tenant "$@"; }
+expect "the console may not read the root credentials" "$(ck get secret kmsc-root -o name 2>&1 | grep -o Forbidden | head -1)" Forbidden
+expect "nor another cluster" "$(ck get bc store -o name 2>&1 | grep -o Forbidden | head -1)" Forbidden
+expect "nor write status" "$(ck patch bc kmsc --subresource=status --type=merge -p '{"status":{"kms":{"test":{"phase":"Passed"}}}}' 2>&1 | grep -o Forbidden | head -1)" Forbidden
+settings='{"backend":"vault","vault":{"endpoint":"https://vault.example.com:8200","prefix":"buckets/kmsc","approle":{"id":"r","secret":"s"}}}'
+cand=$(printf '{"testId":"t1","settings":%s,"keyName":"buckets-default","createKey":true,"requiredKeys":[]}' "$settings")
+ck get secret kmsc-kms-candidate -o json | python3 -c 'import json,sys,base64
+s=json.load(sys.stdin); s["data"]={"candidate.json": base64.b64encode(sys.argv[1].encode()).decode()}; print(json.dumps(s))' "$cand" >"$WORK/cand.json"
+expect "the console writes a candidate" "$(ck replace -f "$WORK/cand.json" -o name 2>&1)" secret/kmsc-kms-candidate
+expect "and asks for a trial" "$(ck annotate bc kmsc buckets.io/kms-test=t1 -o name 2>&1)" bucketscluster.buckets.io/kmsc
+until_true '[[ $(jp bc/kmsc "{.status.kms.test.phase}") == Running ]]'
+expect "trial running" "$(jp bc/kmsc '{.status.kms.test.id} {.status.kms.test.phase}')" "t1 Running"
+expect "trial KES, one replica" "$(jp deploy/kmsc-kes-test '{.spec.replicas}')" 1
+expect "trial runs as KES's account" "$(jp deploy/kmsc-kes-test '{.spec.template.spec.serviceAccountName}')" kmsc-kes
+expect "trial config names Vault" "$(jp secret/kmsc-kes-test-config '{.data.config\.yaml}' | base64 -d | grep -o 'https://vault.example.com:8200')" \
+  https://vault.example.com:8200
+# plays the kubelet: the image cannot be pulled
+k -n tenant apply -f - >/dev/null <<YAML
+apiVersion: v1
+kind: Pod
+metadata: {name: kmsc-kes-test-x, labels: {buckets.io/kes: kmsc-kes-test}}
+spec: {containers: [{name: kes, image: kes:test}]}
+YAML
+k -n tenant patch pod kmsc-kes-test-x --subresource=status --type=merge -p '{"status":{"containerStatuses":[{"name":"kes",
+  "image":"kes:test","imageID":"","ready":false,"restartCount":0,
+  "state":{"waiting":{"reason":"ImagePullBackOff","message":"Back-off pulling image \"kes:test\""}}}]}}' >/dev/null
+until_true '[[ $(jp bc/kmsc "{.status.kms.test.phase}") == Failed ]]'
+expect "trial fails" "$(jp bc/kmsc '{.status.kms.test.phase}')" Failed
+expect "saying why" "$(jp bc/kmsc '{.status.kms.test.message}' | grep -o 'The KES image kes:test cannot be pulled')" \
+  "The KES image kes:test cannot be pulled"
+expect "step by step" "$(jp bc/kmsc '{.status.kms.test.steps[1].name}: {.status.kms.test.steps[1].status}')" \
+  "Start KES with these settings: failed"
+until_true '! k -n tenant get deploy kmsc-kes-test'
+expect "the trial server is gone" "$(k -n tenant get deploy kmsc-kes-test -o name 2>/dev/null || echo gone)" gone
+# settings applied: the live KES
+ck get secret kmsc-kms -o json | python3 -c 'import json,sys,base64
+s=json.load(sys.stdin); s["data"]={"settings.json": base64.b64encode(sys.argv[1].encode()).decode()}; print(json.dumps(s))' "$settings" >"$WORK/live.json"
+expect "the console writes the settings" "$(ck replace -f "$WORK/live.json" -o name 2>&1)" secret/kmsc-kms
+until_true 'k -n tenant get deploy kmsc-kes'
+expect "KES, two replicas" "$(jp deploy/kmsc-kes '{.spec.replicas}')" 2
+expect "KES's Service" "$(jp svc/kmsc-kes '{.spec.ports[0].port}')" 7373
+expect "KES pods stay out of the S3 Service" "$(jp deploy/kmsc-kes '{.spec.template.metadata.labels.buckets\.io/cluster}')" ""
+until_true '[[ -n $(jp bc/kmsc "{.status.kms.backend}") ]]'
+expect "status names the key store" "$(jp bc/kmsc '{.status.kms.backend}')" "HashiCorp Vault at https://vault.example.com:8200"
+expect "storage servers wait for KES" "$(jp sts/kmsc-pool-0 '{.spec.template.spec.containers[0].env[?(@.name=="MINIO_KMS_KES_ENDPOINT")].value}')" ""
+# KES "ready" with no server behind it: the default key cannot be made, and bucketsd still waits
+k -n tenant patch deploy kmsc-kes --subresource=status --type=merge -p '{"status":{"replicas":2,"readyReplicas":2}}' >/dev/null
+until_true '[[ $(jp bc/kmsc "{.status.kms.phase}") == Error ]]'
+expect "the default key cannot be created" "$(jp bc/kmsc '{.status.kms.message}' | grep -o 'Creating key buckets-default failed')" \
+  "Creating key buckets-default failed"
+expect "storage servers still wait" "$(jp sts/kmsc-pool-0 '{.spec.template.spec.containers[0].env[?(@.name=="MINIO_KMS_KES_ENDPOINT")].value}')" ""
+expect "not activated" "$(jp bc/kmsc '{.status.kms.activated}')" ""
+k -n tenant delete bc kmsc >/dev/null
 
 echo "== leader election"
 start_operator opb

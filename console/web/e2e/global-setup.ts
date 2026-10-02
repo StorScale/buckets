@@ -1,5 +1,5 @@
 import { spawn, ChildProcess } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -36,6 +36,11 @@ export default async function globalSetup() {
   );
   procs.push(idp);
   await waitFor("http://127.0.0.1:19891/jwks");
+  // a mock Kubernetes API with buckets-operator's KMS answers (tests/integration/kubemock.py)
+  const kube = spawn("python3", [join(root, "tests/integration/kubemock.py"), "19892", dir, "e2e", "store"], { stdio: ["ignore", "ignore", "inherit"] });
+  procs.push(kube);
+  for (let i = 0; i < 100 && !existsSync(join(dir, "kube-ca.pem")); i++) await new Promise((r) => setTimeout(r, 100));
+  await new Promise((r) => setTimeout(r, 300));
   const bucketsd = spawn(process.env.BUCKETSD_BIN ?? join(root, "build/src/bucketsd"), ["server", "--address", "127.0.0.1:19889", `${dir}/d{1...4}`], {
     env: { ...process.env, MINIO_ROOT_USER: ROOT_USER, MINIO_ROOT_PASSWORD: ROOT_PASSWORD, MINIO_KMS_SECRET_KEY: "e2e-key:MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
       MINIO_IDENTITY_OPENID_CONFIG_URL: "http://127.0.0.1:19891/.well-known/openid-configuration",
@@ -57,6 +62,12 @@ export default async function globalSetup() {
         BUCKETS_CONSOLE_OIDC_CLIENT_ID: "console",
         BUCKETS_CONSOLE_OIDC_CLIENT_SECRET: "s3cr3t",
         BUCKETS_CONSOLE_OIDC_DISPLAY_NAME: "Mock IdP",
+        // KMS settings through the operator, as in a cluster
+        BUCKETS_CONSOLE_CLUSTER: "store",
+        BUCKETS_CONSOLE_NAMESPACE: "e2e",
+        BUCKETS_KUBE_API: "https://127.0.0.1:19892",
+        BUCKETS_KUBE_TOKEN: "kubemock-token",
+        BUCKETS_KUBE_CA: join(dir, "kube-ca.pem"),
       },
       stdio: ["ignore", "ignore", "inherit"],
     },

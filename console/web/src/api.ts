@@ -338,6 +338,96 @@ export const kmsCreateKey = (key: string) => call("POST", kms("key/create"), { q
 // default key and keys a bucket encrypts with by default (KMSKeyInUse).
 export const kmsDeleteKey = (key: string) => call("POST", kms("key/delete"), { query: { "key-id": key } });
 
+// ---- KMS settings (where the operator runs KES for the cluster) ----
+
+export type KmsBackend = "vault" | "aws" | "azure" | "gcp";
+export type VaultSettings = {
+  endpoint: string;
+  engine?: string;
+  version?: "v1" | "v2";
+  namespace?: string;
+  prefix?: string;
+  auth: "approle" | "kubernetes";
+  approle?: { engine?: string; id: string; secret: string };
+  kubernetes?: { engine?: string; role: string };
+  transit?: { engine?: string; key: string };
+  caCert?: string;
+};
+export type AwsSettings = { region: string; endpoint?: string; kmsKey?: string; accessKey?: string; secretKey?: string; sessionToken?: string };
+export type AzureSettings = {
+  endpoint: string;
+  auth: "secret" | "managedIdentity";
+  tenantId?: string;
+  clientId?: string;
+  clientSecret?: string;
+  managedIdentityClientId?: string;
+};
+export type GcpSettings = { projectId?: string; endpoint?: string; credentials: string };
+export type KmsSettings = {
+  backend: KmsBackend;
+  vault?: VaultSettings;
+  aws?: AwsSettings;
+  azure?: AzureSettings;
+  gcp?: GcpSettings;
+  secretsSet?: string[]; // saved secrets, left out: "vault.approle.secret", ...
+};
+export type KmsTestStep = { name: string; status: "ok" | "failed" | "running"; message?: string };
+export type KmsTest = { id: string; phase: "Running" | "Passed" | "Failed"; message?: string; steps?: KmsTestStep[] };
+export type KmsConfigStatus = {
+  phase?: "Off" | "NotConfigured" | "Starting" | "Ready" | "Degraded" | "Error";
+  message?: string;
+  backend?: string;
+  keyName?: string;
+  replicas?: number;
+  readyReplicas?: number;
+  activated?: boolean;
+  test?: KmsTest;
+};
+export type KmsConfig = {
+  managed: boolean;
+  cluster?: string;
+  namespace?: string;
+  kesServiceAccount?: string;
+  enabled?: boolean;
+  keyName?: string;
+  settings?: KmsSettings | null;
+  description?: string;
+  status?: KmsConfigStatus;
+};
+// null: this session may not set up the KMS (it needs admin:ConfigUpdate)
+export async function kmsConfig(): Promise<KmsConfig | null> {
+  try {
+    return await (await call("GET", "/api/v1/kms-config")).json();
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 403) return null;
+    throw e;
+  }
+}
+export async function kmsConfigTest(req: { settings: KmsSettings; keyName: string; createKey: boolean; requiredKeys: string[] }): Promise<string> {
+  const res = await call("POST", "/api/v1/kms-config/test", { body: JSON.stringify(req), headers: { "Content-Type": "application/json" } });
+  return ((await res.json()) as { testId: string }).testId;
+}
+export const kmsConfigApply = (testId: string) =>
+  call("POST", "/api/v1/kms-config/apply", { body: JSON.stringify({ testId }), headers: { "Content-Type": "application/json" } });
+
+// Buckets whose default encryption is SSE-KMS, by key (the KMS's default key
+// when the bucket names none).
+export async function kmsKeyUsage(defaultKey: string): Promise<Map<string, string[]>> {
+  const usage = new Map<string, string[]>();
+  const buckets = await listBuckets();
+  await Promise.all(
+    buckets.map(async (b) => {
+      const x = await bucketDocs.encryption.get(b.name).catch(() => null);
+      if (!x) return;
+      const d = new DOMParser().parseFromString(x, "application/xml");
+      if (d.querySelector("SSEAlgorithm")?.textContent !== "aws:kms") return;
+      const key = (d.querySelector("KMSMasterKeyID")?.textContent || defaultKey).replace(/^arn:aws:kms:/, "");
+      usage.set(key, [...(usage.get(key) ?? []), b.name].sort());
+    }),
+  );
+  return usage;
+}
+
 // Encrypting a bucket's unencrypted objects in place: a KeyRotate batch job
 // with Buckets' onlyUnencrypted (every version; encrypted ones are left alone).
 export async function encryptExisting(bucket: string, alg: "AES256" | "aws:kms", key?: string): Promise<string> {

@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
-#include "kube.h"
+#include "k8s/kube.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,13 +10,13 @@
 #include "net/client.h"
 
 #define SA_DIR "/var/run/secrets/kubernetes.io/serviceaccount"
-#define FIELD_MANAGER "buckets-operator"
 
 struct kube {
   buckets_http_client *http;
   buckets_tls_client *tls;
   char *token_file; /* re-read: projected tokens rotate */
   char *token;
+  char *manager; /* server-side apply's field manager */
 };
 
 static char *read_file(const char *path) {
@@ -71,6 +71,7 @@ kube *kube_from_env(char *err, size_t errlen) {
     return NULL;
   }
   k->http = buckets_http_client_new(host, port, k->tls, 30000);
+  k->manager = buckets_xstrdup("buckets-operator");
   if (token_file) k->token_file = buckets_xstrdup(token_file);
   else if (token) k->token = buckets_xstrdup(token);
   return k;
@@ -82,6 +83,7 @@ void kube_free(kube *k) {
   buckets_tls_client_free(k->tls);
   free(k->token_file);
   free(k->token);
+  free(k->manager);
   free(k);
 }
 
@@ -110,6 +112,25 @@ int kube_request(kube *k, const char *method, const char *path, const char *cont
 
 int kube_get(kube *k, const char *path, yyjson_doc **out) { return kube_request(k, "GET", path, NULL, NULL, 0, out); }
 
+int kube_get_text(kube *k, const char *path, buckets_buf *out) {
+  char *token = k->token_file ? read_file(k->token_file) : NULL;
+  buckets_buf auth = BUCKETS_BUF_INIT;
+  if (token || k->token) buckets_buf_appendf(&auth, "Bearer %s", token ? token : k->token);
+  free(token);
+  buckets_http_kv h[1];
+  size_t nh = 0;
+  if (auth.len) h[nh++] = (buckets_http_kv){"Authorization", auth.data};
+  buckets_http_result r;
+  int status = 0;
+  if (buckets_http_client_do(k->http, "GET", path, h, nh, NULL, 0, &r)) {
+    status = r.status;
+    buckets_buf_append(out, r.body.data, r.body.len);
+    buckets_http_result_free(&r);
+  }
+  buckets_buf_free(&auth);
+  return status;
+}
+
 static int send_doc(kube *k, const char *method, const char *path, const char *ctype, yyjson_mut_doc *obj,
                     yyjson_doc **out) {
   size_t n;
@@ -121,11 +142,24 @@ static int send_doc(kube *k, const char *method, const char *path, const char *c
 
 int kube_apply(kube *k, const char *path, yyjson_mut_doc *obj, yyjson_doc **out) {
   buckets_buf p = BUCKETS_BUF_INIT;
-  buckets_buf_appendf(&p, "%s?fieldManager=" FIELD_MANAGER "&force=true", path);
+  buckets_buf_appendf(&p, "%s?fieldManager=%s&force=true", path, k->manager);
   /* JSON is YAML: the apply patch type takes it as is. */
   int st = send_doc(k, "PATCH", p.data, "application/apply-patch+yaml", obj, out);
   buckets_buf_free(&p);
   return st;
+}
+
+void kube_set_field_manager(kube *k, const char *name) {
+  free(k->manager);
+  k->manager = buckets_xstrdup(name);
+}
+
+int kube_merge_patch(kube *k, const char *path, yyjson_mut_doc *patch, yyjson_doc **out) {
+  return send_doc(k, "PATCH", path, "application/merge-patch+json", patch, out);
+}
+
+int kube_update(kube *k, const char *path, yyjson_mut_doc *obj, yyjson_doc **out) {
+  return send_doc(k, "PUT", path, "application/json", obj, out);
 }
 
 int kube_create(kube *k, const char *collection_path, yyjson_mut_doc *obj, yyjson_doc **out) {

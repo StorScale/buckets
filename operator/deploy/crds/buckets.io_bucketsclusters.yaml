@@ -168,6 +168,23 @@ spec:
                   type: string
                   enum: [ClusterIP, NodePort, LoadBalancer]
                   default: ClusterIP
+                kms:
+                  type: object
+                  description: The cluster's key management service, for SSE-S3 and SSE-KMS.
+                  properties:
+                    kes:
+                      type: object
+                      description: >-
+                        A KES server the operator runs for the cluster. Where it keeps keys (HashiCorp Vault,
+                        AWS Secrets Manager, Azure Key Vault, Google Secret Manager) is in Secret <name>-kms
+                        (settings.json), which the console's Encryption page writes after testing it.
+                      properties:
+                        image: {type: string, description: "Defaults to the operator's BUCKETS_KES_IMAGE, else quay.io/minio/kes."}
+                        replicas: {type: integer, minimum: 1, default: 2}
+                        keyName: {type: string, default: buckets-default, description: The default key for SSE-S3 and for SSE-KMS without a key ID; created when missing.}
+                        resources:
+                          type: object
+                          x-kubernetes-preserve-unknown-fields: true
                 console:
                   type: object
                   description: The web console (consoled and the SPA), a Deployment of its own apart from storage.
@@ -228,6 +245,10 @@ spec:
                 readyServersText: {type: string}
                 topology: {type: string}
                 credsSecret: {type: string}
+                kms:
+                  type: object
+                  description: The KES server, and the latest trial of new key store settings (test).
+                  x-kubernetes-preserve-unknown-fields: true
                 pools:
                   type: array
                   items:

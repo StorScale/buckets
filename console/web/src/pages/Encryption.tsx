@@ -1,37 +1,9 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import {
-  bucketDocs,
-  kmsCheckKey,
-  kmsCreateKey,
-  kmsDeleteKey,
-  kmsListKeys,
-  kmsStatus,
-  KMSKeyCheck,
-  KMSStatus,
-  listBuckets,
-} from "../api";
+import { KmsConfig, kmsConfig, kmsCheckKey, kmsCreateKey, kmsDeleteKey, kmsKeyUsage, kmsListKeys, kmsStatus, KMSKeyCheck, KMSStatus } from "../api";
 import { ErrorBanner, Modal, Notice, Spinner } from "../components";
 
 type KeyRow = { name: string; check?: KMSKeyCheck; usedBy: string[] };
-
-// Buckets whose default encryption is SSE-KMS, by key (the KMS's default key
-// when the bucket names none).
-async function keyUsage(defaultKey: string): Promise<Map<string, string[]>> {
-  const usage = new Map<string, string[]>();
-  const buckets = await listBuckets();
-  await Promise.all(
-    buckets.map(async (b) => {
-      const x = await bucketDocs.encryption.get(b.name).catch(() => null);
-      if (!x) return;
-      const d = new DOMParser().parseFromString(x, "application/xml");
-      if (d.querySelector("SSEAlgorithm")?.textContent !== "aws:kms") return;
-      const key = (d.querySelector("KMSMasterKeyID")?.textContent || defaultKey).replace(/^arn:aws:kms:/, "");
-      usage.set(key, [...(usage.get(key) ?? []), b.name].sort());
-    }),
-  );
-  return usage;
-}
 
 export default function Encryption() {
   const [status, setStatus] = useState<KMSStatus | null>(null);
@@ -43,6 +15,13 @@ export default function Encryption() {
   const [deleting, setDeleting] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
   const reload = () => setTick((t) => t + 1);
+  // where the operator runs KES: its settings (null: not for this session)
+  const [managed, setManaged] = useState<KmsConfig | null>(null);
+  useEffect(() => {
+    kmsConfig()
+      .then((c) => setManaged(c?.managed ? c : null))
+      .catch(() => setManaged(null));
+  }, [tick]);
 
   useEffect(() => {
     let live = true;
@@ -57,7 +36,7 @@ export default function Encryption() {
       if (!live) return;
       setStatus(st);
       try {
-        const [names, usage] = await Promise.all([kmsListKeys(), keyUsage(st["default-key-id"])]);
+        const [names, usage] = await Promise.all([kmsListKeys(), kmsKeyUsage(st["default-key-id"])]);
         if (!live) return;
         const base = names.map((name) => ({ name, usedBy: usage.get(name) ?? [] }));
         setRows(base);
@@ -80,6 +59,28 @@ export default function Encryption() {
   const defaultKey = status?.["default-key-id"] ?? "";
 
   if (noKms !== null) {
+    if (managed)
+      return (
+        <div>
+          <h1>Encryption</h1>
+          <div className="card section setup-cta" data-testid="no-kms">
+            <h2>Set up a key management service</h2>
+            <p>
+              With a KMS, Buckets encrypts objects with SSE-S3 and SSE-KMS: per bucket by default, or as clients ask. Buckets runs KES for this cluster; you
+              choose where it keeps the keys — HashiCorp Vault, AWS Secrets Manager, Azure Key Vault or Google Secret Manager — and test the connection
+              before anything changes.
+            </p>
+            {managed.status?.phase && managed.status.phase !== "Off" && managed.status.message && (
+              <p className={managed.status.phase === "Error" ? "bad" : "muted"} data-testid="kms-phase">
+                {managed.status.message}
+              </p>
+            )}
+            <Link className="button primary" to="/encryption/setup" data-testid="kms-setup">
+              {managed.settings ? "Continue setting up" : "Set up the KMS"}
+            </Link>
+          </div>
+        </div>
+      );
     return (
       <div>
         <h1>Encryption</h1>
@@ -115,6 +116,22 @@ export default function Encryption() {
                 <th>Default key</th>
                 <td className="mono">{defaultKey}</td>
               </tr>
+              {managed?.description && (
+                <tr>
+                  <th>Key store</th>
+                  <td data-testid="kms-keystore">{managed.description}</td>
+                </tr>
+              )}
+              {managed?.status?.replicas !== undefined && (
+                <tr>
+                  <th>KES servers</th>
+                  <td>
+                    {managed.status.readyReplicas ?? 0} of {managed.status.replicas} ready{" "}
+                    {managed.status.phase && <span className={`pill ${managed.status.phase === "Ready" ? "ok" : "bad"}`}>{managed.status.phase}</span>}
+                    {managed.status.phase !== "Ready" && managed.status.message && <div className="muted">{managed.status.message}</div>}
+                  </td>
+                </tr>
+              )}
               <tr>
                 <th>Endpoints</th>
                 <td>
@@ -131,6 +148,13 @@ export default function Encryption() {
             <p className="muted">
               The built-in KMS has one fixed key. Use a KES server to create, rotate between and delete keys.
             </p>
+          )}
+          {managed && (
+            <div className="form-actions">
+              <Link className="button" to="/encryption/setup" data-testid="kms-change">
+                {managed.settings ? "Change key store settings" : "Set up KES"}
+              </Link>
+            </div>
           )}
         </div>
       )}

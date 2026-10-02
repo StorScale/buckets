@@ -11,6 +11,7 @@
 #include "core/timefmt.h"
 #include "core/uuid.h"
 #include "iam.h"
+#include "kms.h"
 #include "manifests.h"
 
 #define GROUP_PATH "/apis/buckets.io/v1alpha1"
@@ -211,8 +212,9 @@ done:
 
 /* ---- status ------------------------------------------------------------------- */
 
+/* kms: status.kms as reconciled; NULL keeps what the status has. */
 static void write_status(op_ctx *o, yyjson_val *bc, const bc_spec *s, const char *phase, bool ready, const char *reason,
-                         const char *message, const char *topology, yyjson_val **sts, size_t nsts) {
+                         const char *message, const char *topology, yyjson_val **sts, size_t nsts, yyjson_mut_val *kms) {
   yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
   yyjson_mut_val *root = yyjson_mut_obj(d);
   yyjson_mut_doc_set_root(d, root);
@@ -253,6 +255,10 @@ static void write_status(op_ctx *o, yyjson_val *bc, const bc_spec *s, const char
   snprintf(text, sizeof(text), "%lld/%lld", readyn, servers);
   yyjson_mut_obj_add_strcpy(d, st, "readyServersText", text);
   if (topology) yyjson_mut_obj_add_strcpy(d, st, "topology", topology);
+  /* the whole status is applied each time: what is left out goes */
+  yyjson_val *old_kms = yyjson_obj_get(yyjson_obj_get(bc, "status"), "kms");
+  if (kms) yyjson_mut_obj_add_val(d, st, "kms", yyjson_mut_val_mut_copy(d, kms));
+  else if (old_kms) yyjson_mut_obj_add_val(d, st, "kms", yyjson_val_mut_copy(d, old_kms));
   /* Ready condition; its transition time only moves when the status flips. */
   const char *want = ready ? "True" : "False";
   char when[32];
@@ -288,22 +294,27 @@ static void reconcile_cluster(op_ctx *o, yyjson_val *bc) {
   char err[512];
   if (!bc_parse(bc, o->cluster_domain, &s, err, sizeof(err))) {
     buckets_log_warn("%s/%s: invalid spec: %s", get_str(bc, "metadata.namespace"), get_str(bc, "metadata.name"), err);
-    write_status(o, bc, NULL, "Invalid", false, "InvalidSpec", err, NULL, NULL, 0);
+    write_status(o, bc, NULL, "Invalid", false, "InvalidSpec", err, NULL, NULL, 0, NULL);
     return;
   }
   if (!ensure_creds(o, &s, err, sizeof(err))) {
-    write_status(o, bc, &s, "Pending", false, "Credentials", err, NULL, NULL, 0);
+    write_status(o, bc, &s, "Pending", false, "Credentials", err, NULL, NULL, 0, NULL);
     return;
   }
   if (s.console.enabled && !ensure_console_secret(o, &s, err, sizeof(err))) {
-    write_status(o, bc, &s, "Pending", false, "ConsoleSecret", err, NULL, NULL, 0);
+    write_status(o, bc, &s, "Pending", false, "ConsoleSecret", err, NULL, NULL, 0, NULL);
     return;
   }
+  /* the KMS first: whether bucketsd uses KES is part of its pods' spec */
+  yyjson_mut_doc *kd = yyjson_mut_doc_new(NULL);
+  yyjson_mut_val *kroot = yyjson_mut_obj(kd);
+  yyjson_mut_doc_set_root(kd, kroot);
+  op_kms_reconcile(o, bc, &s, kd, kroot);
   char topo[17];
   bc_topology(&s, topo);
   bc_object *objs;
   size_t n = bc_desired(&s, &objs);
-  yyjson_doc *applied[2 * BC_MAX_POOLS + 5] = {0};
+  yyjson_doc *applied[2 * BC_MAX_POOLS + 8] = {0};
   yyjson_val *sts[BC_MAX_POOLS];
   size_t nsts = 0;
   bool failed = false;
@@ -320,7 +331,7 @@ static void reconcile_cluster(op_ctx *o, yyjson_val *bc) {
     if (kind && strcmp(kind, "StatefulSet") == 0 && nsts < BC_MAX_POOLS) sts[nsts++] = r;
   }
   if (failed) {
-    write_status(o, bc, &s, "Error", false, "ApplyFailed", err, topo, sts, nsts);
+    write_status(o, bc, &s, "Error", false, "ApplyFailed", err, topo, sts, nsts, kroot);
   } else {
     size_t outdated = 0;
     int restarted = restart_pods(o, &s, topo, sts, nsts, &outdated);
@@ -334,7 +345,7 @@ static void reconcile_cluster(op_ctx *o, yyjson_val *bc) {
     char msg[128];
     snprintf(msg, sizeof(msg), "%lld of %lld servers ready", ready, servers);
     const char *reason = outdated ? "Updating" : ready == servers ? "AllServersReady" : "ServersNotReady";
-    write_status(o, bc, &s, phase, !outdated && ready == servers, reason, msg, topo, sts, nsts);
+    write_status(o, bc, &s, phase, !outdated && ready == servers, reason, msg, topo, sts, nsts, kroot);
   }
   for (size_t i = 0; i < n; i++) yyjson_doc_free(applied[i]);
   /* A disabled console (or Ingress) goes away. */
@@ -347,6 +358,7 @@ static void reconcile_cluster(op_ctx *o, yyjson_val *bc) {
   }
   free(stale);
   bc_objects_free(objs, n);
+  yyjson_mut_doc_free(kd);
 }
 
 void op_reconcile_all(op_ctx *o) {

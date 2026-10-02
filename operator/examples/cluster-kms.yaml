@@ -1,0 +1,21 @@
+# A cluster with a KMS: the operator runs KES for it. Where KES keeps the keys
+# is in Secret store-kms, which the console's Encryption page writes after
+# testing the connection (or write it yourself: see docs/encryption.md).
+apiVersion: buckets.io/v1alpha1
+kind: BucketsCluster
+metadata:
+  name: store
+  namespace: buckets
+spec:
+  pools:
+    - servers: 4
+      volumesPerServer: 2
+      volumeClaimTemplate:
+        resources: {requests: {storage: 100Gi}}
+  console:
+    enabled: true
+  kms:
+    kes:
+      keyName: buckets-default # SSE-S3's key, and SSE-KMS's when none is named; created if missing
+      replicas: 2
+      # image: registry.example.com/minio/kes:2024-09-11T07-22-50Z

@@ -40,6 +40,8 @@ add_library(buckets STATIC
   crypto/estream.c
   crypto/objkey.c
   kms/kms.c
+  kms/kesutil.c
+  k8s/kube.c
   kms/cfgcrypt.c
   compress/s2.c
   compress/stream.c
@@ -80,6 +82,7 @@ add_library(buckets STATIC
   core/auditctx.c
   s3/apiname.c
   console/console.c
+  console/kmsconfig.c
   net/http.c
   net/tls.c
   net/client.c

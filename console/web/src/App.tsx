@@ -13,6 +13,7 @@ import Policies from "./pages/Policies";
 import AccessKeys from "./pages/AccessKeys";
 import Configuration from "./pages/Configuration";
 import Encryption from "./pages/Encryption";
+import KmsSetup from "./pages/KmsSetup";
 import Trace from "./pages/Trace";
 import Logs from "./pages/Logs";
 import Events from "./pages/Events";
@@ -99,6 +100,7 @@ export default function App() {
           <Route path="/identity/access-keys" element={<AccessKeys />} />
           <Route path="/configuration" element={<Configuration />} />
           <Route path="/encryption" element={<Encryption />} />
+          <Route path="/encryption/setup" element={<KmsSetup />} />
           <Route path="/login" element={<Navigate to="/" replace />} />
           <Route path="*" element={<p>Page not found.</p>} />
         </Routes>

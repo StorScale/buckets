@@ -171,3 +171,47 @@ tr.clickable { cursor: pointer; }
 tr.clickable:hover td { background: var(--hover, rgba(127, 127, 127, 0.08)); }
 pre.json { max-height: 60vh; overflow: auto; font-size: 12px; }
 .pill.warn { background: rgba(214, 158, 46, 0.15); color: #b7791f; }
+
+/* the KMS setup wizard */
+.steps { list-style: none; display: flex; gap: 6px; padding: 0; margin: 0 0 16px; flex-wrap: wrap; }
+.steps li { display: flex; align-items: center; }
+.steps li + li::before { content: ""; width: 24px; height: 1px; background: var(--line); margin-right: 6px; }
+.steps button.link { color: var(--muted); padding: 4px 6px; display: inline-flex; align-items: center; gap: 6px; }
+.steps button.link:disabled { opacity: 1; }
+.steps .current button.link { color: var(--text); font-weight: 600; }
+.steps .done button.link { color: var(--accent); }
+.step-no { display: inline-flex; width: 22px; height: 22px; border-radius: 50%; align-items: center; justify-content: center; font-size: 12px; border: 1px solid var(--line); background: var(--panel); }
+.steps .current .step-no { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+.steps .done .step-no { border-color: var(--accent); color: var(--accent); }
+.choices { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; margin: 12px 0; }
+.choice { display: flex; flex-direction: column; gap: 6px; text-align: left; padding: 14px 16px; border-radius: 8px; }
+.choice strong { font-size: 15px; }
+.choice .muted { font-size: 12px; }
+.choice.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.segmented { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; align-self: flex-start; }
+.segmented button { border: none; border-radius: 0; }
+.segmented button + button { border-left: 1px solid var(--line); }
+.segmented button.selected { background: var(--accent); color: var(--accent-fg); }
+.field-label { font-weight: 500; }
+.field-help { color: var(--muted); font-size: 12px; }
+.field-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0 16px; }
+.file-text { display: inline-flex; align-items: center; gap: 8px; }
+.file-text label.button { display: inline-block; margin: 0; }
+details.advanced, details.guide { margin: 4px 0 12px; }
+details.advanced > summary, details.guide > summary { cursor: pointer; color: var(--accent); margin-bottom: 10px; }
+details.guide { border: 1px solid var(--line); border-radius: 6px; padding: 8px 12px; }
+details.guide > summary { margin-bottom: 0; }
+details.guide[open] > summary { margin-bottom: 8px; }
+.copyable { position: relative; }
+.copyable pre { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; overflow: auto; font-size: 12px; margin: 0; }
+.copyable button { position: absolute; top: 6px; right: 6px; }
+.hint { color: var(--muted); font-size: 13px; }
+.checks { list-style: none; padding: 0; margin: 12px 0; }
+.checks li { display: flex; gap: 10px; align-items: flex-start; padding: 6px 0; }
+.checks .mark { display: inline-flex; width: 20px; height: 20px; flex: none; border-radius: 50%; align-items: center; justify-content: center; font-size: 12px; border: 1px solid var(--line); }
+.checks li.ok .mark { background: var(--ok); border-color: var(--ok); color: #fff; }
+.checks li.failed .mark { background: var(--bad); border-color: var(--bad); color: #fff; }
+.checks li.running .mark { border-color: var(--accent); border-top-color: transparent; animation: spin 0.8s linear infinite; }
+.step-why { margin-top: 4px; font-size: 13px; }
+.setup-cta p { max-width: 70ch; }
+.step-hint { margin-top: 4px; font-size: 13px; color: var(--text); }

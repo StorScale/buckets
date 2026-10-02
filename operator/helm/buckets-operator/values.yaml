@@ -13,6 +13,11 @@ watchNamespace: ""
 
 logLevel: info # debug|info|warn|error
 
+# The KES image clusters run for spec.kms.kes when they name none (default:
+# quay.io/minio/kes at the release bucketsd is tested with). Point it at a
+# registry mirror where quay.io is out of reach.
+kesImage: ""
+
 serviceAccount:
   create: true
   name: "" # defaults to the release's full name

@@ -25,6 +25,7 @@
 #include "crypto/madmin.h"
 #include "crypto/sha256.h"
 #include "s3/sign.h"
+#include "console/kmsconfig.h"
 
 #define COOKIE_NAME "buckets-session"
 #define COOKIE_AD "buckets-console-v1"
@@ -37,6 +38,7 @@ struct buckets_console {
   uint8_t key[32];
   pthread_mutex_t oidc_mu;
   char *oidc_authorize, *oidc_token; /* from discovery, once fetched */
+  buckets_console_kms *kms;          /* KMS settings through the operator; NULL outside Kubernetes */
 };
 
 buckets_console *buckets_console_new(const buckets_console_config *cfg) {
@@ -47,6 +49,7 @@ buckets_console *buckets_console_new(const buckets_console_config *cfg) {
   c->http = buckets_http_client_new(cfg->upstream_host, cfg->upstream_port, cfg->upstream_tls, 5 * 60 * 1000);
   snprintf(c->host_header, sizeof(c->host_header), "%s:%d", cfg->upstream_host, cfg->upstream_port);
   pthread_mutex_init(&c->oidc_mu, NULL);
+  c->kms = buckets_console_kms_new();
   if (!c->cfg.oidc_scopes || !*c->cfg.oidc_scopes) c->cfg.oidc_scopes = "openid profile email";
   if (!c->cfg.oidc_display_name || !*c->cfg.oidc_display_name) c->cfg.oidc_display_name = "OpenID";
   /* MinIO console: the cookie key comes from CONSOLE_PBKDF_PASSPHRASE/SALT;
@@ -67,6 +70,7 @@ void buckets_console_free(buckets_console *c) {
   buckets_http_client_free(c->http);
   OPENSSL_cleanse(c->key, sizeof(c->key));
   pthread_mutex_destroy(&c->oidc_mu);
+  buckets_console_kms_free(c->kms);
   free(c->oidc_authorize);
   free(c->oidc_token);
   free(c);
@@ -642,6 +646,18 @@ static void handle_share(buckets_console *c, const buckets_http_request *req, bu
   buckets_query_free(&q);
 }
 
+/* Whether the session may change the servers' configuration (admin:ConfigUpdate),
+ * as bucketsd decides it for GetConfigKV. */
+static bool may_configure(buckets_console *c, const buckets_console_session *s) {
+  buckets_sigv4_creds cr = {.access_key = s->access_key, .secret_key = s->secret_key,
+                            .session_token = s->session_token, .region = c->cfg.region};
+  buckets_http_result res;
+  if (!upstream_call(c, &cr, "GET", "/minio/admin/v3/get-config-kv", "key=region", NULL, 0, NULL, 0, &res)) return false;
+  bool ok = res.status == 200;
+  buckets_http_result_free(&res);
+  return ok;
+}
+
 static void handle_session(buckets_http_response *resp, const buckets_console_session *s) {
   yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
   yyjson_mut_val *o = yyjson_mut_obj(d);
@@ -983,6 +999,14 @@ void buckets_console_handle(const buckets_http_request *req, buckets_http_respon
     char up[4096];
     snprintf(up, sizeof(up), "/minio/admin/v3/%.*s", (int)(path.n - 14), path.p + 14);
     proxy(c, req, resp, &s, up);
+  } else if (buckets_str_eq_c(path, "/api/v1/kms-config") || buckets_str_has_prefix(path, "/api/v1/kms-config/")) {
+    if (!may_configure(c, &s)) {
+      json_error(resp, 403, "AccessDenied", "Setting up the KMS needs the admin:ConfigUpdate permission.");
+    } else {
+      char sub[64];
+      snprintf(sub, sizeof(sub), "%.*s", (int)(path.n - 18), path.p + 18);
+      buckets_console_kms_handle(c->kms, req, sub, resp);
+    }
   } else if (buckets_str_has_prefix(path, "/api/v1/kms/")) { /* the KMS API: keys, status */
     char up[4096];
     snprintf(up, sizeof(up), "/minio/kms/v1/%.*s", (int)(path.n - 12), path.p + 12);

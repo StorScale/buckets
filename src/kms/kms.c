@@ -511,13 +511,8 @@ buckets_kms_err buckets_kms_apis_json(buckets_kms *k, buckets_buf *out) {
 }
 
 /* Connect's KES branch */
-static buckets_kms *kes_from_env(char *err, size_t errlen) {
-  const char *ep = buckets_config_getenv("MINIO_KMS_KES_ENDPOINT");
-  const char *key = buckets_config_getenv("MINIO_KMS_KES_KEY_NAME");
-  const char *api = buckets_config_getenv("MINIO_KMS_KES_API_KEY");
-  const char *kf = buckets_config_getenv("MINIO_KMS_KES_KEY_FILE"), *cf = buckets_config_getenv("MINIO_KMS_KES_CERT_FILE");
-  const char *pw = buckets_config_getenv("MINIO_KMS_KES_KEY_PASSWORD");
-  const char *ca = buckets_config_getenv("MINIO_KMS_KES_CAPATH");
+static buckets_kms *kes_new(const char *ep, const char *key, const char *api, const char *kf, const char *cf,
+                            const char *pw, const char *ca, char *err, size_t errlen) {
   if (!ep) return snprintf(err, errlen, "kms: incomplete configuration for MinIO KES: missing 'MINIO_KMS_KES_ENDPOINT'"), NULL;
   if (!key) return snprintf(err, errlen, "kms: incomplete configuration for MinIO KES: missing 'MINIO_KMS_KES_KEY_NAME'"), NULL;
   if (kf || cf || pw) {
@@ -617,6 +612,18 @@ static buckets_kms *kes_from_env(char *err, size_t errlen) {
     k->cli[i] = buckets_http_client_new(host, port, k->tls, 15000);
   }
   return k;
+}
+
+static buckets_kms *kes_from_env(char *err, size_t errlen) {
+  return kes_new(buckets_config_getenv("MINIO_KMS_KES_ENDPOINT"), buckets_config_getenv("MINIO_KMS_KES_KEY_NAME"),
+                 buckets_config_getenv("MINIO_KMS_KES_API_KEY"), buckets_config_getenv("MINIO_KMS_KES_KEY_FILE"),
+                 buckets_config_getenv("MINIO_KMS_KES_CERT_FILE"), buckets_config_getenv("MINIO_KMS_KES_KEY_PASSWORD"),
+                 buckets_config_getenv("MINIO_KMS_KES_CAPATH"), err, errlen);
+}
+
+buckets_kms *buckets_kms_kes_new(const char *endpoints, const char *key_name, const char *api_key, const char *ca_path,
+                                 char *err, size_t errlen) {
+  return kes_new(endpoints, key_name, api_key, NULL, NULL, NULL, ca_path, err, errlen);
 }
 
 buckets_kms_err buckets_kms_generate(buckets_kms *k, const char *name, const char *context, uint8_t plaintext[32],

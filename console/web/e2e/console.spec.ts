@@ -322,6 +322,103 @@ test.describe("encryption", () => {
   });
 });
 
+test.describe("KMS setup", () => {
+  // the mock Kubernetes API (kubemock.py) stands in for the API server and buckets-operator
+  const kubeState = async (page: import("@playwright/test").Page) =>
+    (await (await page.request.get("https://127.0.0.1:19892/_state", { ignoreHTTPSErrors: true })).json()) as {
+      cluster: { spec: { kms?: { kes?: { keyName?: string } } } };
+      secrets: Record<string, Record<string, { settings?: { vault?: { approle?: { secret?: string; id?: string } } }; vault?: { approle?: { secret?: string; id?: string } } }>>;
+    };
+
+  test("Vault: a failed test says why, a passed one applies, and saved secrets are kept", async ({ page }) => {
+    test.skip(!!process.env.CONSOLE_URL, "needs the mock Kubernetes API of the local setup");
+    await login(page);
+    await page.goto("/encryption");
+    await page.getByTestId("kms-change").click();
+    await expect(page.getByTestId("kms-steps")).toContainText("Key store");
+
+    // 1: where keys are kept
+    await expect(page.getByTestId("kms-next")).toBeDisabled();
+    await page.getByTestId("kms-backend-vault").click();
+    await page.getByTestId("kms-next").click();
+
+    // 2: the connection; Next waits for what is missing, and says what that is
+    await expect(page.getByTestId("kms-missing")).toContainText("Vault's address");
+    await expect(page.getByTestId("kms-next")).toBeDisabled();
+    await page.getByTestId("vault-endpoint").fill("https://unreachable:8200");
+    await page.getByTestId("vault-role-id").fill("role-1");
+    await page.getByTestId("vault-secret-id").fill("secret-1");
+    await expect(page.getByTestId("vault-prefix")).toHaveValue("buckets/store");
+    await page.getByText("Before you start: a policy and a role for KES in Vault").click();
+    await expect(page.locator(".copyable pre")).toContainText('path "kv/data/buckets/store/*"');
+    // Kubernetes sign-in names the service account KES runs as
+    await page.getByTestId("vault-auth-kubernetes").click();
+    await expect(page.getByText("store-kes", { exact: false }).first()).toBeVisible();
+    await page.getByTestId("vault-auth-approle").click();
+    await page.getByTestId("kms-next").click();
+
+    // 3: the default key
+    await expect(page.getByTestId("kms-key-name")).toHaveValue("buckets-default");
+    await page.getByTestId("kms-next").click();
+
+    // 4: a test that fails says why, and leads back to the settings
+    await expect(page.getByTestId("kms-review")).toContainText("https://unreachable:8200");
+    await page.getByTestId("kms-test").click();
+    await expect(page.getByTestId("kms-test-result")).toContainText("no such host", { timeout: 15000 });
+    await expect(page.getByTestId("kms-hint")).toContainText("check the address");
+    await expect(page.getByTestId("kms-apply")).toHaveCount(0);
+    await page.getByTestId("kms-fix").click();
+    await page.getByTestId("vault-endpoint").fill("https://vault.example.com:8200");
+    await page.getByTestId("kms-next").click();
+    await page.getByTestId("kms-next").click();
+    await page.getByTestId("kms-test").click();
+    await expect(page.getByTestId("kms-test-result")).toContainText("The settings work.", { timeout: 15000 });
+    await expect(page.getByTestId("kms-test-result")).toContainText("Default key buckets-default");
+    await expect(page.getByTestId("kms-apply-note")).toContainText("restarts the storage servers one at a time");
+    await page.getByTestId("kms-apply").click();
+    await expect(page.getByTestId("kms-rollout")).toContainText("KES servers 2 of 2 ready", { timeout: 15000 });
+
+    let st = await kubeState(page);
+    expect(st.cluster.spec.kms?.kes?.keyName).toBe("buckets-default");
+    expect(st.secrets["store-kms"]["settings.json"].vault?.approle?.secret).toBe("secret-1");
+
+    // editing: the secret is not shown again, and stays unless retyped
+    await page.goto("/encryption");
+    await expect(page.getByTestId("kms-keystore")).toContainText("HashiCorp Vault at https://vault.example.com:8200");
+    await page.getByTestId("kms-change").click();
+    await expect(page.getByTestId("vault-secret-id")).toHaveValue("");
+    await expect(page.getByTestId("vault-secret-id")).toHaveAttribute("placeholder", /saved/);
+    await page.getByTestId("vault-role-id").fill("role-2");
+    await page.getByTestId("kms-next").click();
+    await page.getByTestId("kms-next").click();
+    await page.getByTestId("kms-test").click();
+    await expect(page.getByTestId("kms-test-result")).toContainText("The settings work.", { timeout: 15000 });
+    await page.getByTestId("kms-apply").click();
+    await expect(page.getByTestId("kms-rollout")).toBeVisible();
+    st = await kubeState(page);
+    expect(st.secrets["store-kms"]["settings.json"].vault?.approle).toEqual({ id: "role-2", secret: "secret-1" });
+  });
+
+  test("settings the server refuses are explained before any test", async ({ page }) => {
+    test.skip(!!process.env.CONSOLE_URL, "needs the mock Kubernetes API of the local setup");
+    await login(page);
+    await page.goto("/encryption/setup");
+    // saved settings open at the connection: the key store is a step back
+    await page.getByTestId("kms-steps").getByRole("button", { name: "Key store" }).click();
+    await page.getByTestId("kms-backend-gcp").click();
+    await page.getByTestId("kms-next").click();
+    await page.getByTestId("gcp-credentials").fill("not json");
+    await expect(page.getByText("This is not a service account's JSON key")).toBeVisible();
+    await page.getByTestId("gcp-credentials").fill(JSON.stringify({ type: "service_account", project_id: "proj-9", client_email: "kes@proj-9.iam.gserviceaccount.com", private_key: "k" }));
+    await expect(page.getByTestId("gcp-who")).toContainText("kes@proj-9.iam.gserviceaccount.com");
+    await expect(page.getByTestId("gcp-project")).toHaveValue("proj-9");
+    // a key name the server would refuse cannot go on
+    await page.getByTestId("kms-next").click();
+    await page.getByTestId("kms-key-name").fill("bad name");
+    await expect(page.getByTestId("kms-next")).toBeDisabled();
+  });
+});
+
 test.describe("monitoring", () => {
   test("trace shows calls as they happen", async ({ page }) => {
     await login(page);

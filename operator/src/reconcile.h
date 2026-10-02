@@ -2,7 +2,7 @@
 #ifndef BUCKETS_OPERATOR_RECONCILE_H
 #define BUCKETS_OPERATOR_RECONCILE_H
 
-#include "kube.h"
+#include "k8s/kube.h"
 
 typedef struct {
   kube *k;

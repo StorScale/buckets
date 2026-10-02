@@ -1,12 +1,12 @@
 # buckets-operator: the Kubernetes operator, linked against libbuckets for
 # HTTP/TLS, JSON and logging.
 add_library(buckets_operator STATIC
-  src/kube.c
   src/manifests.c
   src/reconcile.c
   src/lease.c
   src/s3client.c
   src/iam.c
+  src/kms.c
 )
 target_include_directories(buckets_operator PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(buckets_operator PUBLIC buckets)

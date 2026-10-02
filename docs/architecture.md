@@ -121,6 +121,7 @@ The S3 core runs on one drive, many drives, several pools, or a cluster of nodes
   - one StatefulSet per pool (`Parallel`, `OnDelete`, and `BUCKETS_VOLUMES` naming every pool's pods)
   - PodDisruptionBudgets
   - generated root credentials, which deliberately outlive the cluster
+  - with `spec.kms.kes`, a KES server for SSE-S3/KMS, whose key store the console sets up and tests first (see `docs/encryption.md`)
 - **Restarts:** a topology change (pools, erasure settings) restarts every server together. Any other template change rolls one server at a time, only while all are ready.
 - **Status:** phase, servers ready, and a `Ready` condition.
 - **Leader election:** on a Lease.

@@ -30,6 +30,10 @@ typedef struct buckets_kms buckets_kms;
 /* From the environment; NULL with *err empty when no KMS is configured, NULL
  * with err set when the configuration is invalid. */
 buckets_kms *buckets_kms_from_env(char *err, size_t errlen);
+/* A KES client, as MINIO_KMS_KES_* would make it: endpoints (comma-separated),
+ * the default key, an API key and the server's CA file. */
+buckets_kms *buckets_kms_kes_new(const char *endpoints, const char *key_name, const char *api_key, const char *ca_path,
+                                 char *err, size_t errlen);
 /* A builtin KMS from "name:base64key" (tests, config). */
 buckets_kms *buckets_kms_builtin(const char *spec, char *err, size_t errlen);
 void buckets_kms_free(buckets_kms *k);
