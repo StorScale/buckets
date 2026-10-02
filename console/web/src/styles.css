@@ -4,8 +4,9 @@
   --text: #1d2330;
   --muted: #6b7385;
   --line: #e2e5ea;
-  --accent: #c72e49;
-  --accent-dark: #a5223b;
+  --accent: #0a66d1;
+  --accent-dark: #084fa6;
+  --accent-fg: #fff; /* text on accent */
   --ok: #1f8a4c;
   --bad: #c0392b;
   --side: #1d2330;
@@ -22,6 +23,9 @@
     --muted: #9aa2b1;
     --line: #2d333d;
     --side: #0e1014;
+    --accent: #4c9bf0;
+    --accent-dark: #78b4f5;
+    --accent-fg: #0e1014;
   }
 }
 * { box-sizing: border-box; }
@@ -46,7 +50,13 @@ h3 { font-size: 14px; margin: 16px 0 8px; }
 .whoami { font-size: 12px; color: #9aa2b1; margin-bottom: 6px; word-break: break-all; }
 .brand { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 17px; padding: 0 20px 16px; color: #fff; }
 .brand img { width: 24px; height: 24px; }
-.brand.big { font-size: 22px; color: var(--text); padding: 0 0 16px; justify-content: center; }
+.brand-logo { margin: 0 0 20px; line-height: 0; }
+.brand-logo img { display: block; width: 100%; height: auto; }
+.brand-logo .logo-dark { display: none; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .brand-logo .logo-light { display: none; }
+  :root:not([data-theme="light"]) .brand-logo .logo-dark { display: block; }
+}
 .content { flex: 1; padding: 24px 32px; min-width: 0; }
 
 .page-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 12px; }
@@ -59,7 +69,7 @@ button, .button {
 }
 button:hover, .button:hover { border-color: var(--muted); text-decoration: none; }
 button:disabled { opacity: 0.5; cursor: default; }
-button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
 button.primary:hover { background: var(--accent-dark); }
 button.danger { color: var(--bad); }
 button.link { background: none; border: none; color: var(--accent); padding: 0 4px; }

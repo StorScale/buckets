@@ -43,9 +43,10 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
   return (
     <div className="login">
       <form onSubmit={submit} className="card login-card">
-        <div className="brand big">
-          <img src="/favicon.svg" alt="" /> Buckets
-        </div>
+        <h1 className="brand-logo">
+          <img className="logo-light" src="/logo.png" alt="Buckets" />
+          <img className="logo-dark" src="/logo-dark.png" alt="Buckets" />
+        </h1>
         <ErrorBanner error={error} />
         {ldapOffered && (
           <div className="tabs" role="tablist">
