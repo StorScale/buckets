@@ -159,6 +159,11 @@ int main(int argc, char **argv) {
   cfg.oidc_ca_file = env2("BUCKETS_CONSOLE_OIDC_CA_FILE", NULL);
   const char *ldap = env2("BUCKETS_CONSOLE_LDAP", "CONSOLE_LDAP_ENABLED");
   cfg.ldap = ldap && (strcasecmp(ldap, "on") == 0 || strcasecmp(ldap, "true") == 0 || strcmp(ldap, "1") == 0);
+  /* With OpenID sign-in, people come from the identity provider: no local
+   * users unless asked for. */
+  const char *local = env2("BUCKETS_CONSOLE_LOCAL_USERS", NULL);
+  cfg.local_users = local ? (strcasecmp(local, "on") == 0 || strcasecmp(local, "true") == 0 || strcmp(local, "1") == 0)
+                          : !(cfg.oidc_config_url && cfg.oidc_client_id);
   buckets_console *console = buckets_console_new(&cfg);
 
   g_loop = buckets_loop_new();

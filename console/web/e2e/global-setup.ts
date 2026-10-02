@@ -51,6 +51,8 @@ export default async function globalSetup() {
     ["--address", "127.0.0.1:19890", "--web-dir", resolve(here, "../dist")],
     {
       env: { ...process.env, CONSOLE_MINIO_SERVER: "http://127.0.0.1:19889", CONSOLE_PBKDF_PASSPHRASE: "e2e", CONSOLE_PBKDF_SALT: "e2e", BUCKETS_CONSOLE_S3_URL: "http://127.0.0.1:19889",
+        // OpenID sign-in hides Create user unless asked for; the user tests need it
+        BUCKETS_CONSOLE_LOCAL_USERS: "on",
         BUCKETS_CONSOLE_OIDC_CONFIG_URL: "http://127.0.0.1:19891/.well-known/openid-configuration",
         BUCKETS_CONSOLE_OIDC_CLIENT_ID: "console",
         BUCKETS_CONSOLE_OIDC_CLIENT_SECRET: "s3cr3t",

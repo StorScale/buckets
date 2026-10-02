@@ -1,26 +1,47 @@
 import { FormEvent, useState } from "react";
-import { addUser, attachPolicies, listPolicies, listUsers, removeUser, setUserStatus, UserInfo } from "../api";
+import {
+  addUser,
+  attachPolicies,
+  listOpenIDUsers,
+  listPolicies,
+  listUsers,
+  loginMethods,
+  OpenIDUser,
+  removeUser,
+  setUserStatus,
+  UserInfo,
+} from "../api";
 import { ConfirmButton, ErrorBanner, Modal, Notice, Spinner, useLoad } from "../components";
 
 export default function Users() {
+  const methods = useLoad(loginMethods, []);
   const { data, error, loading, reload, setError } = useLoad(listUsers, []);
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<[string, UserInfo] | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const users = Object.entries(data ?? {}).sort(([a], [b]) => a.localeCompare(b));
+  // With OpenID sign-in, people come from the identity provider; local users
+  // are listed only if some exist or the console is set to allow them.
+  const oidc = methods.data?.oidc ?? false;
+  const canCreate = methods.data?.localUsers ?? false;
+  const showLocal = !oidc || canCreate || users.length > 0;
   return (
     <div>
       <div className="page-head">
         <h1>Users</h1>
-        <button className="primary" onClick={() => setAdding(true)} data-testid="create-user">
-          Create user
-        </button>
+        {canCreate && (
+          <button className="primary" onClick={() => setAdding(true)} data-testid="create-user">
+            Create user
+          </button>
+        )}
       </div>
       <ErrorBanner error={error} onClose={() => setError(undefined)} />
       <Notice text={notice} />
+      {oidc && <OpenIDUsers provider={methods.data?.oidcName ?? "OpenID"} />}
+      {oidc && showLocal && <h2>Local users</h2>}
       {loading && !data && <Spinner />}
-      {data && users.length === 0 && <p className="muted">No users yet.</p>}
-      {users.length > 0 && (
+      {showLocal && data && users.length === 0 && <p className="muted">No users yet.</p>}
+      {showLocal && users.length > 0 && (
         <table data-testid="user-table">
           <thead>
             <tr>
@@ -181,5 +202,53 @@ export function PolicyPicker({
         </button>
       </div>
     </Modal>
+  );
+}
+
+// Read-only: who can sign in, and with which roles, is managed in the identity provider.
+function OpenIDUsers({ provider }: { provider: string }) {
+  const { data, error, loading, setError } = useLoad(listOpenIDUsers, []);
+  const label = (u: OpenIDUser) => u.displayName || u.readableName || u.email || u.ID;
+  const users = (data ?? []).slice().sort((a, b) => label(a).localeCompare(label(b)));
+  const now = Date.now();
+  const signedInUntil = (u: OpenIDUser) =>
+    Math.max(0, ...(u.stsKeys ?? []).map((k) => (k.expiration ? Date.parse(k.expiration) : 0)).filter((t) => t > now));
+  return (
+    <section data-testid="oidc-users">
+      <h2>{provider} users</h2>
+      <p className="muted">
+        People appear here while they are signed in or hold access keys. Who can sign in, and with which roles, is managed in {provider}.
+      </p>
+      <ErrorBanner error={error} onClose={() => setError(undefined)} />
+      {loading && !data && <Spinner />}
+      {data && users.length === 0 && <p className="muted">Nobody has signed in through {provider} yet.</p>}
+      {users.length > 0 && (
+        <table data-testid="oidc-user-table">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Sign-in name</th>
+              <th>Roles</th>
+              <th>Signed in until</th>
+              <th>Access keys</th>
+            </tr>
+          </thead>
+          <tbody>
+            {users.map((u) => {
+              const until = signedInUntil(u);
+              return (
+                <tr key={u.minioAccessKey} data-testid={`oidc-user-${u.email || u.ID}`}>
+                  <td>{u.displayName || u.readableName || "—"}</td>
+                  <td>{u.email || <span className="mono">{u.ID}</span>}</td>
+                  <td>{u.policies?.length ? u.policies.map((p) => <span key={p} className="pill">{p}</span>) : "—"}</td>
+                  <td>{until ? new Date(until).toLocaleString() : "—"}</td>
+                  <td>{u.serviceAccounts?.length ?? 0}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+    </section>
   );
 }

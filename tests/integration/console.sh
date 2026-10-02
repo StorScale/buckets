@@ -41,8 +41,10 @@ PIDS+=($!)
 for _ in $(seq 50); do nc -z 127.0.0.1 "$LPORT" 2>/dev/null && break; sleep 0.1; done
 BASE=dc=example,dc=com
 ISS="http://127.0.0.1:$OPORT"
-python3 "$HERE/oidcmock.py" "$OPORT" "$WORK" console s3cr3t '{"sub":"u-42","preferred_username":"oidcuser","policy":"readwrite"}' \
-  2>"$WORK/oidc.log" &
+# Entra-sized claims (a name, a few dozen group IDs): the session cookie then tops 1 KB, as real ones do.
+CLAIMS=$(python3 -c 'import json; print(json.dumps({"sub": "u-42", "preferred_username": "oidcuser", "name": "OIDC User",
+  "policy": "readwrite", "groups": ["%08x-0000-4000-8000-%012x" % (i, i) for i in range(32)]}))')
+python3 "$HERE/oidcmock.py" "$OPORT" "$WORK" console s3cr3t "$CLAIMS" 2>"$WORK/oidc.log" &
 PIDS+=($!)
 for _ in $(seq 100); do curl -s -o /dev/null "$ISS/jwks" && break; sleep 0.1; done
 
@@ -67,7 +69,7 @@ for _ in $(seq 100); do curl -s -o /dev/null "$C/healthz" && break; sleep 0.1; d
 
 echo "== health, login methods, CSRF"
 check "healthz" "$(curl -s "$C/healthz")" ok
-check "login methods" "$(curl -s "$C/api/v1/login-methods")" '{"ldap":true,"share":true,"oidc":true,"oidcName":"Mock IdP"}'
+check "login methods" "$(curl -s "$C/api/v1/login-methods")" '{"ldap":true,"share":true,"oidc":true,"oidcName":"Mock IdP","localUsers":false}'
 check "no session" "$(code "$C/api/v1/session")" 401
 check "no SPA installed" "$(code "$C/buckets")" 404
 check "login without CSRF header" "$(code -d '{"accessKey":"rootadmin","secretKey":"rootsecret123"}' "$C/api/v1/login")" 403
@@ -106,6 +108,10 @@ check "round trip ends at the console" \
   "$(curl -s -L -c "$O" -b "$O" -o /dev/null -w '%{url_effective}' "$C/api/v1/login/oidc")" "$C/"
 check "oidc session" "$(curl -s -b "$O" "$C/api/v1/session" | python3 -c 'import json,sys;print(json.load(sys.stdin)["accessKey"])')" oidcuser
 check "oidc user makes a bucket" "$(code -b "$O" -H "$H" -X PUT "$C/api/v1/s3/oidcbucket")" 200
+check "the Users page lists who signed in, with name and roles" \
+  "$(curl -s -b "$R" -H 'X-Console-Decrypt: 1' "$C/api/v1/admin/idp/openid/list-access-keys-bulk?all=true&listType=all" |
+    python3 -c 'import json,sys; u=[u for c in json.load(sys.stdin) for u in c["users"]][0]; print(u["displayName"], u["email"], u["policies"], len(u["stsKeys"]))')" \
+  "OIDC User oidcuser ['readwrite'] 1"
 check "a forged callback" "$(curl -s -o /dev/null -w '%{redirect_url}' "$C/oauth_callback?code=x&state=y" | cut -d'?' -f1)" "$C/login"
 check "a provider error is shown" \
   "$(curl -s -o /dev/null -w '%{redirect_url}' "$C/oauth_callback?error=access_denied")" "$C/login?error=access_denied"

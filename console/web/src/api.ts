@@ -74,7 +74,7 @@ export async function call(method: string, path: string, opts: CallOpts = {}): P
 
 export type Session = { accessKey: string; expiresAt: number };
 
-export type LoginMethods = { ldap: boolean; share: boolean; oidc: boolean; oidcName?: string };
+export type LoginMethods = { ldap: boolean; share: boolean; oidc: boolean; oidcName?: string; localUsers: boolean };
 export async function loginMethods(): Promise<LoginMethods> {
   return (await call("GET", "/api/v1/login-methods")).json();
 }
@@ -321,6 +321,25 @@ export const accountInfo = () => adminJson<AccountInfo>("GET", "accountinfo");
 
 export type UserInfo = { status: string; policyName?: string; memberOf?: string[] };
 export const listUsers = () => adminJson<Record<string, UserInfo>>("GET", "list-users");
+
+// People from the OpenID provider that Buckets knows of: signed in now, or holding access keys.
+type KeyInfo = { accessKey: string; expiration?: string };
+export type OpenIDUser = {
+  minioAccessKey: string;
+  ID: string;
+  readableName: string;
+  displayName: string;
+  email: string;
+  policies: string[];
+  serviceAccounts: KeyInfo[] | null;
+  stsKeys: KeyInfo[] | null;
+};
+export const listOpenIDUsers = async (): Promise<OpenIDUser[]> =>
+  (
+    await adminJson<{ configName: string; users: OpenIDUser[] | null }[]>("GET", "idp/openid/list-access-keys-bulk", {
+      query: { all: "true", listType: "all" },
+    })
+  ).flatMap((c) => c.users ?? []);
 export const addUser = (accessKey: string, secretKey: string) =>
   call("PUT", admin("add-user"), { query: { accessKey }, body: JSON.stringify({ secretKey, status: "enabled" }), encrypt: true });
 export const removeUser = (accessKey: string) => call("DELETE", admin("remove-user"), { query: { accessKey } });

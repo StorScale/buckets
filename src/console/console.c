@@ -360,6 +360,7 @@ static void handle_login_methods(buckets_console *c, buckets_http_response *resp
   bool oidc = c->cfg.oidc_config_url && c->cfg.oidc_client_id;
   yyjson_mut_obj_add_bool(d, o, "oidc", oidc);
   if (oidc) yyjson_mut_obj_add_str(d, o, "oidcName", c->cfg.oidc_display_name);
+  yyjson_mut_obj_add_bool(d, o, "localUsers", c->cfg.local_users);
   json_reply(resp, d);
 }
 

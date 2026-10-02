@@ -14,7 +14,7 @@
  * calls to bucketsd, signing them with the session's credentials. It holds
  * no state beyond the cookie key.
  *
- *   GET  /api/v1/login-methods                        -> {"ldap","share","oidc": bool, "oidcName"}
+ *   GET  /api/v1/login-methods                        -> {"ldap","share","oidc","localUsers": bool, "oidcName"}
  *   GET  /api/v1/login/oidc                           -> 302 to the identity provider
  *   GET  /oauth_callback?code=&state=                 -> session cookie, 302 to /
  *   POST /api/v1/login   {"accessKey","secretKey"[,"method":"ldap"]} -> session cookie
@@ -49,6 +49,7 @@ typedef struct {
   const char *oidc_redirect_uri; /* NULL: <scheme>://<Host>/oauth_callback */
   const char *oidc_display_name; /* the sign-in button's label */
   const char *oidc_ca_file;
+  bool local_users; /* the Users page offers Create user (off by default while OpenID sign-in is on) */
 } buckets_console_config;
 
 typedef struct buckets_console buckets_console;

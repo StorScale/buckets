@@ -205,6 +205,11 @@ test.describe("identity", () => {
     const user = unique("alice");
     await login(page);
     await page.getByRole("link", { name: "Users" }).click();
+    if (!process.env.CONSOLE_URL) {
+      // the OpenID user signed in earlier is listed read-only, with their role
+      await expect(page.getByTestId("oidc-users")).toContainText("Mock IdP users");
+      await expect(page.getByTestId("oidc-user-oidcuser")).toContainText("readwrite");
+    }
     await page.getByTestId("create-user").click();
     await page.getByTestId("new-access-key").fill(user);
     await page.getByTestId("new-secret-key").fill("alicesecret1");

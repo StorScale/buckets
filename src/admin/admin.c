@@ -1975,7 +1975,34 @@ typedef struct {
   char *parent, *id, *readable;
   buckets_iam_ident **svc, **sts;
   size_t nsvc, nsts;
+  const buckets_iam_ident *latest; /* whose claims describe the user: a session over an access key */
 } oidc_user;
+
+/* Buckets extension to the MinIO response, for the console's Users page:
+ * the user's name, sign-in name and policy-claim values from the newest
+ * credential's claims. MinIO clients ignore the extra fields. */
+static void add_oidc_profile(yyjson_mut_doc *d, yyjson_mut_val *uo, const oidc_user *u, const char *policy_claim) {
+  const buckets_iam_ident *k = u->latest;
+  const char *name = k ? buckets_iam_ident_claim(k, "name") : NULL;
+  const char *email = k ? buckets_iam_ident_claim(k, "preferred_username") : NULL;
+  if (!email && k) email = buckets_iam_ident_claim(k, "email");
+  yyjson_mut_obj_add_strcpy(d, uo, "displayName", name ? name : "");
+  yyjson_mut_obj_add_strcpy(d, uo, "email", email ? email : "");
+  yyjson_mut_val *pa = yyjson_mut_obj_add_arr(d, uo, "policies");
+  yyjson_val *v = k && k->claims && *policy_claim ? yyjson_obj_get(yyjson_doc_get_root(k->claims), policy_claim) : NULL;
+  if (yyjson_is_str(v)) {
+    const char *p = yyjson_get_str(v);
+    while (*p) {
+      size_t n = strcspn(p, ",");
+      if (n) yyjson_mut_arr_add_strncpy(d, pa, p, n);
+      p += n + (p[n] == ',');
+    }
+  } else if (yyjson_is_arr(v)) {
+    size_t i, max;
+    yyjson_val *e;
+    yyjson_arr_foreach(v, i, max, e) if (yyjson_is_str(e)) yyjson_mut_arr_add_strcpy(d, pa, yyjson_get_str(e));
+  }
+}
 
 static int cmp_oidc_user(const void *a, const void *b) {
   return strcmp(((const oidc_user *)a)->parent, ((const oidc_user *)b)->parent);
@@ -2098,6 +2125,7 @@ static void h_openid_list_access_keys_bulk(s3_ctx *c) {
       size_t *cnt = svc_pass ? &u->nsvc : &u->nsts;
       *arr = buckets_xrealloc(*arr, (*cnt + 1) * sizeof(buckets_iam_ident *));
       (*arr)[(*cnt)++] = k;
+      if (k->claims) u->latest = k; /* the session pass runs last */
     }
     free(list);
   }
@@ -2123,6 +2151,7 @@ static void h_openid_list_access_keys_bulk(s3_ctx *c) {
       yyjson_mut_obj_add_strcpy(d, uo, "minioAccessKey", u->parent);
       yyjson_mut_obj_add_strcpy(d, uo, "ID", u->id);
       yyjson_mut_obj_add_strcpy(d, uo, "readableName", u->readable);
+      add_oidc_profile(d, uo, u, policy_claim);
       add_key_infos(d, uo, "serviceAccounts", u->svc, u->nsvc);
       add_key_infos(d, uo, "stsKeys", u->sts, u->nsts);
       release_idents(u->svc, u->nsvc);
