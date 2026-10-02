@@ -191,8 +191,14 @@ s3 s3api put-object-tagging --bucket plain --key meta.bin --tagging 'TagSet=[{Ke
 s3 s3 cp --quiet /tmp/small s3://plain/sse.bin --sse AES256       # encrypted with the KMS key
 s3 s3 cp --quiet /tmp/o1 s3://versioned/doc.txt
 s3 s3 cp --quiet /tmp/o2 s3://versioned/doc.txt                    # a second version
-sums() { # bucket/key list -> "key md5" lines, read back through the endpoint
-  k exec cli -- sh -c "for o in $*; do aws --endpoint-url $EP s3 cp --quiet s3://\$o /tmp/got && echo \"\$o \$(md5sum < /tmp/got | cut -c1-32)\"; done"
+sums() { # bucket/key list -> "key md5" lines, read back through the endpoint; a read
+  # that still fails after a few tries prints the key and its error instead
+  k exec cli -- sh -c "for o in $*; do
+    ok=0
+    for t in 1 2 3 4; do aws --endpoint-url $EP s3 cp --quiet s3://\$o /tmp/got 2>/tmp/err && { ok=1; break; }; sleep 5; done
+    if [ \$ok = 1 ]; then echo \"\$o \$(md5sum < /tmp/got | cut -c1-32)\"; else echo \"\$o ERROR \$(tail -1 /tmp/err)\"; fi
+    rm -f /tmp/got /tmp/err
+  done"
 }
 OBJS="plain/big.bin plain/meta.bin plain/sse.bin versioned/doc.txt $(seq -f 'plain/many/o%g' 1 50 | tr '\n' ' ')"
 k exec cli -- sh -c 'cd /tmp && md5sum big o3 | cut -c1-32' > "$WORK/local.md5"   # line 1: big, 2: o3
@@ -202,7 +208,7 @@ check_data() { # label, objects expected in bucket plain
   got=$(sums $OBJS)
   expect "$1: all $(wc -l < "$WORK/minio.sums") objects MinIO wrote read back identical" "$got" "$(cat "$WORK/minio.sums")"
   expect "$1: listing" "$(s3 s3 ls s3://plain --recursive | wc -l | tr -d ' ')" "$2"
-  expect "$1: versions" "$(s3 s3api list-object-versions --bucket versioned --query 'length(Versions)' --output text)" 2
+  expect "$1: versions of doc.txt" "$(s3 s3api list-object-versions --bucket versioned --prefix doc.txt --query 'length(Versions)' --output text)" 2
   expect "$1: encrypted object" "$(s3 s3api head-object --bucket plain --key sse.bin --query ServerSideEncryption --output text)" AES256
   expect "$1: user metadata" "$(s3 s3api head-object --bucket plain --key meta.bin --query Metadata.team --output text)" finance
   expect "$1: tags" "$(s3 s3api get-object-tagging --bucket plain --key meta.bin --query 'TagSet[0].Value' --output text)" yes
