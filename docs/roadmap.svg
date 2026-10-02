@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 792" width="760" height="792" role="img" aria-label="Buckets roadmap: five phases and their gates" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif" font-size="13">
+<title>Buckets roadmap: lead with MinIO migration and identity; operations and compliance follow</title>
+<rect width="760" height="792" fill="#ffffff"/>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#9aa2b1"/></marker></defs>
+<text x="24" y="30" font-size="15" font-weight="600" fill="#1d2330">Lead with MinIO migration and identity; operations and compliance follow</text>
+<text x="24" y="52" font-size="11.5" fill="#5f6778">Phases run in order and each gate must pass first. Highlighted: the core, Phases 1 and 2.</text>
+<rect x="24" y="80" width="712" height="84" rx="8" fill="none" stroke="#9aa2b1" stroke-width="1.25"/>
+<line x1="322" y1="94" x2="322" y2="150" stroke="#e2e5ea"/>
+<text x="40" y="114" font-size="14" font-weight="600" fill="#1d2330">Phase 0 · Housekeeping</text>
+<text x="40" y="136" font-size="11.5" fill="#5f6778">Days of work; shows the project is alive</text>
+<text x="338" y="106" fill="#1d2330">README and VERSION agree; require OpenSSL 3.2+</text>
+<text x="338" y="128" fill="#1d2330">Users page spinner; envtest rolling-update race</text>
+<text x="338" y="150" fill="#1d2330">Changelog kept current; security contact</text>
+<line x1="154" y1="164" x2="154" y2="180" stroke="#9aa2b1" stroke-width="1.25"/>
+<polygon points="146,188 154,180 162,188 154,196" fill="none" stroke="#9aa2b1" stroke-width="1.25"/>
+<line x1="154" y1="196" x2="154" y2="211" stroke="#9aa2b1" stroke-width="1.25" marker-end="url(#arrow)"/>
+<text x="176" y="192" font-size="12" fill="#5f6778">Gate: README, build check and tests are clean</text>
+<rect x="24" y="212" width="712" height="84" rx="8" fill="#0a66d1" fill-opacity="0.12" stroke="#0a66d1" stroke-width="2"/>
+<line x1="322" y1="226" x2="322" y2="282" stroke="#e2e5ea"/>
+<text x="40" y="246" font-size="14" font-weight="600" fill="#1d2330">Phase 1 · Home for MinIO users</text>
+<text x="40" y="268" font-size="11.5" fill="#5f6778">Packaging and tooling, not storage work</text>
+<text x="338" y="238" fill="#1d2330">Operator adopts existing MinIO tenants in place</text>
+<text x="338" y="260" fill="#1d2330">Tested rollback to MinIO; compatibility promise</text>
+<text x="338" y="282" fill="#1d2330">Signed images, Helm chart, SBOM, migration guide</text>
+<line x1="154" y1="296" x2="154" y2="312" stroke="#9aa2b1" stroke-width="1.25"/>
+<polygon points="146,320 154,312 162,320 154,328" fill="none" stroke="#9aa2b1" stroke-width="1.25"/>
+<line x1="154" y1="328" x2="154" y2="343" stroke="#9aa2b1" stroke-width="1.25" marker-end="url(#arrow)"/>
+<text x="176" y="324" font-size="12" fill="#5f6778">Gate: a MinIO tenant moves to Buckets and back in CI</text>
+<rect x="24" y="344" width="712" height="84" rx="8" fill="#0a66d1" fill-opacity="0.12" stroke="#0a66d1" stroke-width="2"/>
+<line x1="322" y1="358" x2="322" y2="414" stroke="#e2e5ea"/>
+<text x="40" y="378" font-size="14" font-weight="600" fill="#1d2330">Phase 2 · Enterprise identity</text>
+<text x="40" y="400" font-size="11.5" fill="#5f6778">Builds on today&#x27;s Entra ID sign-in</text>
+<text x="338" y="370" fill="#1d2330">Guided setup for Entra ID, Okta and Keycloak</text>
+<text x="338" y="392" fill="#1d2330">Per-bucket roles; SCIM provisioning and removal</text>
+<text x="338" y="414" fill="#1d2330">Access review: who can reach a bucket, and why</text>
+<line x1="154" y1="428" x2="154" y2="444" stroke="#9aa2b1" stroke-width="1.25"/>
+<polygon points="146,452 154,444 162,452 154,460" fill="none" stroke="#9aa2b1" stroke-width="1.25"/>
+<line x1="154" y1="460" x2="154" y2="475" stroke="#9aa2b1" stroke-width="1.25" marker-end="url(#arrow)"/>
+<text x="176" y="456" font-size="12" fill="#5f6778">Gate: Entra ID set up from the console; access is auditable</text>
+<rect x="24" y="476" width="712" height="84" rx="8" fill="none" stroke="#9aa2b1" stroke-width="1.25"/>
+<line x1="322" y1="490" x2="322" y2="546" stroke="#e2e5ea"/>
+<text x="40" y="510" font-size="14" font-weight="600" fill="#1d2330">Phase 3 · Kubernetes operations</text>
+<text x="40" y="532" font-size="11.5" fill="#5f6778">Everything declared in Git, watched</text>
+<text x="338" y="502" fill="#1d2330">CRDs for replication, lifecycle rules and quotas</text>
+<text x="338" y="524" fill="#1d2330">Dashboards and alerts shipped with the operator</text>
+<text x="338" y="546" fill="#1d2330">cert-manager by default; console scheduling</text>
+<line x1="154" y1="560" x2="154" y2="576" stroke="#9aa2b1" stroke-width="1.25"/>
+<polygon points="146,584 154,576 162,584 154,592" fill="none" stroke="#9aa2b1" stroke-width="1.25"/>
+<line x1="154" y1="592" x2="154" y2="607" stroke="#9aa2b1" stroke-width="1.25" marker-end="url(#arrow)"/>
+<text x="176" y="588" font-size="12" fill="#5f6778">Gate: cluster recreated from Git; a failed drive raises an alert</text>
+<rect x="24" y="608" width="712" height="84" rx="8" fill="none" stroke="#9aa2b1" stroke-width="1.25"/>
+<line x1="322" y1="622" x2="322" y2="678" stroke="#e2e5ea"/>
+<text x="40" y="642" font-size="14" font-weight="600" fill="#1d2330">Phase 4 · Console and compliance</text>
+<text x="40" y="664" font-size="11.5" fill="#5f6778">What regulated buyers ask for</text>
+<text x="338" y="634" fill="#1d2330">Usage and chargeback; lifecycle editor; audit viewer</text>
+<text x="338" y="656" fill="#1d2330">FIPS 140-3 mode using the OpenSSL 3 FIPS provider</text>
+<text x="338" y="678" fill="#1d2330">WORM retention reports; ransomware alerts</text>
+<rect x="24" y="724" width="712" height="44" rx="8" fill="none" stroke="#9aa2b1" stroke-width="1.25" stroke-dasharray="5 4"/>
+<text x="40" y="751" fill="#5f6778">Held until benchmarks exist: footprint and performance claims against MinIO</text>
+</svg>
