@@ -90,6 +90,7 @@ if tj:
     tls = (tspec.get("externalCertSecret") or [{}])[0].get("name")
     config = (tspec.get("configuration") or {}).get("name")
     sc = pools[0][3].get("securityContext") or {}
+    image = tspec.get("image", "")
     if tspec.get("requestAutoCert", True) and not tls:
         problems.append("the tenant uses the MinIO Operator's automatic certificate; give it an externalCertSecret first")
     if tspec.get("kes"):
@@ -102,7 +103,7 @@ else:
     if not sts:
         print(json.dumps({"problems": [f"no Tenant {tenant} and no StatefulSets {tenant}-<pool> with data<n> claims in {ns}"]}))
         sys.exit(0)
-    pools, mount_path, sub_path, tls, config, sc = [], None, "", None, None, {}
+    pools, mount_path, sub_path, tls, config, sc, image = [], None, "", None, None, {}, ""
     for s in sts:
         tmpl = s["spec"]["template"]["spec"]
         c = tmpl["containers"][0]
@@ -115,6 +116,7 @@ else:
         mount_path, sub_path = m.group(1), m.group(2)
         nvol = len([t for t in s["spec"]["volumeClaimTemplates"] if re.fullmatch(r"data\d+", t["metadata"]["name"])])
         pools.append((s["metadata"]["name"][len(tenant) + 1:], s["spec"]["replicas"], nvol, s))
+        image = image or c.get("image", "")
         sc = tmpl.get("securityContext") or {}
         # where MinIO reads them: MINIO_CONFIG_ENV_FILE and --certs-dir
         if env.get("MINIO_CONFIG_ENV_FILE"):
@@ -157,6 +159,15 @@ bc = {"apiVersion": "buckets.io/v1alpha1", "kind": "BucketsCluster",
                "pools": []}}
 if os.environ.get("BUCKETS_IMAGE"):
     bc["spec"]["image"] = os.environ["BUCKETS_IMAGE"]
+# MinIO before RELEASE.2024-10-29 refuses xl.meta metaVersion 3, Buckets' default:
+# write 2 while a rollback to that MinIO must stay possible.
+rel = re.search(r"RELEASE\.(\d{4}-\d{2}-\d{2})T", image)
+if not rel or rel.group(1) < "2024-10-29":
+    bc["spec"]["env"] = [{"name": "BUCKETS_XL_META_VERSION", "value": "2"}]
+    notes.append(("MinIO %s predates RELEASE.2024-10-29" % rel.group(0).rstrip("T") if rel else
+                  "the MinIO release of %r is unknown" % image) +
+                 ": Buckets writes xl.meta metaVersion 2 (BUCKETS_XL_META_VERSION) so a rollback can read "
+                 "what it writes; remove it once there is no going back")
 if tls:
     bc["spec"]["tls"] = {"certSecret": {"name": tls}}
 for pname, servers, nvol, src in pools:

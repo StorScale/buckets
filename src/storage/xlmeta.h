@@ -60,6 +60,10 @@ typedef enum {
 } buckets_xl_err;
 
 buckets_xl_err buckets_xlmeta_parse(const void *buf, size_t n, buckets_xlmeta *out);
+/* The metaVersion serialize writes: 3 (MinIO RELEASE.2024-10-29 and later, the
+ * default) or 2, which MinIO before that release can read. Set before any
+ * I/O, at startup. False for any other value. */
+bool buckets_xlmeta_set_write_version(unsigned v);
 void buckets_xlmeta_serialize(const buckets_xlmeta *x, buckets_buf *out);
 void buckets_xlmeta_free(buckets_xlmeta *x);
 

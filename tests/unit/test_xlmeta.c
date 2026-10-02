@@ -260,12 +260,45 @@ static void test_part_indexes(void **state) {
   }
 }
 
+
+/* BUCKETS_XL_META_VERSION=2: what MinIO before RELEASE.2024-10-29 writes and
+ * reads. Only the metaVersion byte differs; the versions decode the same. */
+static void test_write_meta_version(void **state) {
+  (void)state;
+  size_t n;
+  uint8_t *raw = read_fixture("small.xl.meta", &n);
+  assert_int_equal(raw[13], 3); /* headerVersion */
+  assert_int_equal(raw[14], 3); /* metaVersion: MinIO 2025 */
+  buckets_xlmeta x;
+  assert_int_equal(buckets_xlmeta_parse(raw, n, &x), BUCKETS_XL_OK);
+  assert_false(buckets_xlmeta_set_write_version(1)); /* v1 encodes delete markers differently */
+  assert_false(buckets_xlmeta_set_write_version(4));
+  assert_true(buckets_xlmeta_set_write_version(2));
+  buckets_buf v2 = BUCKETS_BUF_INIT;
+  buckets_xlmeta_serialize(&x, &v2);
+  assert_true(buckets_xlmeta_set_write_version(3));
+  assert_int_equal(((uint8_t *)v2.data)[14], 2);
+  assert_int_equal(v2.len, n);
+  buckets_xlmeta y;
+  assert_int_equal(buckets_xlmeta_parse(v2.data, v2.len, &y), BUCKETS_XL_OK);
+  assert_int_equal(y.n, x.n);
+  buckets_buf v3 = BUCKETS_BUF_INIT;
+  buckets_xlmeta_serialize(&y, &v3); /* back to 3: MinIO's bytes exactly */
+  assert_memory_equal(v3.data, raw, n);
+  buckets_buf_free(&v2);
+  buckets_buf_free(&v3);
+  buckets_xlmeta_free(&y);
+  buckets_xlmeta_free(&x);
+  free(raw);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_roundtrip_bytes),     cmocka_unit_test(test_reencode_header_and_signature),
       cmocka_unit_test(test_decode_fields),       cmocka_unit_test(test_corruption_detected),
       cmocka_unit_test(test_versions_and_inline), cmocka_unit_test(test_version_ids),
       cmocka_unit_test(test_bucket_metadata),     cmocka_unit_test(test_part_indexes),
+      cmocka_unit_test(test_write_meta_version),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

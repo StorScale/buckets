@@ -30,6 +30,7 @@
 #include "admin/info.h"
 #include "dist/storage_server.h"
 #include "storage/remote.h"
+#include "storage/xlmeta.h"
 #include "core/pool.h"
 #include "core/loop.h"
 #include "net/http.h"
@@ -147,6 +148,8 @@ static void usage(FILE *f) {
           "  *_ROOT_USER_FILE / *_ROOT_PASSWORD_FILE      read the root credentials from files\n"
           "  BUCKETS_CONFIG_ENV_FILE / MINIO_CONFIG_ENV_FILE  a file of KEY=value lines (\"export\" allowed) that\n"
           "                                               override the environment\n"
+          "  BUCKETS_XL_META_VERSION                      3 (default), or 2 for drives MinIO before\n"
+          "                                               RELEASE.2024-10-29 must still read (a rollback)\n"
           "  BUCKETS_LOG_LEVEL                            debug|info|warn|error\n"
           "  BUCKETS_API_THREADS                          request handler threads (default: 2 x CPUs, min 8)\n"
           "  BUCKETS_NET_THREADS                          network loop threads (default: CPUs / 2, max 16)\n"
@@ -569,6 +572,18 @@ int main(int argc, char **argv) {
   const char *level_s = getenv("BUCKETS_LOG_LEVEL");
   buckets_log_level level;
   if (level_s && buckets_log_parse_level(level_s, &level)) buckets_log_set_level(level);
+  /* For a tenant adopted from MinIO before RELEASE.2024-10-29, so that it can
+   * still be handed back: that MinIO refuses xl.meta metaVersion 3. */
+  const char *xmv = getenv("BUCKETS_XL_META_VERSION");
+  if (xmv && *xmv) {
+    char *end;
+    unsigned long v = strtoul(xmv, &end, 10);
+    if (*end || !buckets_xlmeta_set_write_version((unsigned)v)) {
+      fprintf(stderr, "bucketsd: BUCKETS_XL_META_VERSION must be 2 or 3, not %s\n", xmv);
+      return 1;
+    }
+    if (v == 2) buckets_log_info("writing xl.meta metaVersion 2, readable by MinIO before RELEASE.2024-10-29");
+  }
 
   if (argc >= 2 && (strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "version") == 0)) {
     printf("bucketsd %s\n", BUCKETS_VERSION);

@@ -14,6 +14,18 @@
 
 #define XL_HEADER_VERSION 3
 #define XL_META_VERSION 3
+
+/* The metaVersion written. MinIO bumped it from 2 to 3 in RELEASE.2024-10-29
+ * only to mark xl.meta written after its compression index fix (minio#20575);
+ * the encoding is the same. MinIO before that release refuses 3, so a tenant
+ * that may be handed back to it is written with 2 (BUCKETS_XL_META_VERSION). */
+static unsigned g_write_meta_version = XL_META_VERSION;
+
+bool buckets_xlmeta_set_write_version(unsigned v) {
+  if (v < 2 || v > XL_META_VERSION) return false;
+  g_write_meta_version = v;
+  return true;
+}
 #define XL_MAJOR 1
 #define XL_MINOR 3
 
@@ -245,7 +257,7 @@ void buckets_xlmeta_serialize(const buckets_xlmeta *x, buckets_buf *out) {
   buckets_buf_append(out, "\xc6\0\0\0\0", 5); /* bin32, length patched below */
   size_t start = out->len;
   buckets_mp_uint(out, XL_HEADER_VERSION);
-  buckets_mp_uint(out, XL_META_VERSION);
+  buckets_mp_uint(out, g_write_meta_version);
   buckets_mp_int(out, (int64_t)x->n);
   buckets_buf hdr = BUCKETS_BUF_INIT;
   for (size_t i = 0; i < x->n; i++) {

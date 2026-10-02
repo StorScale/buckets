@@ -12,7 +12,13 @@
 # NS              a namespace it creates and deletes (default buckets-adopt-test)
 # REGISTRY        where bucketsd and buckets-operator images live
 #                 (default harbor.os.harlandclarke.internal/vericast)
-# MINIO_IMAGE     default quay.io/minio/minio:RELEASE.2024-10-13T13-34-11Z
+# MINIO_IMAGE     default harbor.os.harlandclarke.internal/vericast/minio:RELEASE.2024-10-13T13-34-11Z
+#                 (quay.io and Docker Hub no longer serve MinIO images: use a mirror)
+# MINIO_BINARY_URL, MINIO_BINARY_SHA256
+#                 instead of an image: a static minio binary the pods fetch
+#                 (checked against the hash) and run on busybox. MinIO's
+#                 community images and binaries are no longer published, so a
+#                 binary built with tools/build-oracles.sh can stand in.
 # STORAGE_CLASS   for the drives (default: the cluster's default)
 # AVOID_NODES     node names the pods must not run on (space separated)
 # KEEP=1          leaves the namespace (and its PVs) for a look afterwards
@@ -23,7 +29,7 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 NS=${NS:-buckets-adopt-test}
 T=minio
 REGISTRY=${REGISTRY:-harbor.os.harlandclarke.internal/vericast}
-MINIO_IMAGE=${MINIO_IMAGE:-quay.io/minio/minio:RELEASE.2024-10-13T13-34-11Z}
+MINIO_IMAGE=${MINIO_IMAGE:-harbor.os.harlandclarke.internal/vericast/minio:RELEASE.2024-10-13T13-34-11Z}
 [[ -n ${BUCKETS_TAG:-} ]] || { echo "set BUCKETS_TAG to the bucketsd/buckets-operator image tag"; exit 2; }
 CTXARG=${KUBECONTEXT:+--context $KUBECONTEXT}
 k() { kubectl $CTXARG -n "$NS" "$@"; }
@@ -75,6 +81,15 @@ printf 'export MINIO_ROOT_USER=%s\nexport MINIO_ROOT_PASSWORD="%s"\nexport MINIO
 k create secret generic myminio-env-configuration --from-file=config.env="$WORK/config.env" >/dev/null
 AFF=$(affinity)
 SC=${STORAGE_CLASS:+\"storageClassName\": \"$STORAGE_CLASS\",}
+RUN_IMAGE=$MINIO_IMAGE RUN_CMD= INIT= BINVOL= BINMOUNT=
+if [[ -n ${MINIO_BINARY_URL:-} ]]; then
+  [[ -n ${MINIO_BINARY_SHA256:-} ]] || { echo "MINIO_BINARY_URL needs MINIO_BINARY_SHA256"; exit 2; }
+  RUN_IMAGE=busybox:1.36
+  RUN_CMD="command: [/minio-bin/minio]"
+  INIT="initContainers: [{name: fetch-minio, image: curlimages/curl:8.10.1, volumeMounts: [{name: minio-bin, mountPath: /minio-bin}], command: [sh, -c, 'curl -fsSk \"$MINIO_BINARY_URL\" -o /minio-bin/minio && echo \"$MINIO_BINARY_SHA256  /minio-bin/minio\" | sha256sum -c - && chmod 755 /minio-bin/minio']}]"
+  BINVOL="- {name: minio-bin, emptyDir: {}}"
+  BINMOUNT="- {name: minio-bin, mountPath: /minio-bin}"
+fi
 k apply -f - >/dev/null <<YAML
 apiVersion: v1
 kind: List
@@ -106,9 +121,11 @@ items:
         spec:
           securityContext: {runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000, runAsNonRoot: true, fsGroupChangePolicy: OnRootMismatch}
           ${AFF:+affinity: $AFF}
+          $INIT
           containers:
             - name: minio
-              image: $MINIO_IMAGE
+              image: $RUN_IMAGE
+              $RUN_CMD
               args: [server, --certs-dir, /tmp/certs]
               env:
                 - {name: MINIO_VOLUMES, value: "https://$T-pool-0-{0...3}.$T-hl.$NS.svc.cluster.local:9000/export{0...1}/data"}
@@ -120,8 +137,10 @@ items:
                 - {name: data1, mountPath: /export1}
                 - {name: cfg, mountPath: /tmp/minio}
                 - {name: certs, mountPath: /tmp/certs}
+                $BINMOUNT
           volumes:
             - {name: cfg, secret: {secretName: myminio-env-configuration}}
+            $BINVOL
             - name: certs
               projected:
                 sources:
@@ -213,7 +232,7 @@ expect "a write on Buckets" "$(s3 s3api head-object --bucket plain --key by-buck
 "$ROOT/scripts/rollback-to-minio.sh" -n "$NS" -t "$T" ${KUBECONTEXT:+--context $KUBECONTEXT} --state "$STATE" --apply \
   > "$WORK/rollback.log" 2>&1 && ok=yes || { ok=no; cat "$WORK/rollback.log"; }
 expect "rollback" "$ok" yes
-expect "the StatefulSet runs MinIO again" "$(k get sts $T-pool-0 -o jsonpath='{.spec.template.spec.containers[0].image}')" "$MINIO_IMAGE"
+expect "the StatefulSet runs MinIO again" "$(k get sts $T-pool-0 -o jsonpath='{.spec.template.spec.containers[0].image}')" "$RUN_IMAGE"
 check_data "MinIO after rollback" 54
 expect "MinIO reads what Buckets wrote" "$(k exec cli -- sh -c "aws --endpoint-url $EP s3 cp --quiet s3://plain/by-buckets.bin /tmp/g && md5sum < /tmp/g | cut -c1-32")" "$(sed -n 2p "$WORK/local.md5")"
 expect "MinIO sees Buckets' versioned object" "$(s3 s3api list-object-versions --bucket versioned --prefix by-buckets --query 'length(Versions)' --output text)" 1
