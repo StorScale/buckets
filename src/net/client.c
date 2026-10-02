@@ -292,8 +292,22 @@ static int exchange(hconn *h, const buckets_buf *head, const void *body, size_t 
     return -1;
   }
   size_t cl_len;
+  /* no body by definition (RFC 9112 6.3) */
+  if (res->status == 204 || res->status == 304 || (res->status >= 100 && res->status < 200)) {
+    buckets_buf_free(&in);
+    *reusable = true;
+    return 1;
+  }
   const char *cl = buckets_http_result_header(res, "Content-Length", &cl_len);
-  if (!cl) goto bad;
+  if (!cl) { /* the body runs to the connection's close */
+    buckets_buf_append(&res->body, in.data + hend, in.len - hend);
+    buckets_buf_free(&in);
+    char tmp[16384];
+    for (long r; (r = recv_some(h, tmp, sizeof(tmp))) > 0;) buckets_buf_append(&res->body, tmp, (size_t)r);
+    if (res->body.data) res->body.data[res->body.len] = '\0';
+    *reusable = false;
+    return 1;
+  }
   long long want = strtoll(cl, NULL, 10);
   if (want < 0) goto bad;
   size_t have = in.len - hend;

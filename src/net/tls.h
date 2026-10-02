@@ -23,6 +23,8 @@ typedef struct buckets_tls buckets_tls;
  * private key may be encrypted: password from BUCKETS_CERT_PASSWD or
  * MINIO_CERT_PASSWD. */
 buckets_tls *buckets_tls_server_new(const char *certs_dir, char *err, size_t errlen);
+/* One certificate and its key, from these files (reloaded like a certs dir's). */
+buckets_tls *buckets_tls_server_new_files(const char *cert_file, const char *key_file, char *err, size_t errlen);
 void buckets_tls_free(buckets_tls *t);
 /* Reloads certificates whose files changed. Call from the thread that
  * accepts connections. Returns true if anything was reloaded. */

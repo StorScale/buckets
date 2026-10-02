@@ -256,6 +256,17 @@ void op_kes_log_reason(const char *text, char *out, size_t cap) {
         q = e2 ? e2 + 1 : NULL;
       }
       break;
+    } else if ((m = strstr(p, "\"level\":\"ERROR\"")) && m < p + n && (m = strstr(m, "\"msg\":\"")) && m < p + n) {
+      /* buckets-kes: {"level":"ERROR","time":...,"msg":"..."} */
+      buckets_buf_reset(&r);
+      for (const char *c = m + 7; c < p + n && *c != '"'; c++) {
+        if (*c == '\\' && c + 1 < p + n) {
+          c++;
+          buckets_buf_append_char(&r, *c == 'n' || *c == 't' ? ' ' : *c);
+        } else {
+          buckets_buf_append_char(&r, *c);
+        }
+      }
     } else if ((m = strstr(p, "level=ERROR msg=\"")) && m < p + n) {
       buckets_buf_reset(&r);
       for (const char *c = m + 17; c < p + n && *c != '"'; c++) {

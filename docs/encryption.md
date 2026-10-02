@@ -1,6 +1,6 @@
 # Encryption: a key management service, set up in the console
 
-Buckets encrypts objects with SSE-S3 and SSE-KMS once it has a key management service (KMS). On Kubernetes, buckets-operator runs a [KES](https://github.com/minio/kes) server for each cluster, and you choose in the console where KES keeps the keys:
+Buckets encrypts objects with SSE-S3 and SSE-KMS once it has a key management service (KMS). On Kubernetes, buckets-operator runs a key server for each cluster: `buckets-kes`, Buckets' own implementation of [KES](https://github.com/minio/kes) (see below). You choose in the console where it keeps the keys:
 
 - HashiCorp Vault
 - AWS Secrets Manager
@@ -97,9 +97,39 @@ The settings' fields are described in `src/kms/kesutil.h`. `status.kms` reports 
 - `readyReplicas`
 - `activated`: whether the storage servers use KES yet
 
-## The KES image
+## buckets-kes
 
-The operator runs `quay.io/minio/kes:2024-09-11T07-22-50Z` by default, the release Buckets is tested with. MinIO no longer publishes images there. Point the operator at a mirror with `BUCKETS_KES_IMAGE`, the Helm value `kesImage`, or `spec.kms.kes.image` per cluster. If the image can't be pulled, the console says so.
+The operator runs `buckets-kes`, Buckets' own key server (`src/kes`), image `buckets-kes`. It's a drop-in replacement for MinIO's KES:
+
+- **Same API.** It speaks KES's API: the key, status, readiness, policy and identity endpoints, with identities taken from client certificates and allow/deny policies. bucketsd, MinIO and KES clients use it as they use KES.
+- **Same configuration.** It reads KES's configuration file.
+- **Same storage.** It keeps keys exactly as MinIO KES does, in each key store's layout. Keys and ciphertexts move freely between the two, in both directions: keys one created, the other uses.
+  - **Vault:** `engine/[data/]prefix/name`, each key read at version 1, with Transit-wrapped values.
+  - **AWS:** a secret per key.
+  - **Azure:** a secret per key, its oldest version used.
+  - **Google:** a secret per key, at version 1.
+
+  The stored form is a base64 protobuf key version. Ciphertexts are AES-256-GCM, or ChaCha20-Poly1305 under an HMAC- or HChaCha20-derived key, and the older JSON and msgpack forms decrypt too.
+
+How each key store signs in:
+
+- **Vault:** AppRole or Kubernetes. Tokens are renewed and sign-in repeated, and the Kubernetes token is re-read each time.
+- **AWS:** static keys, or the SDK chain: the environment, IRSA web identity, EKS Pod Identity or ECS container credentials, and the EC2 instance metadata service.
+- **Azure:** a client secret, AKS workload identity, or a managed identity through the instance metadata service.
+- **Google:** a service account key, or the metadata server.
+
+Tested in `tests/integration/buckets-kes.sh`:
+
+- **MinIO's KES:** reads keys `buckets-kes` made, and the other way round.
+- **Vault:** a dev server.
+- **AWS:** moto.
+- **Azure:** Lowkey Vault.
+- **Google:** `gcpmock.py`, which checks the service account's signature.
+- **SigV4:** checked against the specification.
+
+The clouds themselves aren't reached in CI, so try a new account's settings with the console's **Test** first.
+
+MinIO's KES works in its place: set the operator's `BUCKETS_KES_IMAGE` (Helm: `kesImage`) or `spec.kms.kes.image` to it. It reads the same configuration and keys. MinIO no longer publishes its images, so point at a mirror.
 
 ## Things to know
 

@@ -14,8 +14,8 @@ watchNamespace: ""
 logLevel: info # debug|info|warn|error
 
 # The KES image clusters run for spec.kms.kes when they name none (default:
-# quay.io/minio/kes at the release bucketsd is tested with). Point it at a
-# registry mirror where quay.io is out of reach.
+# ghcr.io/buckets-io/buckets-kes at the chart's version). Point it at a
+# registry mirror, or at MinIO's KES, which reads the same configuration.
 kesImage: ""
 
 serviceAccount:

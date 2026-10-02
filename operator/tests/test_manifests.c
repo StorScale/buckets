@@ -493,6 +493,7 @@ static void test_kes_objects(void **state) {
   yyjson_mut_val *c = yyjson_mut_arr_get_first(AT(dep, "spec", "template", "spec", "containers"));
   assert_string_equal(yyjson_mut_get_str(yyjson_mut_obj_get(c, "image")), "kes:test");
   assert_string_equal(yyjson_mut_get_str(AT(c, "readinessProbe", "httpGet", "path")), "/v1/ready");
+  assert_string_equal(yyjson_mut_get_str(AT(c, "livenessProbe", "httpGet", "path")), "/version");
   assert_string_equal(yyjson_mut_get_str(AT(dep, "spec", "template", "spec", "serviceAccountName")), "store-kes");
   assert_non_null(AT(yyjson_mut_doc_get_root(o[1].doc), "stringData", "keystore-ca.pem"));
   bc_objects_free(o, n);
@@ -543,6 +544,11 @@ static void test_kes_log_reason(void **state) {
                     r, sizeof(r));
   assert_string_equal(r, "vault: failed to create 'kv/data/buckets/x/t1': Error making API request. URL: GET "
                          "http://v/v1/kv/data/buckets/x/t1 Code: 403. Errors: * 1 error occurred: * permission denied");
+  /* buckets-kes's own log lines */
+  op_kes_log_reason("{\"level\":\"INFO\",\"msg\":\"listening\"}\n{\"level\":\"ERROR\",\"time\":\"t\",\"msg\":\"vault: "
+                    "failed to create key: permission denied (403)\"}\n",
+                    r, sizeof(r));
+  assert_string_equal(r, "vault: failed to create key: permission denied (403)");
   op_kes_log_reason("=> Server is up and running...\n", r, sizeof(r));
   assert_string_equal(r, "");
 }

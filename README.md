@@ -7,6 +7,7 @@ S3-compatible object storage written in C, built to run natively on Kubernetes. 
 - IAM, STS, and sign-in with LDAP or OpenID Connect (Microsoft Entra ID with app roles is in use)
 - versioning, object lock, lifecycle, SSE with KMS, compression, replication, tiering, batch jobs, S3 Select, SFTP/FTP
 - a Kubernetes operator and a web console deployed apart from storage
+- `buckets-kes`, a KES-compatible key server keeping keys in HashiCorp Vault, AWS Secrets Manager, Azure Key Vault or Google Secret Manager
 
 Real MinIO and Buckets can serve each other's drives, clusters included.
 
@@ -124,6 +125,7 @@ With OpenID sign-in, the Users page also lists the provider's people that Bucket
 | `tests/integration/{erasure,heal,concurrency,pools,tls,cluster}.sh` | Drive loss and bitrot; healing; racing writers; pool expansion; HTTPS; a 4-node cluster losing and regaining nodes (`MINIO_BIN` adds MinIO interop) |
 | `tests/integration/console.sh` | `consoled` without a browser: key, LDAP and OpenID sign-in (with a session cookie over 1 KB, as Entra ID's are), the admin proxy, streams, share links |
 | `tests/integration/openid.sh` | OpenID Connect: AssumeRoleWithWebIdentity and ClientGrants against a mock provider, claim-based and role-policy providers |
+| `tests/integration/buckets-kes.sh` | bucketsd on `buckets-kes`: SSE-S3/KMS, keys, policies, restarts; the same keys read by MinIO's KES (`KES_BIN`); Vault (`VAULT_BIN`), AWS via moto (`MOTO_SERVER`), Azure via Lowkey Vault (`LOWKEY_JAR`), Google via `gcpmock.py` |
 | `tests/e2e-k8s/envtest.sh` | The operator against a real kube-apiserver and etcd (envtest binaries, downloaded on first use), running as its own ServiceAccount |
 | `tests/e2e-k8s/kind.sh` | Full end to end on kind: images, operator, a 4-server cluster, pod and PVC loss, pool expansion, image rollout, the console Deployment and its Playwright suite (needs docker and kind; see `tests/e2e-k8s/README.md`) |
 | `tests/integration/select.sh` | S3 Select against MinIO, case by case (CSV, JSON, Parquet, every compression, errors) |
@@ -136,7 +138,7 @@ With OpenID sign-in, the Users page also lists the provider's people that Bucket
 | `tests/fuzz/soak.sh` | Every fuzz target under libFuzzer with ASan/UBSan in a Linux container, for `SECONDS` each (needs docker) |
 | `scripts/ci.sh` | The full gate: release, ASan/UBSan and TSan builds, unit, smoke and interop tests |
 
-`.gitlab-ci.yml` builds the `bucketsd`, `buckets-operator` and `buckets-console` images with Kaniko on every push to `main` and on tags, and pushes them to Harbor (`harbor.os.harlandclarke.internal/vericast/<image>`), tagged with the short commit SHA and the branch name, or with the tag (without a leading `v`) and `latest`. It needs the CI/CD variables `HARBOR_USER` and `HARBOR_PASSWORD`.
+`.gitlab-ci.yml` builds the `bucketsd`, `buckets-operator`, `buckets-console` and `buckets-kes` images with Kaniko on every push to `main` and on tags, and pushes them to Harbor (`harbor.os.harlandclarke.internal/vericast/<image>`), tagged with the short commit SHA and the branch name, or with the tag (without a leading `v`) and `latest`. It needs the CI/CD variables `HARBOR_USER` and `HARBOR_PASSWORD`.
 
 ## Layout
 
@@ -151,7 +153,8 @@ src/object   object layer: pools, erasure sets, quorum, multipart, healing, name
 src/dist     internode RPC: remote drives, storage server, dsync locks, endpoints
 src/heal     background healer: MRF queue, replaced drives, scanner
 src/bucket   bucket metadata (.metadata.bin)
-src/cmd      bucketsd entry point
+src/kes      buckets-kes: KES's API, keys and key stores (Vault, AWS, Azure, GCP, fs)
+src/cmd      the bucketsd, consoled and buckets-kes entry points
 tests/       unit (cmocka), fuzz (libFuzzer), integration
 scripts/     generators (S3 error table, parity checklist), CI
 docker/      container images

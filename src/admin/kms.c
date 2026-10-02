@@ -184,7 +184,11 @@ static void list_keys(s3_ctx *c) {
   if (!kms_ready(c, "kms:ListKeys")) return;
   const char *pattern = buckets_query_get(&c->q, "pattern");
   if (!pattern) pattern = "";
-  if (strcmp(pattern, "*") == 0) pattern = "";
+  /* a pattern is a name prefix, "*" ending it optional (KES's ListKeys) */
+  char prefix[256];
+  snprintf(prefix, sizeof(prefix), "%s", pattern);
+  if (*prefix && prefix[strlen(prefix) - 1] == '*') prefix[strlen(prefix) - 1] = '\0';
+  pattern = prefix;
   char **names;
   size_t n = buckets_kms_list_keys(c->s->kms, pattern, &names);
   buckets_buf b = BUCKETS_BUF_INIT;

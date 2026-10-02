@@ -129,7 +129,7 @@ spec:
             # - name: BUCKETS_OPERATOR_NAMESPACE   # watch a single namespace
             #   value: my-namespace
             # - name: BUCKETS_KES_IMAGE            # the KES image clusters run by default
-            #   value: registry.example.com/minio/kes:2024-09-11T07-22-50Z
+            #   value: registry.example.com/buckets/buckets-kes:0.10.0
           resources:
             requests: {cpu: 50m, memory: 32Mi}
             limits: {memory: 128Mi}

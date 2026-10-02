@@ -952,8 +952,12 @@ size_t bc_kes_objects(const bc_spec *s, bool trial, const char *config, const ch
   ADD_INT(d, get, "port", BC_KES_PORT);
   ADD_STR(d, get, "scheme", "HTTPS");
   ADD_INT(d, rp, "periodSeconds", trial ? 2 : 5);
+  /* /version needs no identity on either KES (a bare TCP probe fills its log with handshake errors) */
   mval *lp = ADD_OBJ(d, c, "livenessProbe");
-  ADD_INT(d, ADD_OBJ(d, lp, "tcpSocket"), "port", BC_KES_PORT);
+  mval *lget = ADD_OBJ(d, lp, "httpGet");
+  ADD_STR(d, lget, "path", "/version");
+  ADD_INT(d, lget, "port", BC_KES_PORT);
+  ADD_STR(d, lget, "scheme", "HTTPS");
   ADD_INT(d, lp, "initialDelaySeconds", 10);
   ADD_INT(d, lp, "periodSeconds", 20);
   if (s->kes.resources) {

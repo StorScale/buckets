@@ -16,9 +16,10 @@
 #define BC_CONSOLE_IMAGE "ghcr.io/buckets-io/buckets-console:0.10.0"
 #define BC_MAX_POOLS 32
 #define BC_KES_PORT 7373
-/* The KES release bucketsd is tested with; BUCKETS_KES_IMAGE (the operator's
- * environment) or spec.kms.kes.image point elsewhere, e.g. a registry mirror. */
-#define BC_KES_IMAGE "quay.io/minio/kes:2024-09-11T07-22-50Z"
+/* buckets-kes, Buckets' own KES-compatible server; BUCKETS_KES_IMAGE (the
+ * operator's environment) or spec.kms.kes.image point elsewhere: a registry
+ * mirror, or MinIO's KES, which reads the same configuration and keys. */
+#define BC_KES_IMAGE "ghcr.io/buckets-io/buckets-kes:0.10.0"
 #define BC_KES_DEFAULT_KEY "buckets-default"
 
 typedef struct {

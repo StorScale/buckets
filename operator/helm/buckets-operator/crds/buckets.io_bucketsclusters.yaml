@@ -179,7 +179,7 @@ spec:
                         AWS Secrets Manager, Azure Key Vault, Google Secret Manager) is in Secret <name>-kms
                         (settings.json), which the console's Encryption page writes after testing it.
                       properties:
-                        image: {type: string, description: "Defaults to the operator's BUCKETS_KES_IMAGE, else quay.io/minio/kes."}
+                        image: {type: string, description: "Defaults to the operator's BUCKETS_KES_IMAGE, else ghcr.io/buckets-io/buckets-kes (MinIO's KES works too)."}
                         replicas: {type: integer, minimum: 1, default: 2}
                         keyName: {type: string, default: buckets-default, description: The default key for SSE-S3 and for SSE-KMS without a key ID; created when missing.}
                         resources:

@@ -407,7 +407,9 @@ static buckets_kms_err kes_delete(buckets_kms *k, const char *name) {
 
 static size_t kes_list(buckets_kms *k, const char *prefix, char ***names) {
   kes_resp r;
-  kes_call(k, "GET", "/v1/key/list", prefix, NULL, &r);
+  /* KES lists the keys whose names start with the resource, "*" for all
+   * (an empty one reaches Go's KES only through a redirect) */
+  kes_call(k, "GET", "/v1/key/list", *prefix ? prefix : "*", NULL, &r);
   size_t n = 0, cap = 0;
   if (r.status == 200) {
     /* {"names":[...]} or, from older servers, NDJSON {"name":...} lines */

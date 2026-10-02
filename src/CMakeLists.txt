@@ -41,6 +41,13 @@ add_library(buckets STATIC
   crypto/objkey.c
   kms/kms.c
   kms/kesutil.c
+  kes/key.c
+  kes/store.c
+  kes/vault.c
+  kes/aws.c
+  kes/azure.c
+  kes/gcp.c
+  kes/server.c
   k8s/kube.c
   kms/cfgcrypt.c
   compress/s2.c
@@ -220,5 +227,8 @@ install(TARGETS bucketsd RUNTIME DESTINATION bin)
 
 add_executable(consoled cmd/consoled/main.c)
 target_link_libraries(consoled PRIVATE buckets)
+
+add_executable(buckets-kes cmd/buckets-kes/main.c)
+target_link_libraries(buckets-kes PRIVATE buckets)
 buckets_warnings(consoled)
 install(TARGETS consoled RUNTIME DESTINATION bin)

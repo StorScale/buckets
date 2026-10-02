@@ -25,7 +25,7 @@
 #define MAX_CERTS 64
 
 typedef struct {
-  char *dir; /* holds public.crt and private.key */
+  char *crt, *key; /* the files (a certs dir's public.crt and private.key) */
   SSL_CTX *ctx;
   X509 *leaf; /* for SNI matching */
   struct timespec crt_mtime, key_mtime;
@@ -77,11 +77,13 @@ static int sni_cb(SSL *ssl, int *alert, void *arg);
 static int accept_any_cert(int ok, X509_STORE_CTX *ctx);
 
 /* Builds a server context for dir/public.crt + dir/private.key. */
-static bool load_cert(buckets_tls *t, const char *dir, cert *out, char *err, size_t errlen) {
+static bool load_cert_files(buckets_tls *t, const char *crt_file, const char *key_file, cert *out, char *err,
+                            size_t errlen) {
   memset(out, 0, sizeof(*out));
   buckets_buf crt = BUCKETS_BUF_INIT, key = BUCKETS_BUF_INIT;
-  buckets_buf_appendf(&crt, "%s/public.crt", dir);
-  buckets_buf_appendf(&key, "%s/private.key", dir);
+  buckets_buf_append_c(&crt, crt_file);
+  buckets_buf_append_c(&key, key_file);
+  const char *dir = crt_file;
   bool ok = false;
   SSL_CTX *ctx = SSL_CTX_new(TLS_server_method());
   if (!ctx) {
@@ -121,7 +123,8 @@ static bool load_cert(buckets_tls *t, const char *dir, cert *out, char *err, siz
   }
   out->leaf = SSL_CTX_get0_certificate(ctx);
   X509_up_ref(out->leaf);
-  out->dir = buckets_xstrdup(dir);
+  out->crt = buckets_xstrdup(crt.data);
+  out->key = buckets_xstrdup(key.data);
   mtime_of(crt.data, &out->crt_mtime);
   mtime_of(key.data, &out->key_mtime);
   out->ctx = ctx;
@@ -134,10 +137,21 @@ done:
   return ok;
 }
 
+static bool load_cert(buckets_tls *t, const char *dir, cert *out, char *err, size_t errlen) {
+  buckets_buf crt = BUCKETS_BUF_INIT, key = BUCKETS_BUF_INIT;
+  buckets_buf_appendf(&crt, "%s/public.crt", dir);
+  buckets_buf_appendf(&key, "%s/private.key", dir);
+  bool ok = load_cert_files(t, crt.data, key.data, out, err, errlen);
+  buckets_buf_free(&crt);
+  buckets_buf_free(&key);
+  return ok;
+}
+
 static void cert_free(cert *c) {
   SSL_CTX_free(c->ctx);
   X509_free(c->leaf);
-  free(c->dir);
+  free(c->crt);
+  free(c->key);
   memset(c, 0, sizeof(*c));
 }
 
@@ -185,6 +199,16 @@ buckets_tls *buckets_tls_server_new(const char *certs_dir, char *err, size_t err
   return t;
 }
 
+buckets_tls *buckets_tls_server_new_files(const char *cert_file, const char *key_file, char *err, size_t errlen) {
+  buckets_tls *t = buckets_xcalloc(1, sizeof(*t));
+  if (!load_cert_files(t, cert_file, key_file, &t->certs[0], err, errlen)) {
+    buckets_tls_free(t);
+    return NULL;
+  }
+  t->ncerts = 1;
+  return t;
+}
+
 void buckets_tls_free(buckets_tls *t) {
   if (!t) return;
   for (size_t i = 0; i < t->ncerts; i++) cert_free(&t->certs[i]);
@@ -200,19 +224,14 @@ bool buckets_tls_reload(buckets_tls *t) {
   bool any = false;
   for (size_t i = 0; i < t->ncerts; i++) {
     cert *c = &t->certs[i];
-    buckets_buf crt = BUCKETS_BUF_INIT, key = BUCKETS_BUF_INIT;
-    buckets_buf_appendf(&crt, "%s/public.crt", c->dir);
-    buckets_buf_appendf(&key, "%s/private.key", c->dir);
     struct timespec cm, km;
-    bool changed = mtime_of(crt.data, &cm) && mtime_of(key.data, &km) &&
+    bool changed = mtime_of(c->crt, &cm) && mtime_of(c->key, &km) &&
                    (!ts_eq(cm, c->crt_mtime) || !ts_eq(km, c->key_mtime));
-    buckets_buf_free(&crt);
-    buckets_buf_free(&key);
     if (!changed) continue;
     cert fresh;
     char err[512];
-    char *dir = buckets_xstrdup(c->dir);
-    if (load_cert(t, dir, &fresh, err, sizeof(err))) {
+    char *dir = buckets_xstrdup(c->crt), *kf = buckets_xstrdup(c->key);
+    if (load_cert_files(t, dir, kf, &fresh, err, sizeof(err))) {
       /* Connections hold their own reference to the old context. */
       cert_free(c);
       *c = fresh;
@@ -225,6 +244,7 @@ bool buckets_tls_reload(buckets_tls *t) {
       buckets_log_warn("TLS certificate in %s changed but cannot be loaded: %s", dir, err);
     }
     free(dir);
+    free(kf);
   }
   return any;
 }

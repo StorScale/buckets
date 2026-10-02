@@ -48,6 +48,8 @@ build:
         DOCKERFILE: docker/Dockerfile.operator
       - REPOSITORY: buckets-console
         DOCKERFILE: docker/Dockerfile.console
+      - REPOSITORY: buckets-kes
+        DOCKERFILE: docker/Dockerfile.kes
   script:
     - |
       if [ -z "$HARBOR_USER" ] || [ -z "$HARBOR_PASSWORD" ]; then
