@@ -168,13 +168,22 @@ void buckets_http_resp_header_del(buckets_http_response *resp, const char *name)
   buckets_buf_free(&kept);
 }
 
+/* Formats straight into the header block, so long values (a console
+ * session cookie with an OpenID session token is ~2 KB) are never cut. */
 void buckets_http_resp_headerf(buckets_http_response *resp, const char *name, const char *fmt, ...) {
-  char val[1024];
-  va_list ap;
+  buckets_buf_appendf(&resp->headers, "%s: ", name);
+  va_list ap, ap2;
   va_start(ap, fmt);
-  vsnprintf(val, sizeof(val), fmt, ap);
+  va_copy(ap2, ap);
+  int n = vsnprintf(NULL, 0, fmt, ap);
   va_end(ap);
-  buckets_http_resp_header(resp, name, val);
+  if (n > 0) {
+    buckets_buf_reserve(&resp->headers, (size_t)n);
+    vsnprintf(resp->headers.data + resp->headers.len, (size_t)n + 1, fmt, ap2);
+    resp->headers.len += (size_t)n;
+  }
+  va_end(ap2);
+  buckets_buf_append_c(&resp->headers, "\r\n");
 }
 
 const char *buckets_http_status_text(int status) {
