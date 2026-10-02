@@ -67,6 +67,7 @@ bool bc_parse(yyjson_val *obj, const char *cluster_domain, bc_spec *out, char *e
   out->console.ingress_tls_secret = str_at(yyjson_obj_get(ing, "tlsSecret"), "name");
   out->console.annotations = yyjson_obj_get(ing, "annotations");
   out->console.resources = yyjson_obj_get(con, "resources");
+  out->console.env = yyjson_obj_get(con, "env");
   out->console.s3_url = str_at(con, "s3URL");
   out->console.tls_secret = str_at(yyjson_obj_get(yyjson_obj_get(con, "tls"), "certSecret"), "name");
 
@@ -493,6 +494,9 @@ static bc_object console_deployment(const bc_spec *s) {
   if (s->console.ingress_tls_secret) env_value(d, env, "BUCKETS_CONSOLE_SECURE_COOKIE", "on");
   if (s->tls_secret) env_value(d, env, "BUCKETS_CONSOLE_CA_DIR", "/etc/buckets/ca");
   if (s->console.s3_url) env_value(d, env, "BUCKETS_CONSOLE_S3_URL", s->console.s3_url);
+  size_t ei, emax;
+  yyjson_val *ev;
+  yyjson_arr_foreach(s->console.env, ei, emax, ev) yyjson_mut_arr_append(env, yyjson_val_mut_copy(d, ev));
   for (int i = 0; i < 2; i++) {
     mval *p = ADD_OBJ(d, c, i ? "livenessProbe" : "readinessProbe");
     mval *get = ADD_OBJ(d, p, "httpGet");

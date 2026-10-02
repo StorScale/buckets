@@ -156,6 +156,14 @@ spec:
                     resources:
                       type: object
                       x-kubernetes-preserve-unknown-fields: true
+                    env:
+                      type: array
+                      description: >-
+                        Extra environment for consoled, after the operator's own, for example its
+                        OpenID sign-in (BUCKETS_CONSOLE_OIDC_*). Entries may use valueFrom.
+                      items:
+                        type: object
+                        x-kubernetes-preserve-unknown-fields: true
                     ingress:
                       type: object
                       description: Expose the console at a host name.

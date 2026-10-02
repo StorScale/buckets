@@ -42,6 +42,7 @@ typedef struct {
     const char *s3_url; /* S3 as browsers reach it, for share links (NULL: none) */
     const char *tls_secret; /* consoled serves HTTPS with it (NULL: HTTP) */
     yyjson_val *resources, *annotations;
+    yyjson_val *env; /* extra environment for consoled, e.g. its OpenID sign-in */
   } console;
 } bc_spec;
 

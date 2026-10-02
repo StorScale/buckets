@@ -258,11 +258,36 @@ static void test_console_tls(void **state) {
   yyjson_doc_free(d);
 }
 
+static void test_console_env(void **state) {
+  (void)state;
+  const char *json = "{\"metadata\":{\"name\":\"store\",\"namespace\":\"data\",\"uid\":\"u\"},"
+                     "\"spec\":{\"pools\":[{\"servers\":2,\"volumesPerServer\":2}],"
+                     "\"console\":{\"enabled\":true,\"env\":["
+                     "{\"name\":\"BUCKETS_CONSOLE_OIDC_CLIENT_ID\",\"value\":\"app-1\"},"
+                     "{\"name\":\"BUCKETS_CONSOLE_OIDC_CLIENT_SECRET\","
+                     "\"valueFrom\":{\"secretKeyRef\":{\"name\":\"entra\",\"key\":\"secret\"}}}]}}}";
+  bc_spec s;
+  yyjson_doc *d = parse(json, &s, true);
+  bc_object *o;
+  size_t n = bc_desired(&s, &o);
+  yyjson_mut_val *c = yyjson_mut_arr_get_first(AT(yyjson_mut_doc_get_root(o[5].doc), "spec", "template", "spec", "containers"));
+  yyjson_mut_val *env = yyjson_mut_obj_get(c, "env");
+  /* the operator's own first, then the spec's, as given */
+  assert_string_equal(yyjson_mut_get_str(yyjson_mut_obj_get(yyjson_mut_arr_get_first(env), "name")), "BUCKETS_CONSOLE_SERVER");
+  size_t len = yyjson_mut_arr_size(env);
+  yyjson_mut_val *id = yyjson_mut_arr_get(env, len - 2), *sec = yyjson_mut_arr_get(env, len - 1);
+  assert_string_equal(yyjson_mut_get_str(yyjson_mut_obj_get(id, "value")), "app-1");
+  assert_string_equal(yyjson_mut_get_str(yyjson_mut_obj_get(sec, "name")), "BUCKETS_CONSOLE_OIDC_CLIENT_SECRET");
+  assert_string_equal(yyjson_mut_get_str(AT(sec, "valueFrom", "secretKeyRef", "key")), "secret");
+  bc_objects_free(o, n);
+  yyjson_doc_free(d);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_volumes_and_topology), cmocka_unit_test(test_desired_objects), cmocka_unit_test(test_tls),
       cmocka_unit_test(test_root_secret_not_owned), cmocka_unit_test(test_invalid),
-      cmocka_unit_test(test_console), cmocka_unit_test(test_console_tls),
+      cmocka_unit_test(test_console), cmocka_unit_test(test_console_tls), cmocka_unit_test(test_console_env),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }
