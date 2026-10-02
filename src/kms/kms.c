@@ -397,6 +397,14 @@ static buckets_kms_err kes_create(buckets_kms *k, const char *name) {
   return e;
 }
 
+static buckets_kms_err kes_delete(buckets_kms *k, const char *name) {
+  kes_resp r;
+  kes_call(k, "DELETE", "/v1/key/delete", name, NULL, &r);
+  buckets_kms_err e = r.status == 200 ? BUCKETS_KMS_OK : kes_err(&r);
+  buckets_buf_free(&r.body);
+  return e;
+}
+
 static size_t kes_list(buckets_kms *k, const char *prefix, char ***names) {
   kes_resp r;
   kes_call(k, "GET", "/v1/key/list", prefix, NULL, &r);
@@ -629,6 +637,12 @@ buckets_kms_err buckets_kms_create_key(buckets_kms *k, const char *name) {
   int64_t t = mono_ns();
   if (k->kind == KMS_KES) return metered(k, t, kes_create(k, name));
   return metered(k, t, strcmp(name, k->key_id) == 0 ? BUCKETS_KMS_ERR_KEY_EXISTS : BUCKETS_KMS_ERR_NOT_SUPPORTED);
+}
+
+buckets_kms_err buckets_kms_delete_key(buckets_kms *k, const char *name) {
+  int64_t t = mono_ns();
+  if (k->kind == KMS_KES) return metered(k, t, kes_delete(k, name));
+  return metered(k, t, BUCKETS_KMS_ERR_NOT_SUPPORTED); /* the static key is the only key */
 }
 
 size_t buckets_kms_list_keys(buckets_kms *k, const char *prefix, char ***names) {

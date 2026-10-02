@@ -284,6 +284,34 @@ test("configuration: read and change a setting", async ({ page }) => {
   await expect(page.getByTestId("cfg-speed")).toHaveValue("slow");
 });
 
+test.describe("encryption", () => {
+  test("the KMS and its keys, and a bucket encrypted with one", async ({ page }) => {
+    test.skip(!!process.env.CONSOLE_URL, "needs the static KMS key of the local setup");
+    await login(page);
+    await page.getByRole("link", { name: "Encryption" }).click();
+    await expect(page.getByTestId("kms-status")).toContainText("Built-in static key");
+    await expect(page.getByTestId("kms-status")).toContainText("e2e-key");
+    await expect(page.getByTestId("kms-key-e2e-key")).toContainText("works");
+    // one fixed key: nothing to create or delete
+    await expect(page.getByTestId("create-kms-key")).toHaveCount(0);
+    await expect(page.getByTestId("delete-kms-key-e2e-key")).toHaveCount(0);
+
+    const bucket = unique("sealed");
+    await page.getByRole("link", { name: "Buckets" }).click();
+    await page.getByTestId("create-bucket").click();
+    await page.getByTestId("bucket-name").fill(bucket);
+    await page.getByTestId("bucket-create-submit").click();
+    await page.goto(`/buckets/${bucket}/settings`);
+    await page.getByTestId("sse-alg").selectOption("aws:kms");
+    await expect(page.getByTestId("sse-key").locator("option").first()).toHaveText("e2e-key (KMS default key)");
+    await page.getByTestId("save-sse").click();
+    await expect(page.getByTestId("notice")).toHaveText("Encryption saved.");
+    // the key page now names the bucket it encrypts
+    await page.getByRole("link", { name: "Encryption" }).click();
+    await expect(page.getByTestId("kms-key-e2e-key")).toContainText(bucket);
+  });
+});
+
 test.describe("monitoring", () => {
   test("trace shows calls as they happen", async ({ page }) => {
     await login(page);

@@ -1,6 +1,6 @@
 import { ReactNode, useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { bucketDocs, getQuota, getVersioning, parseTags, setQuota, setVersioning, Tag, tagsXml } from "../api";
+import { bucketDocs, getQuota, getVersioning, kmsListKeys, kmsStatus, parseTags, setQuota, setVersioning, Tag, tagsXml } from "../api";
 import { ErrorBanner, formatBytes, Notice, Spinner } from "../components";
 import { TagEditor } from "./Browser";
 
@@ -40,6 +40,8 @@ export default function BucketSettings() {
   const [policy, setPolicy] = useState("");
   const [lifecycle, setLifecycle] = useState("");
   const [sse, setSse] = useState<{ alg: string; key: string }>({ alg: "", key: "" });
+  // the KMS's keys for SSE-KMS; null when they cannot be listed (no KMS, or no permission)
+  const [kmsKeys, setKmsKeys] = useState<{ keys: string[]; defaultKey: string } | null>(null);
   const [lock, setLock] = useState<{ enabled: boolean; mode: string; days: string }>({ enabled: false, mode: "", days: "" });
 
   const ok = (text: string) => () => {
@@ -50,6 +52,12 @@ export default function BucketSettings() {
     setNotice(null);
     setError(e);
   };
+
+  useEffect(() => {
+    Promise.all([kmsListKeys(), kmsStatus()])
+      .then(([keys, st]) => setKmsKeys({ keys, defaultKey: st["default-key-id"] }))
+      .catch(() => setKmsKeys(null));
+  }, []);
 
   useEffect(() => {
     (async () => {
@@ -181,8 +189,25 @@ export default function BucketSettings() {
             <option value="AES256">SSE-S3</option>
             <option value="aws:kms">SSE-KMS</option>
           </select>
-          {sse.alg === "aws:kms" && <input placeholder="KMS key ID" value={sse.key} onChange={(e) => setSse({ ...sse, key: e.target.value })} />}
+          {sse.alg === "aws:kms" &&
+            (kmsKeys ? (
+              // SSE-KMS needs a key ID: the default key is named, not left out
+              <select value={sse.key || kmsKeys.defaultKey} onChange={(e) => setSse({ ...sse, key: e.target.value })} data-testid="sse-key">
+                <option value={kmsKeys.defaultKey}>{kmsKeys.defaultKey} (KMS default key)</option>
+                {kmsKeys.keys
+                  .filter((k) => k !== kmsKeys.defaultKey)
+                  .map((k) => (
+                    <option key={k} value={k}>
+                      {k}
+                    </option>
+                  ))}
+                {sse.key && !kmsKeys.keys.includes(sse.key) && <option value={sse.key}>{sse.key} (not in the KMS)</option>}
+              </select>
+            ) : (
+              <input placeholder="KMS key ID" value={sse.key} onChange={(e) => setSse({ ...sse, key: e.target.value })} data-testid="sse-key" />
+            ))}
         </label>
+        <p className="muted">Applies to objects uploaded from now on. Keys are managed under Encryption.</p>
         <button
           data-testid="save-sse"
           onClick={() =>
@@ -190,7 +215,9 @@ export default function BucketSettings() {
               ? bucketDocs.encryption.put(
                   bucket,
                   `<ServerSideEncryptionConfiguration><Rule><ApplyServerSideEncryptionByDefault><SSEAlgorithm>${sse.alg}</SSEAlgorithm>${
-                    sse.alg === "aws:kms" && sse.key ? `<KMSMasterKeyID>${sse.key}</KMSMasterKeyID>` : ""
+                    sse.alg === "aws:kms" && (sse.key || kmsKeys?.defaultKey)
+                      ? `<KMSMasterKeyID>${sse.key || kmsKeys?.defaultKey}</KMSMasterKeyID>`
+                      : ""
                   }</ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>`,
                 )
               : bucketDocs.encryption.del(bucket)

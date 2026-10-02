@@ -55,6 +55,9 @@ buckets_kms_err buckets_kms_decrypt(buckets_kms *k, const char *name, const uint
                                     const char *context, uint8_t plaintext[32]);
 /* CreateKey: the builtin KMS only "has" its one key. */
 buckets_kms_err buckets_kms_create_key(buckets_kms *k, const char *name);
+/* KES DeleteKey: the key is gone for good, and with it every object
+ * encrypted under it. Not supported by the static builtin key. */
+buckets_kms_err buckets_kms_delete_key(buckets_kms *k, const char *name);
 /* The key names starting with prefix (ListKeys). Caller frees each and the array. */
 size_t buckets_kms_list_keys(buckets_kms *k, const char *prefix, char ***names);
 

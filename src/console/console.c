@@ -983,6 +983,10 @@ void buckets_console_handle(const buckets_http_request *req, buckets_http_respon
     char up[4096];
     snprintf(up, sizeof(up), "/minio/admin/v3/%.*s", (int)(path.n - 14), path.p + 14);
     proxy(c, req, resp, &s, up);
+  } else if (buckets_str_has_prefix(path, "/api/v1/kms/")) { /* the KMS API: keys, status */
+    char up[4096];
+    snprintf(up, sizeof(up), "/minio/kms/v1/%.*s", (int)(path.n - 12), path.p + 12);
+    proxy(c, req, resp, &s, up);
   } else {
     json_error(resp, 404, "NotFound", "unknown API");
   }

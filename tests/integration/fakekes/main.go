@@ -97,6 +97,16 @@ func main() {
 				return
 			}
 			w.WriteHeader(http.StatusOK)
+		case "delete":
+			mu.Lock()
+			_, exists := keys[name]
+			delete(keys, name)
+			mu.Unlock()
+			if !exists {
+				fail(w, http.StatusNotFound, "key does not exist")
+				return
+			}
+			w.WriteHeader(http.StatusOK)
 		case "describe":
 			if _, ok := key(name); !ok {
 				fail(w, http.StatusNotFound, "key does not exist")

@@ -12,6 +12,7 @@ import Groups from "./pages/Groups";
 import Policies from "./pages/Policies";
 import AccessKeys from "./pages/AccessKeys";
 import Configuration from "./pages/Configuration";
+import Encryption from "./pages/Encryption";
 import Trace from "./pages/Trace";
 import Logs from "./pages/Logs";
 import Events from "./pages/Events";
@@ -73,6 +74,7 @@ export default function App() {
         <NavLink to="/monitoring/events">Events</NavLink>
         <div className="nav-group">Administration</div>
         <NavLink to="/configuration">Configuration</NavLink>
+        <NavLink to="/encryption">Encryption</NavLink>
         <div className="sidebar-foot">
           <div className="whoami" data-testid="whoami">
             {user.accessKey}
@@ -96,6 +98,7 @@ export default function App() {
           <Route path="/identity/policies" element={<Policies />} />
           <Route path="/identity/access-keys" element={<AccessKeys />} />
           <Route path="/configuration" element={<Configuration />} />
+          <Route path="/encryption" element={<Encryption />} />
           <Route path="/login" element={<Navigate to="/" replace />} />
           <Route path="*" element={<p>Page not found.</p>} />
         </Routes>

@@ -81,6 +81,7 @@ textarea { width: 100%; font-family: ui-monospace, SFMono-Regular, Menlo, monosp
 label { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
 label.check { flex-direction: row; align-items: center; gap: 6px; margin-bottom: 6px; }
 label.inline { flex-direction: row; align-items: center; gap: 8px; flex-wrap: wrap; }
+form.inline { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 fieldset { border: 1px solid var(--line); border-radius: 6px; margin: 0 0 12px; max-height: 220px; overflow: auto; }
 .form-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; flex-wrap: wrap; }
 

@@ -7,6 +7,8 @@
 
 #include "admin/admin.h"
 #include "kms/kms.h"
+#include "object/object.h"
+#include "bucket/metasys.h"
 #include "notify/event.h"
 
 #define KMS_PREFIX "/minio/kms/v1"
@@ -134,6 +136,50 @@ static void create_key(s3_ctx *c, const char *action) {
   else c->resp->status = 200;
 }
 
+/* A Buckets extension (MinIO's KMS API has no delete): deleting a key loses
+ * every object encrypted under it, so the KMS's default key and any key a
+ * bucket encrypts with by default are refused, with the buckets named. */
+static void delete_key(s3_ctx *c) {
+  if (!kms_ready(c, "kms:DeleteKey")) return;
+  const char *key = buckets_query_get(&c->q, "key-id");
+  if (!key || !*key) {
+    buckets_admin_error(c, BUCKETS_ERR_NOT_IMPLEMENTED); /* the route requires key-id */
+    return;
+  }
+  if (!key_allowed(c, "kms:DeleteKey", key)) {
+    buckets_admin_error(c, BUCKETS_ERR_ACCESS_DENIED);
+    return;
+  }
+  if (strcmp(key, buckets_kms_default_key(c->s->kms)) == 0) {
+    buckets_admin_custom_error(c, 409, "KMSKeyInUse", "the key is the KMS's default key");
+    return;
+  }
+  buckets_bucket_info *bk = NULL;
+  size_t nb = 0;
+  if (buckets_obj_list_buckets(c->s->layer, &bk, &nb) != BUCKETS_OBJ_OK) {
+    buckets_admin_error(c, BUCKETS_ERR_INTERNAL_ERROR);
+    return;
+  }
+  buckets_buf users = BUCKETS_BUF_INIT;
+  for (size_t i = 0; i < nb; i++) {
+    buckets_bucket_state *st = buckets_metasys_get(c->s->meta, bk[i].name);
+    if (st->has_sse && strcmp(st->sse.algorithm, "aws:kms") == 0 && strcmp(buckets_sse_config_key(&st->sse), key) == 0)
+      buckets_buf_appendf(&users, "%s%s", users.len ? ", " : "", bk[i].name);
+    buckets_bucket_state_release(st);
+  }
+  buckets_bucket_info_free(bk, nb);
+  if (users.len) {
+    char msg[1024];
+    snprintf(msg, sizeof(msg), "the key encrypts these buckets by default: %s", users.data);
+    buckets_admin_custom_error(c, 409, "KMSKeyInUse", msg);
+  } else {
+    buckets_kms_err e = buckets_kms_delete_key(c->s->kms, key);
+    if (e) kms_error(c, e);
+    else c->resp->status = 200;
+  }
+  buckets_buf_free(&users);
+}
+
 static void list_keys(s3_ctx *c) {
   if (!kms_ready(c, "kms:ListKeys")) return;
   const char *pattern = buckets_query_get(&c->q, "pattern");
@@ -198,6 +244,7 @@ void buckets_admin_kms_handle(s3_ctx *c) {
   else if (buckets_str_eq_c(rest, "/apis") && get) apis(c);
   else if (buckets_str_eq_c(rest, "/version") && get) version(c);
   else if (buckets_str_eq_c(rest, "/key/create") && post) create_key(c, "kms:CreateKey");
+  else if (buckets_str_eq_c(rest, "/key/delete") && post) delete_key(c);
   else if (buckets_str_eq_c(rest, "/key/list") && get && buckets_query_get(&c->q, "pattern")) list_keys(c);
   else if (buckets_str_eq_c(rest, "/key/status") && get) key_status(c, "kms:KeyStatus");
   else buckets_admin_error(c, BUCKETS_ERR_NOT_IMPLEMENTED);

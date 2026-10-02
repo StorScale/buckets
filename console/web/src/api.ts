@@ -322,6 +322,22 @@ export const accountInfo = () => adminJson<AccountInfo>("GET", "accountinfo");
 export type UserInfo = { status: string; policyName?: string; memberOf?: string[] };
 export const listUsers = () => adminJson<Record<string, UserInfo>>("GET", "list-users");
 
+// ---- KMS: the keys objects are encrypted with ----
+
+const kms = (api: string) => `/api/v1/kms/${api}`;
+export type KMSStatus = { name: string; "default-key-id": string; endpoints: Record<string, string> };
+export type KMSKeyCheck = { "key-id": string; "encryption-error"?: string; "decryption-error"?: string };
+export const kmsStatus = async (): Promise<KMSStatus> => (await call("GET", kms("status"))).json();
+export const kmsListKeys = async (): Promise<string[]> =>
+  ((await (await call("GET", kms("key/list"), { query: { pattern: "*" } })).json()) as { name: string }[]).map((k) => k.name).sort();
+// Encrypts and decrypts a data key with it: errors say what failed.
+export const kmsCheckKey = async (key: string): Promise<KMSKeyCheck> =>
+  (await call("GET", kms("key/status"), { query: { "key-id": key } })).json();
+export const kmsCreateKey = (key: string) => call("POST", kms("key/create"), { query: { "key-id": key } });
+// Gone for good, with every object encrypted under it: the server refuses the
+// default key and keys a bucket encrypts with by default (KMSKeyInUse).
+export const kmsDeleteKey = (key: string) => call("POST", kms("key/delete"), { query: { "key-id": key } });
+
 // People from the OpenID provider that Buckets knows of: signed in now, or holding access keys.
 type KeyInfo = { accessKey: string; expiration?: string };
 export type OpenIDUser = {

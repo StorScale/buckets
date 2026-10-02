@@ -90,6 +90,9 @@ check "attaching again is refused" \
     python3 -c 'import json,sys;print(json.load(sys.stdin)["Code"])')" XMinioAdminPolicyChangeAlreadyApplied
 check "encrypted admin reply decrypted" \
   "$(curl -s -b "$R" -H 'X-Console-Decrypt: 1' "$C/api/v1/admin/list-users" | head -c 1)" "{"
+check "the KMS API through the proxy (no KMS here)" \
+  "$(curl -s -b "$R" "$C/api/v1/kms/status" | python3 -c 'import json,sys;print(json.load(sys.stdin)["Message"])')" \
+  "Server side encryption specified but KMS is not configured"
 
 echo "== LDAP: a directory user signs in and works"
 A="$WORK/alice.jar"
