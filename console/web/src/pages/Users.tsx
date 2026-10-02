@@ -39,7 +39,7 @@ export default function Users() {
       <Notice text={notice} />
       {oidc && <OpenIDUsers provider={methods.data?.oidcName ?? "OpenID"} />}
       {oidc && showLocal && <h2>Local users</h2>}
-      {loading && !data && <Spinner />}
+      {showLocal && loading && !data && <Spinner />}
       {showLocal && data && users.length === 0 && <p className="muted">No users yet.</p>}
       {showLocal && users.length > 0 && (
         <table data-testid="user-table">

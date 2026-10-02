@@ -97,8 +97,15 @@ expect "credentials stable across resyncs" "$(jp secret/store-root '{.data.rootU
 
 echo "== servers become ready"
 TOPO=$(jp bc/store '{.status.topology}')
+# Plays the StatefulSet controller: (re)creates a pod and marks it ready. The
+# operator may delete the pod between apply's read and its patch (it is rolling
+# the next one), so a failed attempt is retried, as the controller would.
 mkpod() { # name pool topology revision
-  k -n tenant apply -f - >/dev/null <<YAML
+  for _ in 1 2 3 4; do mkpod_once "$@" 2>/dev/null && return 0; sleep 0.2; done
+  mkpod_once "$@"
+}
+mkpod_once() {
+  k -n tenant apply -f - >/dev/null <<YAML || return 1
 apiVersion: v1
 kind: Pod
 metadata:
@@ -108,7 +115,7 @@ metadata:
 spec: {containers: [{name: bucketsd, image: bucketsd:test}]}
 YAML
   k -n tenant patch pod "$1" --subresource=status --type=merge \
-    -p '{"status":{"conditions":[{"type":"Ready","status":"True"}]}}' >/dev/null
+    -p '{"status":{"conditions":[{"type":"Ready","status":"True"}]}}' >/dev/null || return 1
 }
 for i in 0 1 2 3; do mkpod "store-pool-0-$i" pool-0 "$TOPO" rev1; done
 k -n tenant patch sts store-pool-0 --subresource=status --type=merge \

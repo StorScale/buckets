@@ -18,16 +18,13 @@ Real MinIO and Buckets can serve each other's drives, clusters included.
 | [docs/performance.md](docs/performance.md) | Benchmarks against MinIO and how to run them |
 | [docs/roadmap.md](docs/roadmap.md) | What comes next, and why |
 | [CHANGELOG.md](CHANGELOG.md) | Changes by release |
+| [SECURITY.md](SECURITY.md) | How to report a vulnerability, and which releases get fixes |
 
 ## Build
 
 You need a C17 compiler and CMake 3.20+ (Ninja is recommended). Dependencies (llhttp, yyjson, libssh and others) are fetched and pinned at configure time; cmocka too when tests are built.
 
-OpenSSL must be 3.2 or later (madmin's encrypted admin payloads need its Argon2id). The system's is used when present, and otherwise built once from a pinned release into `.deps/` (this needs perl and make). Configure does not yet reject an older system OpenSSL: on, for example, Ubuntu 24.04 (OpenSSL 3.0) the build fails in `src/crypto/madmin.c`. Build the pinned release into `.deps/openssl-3.5.4` (as `cmake/OpenSSL.cmake` does) and point CMake at it:
-
-```bash
-cmake -S . -B build -G Ninja -DOPENSSL_ROOT_DIR=$PWD/.deps/openssl-3.5.4 -DOPENSSL_USE_STATIC_LIBS=TRUE
-```
+OpenSSL must be 3.2 or later (madmin's encrypted admin payloads need its Argon2id). The system's is used when it is new enough; otherwise (for example Ubuntu 24.04, which has 3.0) a pinned release is built once from source into `.deps/`, which needs perl and make.
 
 ```bash
 cmake -S . -B build -G Ninja

@@ -19,10 +19,10 @@ Phases 1 and 2 carry the case for choosing Buckets; Phases 3 and 4 make it easie
 Small fixes that decide whether people trust Buckets as the maintained successor. Each is days of work, not weeks.
 
 - [x] Update the README: it said "Status: 0.3.0" and "Next up is the Kubernetes operator", but `VERSION` is 0.10.0 and the operator ships. Done 2026-10-02.
-- [ ] Require OpenSSL 3.2 or later at configure time. The build accepts 3.0, then fails compiling Argon2 code.
-- [ ] Fix the brief loading spinner on the Users page when local users are hidden.
-- [ ] Fix the envtest rolling-update step, which fails on a race with or without recent changes ("pod not found").
-- [ ] Keep CHANGELOG.md current with each release, and publish a security contact so users can report issues.
+- [x] Require OpenSSL 3.2 or later at configure time. The build accepts 3.0, then fails compiling Argon2 code.
+- [x] Fix the brief loading spinner on the Users page when local users are hidden.
+- [x] Fix the envtest rolling-update step, which fails on a race with or without recent changes ("pod not found").
+- [x] Keep CHANGELOG.md current with each release, and publish a security contact so users can report issues.
 
 ## Phase 1: The maintained home for MinIO users
 

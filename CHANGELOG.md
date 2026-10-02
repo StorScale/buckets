@@ -14,8 +14,12 @@ All notable changes to this project are documented here. The format follows
 - `docs/identity.md`: sign-in with Microsoft Entra ID and role-based access from Entra app roles, with `operator/examples/cluster-entra.yaml`.
 - `docs/roadmap.md`: what comes next, and why.
 - A GitLab pipeline (`.gitlab-ci.yml`) that builds the `bucketsd`, `buckets-operator` and `buckets-console` images with Kaniko and pushes them to Harbor.
+- `SECURITY.md`: how to report a vulnerability (a confidential GitLab issue) and which releases get fixes.
 
 ### Fixed
+- Configure accepted a system OpenSSL older than 3.2, and the build then failed in `src/crypto/madmin.c` (Argon2id). It now requires 3.2 and builds the pinned release when the system's is older, as on Ubuntu 24.04 (3.0).
+- The Users page flashed a loading spinner under the provider's users while it loaded the hidden local-users list.
+- `tests/e2e-k8s/envtest.sh` failed in its rolling-update step when the operator deleted a pod between `kubectl apply`'s read and its patch; the test's stand-in for the StatefulSet controller now retries.
 - OpenID sign-in returned to the login page with no error: response headers were formatted into a 1 KB buffer and cut, and a session cookie carrying an Entra ID session token is about 2 KB. Formatted headers are no longer truncated, and `tests/integration/console.sh` signs in with Entra-sized claims.
 - The libssh download falls back to snapshot.debian.org (the identical tarball, checked against the same SHA-256) when www.libssh.org cannot be reached, as from some corporate networks.
 - Test data committed by mistake with the batch jobs (`src/sb`, about 19 MB of random bytes) is gone.
