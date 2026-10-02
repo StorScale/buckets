@@ -338,6 +338,23 @@ export const kmsCreateKey = (key: string) => call("POST", kms("key/create"), { q
 // default key and keys a bucket encrypts with by default (KMSKeyInUse).
 export const kmsDeleteKey = (key: string) => call("POST", kms("key/delete"), { query: { "key-id": key } });
 
+// Encrypting a bucket's unencrypted objects in place: a KeyRotate batch job
+// with Buckets' onlyUnencrypted (every version; encrypted ones are left alone).
+export async function encryptExisting(bucket: string, alg: "AES256" | "aws:kms", key?: string): Promise<string> {
+  const enc = alg === "aws:kms" ? `    type: sse-kms\n    key: ${JSON.stringify(key ?? "")}\n` : "    type: sse-s3\n";
+  const yaml = `keyrotate:\n  apiVersion: v1\n  bucket: ${JSON.stringify(bucket)}\n  encryption:\n${enc}    onlyUnencrypted: true\n`;
+  const res = await call("POST", admin("start-job"), { body: yaml, headers: { "Content-Type": "application/yaml" } });
+  return ((await res.json()) as { id: string }).id;
+}
+export type JobProgress = { complete: boolean; failed: boolean; objects: number; objectsFailed: number };
+export async function jobProgress(id: string): Promise<JobProgress> {
+  const st = (await (await call("GET", admin("status-job"), { query: { jobId: id } })).json()) as {
+    LastMetric: { complete: boolean; failed: boolean; rotation?: { objects?: number; objectsFailed?: number } };
+  };
+  const m = st.LastMetric;
+  return { complete: m.complete, failed: m.failed, objects: m.rotation?.objects ?? 0, objectsFailed: m.rotation?.objectsFailed ?? 0 };
+}
+
 // People from the OpenID provider that Buckets knows of: signed in now, or holding access keys.
 type KeyInfo = { accessKey: string; expiration?: string };
 export type OpenIDUser = {

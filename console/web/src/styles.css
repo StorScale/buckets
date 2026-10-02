@@ -97,6 +97,7 @@ table.kv th { width: 35%; text-transform: none; font-size: 13px; }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px 20px; }
 .section { margin-bottom: 16px; }
 .section h2 { margin-top: 0; }
+.subsection { margin-top: 16px; padding-top: 4px; border-top: 1px solid var(--line); }
 
 .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; margin-bottom: 12px; }
 .tile { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; }

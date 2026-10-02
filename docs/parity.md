@@ -292,6 +292,19 @@ FTP (`--ftp`, `tests/integration/ftp.sh`) and SFTP (`--sftp`, `tests/integration
 
 KES (`tests/integration/kes.sh`).
 
+Extensions to MinIO's APIs (MinIO ignores what it does not know, so a job file or bucket written with
+them still loads there):
+- deleting a KMS key, `POST /minio/kms/v1/key/delete?key-id=` (`kms:DeleteKey`, KES only): the KMS's
+  default key and keys a bucket encrypts with by default are refused with 409 `KMSKeyInUse`
+  (`tests/integration/kms-delete.sh`);
+- encrypting existing objects in place: a keyrotate job with `encryption.includeUnencrypted: true` also
+  rewrites unencrypted versions encrypted (MinIO's skips them), and `onlyUnencrypted: true` rewrites only
+  those. Each version keeps its ID, modification time, metadata, tags, object lock state and checksum;
+  compressed objects stay compressed; SSE-S3 objects keep their ETag (an SSE-KMS ETag is not the MD5, as in
+  S3, and a multipart object is rewritten as one part). A version changed while it was being rewritten is
+  left alone and counted as failed (`tests/integration/encrypt-existing.sh`). The console's bucket
+  settings start one with "Encrypt existing objects".
+
 Open: MinIO KMS (`MINIO_KMS_SERVER`, the commercial KMS) as a backend.
 
 Known deviations from MinIO, kept on purpose:

@@ -800,6 +800,21 @@ static buckets_obj_err rot_apply(void *ud, const buckets_object_info *cur, bucke
   return BUCKETS_OBJ_OK;
 }
 
+/* includeUnencrypted: one unencrypted version rewritten encrypted, in place */
+static bool encrypt_one(buckets_s3_server *s, const buckets_batch_keyrotate *k, const item *it, char *err, size_t errlen) {
+  buckets_sse_req q = {.kind = strcmp(k->enc_type, "sse-kms") == 0 ? BUCKETS_SSE_KMS : BUCKETS_SSE_S3};
+  if (q.kind == BUCKETS_SSE_KMS && k->enc_key) {
+    const char *key = k->enc_key;
+    if (strncmp(key, "arn:aws:kms:", 12) == 0) key += 12;
+    snprintf(q.key_id, sizeof(q.key_id), "%s", key);
+  }
+  char why[160] = "";
+  buckets_s3_error se = buckets_s3_encrypt_in_place(s, k->bucket, it->name, it->version_id, &q, why, sizeof(why));
+  buckets_sse_req_free(&q);
+  if (se) snprintf(err, errlen, "%s%s%s", buckets_s3_error_get(se)->code, *why ? ": " : "", why);
+  return !se;
+}
+
 /* KeyRotate: one version's object key sealed anew */
 static bool rotate_one(run *r, const item *it, char *err, size_t errlen) {
   buckets_s3_server *s = r->b->s;
@@ -807,6 +822,7 @@ static bool rotate_one(run *r, const item *it, char *err, size_t errlen) {
   if (it->delete_marker) return true;
   buckets_sse_kind kind = buckets_s3_sse_kind_of_meta(it->meta_sys, it->nmeta_sys);
   bool kms = kind == BUCKETS_SSE_KMS, s3 = kind == BUCKETS_SSE_S3;
+  if (kind == BUCKETS_SSE_NONE && (k->include_unencrypted || k->only_unencrypted)) return encrypt_one(s, k, it, err, errlen);
   if (!kms && !s3) {
     snprintf(err, errlen, "The encryption parameters are not applicable to this object");
     return false;
@@ -884,8 +900,11 @@ static bool rot_visit(void *ud, item *it) {
   rot_walk *w = ud;
   if (cancelled(w->r)) return false;
   if (!rotate_select(w->r->job.keyrotate, it, w->now)) return true;
+  const buckets_batch_keyrotate *k = w->r->job.keyrotate;
   buckets_sse_kind kind = buckets_s3_sse_kind_of_meta(it->meta_sys, it->nmeta_sys);
-  if (kind != BUCKETS_SSE_KMS && kind != BUCKETS_SSE_S3) return true;
+  bool plain = kind == BUCKETS_SSE_NONE;
+  if (k->only_unencrypted ? !plain : kind != BUCKETS_SSE_KMS && kind != BUCKETS_SSE_S3 && !(plain && k->include_unencrypted))
+    return true;
   rot_task *t = buckets_xcalloc(1, sizeof(*t));
   t->r = w->r;
   t->it = *it; /* taken over */

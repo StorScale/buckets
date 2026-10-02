@@ -474,6 +474,8 @@ static void dec_keyrotate(ydec *d, const ynode *n, buckets_batch_keyrotate *k) {
     buckets_yaml_dec_str(d, GET(e, "type"), &k->enc_type);
     buckets_yaml_dec_str(d, GET(e, "key"), &k->enc_key);
     buckets_yaml_dec_str(d, GET(e, "context"), &k->enc_context);
+    buckets_yaml_dec_bool(d, GET(e, "includeUnencrypted"), &k->include_unencrypted);
+    buckets_yaml_dec_bool(d, GET(e, "onlyUnencrypted"), &k->only_unencrypted);
   }
 }
 
@@ -770,13 +772,21 @@ static void mp_keyrotate(buckets_buf *b, const buckets_batch_keyrotate *k) {
   mp_key(b, "Prefix");
   mp_str(b, k->prefix);
   mp_key(b, "Encryption");
-  buckets_mp_map(b, 3);
+  buckets_mp_map(b, 3 + k->include_unencrypted + k->only_unencrypted); /* as MinIO's, unless the extension is used */
   mp_key(b, "Type");
   mp_str(b, k->enc_type);
   mp_key(b, "Key");
   mp_str(b, k->enc_key);
   mp_key(b, "Context");
   mp_str(b, k->enc_context);
+  if (k->include_unencrypted) {
+    mp_key(b, "IncludeUnencrypted");
+    buckets_mp_bool(b, true);
+  }
+  if (k->only_unencrypted) {
+    mp_key(b, "OnlyUnencrypted");
+    buckets_mp_bool(b, true);
+  }
 }
 
 static void mp_expire(buckets_buf *b, const buckets_batch_expire *e) {
@@ -1069,6 +1079,8 @@ static bool rd_keyrotate(mpr *r, buckets_batch_keyrotate *kr) {
         if (IS(k2, "Type")) ok = rd_str(r, &kr->enc_type);
         else if (IS(k2, "Key")) ok = rd_str(r, &kr->enc_key);
         else if (IS(k2, "Context")) ok = rd_str(r, &kr->enc_context);
+        else if (IS(k2, "IncludeUnencrypted")) ok = buckets_mp_read_nil(r) || buckets_mp_read_bool(r, &kr->include_unencrypted);
+        else if (IS(k2, "OnlyUnencrypted")) ok = buckets_mp_read_nil(r) || buckets_mp_read_bool(r, &kr->only_unencrypted);
         else ok = buckets_mp_skip(r);
       });
     } else {
@@ -1318,6 +1330,8 @@ void buckets_batch_job_yaml(const buckets_batch_job *j, buckets_buf *out) {
     buckets_yaml_w_str(&w, "type", k->enc_type);
     buckets_yaml_w_str(&w, "key", k->enc_key);
     buckets_yaml_w_str(&w, "context", k->enc_context);
+    if (k->include_unencrypted) buckets_yaml_w_bool(&w, "includeUnencrypted", true);
+    if (k->only_unencrypted) buckets_yaml_w_bool(&w, "onlyUnencrypted", true);
     buckets_yaml_w_end(&w);
     buckets_yaml_w_end(&w);
   }

@@ -1,6 +1,20 @@
 import { ReactNode, useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { bucketDocs, getQuota, getVersioning, kmsListKeys, kmsStatus, parseTags, setQuota, setVersioning, Tag, tagsXml } from "../api";
+import {
+  bucketDocs,
+  encryptExisting,
+  getQuota,
+  getVersioning,
+  jobProgress,
+  JobProgress,
+  kmsListKeys,
+  kmsStatus,
+  parseTags,
+  setQuota,
+  setVersioning,
+  Tag,
+  tagsXml,
+} from "../api";
 import { ErrorBanner, formatBytes, Notice, Spinner } from "../components";
 import { TagEditor } from "./Browser";
 
@@ -40,6 +54,9 @@ export default function BucketSettings() {
   const [policy, setPolicy] = useState("");
   const [lifecycle, setLifecycle] = useState("");
   const [sse, setSse] = useState<{ alg: string; key: string }>({ alg: "", key: "" });
+  // the encryption as saved: what encrypting existing objects applies
+  const [savedSse, setSavedSse] = useState<{ alg: string; key: string }>({ alg: "", key: "" });
+  const [encJob, setEncJob] = useState<{ id: string; progress?: JobProgress } | null>(null);
   // the KMS's keys for SSE-KMS; null when they cannot be listed (no KMS, or no permission)
   const [kmsKeys, setKmsKeys] = useState<{ keys: string[]; defaultKey: string } | null>(null);
   const [lock, setLock] = useState<{ enabled: boolean; mode: string; days: string }>({ enabled: false, mode: "", days: "" });
@@ -78,7 +95,9 @@ export default function BucketSettings() {
         setLifecycle(l ?? "");
         if (e) {
           const d = new DOMParser().parseFromString(e, "application/xml");
-          setSse({ alg: d.querySelector("SSEAlgorithm")?.textContent ?? "", key: d.querySelector("KMSMasterKeyID")?.textContent ?? "" });
+          const cur = { alg: d.querySelector("SSEAlgorithm")?.textContent ?? "", key: d.querySelector("KMSMasterKeyID")?.textContent ?? "" };
+          setSse(cur);
+          setSavedSse(cur);
         }
         if (o) {
           const d = new DOMParser().parseFromString(o, "application/xml");
@@ -96,7 +115,28 @@ export default function BucketSettings() {
     })();
   }, [bucket]);
 
+  // the encrypt job's progress, until it ends
+  useEffect(() => {
+    if (!encJob || encJob.progress?.complete || encJob.progress?.failed) return;
+    const t = setTimeout(
+      () =>
+        jobProgress(encJob.id)
+          .then((progress) => {
+            setEncJob({ id: encJob.id, progress });
+            if (progress.complete || progress.failed)
+              setNotice(
+                `Encrypted ${progress.objects - progress.objectsFailed} existing object version(s)` +
+                  (progress.objectsFailed ? `; ${progress.objectsFailed} failed (run it again to retry them).` : "."),
+              );
+          })
+          .catch(fail),
+      1000,
+    );
+    return () => clearTimeout(t);
+  }, [encJob]);
+
   if (!loaded) return <Spinner />;
+  const encRunning = !!encJob && !encJob.progress?.complete && !encJob.progress?.failed;
   return (
     <div>
       <div className="page-head">
@@ -222,12 +262,49 @@ export default function BucketSettings() {
                 )
               : bucketDocs.encryption.del(bucket)
             )
+              .then(() => setSavedSse({ alg: sse.alg, key: sse.alg === "aws:kms" ? sse.key || kmsKeys?.defaultKey || "" : "" }))
               .then(ok("Encryption saved."))
               .catch(fail)
           }
         >
           Save
         </button>
+        {savedSse.alg && (
+          <div className="subsection" data-testid="encrypt-existing">
+            <h3>Existing objects</h3>
+            <p className="muted">
+              Objects uploaded before encryption was turned on stay unencrypted. Encrypt them in place, every version, with{" "}
+              {savedSse.alg === "aws:kms" ? (
+                <>
+                  SSE-KMS key <span className="mono">{savedSse.key || kmsKeys?.defaultKey}</span>
+                </>
+              ) : (
+                "SSE-S3"
+              )}
+              : their version IDs, dates, metadata and tags are kept. Objects already encrypted are left as they are.
+            </p>
+            <button
+              data-testid="encrypt-existing-start"
+              disabled={encRunning}
+              onClick={() =>
+                encryptExisting(bucket, savedSse.alg as "AES256" | "aws:kms", savedSse.key || kmsKeys?.defaultKey)
+                  .then((id) => {
+                    setNotice(null);
+                    setEncJob({ id });
+                  })
+                  .catch(fail)
+              }
+            >
+              Encrypt existing objects
+            </button>
+            {encRunning && (
+              <span className="muted" data-testid="encrypt-existing-progress">
+                {" "}
+                Encrypting… {encJob?.progress ? `${encJob.progress.objects} done` : "starting"}
+              </span>
+            )}
+          </div>
+        )}
       </Section>
 
       <Section title="Object locking">

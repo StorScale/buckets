@@ -428,7 +428,7 @@ static void *hc_main(void *arg) {
     pthread_mutex_lock(&r->mu);
     size_t n = r->nhc;
     ep_health *snap = buckets_xcalloc(n + 1, sizeof(*snap));
-    memcpy(snap, r->hc, n * sizeof(*snap));
+    if (n) memcpy(snap, r->hc, n * sizeof(*snap));
     pthread_mutex_unlock(&r->mu);
     for (size_t i = 0; i < n && !atomic_load(&r->stop); i++) {
       buckets_s3c_config cfg = {.endpoint = snap[i].endpoint, .secure = snap[i].secure,

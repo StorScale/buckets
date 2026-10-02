@@ -54,6 +54,7 @@ typedef enum {
   BUCKETS_OBJ_ERR_TIER,               /* the remote tier holding a transitioned version failed */
   BUCKETS_OBJ_ERR_DISK_FULL,          /* no pool can take the object */
   BUCKETS_OBJ_ERR_DATA_MOVEMENT,      /* data movement would write into its own source pool */
+  BUCKETS_OBJ_ERR_CHANGED,            /* the version to replace changed after it was read */
 } buckets_obj_err;
 
 const char *buckets_obj_strerror(buckets_obj_err e);
@@ -214,6 +215,11 @@ typedef struct {
   const char *version_id;
   int64_t mod_time_ns; /* 0: now */
   const char *preserve_etag; /* store this ETag instead of the computed one (replication) */
+  /* Rewriting a version in place (version_id): commit only if, under the
+   * namespace lock, that version still has this modification time and
+   * stored ETag; else BUCKETS_OBJ_ERR_CHANGED and nothing changes. 0/NULL: no check. */
+  int64_t expect_mod_time_ns;
+  const char *expect_etag;
   /* Puts of unknown size (-1, compressed streams): the plaintext size, which
    * decides inlining. */
   int64_t actual_size;

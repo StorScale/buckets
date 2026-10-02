@@ -69,6 +69,7 @@ buckets_s3_error buckets_s3_obj_error(buckets_obj_err e) {
     case BUCKETS_OBJ_ERR_TIER: return BUCKETS_ERR_INTERNAL_ERROR;
     case BUCKETS_OBJ_ERR_DISK_FULL: return BUCKETS_ERR_STORAGE_FULL;
     case BUCKETS_OBJ_ERR_DATA_MOVEMENT: return BUCKETS_ERR_INTERNAL_ERROR;
+    case BUCKETS_OBJ_ERR_CHANGED: return BUCKETS_ERR_PRECONDITION_FAILED;
   }
   return BUCKETS_ERR_INTERNAL_ERROR;
 }
@@ -4944,4 +4945,98 @@ buckets_obj_err buckets_s3_config_read(buckets_s3_server *s, const char *path, b
   OPENSSL_cleanse(key, sizeof(key));
   buckets_object_info_free(&oi);
   return err;
+}
+
+/* ---- encrypting a stored version in place (KeyRotate's includeUnencrypted) ---- */
+
+/* What a rewrite recomputes from the new data, and so leaves out of the kept
+ * metadata: the ETag, checksum, compression, inline flag and encryption. */
+static bool rewrite_recomputes(const char *key) {
+  static const char *const keys[] = {"etag", BUCKETS_CKSUM_META, BUCKETS_COMPRESS_META, BUCKETS_ACTUAL_SIZE_META,
+                                     BUCKETS_XL_META_INLINE};
+  for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++)
+    if (strcasecmp(key, keys[i]) == 0) return true;
+  return strncasecmp(key, "X-Minio-Internal-Server-Side-Encryption", 39) == 0;
+}
+
+buckets_s3_error buckets_s3_encrypt_in_place(struct buckets_s3_server *srv, const char *bucket, const char *object,
+                                            const char *version_id, const buckets_sse_req *r, char *why, size_t cap) {
+  buckets_objlayer *L = srv->layer;
+  buckets_object_info src;
+  buckets_obj_err err = buckets_obj_stat(L, bucket, object, version_id, &src);
+  if (err) return buckets_s3_obj_error(err);
+  buckets_s3_error se = BUCKETS_ERR_NONE;
+  if (src.delete_marker) snprintf(why, cap, "a delete marker has no data"), se = BUCKETS_ERR_INVALID_REQUEST;
+  else if (buckets_s3_sse_encrypted(&src)) snprintf(why, cap, "already encrypted"), se = BUCKETS_ERR_INVALID_REQUEST;
+  else if (buckets_object_is_remote(&src))
+    snprintf(why, cap, "transitioned to a remote tier: restore it first"), se = BUCKETS_ERR_INVALID_REQUEST;
+  if (se) {
+    buckets_object_info_free(&src);
+    return se;
+  }
+  bool compressed = buckets_s3_is_compressed(&src);
+  int64_t stored_size = src.size;
+  if (compressed) src.size = buckets_s3_actual_size(&src);
+  char expect_etag[sizeof(src.etag)];
+  snprintf(expect_etag, sizeof(expect_etag), "%s", src.etag);
+
+  /* every piece of metadata the new data does not recompute: content type,
+   * x-amz-meta-*, tags, object lock, replication state, ... */
+  buckets_xl_kv *meta = NULL;
+  size_t nmeta = 0;
+  for (size_t i = 0; i < src.nmeta; i++)
+    if (!rewrite_recomputes(src.meta[i].key)) buckets_xl_kv_set(&meta, &nmeta, src.meta[i].key, src.meta[i].value, src.meta[i].value_len);
+  for (size_t i = 0; i < src.nmeta_sys; i++)
+    if (!rewrite_recomputes(src.meta_sys[i].key))
+      buckets_xl_kv_set(&meta, &nmeta, src.meta_sys[i].key, src.meta_sys[i].value, src.meta_sys[i].value_len);
+
+  /* the stored checksum, verified against what is read and sealed with the new key */
+  cks_ctx cx = {0};
+  body_src nob = {0};
+  sse_put sp = {.cx = &cx, .b = &nob, .compressed = compressed};
+  buckets_checksum sc;
+  if (src.checksum && buckets_checksum_read_stored(src.checksum, src.checksum_len, &sc)) {
+    if ((sc.type & BUCKETS_CKSUM_MULTIPART) && !(sc.type & BUCKETS_CKSUM_FULL_OBJECT)) {
+      cx.want.type = sc.type & BUCKETS_CKSUM_BASE_MASK; /* a composite one: computed again whole */
+      cx.server_side = true;
+    } else {
+      cx.want = sc;
+      cx.want.type &= BUCKETS_CKSUM_BASE_MASK | BUCKETS_CKSUM_FULL_OBJECT;
+    }
+  }
+  uint8_t key[32];
+  se = buckets_s3_sse_new_key_srv(srv, r, bucket, object, key, &sp.sys, &sp.nsys);
+  memcpy(sp.key, key, 32);
+  src_stream ss = {0};
+  if (!se) se = open_source_layer(L, bucket, object, src.version_id, &src, NULL, false, stored_size, 0, src.size, &ss);
+  if (!se) {
+    buckets_sse_writer w;
+    sp.w = &w;
+    int64_t size = src.size;
+    void *rd_ud;
+    buckets_read_fn rd = xform_open(&sp, src_read, &ss, &size, cx.want.type & BUCKETS_CKSUM_BASE_MASK, key, NULL, true, true, &rd_ud);
+    /* the same version, rewritten: its ID and time, and only if it is still the one read */
+    buckets_put_opts opts = {.meta = meta,
+                             .nmeta = nmeta,
+                             .version_id = src.version_id,
+                             .mod_time_ns = src.mod_time_ns,
+                             .expect_mod_time_ns = src.mod_time_ns,
+                             .expect_etag = expect_etag,
+                             .pre_commit = sse_pre_commit,
+                             .pre_commit_ud = &sp,
+                             .actual_size = src.size};
+    buckets_object_info oi;
+    err = buckets_obj_put(L, bucket, object, rd, rd_ud, size, &opts, &oi);
+    xform_close(&sp);
+    if (!err) buckets_object_info_free(&oi);
+    else if (err == BUCKETS_OBJ_ERR_CHANGED) snprintf(why, cap, "changed while it was being encrypted; run the job again");
+    se = buckets_s3_obj_error(err);
+  }
+  src_close(&ss);
+  OPENSSL_cleanse(key, sizeof(key));
+  OPENSSL_cleanse(sp.key, sizeof(sp.key));
+  free_kvs(sp.sys, sp.nsys);
+  free_kvs(meta, nmeta);
+  buckets_object_info_free(&src);
+  return se;
 }

@@ -99,6 +99,10 @@ typedef struct {
   buckets_batch_flags flags;
   char *bucket, *prefix;
   char *enc_type, *enc_key, *enc_context;
+  /* encryption.includeUnencrypted (a Buckets extension): unencrypted versions
+   * are encrypted in place too, not skipped; onlyUnencrypted: only they are,
+   * encrypted versions are left as they are */
+  bool include_unencrypted, only_unencrypted;
 } buckets_batch_keyrotate;
 
 typedef struct {

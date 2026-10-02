@@ -67,6 +67,9 @@ buckets_s3_error buckets_s3_ssec_key(s3_ctx *c, bool copy, uint8_t key[32]);
  * metadata is added to sys. */
 buckets_s3_error buckets_s3_sse_new_key(s3_ctx *c, const buckets_sse_req *r, const char *bucket, const char *object,
                                         uint8_t key[32], buckets_xl_kv **sys, size_t *nsys);
+/* The same, outside a request (batch jobs): the server's KMS. */
+buckets_s3_error buckets_s3_sse_new_key_srv(struct buckets_s3_server *srv, const buckets_sse_req *r, const char *bucket,
+                                            const char *object, uint8_t key[32], buckets_xl_kv **sys, size_t *nsys);
 
 /* Stored objects */
 buckets_sse_kind buckets_s3_sse_kind_of(const buckets_object_info *oi);
@@ -79,6 +82,14 @@ buckets_sse_kind buckets_s3_sse_kind_of_meta(const buckets_xl_kv *sys, size_t ns
 buckets_s3_error buckets_s3_sse_rotate(struct buckets_s3_server *s, const buckets_object_info *oi, const char *bucket,
                                        const char *object, const char *new_key_id, buckets_xl_kv **sys, size_t *nsys);
 bool buckets_s3_sse_encrypted(const buckets_object_info *oi); /* crypto.IsEncrypted */
+/* KeyRotate's includeUnencrypted (a Buckets extension): version version_id of
+ * bucket/object, stored unencrypted, rewritten encrypted as r asks, in place:
+ * the same version ID, modification time and metadata (tags, object lock,
+ * ...), compressed if it was, its checksum kept. Changes nothing, with
+ * PreconditionFailed, when the version changed after it was read; why says
+ * what was refused (already encrypted, a remote tier, ...). */
+buckets_s3_error buckets_s3_encrypt_in_place(struct buckets_s3_server *srv, const char *bucket, const char *object,
+                                            const char *version_id, const buckets_sse_req *r, char *why, size_t cap);
 bool buckets_s3_sse_is_multipart(const buckets_object_info *oi);
 /* decryptObjectMeta: the object key (SSE-C: from the request's key, copy
  * headers when copy is set). */

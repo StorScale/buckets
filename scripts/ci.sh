@@ -5,7 +5,7 @@
 # SELGEN (a fixture writer: see tests/integration/select.sh) adds zstd/lz4/s2/snappy and generated
 # Parquet cases to tests/integration/select.sh.
 # SFTPCLIENT (tests/integration/sftpclient built with Go) runs tests/integration/sftp.sh;
-# FAKEKES (tests/integration/fakekes built with Go) runs tests/integration/kes.sh.
+# FAKEKES (tests/integration/fakekes built with Go) runs tests/integration/kes.sh and kms-delete.sh.
 # The full CI gate, runnable locally and from any CI host:
 #   1. release build + unit tests + fuzz corpus replay
 #   2. ASan/UBSan build + unit tests + end-to-end smoke test
@@ -71,6 +71,8 @@ run tests/integration/adminops-dist.sh build-ci-asan/src/bucketsd
 run tests/integration/ftp.sh build-ci-asan/src/bucketsd
 run tests/integration/sftp.sh build-ci-asan/src/bucketsd
 run tests/integration/kes.sh build-ci-asan/src/bucketsd
+run tests/integration/kms-delete.sh build-ci-asan/src/bucketsd
+run tests/integration/encrypt-existing.sh build-ci-asan/src/bucketsd
 run tests/integration/console.sh build-ci-asan/src/bucketsd build-ci-asan/src/consoled
 # The console: SPA build, typecheck and Playwright e2e against the sanitized
 # bucketsd and consoled (skipped without npm).
@@ -110,6 +112,8 @@ run tests/integration/adminops-dist.sh build-ci/src/bucketsd
 run tests/integration/ftp.sh build-ci/src/bucketsd
 run tests/integration/sftp.sh build-ci/src/bucketsd
 run tests/integration/kes.sh build-ci/src/bucketsd
+run tests/integration/kms-delete.sh build-ci/src/bucketsd
+run tests/integration/encrypt-existing.sh build-ci/src/bucketsd
 
 # kind end to end (needs docker, kind and kubectl; see tests/e2e-k8s/README.md)
 if [[ -n "${KIND_E2E:-}" ]]; then

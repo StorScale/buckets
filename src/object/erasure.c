@@ -47,7 +47,7 @@ const char *buckets_obj_strerror(buckets_obj_err e) {
       "no such upload", "invalid part", "parts out of order", "part too small", "checksum mismatch",
       "read quorum not met", "write quorum not met", "bucket exists", "bucket not empty",
       "namespace lock timed out", "method not allowed on a delete marker", "remote tier failure",
-      "storage full", "data movement would overwrite the source pool"};
+      "storage full", "data movement would overwrite the source pool", "the object changed after it was read"};
   return (size_t)e < BUCKETS_ARRAY_LEN(names) ? names[e] : "unknown";
 }
 
@@ -980,6 +980,9 @@ static void add_free_version(buckets_xlmeta *x, const buckets_xl_object *cur, co
 
 /* ---- put --------------------------------------------------------------------------- */
 
+static buckets_obj_err still_expected(buckets_epool *L, const char *bucket, const char *object,
+                                      const buckets_put_opts *opts);
+
 buckets_obj_err buckets_ep_put(buckets_epool *L, const char *bucket, const char *object, buckets_read_fn rd,
                                 void *rd_ud, int64_t size, const buckets_put_opts *opts, buckets_object_info *out) {
   buckets_obj_err err = buckets_ep_stat_bucket(L, bucket);
@@ -1061,6 +1064,7 @@ buckets_obj_err buckets_ep_put(buckets_epool *L, const char *bucket, const char 
       /* The namespace check runs under the lock: a concurrent commit of this
        * key briefly leaves its directory without xl.meta. */
       err = !lk ? BUCKETS_OBJ_ERR_TIMEOUT : check_namespace(s, bucket, object);
+      if (!err && opts && opts->expect_mod_time_ns) err = still_expected(L, bucket, object, opts);
       if (!err) {
         err = commit_version(s, bucket, object, &o, e.dist, e.alive, e.inline_mode ? e.ibuf : NULL, tmp_dir.data,
                              !e.inline_mode, write_quorum(e.data, e.parity), &committed);
@@ -1171,6 +1175,26 @@ static buckets_obj_err resolve(buckets_epool *L, const char *bucket, const char 
   }
   if (err) free_metas(m, (*set)->n);
   return err;
+}
+
+/* An in-place rewrite's guard, under the write lock: the version it read is
+ * still there, unchanged. The read is the same quorum read stat makes. */
+static buckets_obj_err still_expected(buckets_epool *L, const char *bucket, const char *object,
+                                      const buckets_put_opts *opts) {
+  buckets_eset *s;
+  dmeta m[MAX_SET];
+  long vidx[MAX_SET];
+  buckets_xl_object o;
+  buckets_obj_err err = resolve(L, bucket, object, opts->version_id, &s, m, vidx, &o);
+  if (err == BUCKETS_OBJ_ERR_NO_SUCH_KEY || err == BUCKETS_OBJ_ERR_NO_SUCH_VERSION) return BUCKETS_OBJ_ERR_CHANGED;
+  if (err) return err;
+  const buckets_xl_kv *etag = buckets_xl_kv_get(o.meta_user, o.nmeta_user, "etag");
+  bool same = o.type == BUCKETS_XL_TYPE_OBJECT && o.mod_time == opts->expect_mod_time_ns &&
+              (!opts->expect_etag || (etag && etag->value_len == strlen(opts->expect_etag) &&
+                                      memcmp(etag->value, opts->expect_etag, etag->value_len) == 0));
+  buckets_xl_object_free(&o);
+  free_metas(m, s->n);
+  return same ? BUCKETS_OBJ_OK : BUCKETS_OBJ_ERR_CHANGED;
 }
 
 static buckets_obj_err obj_stat(buckets_epool *L, const char *bucket, const char *object, const char *version_id,

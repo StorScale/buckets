@@ -285,7 +285,7 @@ test("configuration: read and change a setting", async ({ page }) => {
 });
 
 test.describe("encryption", () => {
-  test("the KMS and its keys, and a bucket encrypted with one", async ({ page }) => {
+  test("the KMS and its keys, a bucket encrypted with one, and its existing objects", async ({ page }) => {
     test.skip(!!process.env.CONSOLE_URL, "needs the static KMS key of the local setup");
     await login(page);
     await page.getByRole("link", { name: "Encryption" }).click();
@@ -301,11 +301,21 @@ test.describe("encryption", () => {
     await page.getByTestId("create-bucket").click();
     await page.getByTestId("bucket-name").fill(bucket);
     await page.getByTestId("bucket-create-submit").click();
+    // an object from before the bucket was encrypted
+    await page.getByRole("link", { name: bucket }).click();
+    await page.getByTestId("file-input").setInputFiles([{ name: "old.txt", mimeType: "text/plain", buffer: Buffer.from("written in the clear") }]);
+    await expect(page.getByTestId("notice")).toHaveText("Uploaded 1 file.");
     await page.goto(`/buckets/${bucket}/settings`);
+    await expect(page.getByTestId("encrypt-existing")).toHaveCount(0); // nothing to encrypt with yet
     await page.getByTestId("sse-alg").selectOption("aws:kms");
     await expect(page.getByTestId("sse-key").locator("option").first()).toHaveText("e2e-key (KMS default key)");
     await page.getByTestId("save-sse").click();
     await expect(page.getByTestId("notice")).toHaveText("Encryption saved.");
+    await expect(page.getByTestId("encrypt-existing")).toContainText("e2e-key");
+    await page.getByTestId("encrypt-existing-start").click();
+    await expect(page.getByTestId("notice")).toHaveText("Encrypted 1 existing object version(s).", { timeout: 20000 });
+    const head = await page.request.head(`/api/v1/s3/${bucket}/old.txt`);
+    expect(head.headers()["x-amz-server-side-encryption"]).toBe("aws:kms");
     // the key page now names the bucket it encrypts
     await page.getByRole("link", { name: "Encryption" }).click();
     await expect(page.getByTestId("kms-key-e2e-key")).toContainText(bucket);

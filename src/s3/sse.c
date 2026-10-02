@@ -250,6 +250,11 @@ static void sys_set(buckets_xl_kv **sys, size_t *n, const char *k, const char *v
 
 buckets_s3_error buckets_s3_sse_new_key(s3_ctx *c, const buckets_sse_req *r, const char *bucket, const char *object,
                                         uint8_t key[32], buckets_xl_kv **sys, size_t *nsys) {
+  return buckets_s3_sse_new_key_srv(c->s, r, bucket, object, key, sys, nsys);
+}
+
+buckets_s3_error buckets_s3_sse_new_key_srv(struct buckets_s3_server *srv, const buckets_sse_req *r, const char *bucket,
+                                            const char *object, uint8_t key[32], buckets_xl_kv **sys, size_t *nsys) {
   uint8_t ext[32], iv[32], sealed[BUCKETS_SEALED_KEY_LEN];
   const char *domain;
   buckets_buf dek = BUCKETS_BUF_INIT;
@@ -258,10 +263,10 @@ buckets_s3_error buckets_s3_sse_new_key(s3_ctx *c, const buckets_sse_req *r, con
     memcpy(ext, r->ssec_key, 32);
     domain = "SSE-C";
   } else {
-    if (!c->s->kms) return BUCKETS_ERR_KMS_NOT_CONFIGURED;
+    if (!srv->kms) return BUCKETS_ERR_KMS_NOT_CONFIGURED;
     buckets_buf ctx = BUCKETS_BUF_INIT;
     object_context(bucket, object, r->kind == BUCKETS_SSE_KMS && r->has_context ? r->context.data : NULL, &ctx);
-    buckets_kms_err ke = buckets_kms_generate(c->s->kms, r->kind == BUCKETS_SSE_KMS ? r->key_id : NULL, ctx.data, ext, &dek,
+    buckets_kms_err ke = buckets_kms_generate(srv->kms, r->kind == BUCKETS_SSE_KMS ? r->key_id : NULL, ctx.data, ext, &dek,
                                              key_id, sizeof(key_id));
     buckets_buf_free(&ctx);
     if (ke) {
