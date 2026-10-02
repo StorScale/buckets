@@ -2,17 +2,32 @@
 
 S3-compatible object storage written in C, built to run natively on Kubernetes. It is a rewrite of MinIO's last public release (`RELEASE.2025-10-15T17-29-55Z`; the upstream project was archived in April 2026).
 
-**Status: 0.3.0, erasure-coded and distributed.** The S3 core runs in MinIO's exact on-disk format, on anything from one drive to multi-pool clusters of nodes:
-- erasure coding, bitrot protection and healing
-- HTTPS
-- cluster-wide locks
-- survives drive and node loss
+**Status: 0.10.0. All build phases are done:** Buckets implements 220 of MinIO's 222 API handlers (the other two are dropped on purpose) in MinIO's exact on-disk format, on anything from one drive to multi-pool clusters of nodes:
+- erasure coding, bitrot protection and healing; survives drive and node loss
+- IAM, STS, and sign-in with LDAP or OpenID Connect (Microsoft Entra ID with app roles is in use)
+- versioning, object lock, lifecycle, SSE with KMS, compression, replication, tiering, batch jobs, S3 Select, SFTP/FTP
+- a Kubernetes operator and a web console deployed apart from storage
 
-Real MinIO and Buckets can serve each other's drives, clusters included. minio-go's functional suite (mint's Go suite) passes with zero failures on one node and on a cluster; its remaining tests need features from later phases. Next up is the Kubernetes operator. See [docs/architecture.md](docs/architecture.md) for the roadmap and [docs/parity.md](docs/parity.md) for per-handler progress.
+Real MinIO and Buckets can serve each other's drives, clusters included.
+
+| Document | What it covers |
+|---|---|
+| [docs/architecture.md](docs/architecture.md) | Components, layers, the compatibility contract, build phases |
+| [docs/parity.md](docs/parity.md) | Every MinIO API handler and its status |
+| [docs/identity.md](docs/identity.md) | Sign-in with Microsoft Entra ID (or another OpenID provider) and role-based access |
+| [docs/performance.md](docs/performance.md) | Benchmarks against MinIO and how to run them |
+| [docs/roadmap.md](docs/roadmap.md) | What comes next, and why |
+| [CHANGELOG.md](CHANGELOG.md) | Changes by release |
 
 ## Build
 
-You need a C17 compiler and CMake 3.20+ (Ninja is recommended). Dependencies (llhttp, yyjson, cmocka) are fetched and pinned at configure time. OpenSSL 3 is used from the system when present, and otherwise built once from a pinned release into `.deps/` (this needs perl and make).
+You need a C17 compiler and CMake 3.20+ (Ninja is recommended). Dependencies (llhttp, yyjson, libssh and others) are fetched and pinned at configure time; cmocka too when tests are built.
+
+OpenSSL must be 3.2 or later (madmin's encrypted admin payloads need its Argon2id). The system's is used when present, and otherwise built once from a pinned release into `.deps/` (this needs perl and make). Configure does not yet reject an older system OpenSSL: on, for example, Ubuntu 24.04 (OpenSSL 3.0) the build fails in `src/crypto/madmin.c`. Build the pinned release into `.deps/openssl-3.5.4` (as `cmake/OpenSSL.cmake` does) and point CMake at it:
+
+```bash
+cmake -S . -B build -G Ninja -DOPENSSL_ROOT_DIR=$PWD/.deps/openssl-3.5.4 -DOPENSSL_USE_STATIC_LIBS=TRUE
+```
 
 ```bash
 cmake -S . -B build -G Ninja
@@ -60,7 +75,13 @@ Or install the operator with Helm (`watchNamespace` limits it, and its RBAC, to 
 helm install buckets-operator operator/helm/buckets-operator -n buckets-system --create-namespace
 ```
 
-Root credentials land in the Secret `<name>-root` unless `spec.credsSecret` names your own. `spec.console.enabled` adds the web console as a Deployment of its own (`<name>-console`, port 9090, optionally behind an Ingress); sign in with any Buckets credentials. Pools can be appended to expand a cluster; the operator then restarts every server together. Image changes roll one server at a time. `operator/examples/cluster-tls.yaml` shows TLS with cert-manager.
+Root credentials land in the Secret `<name>-root` unless `spec.credsSecret` names your own. Pools can be appended to expand a cluster; the operator then restarts every server together. Image changes roll one server at a time. `operator/examples/cluster-tls.yaml` shows TLS with cert-manager.
+
+`spec.console.enabled` adds the web console as a Deployment of its own (`<name>-console`, port 9090, optionally behind an Ingress). In `spec.console`:
+- `tls.certSecret` names a `kubernetes.io/tls` Secret that the console serves itself, so it can sit behind a LoadBalancer on 443 without an Ingress;
+- `env` adds environment variables, such as its OpenID sign-in settings, with `valueFrom` for secrets.
+
+`operator/examples/cluster-entra.yaml` puts these together: TLS on the servers and the console, and sign-in with Microsoft Entra ID (see [docs/identity.md](docs/identity.md)).
 
 Any S3 client works:
 
@@ -79,7 +100,18 @@ CONSOLE_MINIO_SERVER=http://127.0.0.1:9000 CONSOLE_PBKDF_PASSPHRASE=some-secret 
   build/src/consoled --address :9090 --web-dir console/web/dist
 ```
 
-Sign in at http://localhost:9090 with any Buckets credentials: the console exchanges them for STS credentials and keeps those in an encrypted cookie. `CONSOLE_PBKDF_PASSPHRASE`/`CONSOLE_PBKDF_SALT` derive the cookie key; give every replica the same values. `CONSOLE_LDAP_ENABLED=on` adds LDAP sign-in, `BUCKETS_CONSOLE_OIDC_CONFIG_URL` with `_CLIENT_ID`/`_CLIENT_SECRET` adds OpenID sign-in (the redirect URI is `<console>/oauth_callback`), and `BUCKETS_CONSOLE_S3_URL` (the S3 endpoint browsers can reach) enables share links.
+Building the console needs Node.js 22 or later (its image uses Node 24; Node 18 is too old for its build tools).
+
+Sign in at http://localhost:9090 with any Buckets credentials: the console exchanges them for STS credentials and keeps those in an encrypted cookie. `CONSOLE_PBKDF_PASSPHRASE`/`CONSOLE_PBKDF_SALT` derive the cookie key; give every replica the same values. `--certs-dir` serves the console over HTTPS (`public.crt` and `private.key`).
+
+| Setting | Effect |
+|---|---|
+| `CONSOLE_LDAP_ENABLED=on` | Adds LDAP sign-in |
+| `BUCKETS_CONSOLE_OIDC_CONFIG_URL`, `_CLIENT_ID`, `_CLIENT_SECRET` | Adds OpenID sign-in; the redirect URI is `<console>/oauth_callback` unless `BUCKETS_CONSOLE_OIDC_REDIRECT_URI` sets it. `_SCOPES` and `_DISPLAY_NAME` are optional |
+| `BUCKETS_CONSOLE_LOCAL_USERS=on` | Offers Create user on the Users page. Off by default while OpenID sign-in is on, so people come from the identity provider; existing local users are still listed |
+| `BUCKETS_CONSOLE_S3_URL` | The S3 endpoint browsers can reach; enables share links |
+
+With OpenID sign-in, the Users page also lists the provider's people that Buckets knows of (signed in now, or holding access keys), with their names and roles.
 
 `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD` and `MINIO_REGION` are honored as fallbacks, so existing deployments can switch over. The health endpoints are `/minio/health/{live,ready,cluster}`, also served under `/buckets/health/...`.
 
@@ -92,6 +124,8 @@ Sign in at http://localhost:9090 with any Buckets credentials: the console excha
 | `tests/integration/interop.sh` | Round trips with `mc` and a real MinIO build in both directions (needs `MC_BIN` and `MINIO_BIN`; `tools/build-oracles.sh` builds them) |
 | `tests/conformance/minio-go.sh` | minio-go's functional suite (MinIO mint's Go suite); needs Go |
 | `tests/integration/{erasure,heal,concurrency,pools,tls,cluster}.sh` | Drive loss and bitrot; healing; racing writers; pool expansion; HTTPS; a 4-node cluster losing and regaining nodes (`MINIO_BIN` adds MinIO interop) |
+| `tests/integration/console.sh` | `consoled` without a browser: key, LDAP and OpenID sign-in (with a session cookie over 1 KB, as Entra ID's are), the admin proxy, streams, share links |
+| `tests/integration/openid.sh` | OpenID Connect: AssumeRoleWithWebIdentity and ClientGrants against a mock provider, claim-based and role-policy providers |
 | `tests/e2e-k8s/envtest.sh` | The operator against a real kube-apiserver and etcd (envtest binaries, downloaded on first use), running as its own ServiceAccount |
 | `tests/e2e-k8s/kind.sh` | Full end to end on kind: images, operator, a 4-server cluster, pod and PVC loss, pool expansion, image rollout, the console Deployment and its Playwright suite (needs docker and kind; see `tests/e2e-k8s/README.md`) |
 | `tests/integration/select.sh` | S3 Select against MinIO, case by case (CSV, JSON, Parquet, every compression, errors) |
@@ -103,6 +137,8 @@ Sign in at http://localhost:9090 with any Buckets credentials: the console excha
 | `tests/bench/warp.sh` | warp-style concurrent PUT/GET throughput, Buckets then MinIO on the same drives (`S3BENCH`, `MINIO_BIN`; see `docs/performance.md`) |
 | `tests/fuzz/soak.sh` | Every fuzz target under libFuzzer with ASan/UBSan in a Linux container, for `SECONDS` each (needs docker) |
 | `scripts/ci.sh` | The full gate: release, ASan/UBSan and TSan builds, unit, smoke and interop tests |
+
+`.gitlab-ci.yml` builds the `bucketsd`, `buckets-operator` and `buckets-console` images with Kaniko on every push to `main` and on tags, and pushes them to Harbor (`harbor.os.harlandclarke.internal/vericast/<image>`), tagged with the short commit SHA and the branch name, or with the tag (without a leading `v`) and `latest`. It needs the CI/CD variables `HARBOR_USER` and `HARBOR_PASSWORD`.
 
 ## Layout
 
@@ -121,12 +157,11 @@ src/cmd      bucketsd entry point
 tests/       unit (cmocka), fuzz (libFuzzer), integration
 scripts/     generators (S3 error table, parity checklist), CI
 docker/      container images
-```
-
-operator/    the Kubernetes operator (C): CRDs, RBAC, manifests, examples
-
+operator/    the Kubernetes operator (C): CRDs, RBAC, Helm chart, manifests, examples
 console/     the web console: web/ (React + TypeScript SPA, Playwright e2e) served by
              src/console + src/cmd/consoled (the C backend-for-frontend)
+docs/        architecture, parity, identity, performance, roadmap; docs/brand holds the logo artwork
+```
 
 ## License
 

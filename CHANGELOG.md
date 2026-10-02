@@ -6,10 +6,22 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- `spec.console.tls.certSecret`: the console serves HTTPS itself (`consoled --certs-dir`), so it can sit behind a LoadBalancer on 443 without an Ingress. Its probes switch to HTTPS, its Service port becomes `https-console`, and a console Ingress gets ingress-nginx's `backend-protocol: HTTPS` unless one is set.
+- `spec.console.env`: extra environment for the console, after the operator's own, with `valueFrom` allowed. It carries the console's OpenID sign-in settings.
+- The console's Users page lists people from the OpenID provider that Buckets knows of (signed in now, or holding access keys), read-only, with their name, sign-in name and roles. `ListAccessKeysOpenIDBulk` returns `displayName`, `email` and `policies` for them, a Buckets extension that MinIO clients ignore.
+- `BUCKETS_CONSOLE_LOCAL_USERS`: whether the Users page offers Create user. Off by default while OpenID sign-in is on; `login-methods` reports it as `localUsers`.
+- `docs/identity.md`: sign-in with Microsoft Entra ID and role-based access from Entra app roles, with `operator/examples/cluster-entra.yaml`.
+- `docs/roadmap.md`: what comes next, and why.
+- A GitLab pipeline (`.gitlab-ci.yml`) that builds the `bucketsd`, `buckets-operator` and `buckets-console` images with Kaniko and pushes them to Harbor.
+
 ### Fixed
+- OpenID sign-in returned to the login page with no error: response headers were formatted into a 1 KB buffer and cut, and a session cookie carrying an Entra ID session token is about 2 KB. Formatted headers are no longer truncated, and `tests/integration/console.sh` signs in with Entra-sized claims.
+- The libssh download falls back to snapshot.debian.org (the identical tarball, checked against the same SHA-256) when www.libssh.org cannot be reached, as from some corporate networks.
 - Test data committed by mistake with the batch jobs (`src/sb`, about 19 MB of random bytes) is gone.
 
 ### Changed
+- The console has a new logo (a bucket of data blocks, in `console/web/public` with the artwork in `docs/brand`) and a blue accent to match; dark mode uses a lighter blue with dark text on primary buttons.
 - Streamed responses are sent by the worker that produces them, straight from the stream's own buffer when it offers one (`stream_view`/`stream_consume`; object GETs send from the verified shard buffers without a copy), until the socket is full, the response ends or 4 MiB have gone. They no longer cross three threads per 256 KiB. Under warp, 10 MiB GETs at 16 clients went from 8.5% behind MinIO to 3% behind, and 1 MiB GETs from 7% to 23% ahead.
 
 ## [0.10.0] - 2026-09-30

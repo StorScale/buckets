@@ -1,0 +1,38 @@
+# Sign-in with Microsoft Entra ID, roles from Entra app roles (see docs/identity.md).
+# TLS on the servers and on the console, so each can sit behind a LoadBalancer
+# on 443. Create first:
+#   - Secret entra-oidc (key client-secret): the app registration's client secret
+#     kubectl create secret generic entra-oidc --from-literal=client-secret='...'
+#   - Secrets store-tls and console-tls: kubernetes.io/tls, from cert-manager as in
+#     cluster-tls.yaml (store-tls also needs ca.crt, for internode trust)
+# Replace <tenant-id>, <client-id> and the console host name.
+apiVersion: buckets.io/v1alpha1
+kind: BucketsCluster
+metadata:
+  name: store
+spec:
+  tls:
+    certSecret: {name: store-tls}
+  # The servers: app roles arrive in the "roles" claim and name Buckets policies.
+  env:
+    - {name: MINIO_IDENTITY_OPENID_CONFIG_URL, value: "https://login.microsoftonline.com/<tenant-id>/v2.0/.well-known/openid-configuration"}
+    - {name: MINIO_IDENTITY_OPENID_CLIENT_ID, value: "<client-id>"}
+    - {name: MINIO_IDENTITY_OPENID_CLIENT_SECRET, valueFrom: {secretKeyRef: {name: entra-oidc, key: client-secret}}}
+    - {name: MINIO_IDENTITY_OPENID_CLAIM_NAME, value: "roles"}
+    - {name: MINIO_IDENTITY_OPENID_SCOPES, value: "openid,profile,email"}
+  pools:
+    - servers: 4
+      volumesPerServer: 2
+      volumeClaimTemplate:
+        resources: {requests: {storage: 100Gi}}
+  console:
+    enabled: true
+    tls:
+      certSecret: {name: console-tls}
+    # The console's sign-in button; the redirect URI must match the app registration.
+    env:
+      - {name: BUCKETS_CONSOLE_OIDC_CONFIG_URL, value: "https://login.microsoftonline.com/<tenant-id>/v2.0/.well-known/openid-configuration"}
+      - {name: BUCKETS_CONSOLE_OIDC_CLIENT_ID, value: "<client-id>"}
+      - {name: BUCKETS_CONSOLE_OIDC_CLIENT_SECRET, valueFrom: {secretKeyRef: {name: entra-oidc, key: client-secret}}}
+      - {name: BUCKETS_CONSOLE_OIDC_REDIRECT_URI, value: "https://console.example.com/oauth_callback"}
+      - {name: BUCKETS_CONSOLE_OIDC_DISPLAY_NAME, value: "Entra ID"}

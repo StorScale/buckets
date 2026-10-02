@@ -9,8 +9,8 @@ The MinIO source at that tag is the behavioral spec. Each subsystem below names 
 ```
                         ┌──────────────────────────── Kubernetes namespace ───────────────────────────┐
   browser ──Ingress──▶  │ buckets-console (Deployment)            buckets-operator (Deployment)       │
-                        │  ├─ nginx: React SPA                     watches BucketsCluster, BucketsUser,│
-                        │  └─ consoled (C BFF): sessions,          BucketsPolicy, Bucket CRs           │
+                        │  └─ consoled (C): serves the SPA,        watches BucketsCluster, BucketsUser,│
+                        │     sessions, key/LDAP/OpenID sign-in,   BucketsPolicy, Bucket CRs           │
                         │     SigV4-signs S3/admin calls ─┐        reconciles everything below         │
                         │                                 ▼                                            │
   S3 clients ─Ingress─▶ │ Service <cluster>  ──▶  StatefulSet per pool: bucketsd ×N (PVCs per drive)   │
@@ -26,7 +26,7 @@ The MinIO source at that tag is the behavioral spec. Each subsystem below names 
   - decommissioning
   - TLS
   - leader election through a Lease
-- **`buckets-console`** is stateless and scales independently of storage. It never touches drives: it only talks to `bucketsd` over the S3 and admin APIs, like any other client.
+- **`buckets-console`** is stateless and scales independently of storage. It never touches drives: it only talks to `bucketsd` over the S3 and admin APIs, like any other client. `consoled` serves the SPA itself, over HTTPS when `spec.console.tls` gives it a certificate, and signs people in with access keys, LDAP or OpenID Connect (see `docs/identity.md`).
 
 ## `bucketsd` layers
 
@@ -54,9 +54,15 @@ net/  core/      HTTP/1.1 server (llhttp), event loop (epoll/kqueue, io_uring pl
 | Internode protocol | **no** | mixed MinIO/Buckets clusters are unsupported |
 | SUBNET, callhome, self-update, gateway | dropped | not applicable on Kubernetes |
 
-## Current state (0.3.0)
+## Current state (0.10.0)
 
-The S3 core runs on one drive, many drives, several pools, or a cluster of nodes, in MinIO's on-disk format. It is verified these ways:
+Every build phase below is done: `docs/parity.md` lists 220 of MinIO's 222 API handlers as implemented and 2 as dropped on purpose, and `CHANGELOG.md` records what each release added. What comes next is in `docs/roadmap.md`.
+
+The rest of this section describes the S3 core and the operator as they were verified at 0.3.0 (Phases 1 to 3); later phases are described in the sections after it.
+
+### The S3 core at 0.3.0
+
+The S3 core runs on one drive, many drives, several pools, or a cluster of nodes, in MinIO's on-disk format. At 0.3.0 it was verified these ways:
 - **Conformance:** minio-go's functional suite (the Go suite inside MinIO's `mint`) gives 78 pass, 0 fail. The other 24 tests need later-phase features.
 - **On-disk compatibility:** a real MinIO build (`tests/integration/interop.sh`) reads what Buckets wrote, and Buckets reads what MinIO wrote. That covers single PUT, streaming PUT, multipart, checksums, folder objects, metadata and bucket creation times.
 - **Byte-level fixtures:** `tests/data/minio-ref` holds files written by MinIO, and `xl.meta` and `.metadata.bin` round-trip byte for byte.
@@ -122,14 +128,11 @@ The S3 core runs on one drive, many drives, several pools, or a cluster of nodes
 - **Verified here:** manifest unit tests, and the operator against a real kube-apiserver and etcd (`tests/e2e-k8s/envtest.sh`, 34 checks, running as its own ServiceAccount under the shipped RBAC).
 - **On kind:** `tests/e2e-k8s/kind.sh` (17 checks) applies a 4-server `BucketsCluster` and keeps serving S3 through its Service while a pod is killed, a drive's PVC is replaced and healed, a pool is added and the image is rolled; then the console comes up as its own Deployment and its Playwright suite passes against the cluster. The images build on Debian trixie, whose OpenSSL (3.5) has the Argon2id that madmin's encrypted admin payloads need.
 
-**Known interim choices, each replaced in a later phase:**
-- One event-loop thread moves bytes for all connections (per node). Handlers and stream pulls run on a worker pool, and each fans out per-drive work to the drive I/O pool. Request bodies are still spooled synchronously on the loop thread. Multiple reactors, then io_uring, follow.
-- Crypto primitives (SHA-256, MD5, SHA-1, HighwayHash, CRCs) are portable C, and all are verified against MinIO's Go libraries. OpenSSL is linked for TLS; moving the hashes onto it (and SIMD) comes with performance work.
-- Only the root credential is accepted. IAM comes in Phase 4.
-- Buckets are unversioned. Versioning, object lock, tagging and SSE come in Phase 5.
-- Remote listings walk peers' directories with one RPC per directory, and remote writes are buffered appends. A streaming walk RPC and streamed uploads come with performance work.
-- The operator resyncs every 5 s instead of watching (level-triggered either way). Watches come later.
-- Bucket metadata is read from the drives on each use (there is no cache yet), so nodes need no invalidation messages.
+**Interim choices that remain:**
+- The operator resyncs on an interval (`BUCKETS_OPERATOR_RESYNC_MS`, 5 s by default) instead of watching; it is level-triggered either way.
+- The network loops use epoll or kqueue; io_uring is not used yet.
+
+The others listed at 0.3.0 are gone: the HTTP server runs several event loops (`BUCKETS_NET_THREADS`), SHA-256 and MD5 use OpenSSL, IAM and versioning arrived in Phases 4 and 5, and bucket metadata is cached.
 
 ## Build phases
 
@@ -156,10 +159,10 @@ S3 Select (`src/select/`) follows MinIO's `internal/s3select` closely enough to 
 | 1 ✅ | Single-node S3 core: streaming bodies, xl.meta v2, objects, multipart, listing, checksums, SigV2, POST policy | minio-go functional suite at 0 failures; MinIO interop both ways |
 | 2 ✅ | Erasure coding, multi-drive, distributed (RPC, dsync, pools, heal, scanner, MRF), TLS | Drive and node loss with no data loss; reads MinIO-written drives |
 | 3 ✅ | Operator and CRDs, K8s-aware server, kind e2e | `kubectl apply` gives a healthy 4×4 cluster; pod and PVC loss heals |
-| 4 | IAM, STS, policy, LDAP, OIDC, plugins, admin API core | `mc admin user/policy/svcacct`; mint IAM |
-| 5 | Versioning, object lock, tagging, CORS, quota, lifecycle, SSE-S3/KMS/C, compression | Full mint pass; ceph s3-tests at or above the MinIO baseline |
+| 4 ✅ | IAM, STS, policy, LDAP, OIDC, plugins, admin API core | `mc admin user/policy/svcacct`; mint IAM |
+| 5 ✅ | Versioning, object lock, tagging, CORS, quota, lifecycle, SSE-S3/KMS/C, compression | Full mint pass; ceph s3-tests at or above the MinIO baseline |
 | 6 ✅ | Console (web + consoled) as its own Deployment | Playwright e2e on kind |
 | 7 ✅ | Notifications (10 targets), audit, metrics v2/v3 | Target integration tests; zero metric-name diff against MinIO |
 | 8 ✅ | Bucket and site replication, tiering, batch jobs, decommission, rebalance | Two-cluster and three-site e2e; mixed MinIO/Buckets replication (see below) |
-| 9 | S3 Select, object lambda, SFTP/FTP, Veeam SOS, remaining admin | `docs/parity.md` at 100% |
-| 10 | Performance parity (warp), fuzz soak, Helm chart | warp within 10% of MinIO or better |
+| 9 ✅ | S3 Select, object lambda, SFTP/FTP, Veeam SOS, remaining admin | `docs/parity.md` at 100% |
+| 10 ✅ | Performance parity (warp), fuzz soak, Helm chart | warp within 10% of MinIO or better |
