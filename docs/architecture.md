@@ -61,7 +61,7 @@ net/  core/      HTTP/1.1 server (llhttp), event loop (epoll/kqueue, io_uring pl
 | Internode protocol | **no** | mixed MinIO/Buckets clusters are unsupported |
 | SUBNET, callhome, self-update, gateway | dropped | not applicable on Kubernetes |
 
-## Current state (0.10.0)
+## Current state (1.0.0)
 
 Every build phase below is done: `docs/parity.md` lists 220 of MinIO's 222 API handlers as implemented and 2 as dropped on purpose, and `CHANGELOG.md` records what each release added. What comes next is in `docs/roadmap.md`.
 

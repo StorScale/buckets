@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-03
+
+The first stable release. Buckets takes over existing MinIO deployments in place and hands them back: `scripts/adopt-minio.sh` adopts a tenant's drives with no data copy, KES and its keys included, and `scripts/rollback-to-minio.sh` returns them to MinIO, both tested end to end on Kubernetes. Buckets no longer depends on MinIO's images: it ships its own KES-compatible key server, `buckets-kes`. Encryption is set up from the console, and existing objects can be encrypted in place.
+
 ### Added
 - Adoption carries a tenant's KES over (`scripts/adopt-minio.sh`). The keys stay in the tenant's key store.
   - **Settings:** the tenant's KES configuration, as it runs (its `${VAR}`s resolved from the KES pods' Secrets), becomes Secret `<tenant>-kms`. Vault, AWS, Azure and Google key stores carry over; the `fs` key store and Vault client certificates are refused.
