@@ -161,8 +161,10 @@ static bool ensure_creds(op_ctx *o, const bc_spec *s, kes_creds *c, char *err, s
   yyjson_doc_free(doc);
   if (ok && (!c->cert || !c->admin || !c->client || !buckets_kes_identity(c->admin, c->admin_id) ||
              !buckets_kes_identity(c->client, c->client_id))) {
-    snprintf(err, errlen, "the KES Secrets %s-kes-tls and %s-kes-identity are incomplete: delete them to have them made again",
-             s->name, s->name);
+    char tn[160], in[160];
+    bc_kes_tls_secret_name(s, tn, sizeof(tn));
+    bc_kes_identity_secret_name(s, in, sizeof(in));
+    snprintf(err, errlen, "the KES Secrets %s and %s are incomplete: delete them to have them made again", tn, in);
     ok = false;
   }
   if (!ok) creds_free(c);
@@ -658,10 +660,14 @@ void op_kms_reconcile(op_ctx *o, yyjson_val *bc, bc_spec *s, yyjson_mut_doc *d, 
     if (k) {
       bool created;
       buckets_kms_err e;
-      ensure_key(k, s->kes.key_name, true, &created, &e);
+      ensure_key(k, s->kes.key_name, s->kes.create_key, &created, &e);
       have_key = e == BUCKETS_KMS_OK;
       if (created) buckets_log_info("%s/%s: created KMS key %s", s->ns, s->name, s->kes.key_name);
-      if (!have_key) {
+      if (e == BUCKETS_KMS_ERR_KEY_NOT_FOUND) {
+        /* an adopted key store must already hold it: another key would hide that it is the wrong place */
+        snprintf(why, sizeof(why), "it is not in the key store, and spec.kms.kes.createKey is false: check that the "
+                                   "settings in Secret %s-kms point where the keys are", s->name);
+      } else if (!have_key) {
         pod_state ps;
         kes_pod(o, s, false, &ps);
         kes_log_reason(o, s, ps.pod, why, sizeof(why));
@@ -686,7 +692,7 @@ void op_kms_reconcile(op_ctx *o, yyjson_val *bc, bc_spec *s, yyjson_mut_doc *d, 
     snprintf(msg, sizeof(msg), "%lld of %d KES servers ready", ready, s->kes.replicas);
   } else if (*why) {
     phase = "Error";
-    snprintf(msg, sizeof(msg), "Creating key %s failed: %s", s->kes.key_name, why);
+    snprintf(msg, sizeof(msg), "The default key %s: %s", s->kes.key_name, why);
   } else if (ready == 0) {
     pod_state ps;
     kes_pod(o, s, false, &ps);

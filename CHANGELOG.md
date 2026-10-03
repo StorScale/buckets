@@ -7,6 +7,14 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Adoption carries a tenant's KES over (`scripts/adopt-minio.sh`). The keys stay in the tenant's key store.
+  - **Settings:** the tenant's KES configuration, as it runs (its `${VAR}`s resolved from the KES pods' Secrets), becomes Secret `<tenant>-kms`. Vault, AWS, Azure and Google key stores carry over; the `fs` key store and Vault client certificates are refused.
+  - **Spec:** `spec.kms.kes` names the tenant's default key with `createKey: false`, runs as the tenant's KES ServiceAccount (which a Vault Kubernetes role names) and keeps its node selector, tolerations and affinity. Its objects are named `<tenant>-buckets-kes`, so the tenant's own `<tenant>-kes` objects stay for a rollback.
+  - **Pre-flight:** before MinIO stops, `buckets-kes check` reads the default key in a one-off pod with the tenant's own KES configuration; adoption stops if it can't. `--check-kes` runs it in a dry run too.
+  - **config.env:** if it holds `MINIO_KMS_*` lines, Buckets reads a copy without them (Secret `<tenant>-buckets-config`); MinIO's stays as it was.
+  - **Credentials** never reach the plan, the state directory or the output. Rollback removes the copies.
+- Operator: `spec.kms.kes.createKey`, `name`, `serviceAccountName`, `nodeSelector`, `tolerations` and `affinity`. A new cluster with KES starts its storage servers only once KES serves the default key (phase `WaitingForKMS`).
+- `buckets-kes check --config FILE --key NAME`: reads a key with a KES configuration, and exits non-zero if it can't.
 - `buckets-kes` (`src/kes`, image `buckets-kes`): Buckets' own key server.
   - **Compatibility:** it speaks MinIO KES's API and reads its configuration file.
   - **Same storage:** it keeps keys as KES does, so either server reads the other's keys and ciphertexts.

@@ -162,8 +162,12 @@ static void handle_get(buckets_console_kms *m, buckets_http_response *resp) {
   yyjson_mut_obj_add_bool(d, o, "managed", true);
   yyjson_mut_obj_add_strcpy(d, o, "cluster", m->cluster);
   yyjson_mut_obj_add_strcpy(d, o, "namespace", m->ns);
-  char sa[160];
-  snprintf(sa, sizeof(sa), "%s-kes", m->cluster);
+  char sa[160]; /* the account a Vault Kubernetes role names: spec.kms.kes's, else the servers' own */
+  const char *sa_set = yyjson_get_str(yyjson_obj_get(kes, "serviceAccountName"));
+  const char *kes_name = yyjson_get_str(yyjson_obj_get(kes, "name"));
+  if (sa_set && *sa_set) snprintf(sa, sizeof(sa), "%s", sa_set);
+  else if (kes_name && *kes_name) snprintf(sa, sizeof(sa), "%s", kes_name);
+  else snprintf(sa, sizeof(sa), "%s-kes", m->cluster);
   yyjson_mut_obj_add_strcpy(d, o, "kesServiceAccount", sa);
   yyjson_mut_obj_add_bool(d, o, "enabled", yyjson_is_obj(kes));
   const char *key = yyjson_get_str(yyjson_obj_get(kes, "keyName"));

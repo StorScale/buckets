@@ -159,12 +159,14 @@ static yyjson_mut_val *vault(yyjson_mut_doc *d, yyjson_val *v, const char *ca_pa
     if (!*str(v, "approle.secret")) FAIL("Enter the AppRole's secret ID.");
     yyjson_mut_val *a = yyjson_mut_obj_add_obj(d, o, "approle");
     yyjson_mut_obj_add_strcpy(d, a, "engine", str_or(v, "approle.engine", "approle"));
+    if (*str(v, "approle.namespace")) yyjson_mut_obj_add_strcpy(d, a, "namespace", str(v, "approle.namespace"));
     yyjson_mut_obj_add_strcpy(d, a, "id", str(v, "approle.id"));
     yyjson_mut_obj_add_strcpy(d, a, "secret", str(v, "approle.secret"));
   } else if (strcmp(auth, "kubernetes") == 0) {
     if (!*str(v, "kubernetes.role")) FAIL("Enter the Vault role bound to KES's service account.");
     yyjson_mut_val *a = yyjson_mut_obj_add_obj(d, o, "kubernetes");
     yyjson_mut_obj_add_strcpy(d, a, "engine", str_or(v, "kubernetes.engine", "kubernetes"));
+    if (*str(v, "kubernetes.namespace")) yyjson_mut_obj_add_strcpy(d, a, "namespace", str(v, "kubernetes.namespace"));
     yyjson_mut_obj_add_strcpy(d, a, "role", str(v, "kubernetes.role"));
     yyjson_mut_obj_add_str(d, a, "jwt", K8S_SA_TOKEN);
   } else {

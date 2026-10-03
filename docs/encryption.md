@@ -90,12 +90,46 @@ spec:
       replicas: 2
 ```
 
+Other `spec.kms.kes` fields:
+
+- `createKey`: `false` makes a missing default key an error instead of creating it. Use it when the key store should already hold the key.
+- `name`: the base name of the KES Deployment, Service and ServiceAccount, and of Secrets `<name>-tls` and `<name>-identity`. Default `<cluster>-kes`.
+- `serviceAccountName`: an existing ServiceAccount for KES, instead of one the operator makes.
+- `image`, `replicas`, `resources`, `nodeSelector`, `tolerations`, `affinity`.
+
+A new cluster with `spec.kms.kes` starts its storage servers only once KES serves the default key. Until then its phase is `WaitingForKMS`. A cluster whose servers already run keeps running while KES comes up.
+
 The settings' fields are described in `src/kms/kesutil.h`. `status.kms` reports the KES servers' state:
 
 - `phase`: `NotConfigured`, `Starting`, `Ready`, `Degraded` or `Error`
 - `message`
 - `readyReplicas`
 - `activated`: whether the storage servers use KES yet
+
+## Adopting a MinIO tenant that uses KES
+
+`scripts/adopt-minio.sh` carries a tenant's KES over. The keys don't move: buckets-kes reads them where the tenant's KES keeps them.
+
+1. **Reading the tenant's KES.** The script reads the KES StatefulSet `<tenant>-kes` as it runs: its configuration file, the Secrets it mounts (a Vault CA among them) and the environment the configuration's `${VAR}`s refer to. The default key is the Tenant's `spec.kes.keyName`, or `MINIO_KMS_KES_KEY_NAME`.
+2. **The plan.** The key store's settings go to Secret `<tenant>-kms`, never to the plan or the state directory. `spec.kms.kes` gets:
+   - `keyName` with `createKey: false`: a missing key means the settings point to the wrong place, and making a new one would hide that;
+   - `serviceAccountName`: the tenant's KES account, so a Vault Kubernetes role bound to it keeps working;
+   - the KES pods' node selector, tolerations and affinity;
+   - `name: <tenant>-buckets-kes`, so the tenant's own `<tenant>-kes` objects and Secret `<tenant>-kes-tls` stay as they are for a rollback.
+3. **Pre-flight.** Before MinIO stops, a one-off pod runs `buckets-kes check` with the tenant's own KES configuration, Secrets and account, and reads the default key. If it can't, nothing changes. Add `--check-kes` to run this during a dry run as well (a pod is the only change).
+4. **config.env.** If the tenant's `config.env` sets `MINIO_KMS_*`, Buckets gets a copy without those lines (Secret `<tenant>-buckets-config`). MinIO's own stays as it was.
+5. **Start.** The storage servers wait until buckets-kes serves the key (phase `WaitingForKMS`; why is in `status.kms.message`).
+
+Rollback restores MinIO with its own KES and removes Secrets `<tenant>-kms` and `<tenant>-buckets-config`. Objects Buckets encrypted in the meantime use the same keys, so MinIO reads them.
+
+Not carried over:
+
+- KES's `fs` key store: move the keys to a key store first.
+- Vault sign-in with a client certificate.
+- A Kubernetes JWT written into the configuration, rather than the pod's token.
+- Google workload identity through `gcpCredentialSecretName`.
+
+The script reports these as problems and stops before changing anything.
 
 ## buckets-kes
 

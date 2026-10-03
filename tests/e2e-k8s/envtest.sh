@@ -304,11 +304,53 @@ expect "storage servers wait for KES" "$(jp sts/kmsc-pool-0 '{.spec.template.spe
 # KES "ready" with no server behind it: the default key cannot be made, and bucketsd still waits
 k -n tenant patch deploy kmsc-kes --subresource=status --type=merge -p '{"status":{"replicas":2,"readyReplicas":2}}' >/dev/null
 until_true '[[ $(jp bc/kmsc "{.status.kms.phase}") == Error ]]'
-expect "the default key cannot be created" "$(jp bc/kmsc '{.status.kms.message}' | grep -o 'Creating key buckets-default failed')" \
-  "Creating key buckets-default failed"
+expect "the default key cannot be created" "$(jp bc/kmsc '{.status.kms.message}' | grep -o 'The default key buckets-default' | head -1)" \
+  "The default key buckets-default"
 expect "storage servers still wait" "$(jp sts/kmsc-pool-0 '{.spec.template.spec.containers[0].env[?(@.name=="MINIO_KMS_KES_ENDPOINT")].value}')" ""
 expect "not activated" "$(jp bc/kmsc '{.status.kms.activated}')" ""
 k -n tenant delete bc kmsc >/dev/null
+
+echo "== an adopted tenant's KES (scripts/adopt-minio.sh): its key, its account, servers wait for KES"
+k -n tenant create serviceaccount tenant-kes >/dev/null
+# the tenant's own KES certificate, which a rollback needs as it is
+k -n tenant create secret tls adoptk-kes-tls --cert="$WORK/certs/apiserver.crt" --key="$WORK/certs/apiserver.key" >/dev/null
+tenant_tls=$(jp secret/adoptk-kes-tls '{.data.tls\.crt}' | sha256sum)
+k -n tenant create secret generic adoptk-kms --from-literal=settings.json="$settings" >/dev/null
+k -n tenant label secret adoptk-kms buckets.io/cluster=adoptk >/dev/null
+k apply -f - >/dev/null <<YAML
+apiVersion: buckets.io/v1alpha1
+kind: BucketsCluster
+metadata: {name: adoptk, namespace: tenant}
+spec:
+  image: bucketsd:test
+  kms:
+    kes:
+      image: kes:test
+      keyName: minio-key
+      createKey: false
+      name: adoptk-buckets-kes
+      serviceAccountName: tenant-kes
+      tolerations: [{key: storage, operator: Exists}]
+  pools: [{servers: 4, volumesPerServer: 1}]
+YAML
+until_true '[[ $(jp bc/adoptk "{.status.phase}") == WaitingForKMS ]]'
+expect "the cluster waits for KMS" "$(jp bc/adoptk '{.status.phase}')" WaitingForKMS
+expect "no servers yet" "$(k -n tenant get sts adoptk-pool-0 -o name 2>/dev/null || echo none)" none
+until_true 'k -n tenant get deploy adoptk-buckets-kes'
+expect "KES under its own name" "$(jp deploy/adoptk-buckets-kes '{.spec.template.spec.serviceAccountName}')" tenant-kes
+expect "no account of its own" "$(k -n tenant get sa adoptk-buckets-kes -o name 2>/dev/null || echo none)" none
+expect "where the tenant's KES ran" "$(jp deploy/adoptk-buckets-kes '{.spec.template.spec.tolerations[0].key}')" storage
+expect "its certificate" "$(jp secret/adoptk-buckets-kes-tls '{.data.tls\.crt}' | base64 -d | openssl x509 -noout -ext subjectAltName | grep -o 'adoptk-buckets-kes.tenant.svc.cluster.local' | head -1)" \
+  adoptk-buckets-kes.tenant.svc.cluster.local
+expect "the tenant's certificate untouched" "$(jp secret/adoptk-kes-tls '{.data.tls\.crt}' | sha256sum)" "$tenant_tls"
+expect "nothing named like the tenant's KES" "$(k -n tenant get deploy,svc adoptk-kes -o name 2>/dev/null || echo none)" none
+k -n tenant patch deploy adoptk-buckets-kes --subresource=status --type=merge -p '{"status":{"replicas":2,"readyReplicas":2}}' >/dev/null
+until_true '[[ $(jp bc/adoptk "{.status.kms.phase}") == Error ]]'
+expect "the key is not made" "$(jp bc/adoptk '{.status.kms.message}' | grep -o 'The default key minio-key' | head -1)" "The default key minio-key"
+expect "saying why the servers wait" "$(jp bc/adoptk '{.status.conditions[?(@.type=="Ready")].message}' | grep -o 'the servers start once KES serves key minio-key')" \
+  "the servers start once KES serves key minio-key"
+expect "still no servers" "$(k -n tenant get sts adoptk-pool-0 -o name 2>/dev/null || echo none)" none
+k -n tenant delete bc adoptk >/dev/null
 
 echo "== leader election"
 start_operator opb

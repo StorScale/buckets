@@ -182,6 +182,18 @@ spec:
                         image: {type: string, description: "Defaults to the operator's BUCKETS_KES_IMAGE, else ghcr.io/buckets-io/buckets-kes (MinIO's KES works too)."}
                         replicas: {type: integer, minimum: 1, default: 2}
                         keyName: {type: string, default: buckets-default, description: The default key for SSE-S3 and for SSE-KMS without a key ID; created when missing.}
+                        createKey: {type: boolean, default: true, description: "Create the default key when the key store lacks it. False (an adopted tenant's keys): a missing key is an error, and the servers do not start."}
+                        nodeSelector:
+                          type: object
+                          additionalProperties: {type: string}
+                        tolerations:
+                          type: array
+                          items: {type: object, x-kubernetes-preserve-unknown-fields: true}
+                        affinity:
+                          type: object
+                          x-kubernetes-preserve-unknown-fields: true
+                        name: {type: string, maxLength: 50, pattern: "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", description: "The base name of the KES Deployment, Service and ServiceAccount, and of their Secrets <name>-tls and <name>-identity. Default: <cluster>-kes. scripts/adopt-minio.sh sets <tenant>-buckets-kes, so the tenant's own KES objects keep theirs."}
+                        serviceAccountName: {type: string, description: "An existing ServiceAccount for KES to run as (an adopted tenant's KES account, which a Vault Kubernetes role names). Default: the KES name (<cluster>-kes), made by the operator."}
                         resources:
                           type: object
                           x-kubernetes-preserve-unknown-fields: true

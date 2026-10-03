@@ -4,6 +4,11 @@
  *
  *   buckets-kes server --config FILE [--addr HOST:PORT]
  *   buckets-kes identity of CERT      the identity of a certificate (as "kes identity of")
+ *   buckets-kes check --config FILE --key NAME
+ *                                     signs in to the configuration's key store and reads
+ *                                     key NAME (exit 1 and why when it cannot): KES's own
+ *                                     configuration works, so a MinIO tenant's KES can be
+ *                                     checked before Buckets takes over its keys
  *   buckets-kes --version */
 #include <signal.h>
 #include <stdio.h>
@@ -19,6 +24,7 @@
 #include "core/pool.h"
 #include "crypto/hex.h"
 #include "crypto/sha256.h"
+#include "kes/key.h"
 #include "kes/server.h"
 
 #define SHUTDOWN_GRACE_SECONDS 10
@@ -81,12 +87,60 @@ static int identity_of(const char *path) {
   return 0;
 }
 
+/* buckets-kes check: the key store and one key, nothing served */
+static int check(int argc, char **argv) {
+  const char *config = NULL, *key = NULL;
+  for (int i = 2; i < argc; i++) {
+    if (strcmp(argv[i], "--config") == 0 && i + 1 < argc) config = argv[++i];
+    else if (strncmp(argv[i], "--config=", 9) == 0) config = argv[i] + 9;
+    else if (strcmp(argv[i], "--key") == 0 && i + 1 < argc) key = argv[++i];
+    else if (strncmp(argv[i], "--key=", 6) == 0) key = argv[i] + 6;
+  }
+  if (!config || !key) {
+    fprintf(stderr, "usage: buckets-kes check --config FILE --key NAME\n");
+    return 2;
+  }
+  char err[1024];
+  yyjson_doc *conf = buckets_kes_config_load(config, err, sizeof(err));
+  if (!conf) return die(err);
+  buckets_kes_store *st = buckets_kes_store_open(yyjson_obj_get(yyjson_doc_get_root(conf), "keystore"), err, sizeof(err));
+  if (!st) {
+    yyjson_doc_free(conf);
+    return die(err);
+  }
+  buckets_buf v = BUCKETS_BUF_INIT;
+  buckets_kes_status s = st->ops->get(st, key, &v, err, sizeof(err));
+  int rc = 1;
+  buckets_kes_key k;
+  if (s == BUCKETS_KES_NOT_FOUND) {
+    char m[400];
+    snprintf(m, sizeof(m), "key '%s' is not in %s", key, st->desc);
+    die(m);
+  } else if (s != BUCKETS_KES_OK) {
+    die(err);
+  } else if (!buckets_kes_key_decode(v.data ? v.data : "", v.len, &k, err, sizeof(err))) {
+    char m[1200];
+    snprintf(m, sizeof(m), "key '%s' in %s cannot be read: %.300s", key, st->desc, err);
+    die(m);
+  } else {
+    printf("ok: key '%s' (%s) read from %s\n", key, buckets_kes_cipher_name(k.cipher), st->desc);
+    buckets_kes_key_wipe(&k);
+    rc = 0;
+  }
+  if (v.data) memset(v.data, 0, v.len);
+  buckets_buf_free(&v);
+  buckets_kes_store_close(st);
+  yyjson_doc_free(conf);
+  return rc;
+}
+
 int main(int argc, char **argv) {
   if (argc > 1 && (strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "version") == 0)) {
     printf("buckets-kes %s\n", BUCKETS_VERSION);
     return 0;
   }
   if (argc == 4 && strcmp(argv[1], "identity") == 0 && strcmp(argv[2], "of") == 0) return identity_of(argv[3]);
+  if (argc > 1 && strcmp(argv[1], "check") == 0) return check(argc, argv);
   const char *config = NULL, *addr = NULL;
   for (int i = 2; argc > 1 && strcmp(argv[1], "server") == 0 && i < argc; i++) {
     if (strcmp(argv[i], "--config") == 0 && i + 1 < argc) config = argv[++i];
@@ -96,7 +150,8 @@ int main(int argc, char **argv) {
   }
   if (argc < 2 || strcmp(argv[1], "server") != 0 || !config) {
     fprintf(stderr, "usage: buckets-kes server --config FILE [--addr HOST:PORT]\n"
-                    "       buckets-kes identity of CERT\n");
+                    "       buckets-kes identity of CERT\n"
+                    "       buckets-kes check --config FILE --key NAME\n");
     return 2;
   }
   char err[1024];

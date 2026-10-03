@@ -47,6 +47,12 @@ running() { for p in $PODS; do k get pod "$p" -o name 2>/dev/null; done; }
 for _ in $(seq 150); do [[ -z $(running) ]] && break; sleep 2; done
 [[ -z $(running) ]] || die "Buckets pods are still running: $(running | tr '\n' ' ')"
 for c in $CLAIMS; do k get pvc "$c" -o name >/dev/null || die "PVC $c is gone"; done
+# a carried-over KES: its settings (credentials) and config.env's copy go too; the
+# tenant's own KES comes back with it, its keys never moved
+for s in "$TENANT-kms" "$TENANT-kms-candidate" "$TENANT-buckets-config"; do
+  [[ $(k get secret "$s" -o jsonpath='{.metadata.labels.buckets\.io/cluster}' 2>/dev/null) == "$TENANT" ]] &&
+    k delete secret "$s" >/dev/null
+done
 
 # ---- 2. MinIO back on the same drives ----------------------------------------
 say "2/3 restoring $SAVED"

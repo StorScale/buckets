@@ -524,6 +524,49 @@ static void test_kes_objects(void **state) {
   yyjson_doc_free(d);
 }
 
+/* an adopted tenant's KES: its account, its keys (none made) */
+static void test_kes_adopted(void **state) {
+  (void)state;
+  bc_spec s;
+  yyjson_doc *d = parse("{\"metadata\":{\"name\":\"minio\",\"namespace\":\"lake\",\"uid\":\"u\"},\"spec\":{\"kms\":{\"kes\":"
+                        "{\"keyName\":\"minio-key\",\"createKey\":false,\"serviceAccountName\":\"minio-kes-sa\","
+                        "\"name\":\"minio-buckets-kes\","
+                        "\"tolerations\":[{\"key\":\"storage\",\"operator\":\"Exists\"}]}},"
+                        "\"pools\":[{\"servers\":4,\"volumesPerServer\":1}]}}",
+                        &s, true);
+  assert_false(s.kes.create_key);
+  assert_string_equal(s.kes.service_account, "minio-kes-sa");
+  assert_string_equal(s.kes.key_name, "minio-key");
+  char nm[160];
+  bc_kes_name(&s, false, nm, sizeof(nm));
+  assert_string_equal(nm, "minio-buckets-kes"); /* the tenant's minio-kes objects keep their names */
+  bc_kes_name(&s, true, nm, sizeof(nm));
+  assert_string_equal(nm, "minio-buckets-kes-test");
+  bc_kes_tls_secret_name(&s, nm, sizeof(nm));
+  assert_string_equal(nm, "minio-buckets-kes-tls");
+  bc_kes_identity_secret_name(&s, nm, sizeof(nm));
+  assert_string_equal(nm, "minio-buckets-kes-identity");
+  bc_kes_endpoint(&s, false, nm, sizeof(nm));
+  assert_non_null(strstr(nm, "https://minio-buckets-kes.lake.svc."));
+  bc_object *o;
+  size_t n = bc_kes_objects(&s, false, "{}", NULL, &o);
+  assert_int_equal(n, 3); /* no ServiceAccount of its own */
+  for (size_t i = 0; i < n; i++) assert_null(strstr(o[i].path, "/serviceaccounts/"));
+  assert_string_equal(yyjson_mut_get_str(AT(yyjson_mut_doc_get_root(o[1].doc), "spec", "template", "spec", "serviceAccountName")),
+                      "minio-kes-sa");
+  assert_string_equal(yyjson_mut_get_str(yyjson_mut_obj_get(yyjson_mut_arr_get_first(AT(yyjson_mut_doc_get_root(o[1].doc), "spec",
+                                                                                  "template", "spec", "tolerations")), "key")),
+                      "storage");
+  bc_objects_free(o, n);
+  yyjson_doc_free(d);
+  d = parse(k_kes, &s, true);
+  assert_true(s.kes.create_key); /* the default */
+  assert_null(s.kes.service_account);
+  bc_kes_tls_secret_name(&s, nm, sizeof(nm));
+  assert_string_equal(nm, "store-kes-tls");
+  yyjson_doc_free(d);
+}
+
 /* what KES 2024-09-11 prints, as captured */
 static void test_kes_log_reason(void **state) {
   (void)state;
@@ -558,7 +601,7 @@ int main(void) {
       cmocka_unit_test(test_volumes_and_topology), cmocka_unit_test(test_desired_objects), cmocka_unit_test(test_tls),
       cmocka_unit_test(test_root_secret_not_owned), cmocka_unit_test(test_invalid),
       cmocka_unit_test(test_console), cmocka_unit_test(test_console_tls), cmocka_unit_test(test_console_env),
-      cmocka_unit_test(test_minio_tenant_layout), cmocka_unit_test(test_kes_spec), cmocka_unit_test(test_kes_objects), cmocka_unit_test(test_kes_log_reason),
+      cmocka_unit_test(test_minio_tenant_layout), cmocka_unit_test(test_kes_spec), cmocka_unit_test(test_kes_objects), cmocka_unit_test(test_kes_log_reason), cmocka_unit_test(test_kes_adopted),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

@@ -31,8 +31,8 @@ bool buckets_kes_server_cert(const char *const *dns, size_t ndns, int days, buck
  *   {"backend": "vault" | "aws" | "azure" | "gcp",
  *    "vault": {"endpoint", "engine", "version", "namespace", "prefix",
  *              "auth": "approle" | "kubernetes",
- *              "approle": {"engine", "id", "secret"},
- *              "kubernetes": {"engine", "role"},
+ *              "approle": {"engine", "namespace", "id", "secret"},
+ *              "kubernetes": {"engine", "namespace", "role"},  (namespace: the sign-in's own; "/" = the root)
  *              "transit": {"engine", "key"}, "caCert"},
  *    "aws": {"region", "endpoint", "kmsKey", "accessKey", "secretKey", "sessionToken"},
  *    "azure": {"endpoint", "auth": "secret" | "managedIdentity", "tenantId", "clientId",

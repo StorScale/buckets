@@ -21,6 +21,11 @@
 #                 binary built with tools/build-oracles.sh can stand in.
 # STORAGE_CLASS   for the drives (default: the cluster's default)
 # AVOID_NODES     node names the pods must not run on (space separated)
+# KES=1           the tenant encrypts with MinIO's KES on a Vault (KV v1, AppRole), laid out as
+#                 the MinIO Operator lays it out (StatefulSet <t>-kes, ${VAR}s from Secrets); the
+#                 adoption carries it over to buckets-kes ($REGISTRY/buckets-kes:$BUCKETS_TAG)
+# KES_IMAGE       MinIO's KES (default harbor.os.harlandclarke.internal/vericast/minio-kes:2024-09-11T07-22-50Z)
+# VAULT_IMAGE     default harbor.os.harlandclarke.internal/dockerhub/hashicorp/vault:1.18
 # KEEP=1          leaves the namespace (and its PVs) for a look afterwards
 # Needs the buckets.io CRDs (operator/deploy/crds) and permission to create a
 # namespace, a namespaced operator (Helm) and to patch PersistentVolumes.
@@ -30,6 +35,9 @@ NS=${NS:-buckets-adopt-test}
 T=minio
 REGISTRY=${REGISTRY:-harbor.os.harlandclarke.internal/vericast}
 MINIO_IMAGE=${MINIO_IMAGE:-harbor.os.harlandclarke.internal/vericast/minio:RELEASE.2024-10-13T13-34-11Z}
+KES_IMAGE=${KES_IMAGE:-harbor.os.harlandclarke.internal/vericast/minio-kes:2024-09-11T07-22-50Z}
+VAULT_IMAGE=${VAULT_IMAGE:-harbor.os.harlandclarke.internal/dockerhub/hashicorp/vault:1.18}
+KES=${KES:-}
 [[ -n ${BUCKETS_TAG:-} ]] || { echo "set BUCKETS_TAG to the bucketsd/buckets-operator image tag"; exit 2; }
 CTXARG=${KUBECONTEXT:+--context $KUBECONTEXT}
 k() { kubectl $CTXARG -n "$NS" "$@"; }
@@ -75,11 +83,116 @@ k create secret generic tls-minio --type=kubernetes.io/tls --from-file=tls.crt="
 # config.env: the root credentials and a static KMS key, so objects can be encrypted
 ROOT_USER=adoptroot
 ROOT_PASS=$(openssl rand -hex 16)
-KMS_KEY="adopt-key:$(openssl rand -base64 32)"
-printf 'export MINIO_ROOT_USER=%s\nexport MINIO_ROOT_PASSWORD="%s"\nexport MINIO_KMS_SECRET_KEY=%s\n' \
-  "$ROOT_USER" "$ROOT_PASS" "$KMS_KEY" > "$WORK/config.env"
-k create secret generic myminio-env-configuration --from-file=config.env="$WORK/config.env" >/dev/null
 AFF=$(affinity)
+if [[ -z $KES ]]; then
+  KMS_KEY="adopt-key:$(openssl rand -base64 32)"
+  printf 'export MINIO_ROOT_USER=%s\nexport MINIO_ROOT_PASSWORD="%s"\nexport MINIO_KMS_SECRET_KEY=%s\n' \
+    "$ROOT_USER" "$ROOT_PASS" "$KMS_KEY" > "$WORK/config.env"
+else
+  echo "== a Vault, and MinIO's KES on it, as the MinIO Operator runs KES"
+  k apply -f - >/dev/null <<YAML
+apiVersion: v1
+kind: List
+items:
+  - apiVersion: v1
+    kind: Pod
+    metadata: {name: vault, labels: {app: vault}}
+    spec:
+      ${AFF:+affinity: $AFF}
+      containers:
+        - name: vault
+          image: $VAULT_IMAGE
+          args: [server, -dev, -dev-root-token-id=root, -dev-listen-address=0.0.0.0:8200]
+          env: [{name: SKIP_SETCAP, value: "true"}]
+          readinessProbe: {httpGet: {path: /v1/sys/health, port: 8200}, periodSeconds: 2}
+  - apiVersion: v1
+    kind: Service
+    metadata: {name: vault}
+    spec: {selector: {app: vault}, ports: [{port: 8200}]}
+YAML
+  k wait --for=condition=Ready pod/vault --timeout=300s >/dev/null
+  V() { k exec vault -- env VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=root vault "$@"; }
+  V secrets enable -path=kv -version=1 kv >/dev/null      # KES's default: engine kv, version 1
+  V auth enable approle >/dev/null
+  k exec -i vault -- env VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=root vault policy write kes - >/dev/null <<'HCL'
+path "kv/minio/*" { capabilities = ["create", "read", "delete", "list"] }
+path "kv/minio" { capabilities = ["list"] }
+HCL
+  V write auth/approle/role/kes token_policies=kes token_ttl=1h >/dev/null
+  k create secret generic vault-approle --from-literal=id="$(V read -field=role_id auth/approle/role/kes/role-id)" \
+    --from-literal=secret="$(V write -f -field=secret_id auth/approle/role/kes/secret-id)" >/dev/null
+  # MinIO signs in to KES with an API key; KES knows it by its identity (the SHA-256 of its public key)
+  SEED=$(openssl rand -hex 32)
+  KES_API_KEY="kes:v1:$( (printf '\000'; echo "$SEED" | xxd -r -p) | base64 -w0)"
+  KES_IDENTITY=$(echo "302e020100300506032b657004220420$SEED" | xxd -r -p | openssl pkey -inform DER -pubout -outform DER | sha256sum | cut -c1-64)
+  openssl req -newkey rsa:2048 -nodes -subj "/CN=$T-kes" -keyout "$WORK/kes.key" -out "$WORK/kes.csr" 2>/dev/null
+  printf 'subjectAltName=DNS:%s-kes,DNS:%s-kes.%s.svc,DNS:%s-kes.%s.svc.cluster.local\n' "$T" "$T" "$NS" "$T" "$NS" > "$WORK/kes-san.cnf"
+  openssl x509 -req -in "$WORK/kes.csr" -CA "$WORK/ca.crt" -CAkey "$WORK/ca.key" -CAcreateserial -days 2 \
+    -extfile "$WORK/kes-san.cnf" -out "$WORK/kes.crt" 2>/dev/null
+  k create secret tls $T-kes-tls --cert="$WORK/kes.crt" --key="$WORK/kes.key" >/dev/null
+  cat > "$WORK/server-config.yaml" <<CONF
+address: 0.0.0.0:7373
+admin:
+  identity: \${MINIO_KES_IDENTITY}
+tls:
+  key: /tmp/kes/server.key
+  cert: /tmp/kes/server.crt
+keystore:
+  vault:
+    endpoint: http://vault.$NS.svc.cluster.local:8200
+    prefix: minio
+    approle:
+      id: \${VAULT_ROLE_ID}
+      secret: \${VAULT_SECRET_ID}
+CONF
+  k create secret generic kes-configuration --from-file=server-config.yaml="$WORK/server-config.yaml" >/dev/null
+  k apply -f - >/dev/null <<YAML
+apiVersion: v1
+kind: List
+items:
+  - apiVersion: v1
+    kind: Service
+    metadata: {name: $T-kes, labels: {v1.min.io/kes: $T-kes}}
+    spec:
+      selector: {v1.min.io/kes: $T-kes}
+      ports: [{name: https-kes, port: 7373, targetPort: 7373}]
+  - apiVersion: apps/v1
+    kind: StatefulSet
+    metadata: {name: $T-kes, labels: {v1.min.io/kes: $T-kes}}
+    spec:
+      serviceName: $T-kes-hl
+      replicas: 1
+      selector: {matchLabels: {v1.min.io/kes: $T-kes}}
+      template:
+        metadata: {labels: {v1.min.io/kes: $T-kes}}
+        spec:
+          ${AFF:+affinity: $AFF}
+          containers:
+            - name: kes
+              image: $KES_IMAGE
+              args: [server, --config=/tmp/kes/server-config.yaml]
+              env:
+                - {name: MINIO_KES_IDENTITY, value: "$KES_IDENTITY"}
+                - {name: VAULT_ROLE_ID, valueFrom: {secretKeyRef: {name: vault-approle, key: id}}}
+                - {name: VAULT_SECRET_ID, valueFrom: {secretKeyRef: {name: vault-approle, key: secret}}}
+              ports: [{containerPort: 7373}]
+              volumeMounts: [{name: $T-kes, mountPath: /tmp/kes}]
+          volumes:
+            - name: $T-kes
+              projected:
+                sources:
+                  - secret: {name: kes-configuration, items: [{key: server-config.yaml, path: server-config.yaml}]}
+                  - secret: {name: $T-kes-tls, items: [{key: tls.crt, path: server.crt}, {key: tls.key, path: server.key}]}
+YAML
+  for _ in $(seq 60); do k get pod "$T-kes-0" >/dev/null 2>&1 && break; sleep 2; done
+  k wait --for=condition=Ready pod/$T-kes-0 --timeout=300s >/dev/null
+  expect "MinIO's KES up" "$(k get pod $T-kes-0 -o jsonpath='{.status.containerStatuses[0].ready}')" true
+  printf 'export MINIO_ROOT_USER=%s\nexport MINIO_ROOT_PASSWORD="%s"\n' "$ROOT_USER" "$ROOT_PASS" > "$WORK/config.env"
+  printf 'export MINIO_KMS_KES_ENDPOINT=https://%s-kes.%s.svc.cluster.local:7373\nexport MINIO_KMS_KES_API_KEY=%s\n' \
+    "$T" "$NS" "$KES_API_KEY" >> "$WORK/config.env"
+  printf 'export MINIO_KMS_KES_KEY_NAME=minio-key\nexport MINIO_KMS_KES_CAPATH=/tmp/certs/CAs/ca.crt\n' >> "$WORK/config.env"
+fi
+k create secret generic myminio-env-configuration --from-file=config.env="$WORK/config.env" >/dev/null
 SC=${STORAGE_CLASS:+\"storageClassName\": \"$STORAGE_CLASS\",}
 RUN_IMAGE=$MINIO_IMAGE RUN_CMD= INIT= BINVOL= BINMOUNT=
 if [[ -n ${MINIO_BINARY_URL:-} ]]; then
@@ -220,16 +333,36 @@ echo "== Buckets adopts the tenant in place"
 kc apply -f "$ROOT/operator/deploy/crds/" >/dev/null
 helm ${KUBECONTEXT:+--kube-context $KUBECONTEXT} -n "$NS" install adopt-operator "$ROOT/operator/helm/buckets-operator" \
   --set image.repository="$REGISTRY/buckets-operator" --set image.tag="$BUCKETS_TAG" --set watchNamespace="$NS" \
-  --set replicaCount=1 ${AFF:+--set-json affinity="$AFF"} --wait --timeout 5m >/dev/null
-"$ROOT/scripts/adopt-minio.sh" -n "$NS" -t "$T" ${KUBECONTEXT:+--context $KUBECONTEXT} --state "$STATE" \
-  --image "$REGISTRY/bucketsd:$BUCKETS_TAG" > "$WORK/adopt.log" 2>&1 && ok=yes || { ok=no; cat "$WORK/adopt.log"; }
+  --set replicaCount=1 --set kesImage="$REGISTRY/buckets-kes:$BUCKETS_TAG" ${AFF:+--set-json affinity="$AFF"} \
+  --wait --timeout 5m >/dev/null
+ADOPT=("$ROOT/scripts/adopt-minio.sh" -n "$NS" -t "$T" ${KUBECONTEXT:+--context $KUBECONTEXT} --state "$STATE"
+  --image "$REGISTRY/bucketsd:$BUCKETS_TAG" ${KES:+--check-kes})
+"${ADOPT[@]}" > "$WORK/adopt.log" 2>&1 && ok=yes || { ok=no; cat "$WORK/adopt.log"; }
 expect "dry run passes" "$ok" yes
-"$ROOT/scripts/adopt-minio.sh" -n "$NS" -t "$T" ${KUBECONTEXT:+--context $KUBECONTEXT} --state "$STATE" \
-  --image "$REGISTRY/bucketsd:$BUCKETS_TAG" --apply > "$WORK/adopt.log" 2>&1 && ok=yes || { ok=no; cat "$WORK/adopt.log"; }
+if [[ -n $KES ]]; then
+  expect "dry run: buckets-kes reads the tenant's key" "$(grep -o "ok: key 'minio-key' (AES256)" "$WORK/adopt.log")" "ok: key 'minio-key' (AES256)"
+  expect "the plan never shows the credentials" "$(grep -c -e "$(k get secret vault-approle -o jsonpath='{.data.secret}' | base64 -d)" -e "${KES_API_KEY#kes:v1:}" "$WORK/adopt.log")" 0
+  expect "the check pod is gone" "$(k get pod $T-buckets-kes-check -o name 2>/dev/null || echo gone)" gone
+fi
+"${ADOPT[@]}" --apply > "$WORK/adopt.log" 2>&1 && ok=yes || { ok=no; cat "$WORK/adopt.log"; }
 expect "adoption" "$ok" yes
+if [[ -n $KES ]]; then
+  expect "the state never holds the credentials" "$(grep -rc "$(k get secret vault-approle -o jsonpath='{.data.secret}' | base64 -d)" "$STATE" | grep -vc ':0$')" 0
+  expect "KES carried over" "$(k get bc $T -o jsonpath='{.spec.kms.kes.keyName} {.spec.kms.kes.createKey} {.spec.kms.kes.name}')" "minio-key false $T-buckets-kes"
+  expect "buckets-kes ready" "$(k get bc $T -o jsonpath='{.status.kms.phase}')" Ready
+  expect "on the tenant's Vault" "$(k get bc $T -o jsonpath='{.status.kms.backend}' | grep -o "vault.$NS.svc.cluster.local:8200")" "vault.$NS.svc.cluster.local:8200"
+  expect "bucketsd reads a config.env without the KES lines" "$(k get secret $T-buckets-config -o jsonpath='{.data.config\.env}' | base64 -d | grep -c MINIO_KMS_)" 0
+  expect "MinIO's config.env untouched" "$(k get secret myminio-env-configuration -o jsonpath='{.data.config\.env}' | base64 -d | grep -c MINIO_KMS_KES_)" 4
+  expect "the tenant's KES left as it was" "$(k get sts $T-kes -o jsonpath='{.spec.template.spec.containers[0].image}')" "$KES_IMAGE"
+fi
 expect "the same StatefulSet now runs bucketsd" "$(k get sts $T-pool-0 -o jsonpath='{.spec.template.spec.containers[0].name}')" bucketsd
 expect "every PV is Retain" "$(for pv in $(k get pvc -o jsonpath='{range .items[*]}{.spec.volumeName}{" "}{end}'); do kc get pv $pv -o jsonpath='{.spec.persistentVolumeReclaimPolicy}{"\n"}'; done | sort -u)" Retain
 check_data "Buckets" 53
+if [[ -n $KES ]]; then
+  s3 s3 cp --quiet /tmp/o3 s3://plain/sse-by-buckets.bin --sse AES256
+  expect "Buckets encrypts with the tenant's key" "$(s3 s3api head-object --bucket plain --key sse-by-buckets.bin --query ServerSideEncryption --output text)" AES256
+  expect "and makes no key of its own" "$(V list -format=json kv/minio | tr -d ' \n')" '["minio-key"]'
+fi
 
 echo "== Buckets writes, then hands the drives back"
 s3 s3 cp --quiet /tmp/o3 s3://plain/by-buckets.bin
@@ -239,8 +372,12 @@ expect "a write on Buckets" "$(s3 s3api head-object --bucket plain --key by-buck
   > "$WORK/rollback.log" 2>&1 && ok=yes || { ok=no; cat "$WORK/rollback.log"; }
 expect "rollback" "$ok" yes
 expect "the StatefulSet runs MinIO again" "$(k get sts $T-pool-0 -o jsonpath='{.spec.template.spec.containers[0].image}')" "$RUN_IMAGE"
-check_data "MinIO after rollback" 54
+check_data "MinIO after rollback" $([[ -n $KES ]] && echo 55 || echo 54)
 expect "MinIO reads what Buckets wrote" "$(k exec cli -- sh -c "aws --endpoint-url $EP s3 cp --quiet s3://plain/by-buckets.bin /tmp/g && md5sum < /tmp/g | cut -c1-32")" "$(sed -n 2p "$WORK/local.md5")"
+if [[ -n $KES ]]; then
+  expect "MinIO decrypts what Buckets encrypted" "$(k exec cli -- sh -c "aws --endpoint-url $EP s3 cp --quiet s3://plain/sse-by-buckets.bin /tmp/g && md5sum < /tmp/g | cut -c1-32")" "$(sed -n 2p "$WORK/local.md5")"
+  expect "the KMS settings went with Buckets" "$(k get secret $T-kms -o name 2>/dev/null || echo gone)" gone
+fi
 expect "MinIO sees Buckets' versioned object" "$(s3 s3api list-object-versions --bucket versioned --prefix by-buckets --query 'length(Versions)' --output text)" 1
 
 echo "adopt-minio: $pass passed, $fail failed"

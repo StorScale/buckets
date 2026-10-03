@@ -101,10 +101,10 @@ static void test_keystore_vault(void **state) {
                 "\"buckets/store\",\"approle\":{\"engine\":\"approle\",\"id\":\"rid\",\"secret\":\"sid\"},\"status\":{"
                 "\"ping\":\"10s\"}}}");
   expect_render("{\"backend\":\"vault\",\"vault\":{\"endpoint\":\"https://vault:8200\",\"engine\":\"secret\",\"version\":"
-                "\"v1\",\"namespace\":\"team\",\"auth\":\"kubernetes\",\"kubernetes\":{\"role\":\"kes\"},\"transit\":{"
+                "\"v1\",\"namespace\":\"team\",\"auth\":\"kubernetes\",\"kubernetes\":{\"role\":\"kes\",\"namespace\":\"/\"},\"transit\":{"
                 "\"key\":\"wrap\"},\"caCert\":\"-----BEGIN CERTIFICATE-----\\nx\\n-----END CERTIFICATE-----\\n\"}}",
                 "{\"vault\":{\"endpoint\":\"https://vault:8200\",\"engine\":\"secret\",\"version\":\"v1\",\"namespace\":"
-                "\"team\",\"kubernetes\":{\"engine\":\"kubernetes\",\"role\":\"kes\",\"jwt\":"
+                "\"team\",\"kubernetes\":{\"engine\":\"kubernetes\",\"namespace\":\"/\",\"role\":\"kes\",\"jwt\":"
                 "\"/var/run/secrets/kubernetes.io/serviceaccount/token\"},\"transit\":{\"engine\":\"transit\",\"key\":"
                 "\"wrap\"},\"tls\":{\"ca\":\"/etc/kes/keystore-ca.pem\"},\"status\":{\"ping\":\"10s\"}}}");
   expect_refused("{\"backend\":\"vault\",\"vault\":{}}", "Vault server's address");

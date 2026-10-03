@@ -132,6 +132,15 @@ bool bc_parse(yyjson_val *obj, const char *cluster_domain, bc_spec *out, char *e
   out->kes.key_name = str_at(kes, "keyName");
   if (!out->kes.key_name || !*out->kes.key_name) out->kes.key_name = BC_KES_DEFAULT_KEY;
   out->kes.resources = yyjson_obj_get(kes, "resources");
+  out->kes.node_selector = yyjson_obj_get(kes, "nodeSelector");
+  out->kes.tolerations = yyjson_obj_get(kes, "tolerations");
+  out->kes.affinity = yyjson_obj_get(kes, "affinity");
+  out->kes.name = str_at(kes, "name");
+  if (out->kes.name && !*out->kes.name) out->kes.name = NULL;
+  out->kes.service_account = str_at(kes, "serviceAccountName");
+  if (out->kes.service_account && !*out->kes.service_account) out->kes.service_account = NULL;
+  yyjson_val *ck = yyjson_obj_get(kes, "createKey");
+  out->kes.create_key = !yyjson_is_bool(ck) || yyjson_get_bool(ck);
   if (out->kes.enabled) { /* one KMS: KES configured here, not in the environment as well */
     size_t ki, kmax;
     yyjson_val *ev;
@@ -800,8 +809,16 @@ yyjson_mut_doc *bc_root_secret(const bc_spec *s, const char *user, const char *p
 
 /* ---- KES ------------------------------------------------------------------------- */
 
+/* spec.kms.kes.name, or <cluster>-kes: an adopted MinIO tenant's own KES objects
+ * (<tenant>-kes, <tenant>-kes-tls) keep their names */
+static void kes_base(const bc_spec *s, char *out, size_t cap) {
+  if (s->kes.name) snprintf(out, cap, "%s", s->kes.name);
+  else snprintf(out, cap, "%s-kes", s->name);
+}
 void bc_kes_name(const bc_spec *s, bool trial, char *out, size_t cap) {
-  snprintf(out, cap, "%s-kes%s", s->name, trial ? "-test" : "");
+  char b[128];
+  kes_base(s, b, sizeof(b));
+  snprintf(out, cap, "%s%s", b, trial ? "-test" : "");
 }
 void bc_kes_endpoint(const bc_spec *s, bool trial, char *out, size_t cap) {
   char n[128];
@@ -812,9 +829,15 @@ void bc_kms_settings_secret_name(const bc_spec *s, char *out, size_t cap) { snpr
 void bc_kms_candidate_secret_name(const bc_spec *s, char *out, size_t cap) {
   snprintf(out, cap, "%s-kms-candidate", s->name);
 }
-void bc_kes_tls_secret_name(const bc_spec *s, char *out, size_t cap) { snprintf(out, cap, "%s-kes-tls", s->name); }
+void bc_kes_tls_secret_name(const bc_spec *s, char *out, size_t cap) {
+  char b[128];
+  kes_base(s, b, sizeof(b));
+  snprintf(out, cap, "%s-tls", b);
+}
 void bc_kes_identity_secret_name(const bc_spec *s, char *out, size_t cap) {
-  snprintf(out, cap, "%s-kes-identity", s->name);
+  char b[128];
+  kes_base(s, b, sizeof(b));
+  snprintf(out, cap, "%s-identity", b);
 }
 
 #define KES_CA_PATH "/etc/kes/config/keystore-ca.pem"
@@ -883,9 +906,11 @@ size_t bc_kes_objects(const bc_spec *s, bool trial, const char *config, const ch
   bc_kes_name(s, trial, kes, sizeof(kes));
   snprintf(cfg, sizeof(cfg), "%s-config", kes);
   bc_kes_tls_secret_name(s, tlsn, sizeof(tlsn));
-  bc_kes_name(s, false, sa, sizeof(sa)); /* the trial signs in to Vault as the live one would */
+  /* the trial signs in to Vault as the live one would */
+  if (s->kes.service_account) snprintf(sa, sizeof(sa), "%s", s->kes.service_account);
+  else bc_kes_name(s, false, sa, sizeof(sa));
 
-  { /* the live server's, which a trial uses too */
+  if (!s->kes.service_account) { /* the live server's own, which a trial uses too */
     mdoc *d = yyjson_mut_doc_new(NULL);
     kes_object(d, "v1", "ServiceAccount", s, sa, sa);
     o[k++] = (bc_object){path_of("/api/v1", s, "serviceaccounts", sa), d};
@@ -926,7 +951,11 @@ size_t bc_kes_objects(const bc_spec *s, bool trial, const char *config, const ch
   ADD_INT(d, sec, "runAsGroup", 65532);
   ADD_BOOL(d, sec, "runAsNonRoot", true);
   if (s->pull_secrets) yyjson_mut_obj_add_val(d, pod, "imagePullSecrets", yyjson_val_mut_copy(d, s->pull_secrets));
-  if (!trial) { /* replicas on different nodes when possible */
+  if (s->kes.node_selector) yyjson_mut_obj_add_val(d, pod, "nodeSelector", yyjson_val_mut_copy(d, s->kes.node_selector));
+  if (s->kes.tolerations) yyjson_mut_obj_add_val(d, pod, "tolerations", yyjson_val_mut_copy(d, s->kes.tolerations));
+  if (s->kes.affinity) {
+    yyjson_mut_obj_add_val(d, pod, "affinity", yyjson_val_mut_copy(d, s->kes.affinity));
+  } else if (!trial) { /* replicas on different nodes when possible */
     mval *pref = ADD_ARR(d, ADD_OBJ(d, ADD_OBJ(d, pod, "affinity"), "podAntiAffinity"),
                          "preferredDuringSchedulingIgnoredDuringExecution");
     mval *term = yyjson_mut_arr_add_obj(d, pref);

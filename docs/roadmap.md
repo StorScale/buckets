@@ -13,7 +13,7 @@ A successor can't depend on what it replaces. MinIO no longer publishes its imag
 **Where things stand (2026-10-02):** Phase 0 is done. In Phase 1:
 
 - **Done:** adoption, rollback and encryption.
-- **Left:** carrying over a tenant's KES, the compatibility promise, release artifacts, the migration guide, and running the round trip in CI.
+- **Left:** a shared-cluster run of the KES carry-over, the compatibility promise, release artifacts, the migration guide, and running the round trip in CI.
 
 ## Priorities at a glance
 
@@ -46,7 +46,7 @@ The goal is a safe, supported move from an archived MinIO deployment to Buckets.
   - The console's Encryption page sets it up: choose the key store, test the connection with a temporary key server, then apply.
   - Keys can be created and deleted safely.
   - Objects stored unencrypted can be encrypted in place. See `docs/encryption.md`.
-- [ ] **Carry over a tenant's KES.** Adoption still refuses tenants that use KES. The keys are already readable; what's left is mapping the tenant's KES configuration onto `spec.kms.kes`.
+- [ ] **Carry over a tenant's KES.** Built: `scripts/adopt-minio.sh` maps the tenant's running KES configuration onto Secret `<tenant>-kms` and `spec.kms.kes` (`createKey: false`, the tenant's KES account and scheduling). `buckets-kes check` reads the default key before MinIO stops, and the servers wait for KES. Unit tests and envtest pass. Left: the `KES=1` run of `tests/e2e-k8s/adopt-minio.sh` on the shared cluster (MinIO's own KES on Vault, adopted and rolled back).
 - [ ] **A compatibility promise.** State what stays compatible across releases: the on-disk format, `mc`, the AWS and MinIO SDKs, the admin API and the KES API.
 - [ ] **Release artifacts.** Signed images in a public registry, a published Helm chart for the operator, and an SBOM per release.
 - [ ] **A migration guide** covering:

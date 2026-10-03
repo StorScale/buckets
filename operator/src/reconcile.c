@@ -289,6 +289,19 @@ static void write_status(op_ctx *o, yyjson_val *bc, const bc_spec *s, const char
 
 /* ---- one cluster ---------------------------------------------------------------- */
 
+/* Whether any of the cluster's StatefulSets exists already. */
+static bool servers_exist(op_ctx *o, const bc_spec *s) {
+  buckets_buf path = BUCKETS_BUF_INIT;
+  buckets_buf_appendf(&path, "/apis/apps/v1/namespaces/%s/statefulsets?labelSelector=buckets.io%%2Fcluster%%3D%s", s->ns, s->name);
+  yyjson_doc *doc = NULL;
+  int st = kube_get(o->k, path.data, &doc);
+  buckets_buf_free(&path);
+  /* unknown counts as existing: never hold back servers that may be running */
+  bool any = st != 200 || yyjson_arr_size(yyjson_obj_get(yyjson_doc_get_root(doc), "items")) > 0;
+  yyjson_doc_free(doc);
+  return any;
+}
+
 static void reconcile_cluster(op_ctx *o, yyjson_val *bc) {
   bc_spec s;
   char err[512];
@@ -318,7 +331,12 @@ static void reconcile_cluster(op_ctx *o, yyjson_val *bc) {
   yyjson_val *sts[BC_MAX_POOLS];
   size_t nsts = 0;
   bool failed = false;
+  /* A new cluster with KES starts its servers once KES serves the default key:
+   * servers up without it cannot read what was encrypted (an adopted tenant's
+   * objects). A running cluster keeps running while KES comes up. */
+  bool hold = s.kes.enabled && !s.kes.active && !servers_exist(o, &s);
   for (size_t i = 0; i < n; i++) {
+    if (hold && strstr(objs[i].path, "/statefulsets/")) continue;
     int code = kube_apply(o->k, objs[i].path, objs[i].doc, &applied[i]);
     if (code / 100 != 2) {
       snprintf(err, sizeof(err), "applying %s failed (%d): %s", objs[i].path, code, kube_error_message(applied[i]));
@@ -332,6 +350,10 @@ static void reconcile_cluster(op_ctx *o, yyjson_val *bc) {
   }
   if (failed) {
     write_status(o, bc, &s, "Error", false, "ApplyFailed", err, topo, sts, nsts, kroot);
+  } else if (hold) {
+    const char *km = yyjson_mut_get_str(yyjson_mut_obj_get(kroot, "message"));
+    snprintf(err, sizeof(err), "the servers start once KES serves key %s: %s", s.kes.key_name, km ? km : "KES is starting");
+    write_status(o, bc, &s, "WaitingForKMS", false, "WaitingForKMS", err, topo, sts, nsts, kroot);
   } else {
     size_t outdated = 0;
     int restarted = restart_pods(o, &s, topo, sts, nsts, &outdated);

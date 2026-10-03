@@ -68,6 +68,12 @@ typedef struct {
     int replicas;
     const char *image, *key_name;
     yyjson_val *resources;
+    /* an existing ServiceAccount KES runs as (an adopted tenant's, which a
+     * Vault Kubernetes role names); NULL: the operator's own <name>-kes */
+    const char *name; /* the KES servers' and their Secrets' base name (default <cluster>-kes) */
+    const char *service_account;
+    yyjson_val *node_selector, *tolerations, *affinity; /* where KES runs (trials too) */
+    bool create_key; /* make the default key when missing (false: a missing key is an error) */
     bool active; /* set by the reconciler once KES serves the default key: bucketsd uses it */
   } kes;
 } bc_spec;
@@ -131,7 +137,8 @@ char *bc_kes_config(const bc_spec *s, yyjson_val *settings, const char *admin_id
                     char **ca_pem, char *err, size_t errlen);
 /* A KES server's objects for a configuration: the live server's
  * ServiceAccount (which Vault's Kubernetes sign-in names; a trial runs as it
- * too), its config Secret, Deployment and Service. */
+ * too; none when spec.kms.kes.serviceAccountName names one), its config
+ * Secret, Deployment and Service. */
 size_t bc_kes_objects(const bc_spec *s, bool trial, const char *config, const char *ca_pem, bc_object **out);
 /* Paths of a KES server's objects, to delete them. Caller frees each and the array. */
 size_t bc_kes_paths(const bc_spec *s, bool trial, char ***paths);

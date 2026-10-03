@@ -4,23 +4,35 @@
 #
 #   scripts/adopt-minio.sh -n <namespace> -t <tenant> [--context <ctx>] [--state <dir>] [--apply]
 #     [--image <bucketsd image>] [--configuration <secret>] [--tls <secret>]
+#     [--kes-image <buckets-kes image>] [--check-kes]
 #
 # The tenant is a MinIO Operator Tenant (tenants.minio.min.io) or, without the
 # MinIO Operator, StatefulSets <tenant>-<pool> laid out the way it lays them
 # out (MINIO_VOLUMES in their environment or config.env). Without --apply it
 # only checks and prints the plan and the BucketsCluster it would create.
 # With --apply it:
-#   1. saves the tenant's objects in --state (for scripts/rollback-to-minio.sh)
-#   2. sets every drive's PersistentVolume to Retain, so no step can lose data
-#   3. stops MinIO: deletes the Tenant (or its StatefulSets and Services);
+#   1. with KES: has buckets-kes read the tenant's default key, using the
+#      tenant's own KES configuration, in a one-off pod (stops here if it cannot)
+#   2. saves the tenant's objects in --state (for scripts/rollback-to-minio.sh)
+#   3. sets every drive's PersistentVolume to Retain, so no step can lose data
+#   4. stops MinIO: deletes the Tenant (or its StatefulSets and Services);
 #      the PVCs stay, and are never deleted by this script
-#   4. creates the BucketsCluster and waits for it to be Ready
+#   5. creates the BucketsCluster and waits for it to be Ready
+# KES: a tenant that encrypts with KES (spec.kes, or a <tenant>-kes StatefulSet
+# beside MINIO_KMS_KES_* settings) keeps its keys where they are. Where they are
+# and how to sign in become Secret <tenant>-kms; spec.kms.kes names the default
+# key (never created: a missing key means the settings point elsewhere), KES's
+# account and where its pods run; the servers start once buckets-kes serves the
+# key. --kes-image is the buckets-kes image, set in spec.kms.kes.image (default:
+# the operator's BUCKETS_KES_IMAGE, not set in the spec); --check-kes runs step 1 in a dry run too (a pod, nothing
+# else changes). The tenant's own KES StatefulSet is left as it is (a deleted
+# Tenant takes it along; rollback brings it back).
 # A BucketsCluster operator must be watching the namespace. Reads go on while
 # MinIO stops and Buckets starts: plan a short outage.
 set -euo pipefail
 
 NS= TENANT= CTX= STATE= APPLY= TIMEOUT=900
-BUCKETS_IMAGE=${BUCKETS_IMAGE:-} CONFIG_SECRET= TLS_SECRET=
+BUCKETS_IMAGE=${BUCKETS_IMAGE:-} CONFIG_SECRET= TLS_SECRET= KES_IMAGE=${BUCKETS_KES_IMAGE:-} CHECK_KES= KES_PIN=${BUCKETS_KES_IMAGE:+1}
 while [[ $# -gt 0 ]]; do
   case $1 in
     -n) NS=$2; shift 2 ;;
@@ -32,6 +44,8 @@ while [[ $# -gt 0 ]]; do
     --configuration) CONFIG_SECRET=$2; shift 2 ;;
     --tls) TLS_SECRET=$2; shift 2 ;;
     --timeout) TIMEOUT=$2; shift 2 ;;
+    --kes-image) KES_IMAGE=$2 KES_PIN=1; shift 2 ;;
+    --check-kes) CHECK_KES=1; shift ;;
     *) echo "unknown argument $1" >&2; exit 2 ;;
   esac
 done
@@ -51,9 +65,22 @@ k get services -o json > "$WORK/svc.json"
 k get persistentvolumeclaims -o json > "$WORK/pvc.json"
 [[ -n $(k get bucketsclusters "$TENANT" -o name 2>/dev/null || true) ]] && die "a BucketsCluster $TENANT already exists in $NS"
 
-export TENANT NS BUCKETS_IMAGE CONFIG_SECRET TLS_SECRET WORK
-python3 - > "$WORK/plan.json" <<'PY'
-import json, os, re, sys
+# the buckets-kes image the operator runs, unless named
+if [[ -z $KES_IMAGE ]]; then
+  KES_IMAGE=$(kc get deployments -A -o json 2>/dev/null | python3 -c '
+import json,sys
+for d in json.load(sys.stdin)["items"]:
+    for c in d["spec"]["template"]["spec"]["containers"]:
+        for e in c.get("env", []):
+            if e["name"] == "BUCKETS_KES_IMAGE" and e.get("value"): print(e["value"]); sys.exit()' || true)
+fi
+
+export TENANT NS BUCKETS_IMAGE CONFIG_SECRET TLS_SECRET WORK KES_IMAGE KES_PIN CTX
+SCRIPTS=$(cd "$(dirname "$0")" && pwd) python3 - > "$WORK/plan.json" <<'PY'
+import base64, json, os, re, subprocess, sys
+sys.dont_write_bytecode = True  # nothing left behind in scripts/
+sys.path.insert(0, os.environ["SCRIPTS"])
+import adopt_kes
 
 tenant, ns = os.environ["TENANT"], os.environ["NS"]
 def load(name):
@@ -79,6 +106,23 @@ def secret_at(tmpl, container, path):
     return None
 problems, notes = [], []
 
+_cache = {}
+def read(kind, name):
+    """A Secret's or ConfigMap's data, decoded; None if it cannot be read. Never printed."""
+    if not name:
+        return None
+    if (kind, name) not in _cache:
+        cmd = ["kubectl"] + (["--context", os.environ["CTX"]] if os.environ.get("CTX") else []) + \
+              ["-n", ns, "get", kind, name, "-o", "json"]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        data = json.loads(r.stdout).get("data", {}) if r.returncode == 0 else None
+        if data is not None and kind == "secret":
+            data = {k: base64.b64decode(v).decode("utf-8", "replace") for k, v in data.items()}
+        _cache[(kind, name)] = data
+    return _cache[(kind, name)]
+read_secret = lambda n: read("secret", n)
+read_configmap = lambda n: read("configmap", n)
+
 # The tenant's pools: from the Tenant, else from its StatefulSets.
 sts = sorted((s for s in sts_all if s["metadata"]["name"].startswith(tenant + "-")
               and any(re.fullmatch(r"data\d+", t["metadata"]["name"]) for t in s["spec"].get("volumeClaimTemplates", []))),
@@ -93,9 +137,8 @@ if tj:
     image = tspec.get("image", "")
     if tspec.get("requestAutoCert", True) and not tls:
         problems.append("the tenant uses the MinIO Operator's automatic certificate; give it an externalCertSecret first")
-    if tspec.get("kes"):
-        problems.append("the tenant encrypts with KES, which this script does not carry over yet: without it "
-                        "Buckets cannot read encrypted objects (see docs/migration.md)")
+    kes_key = (tspec.get("kes") or {}).get("keyName") if tspec.get("kes") else None
+    uses_kes = bool(tspec.get("kes"))
     if (tspec.get("features") or {}).get("bucketDNS"):
         notes.append("bucket DNS (MINIO_DNS_WEBHOOK_ENDPOINT) is not carried over")
     source = "Tenant"
@@ -104,6 +147,7 @@ else:
         print(json.dumps({"problems": [f"no Tenant {tenant} and no StatefulSets {tenant}-<pool> with data<n> claims in {ns}"]}))
         sys.exit(0)
     pools, mount_path, sub_path, tls, config, sc, image = [], None, "", None, None, {}, ""
+    kes_key, uses_kes = None, False
     for s in sts:
         tmpl = s["spec"]["template"]["spec"]
         c = tmpl["containers"][0]
@@ -121,6 +165,8 @@ else:
         # where MinIO reads them: MINIO_CONFIG_ENV_FILE and --certs-dir
         if env.get("MINIO_CONFIG_ENV_FILE"):
             config = config or secret_at(tmpl, c, env["MINIO_CONFIG_ENV_FILE"])
+        if env.get("MINIO_KMS_KES_ENDPOINT"):
+            uses_kes, kes_key = True, kes_key or env.get("MINIO_KMS_KES_KEY_NAME")
         args = c.get("args", [])
         if "--certs-dir" in args[:-1]:
             tls = tls or secret_at(tmpl, c, args[args.index("--certs-dir") + 1])
@@ -146,6 +192,49 @@ config = os.environ.get("CONFIG_SECRET") or config
 tls = os.environ.get("TLS_SECRET") or tls
 if not config:
     problems.append("no configuration Secret (config.env with the root credentials) found; name it with --configuration")
+
+# KES: settings in config.env count too (MinIO without its operator)
+config_env = (read_secret(config) or {}).get("config.env", "") if config else ""
+m = re.search(r"^\s*(?:export\s+)?MINIO_KMS_KES_ENDPOINT=", config_env, re.M)
+if m:
+    uses_kes = True
+    k = re.search(r"^\s*(?:export\s+)?MINIO_KMS_KES_KEY_NAME=[\"']?([^\"'\n]+)", config_env, re.M)
+    kes_key = kes_key or (k.group(1).strip() if k else None)
+kms = None
+if uses_kes:
+    try:
+        import yaml
+        load_yaml = yaml.safe_load
+    except ImportError:
+        load_yaml = None
+        problems.append("carrying KES over reads its YAML configuration: install PyYAML (pip install pyyaml)")
+    kes_sts = next((x for x in sts_all if x["metadata"]["name"] == tenant + "-kes"), None)
+    if load_yaml:
+        kms = adopt_kes.carry(tenant, kes_sts, kes_key, os.environ.get("KES_IMAGE"), read_secret, read_configmap, load_yaml)
+        problems.extend(kms["problems"])
+        notes.extend(kms["notes"])
+        cmd = ["kubectl"] + (["--context", os.environ["CTX"]] if os.environ.get("CTX") else []) + \
+              ["-n", ns, "get", "secrets,services,deployments,serviceaccounts", "-o", "json"]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        # names only: the Secrets' data is dropped unread
+        existing = [{"kind": o["kind"], "metadata": o["metadata"]} for o in json.loads(r.stdout)["items"]] \
+            if r.returncode == 0 else []
+        for c in adopt_kes.collisions(tenant, existing):
+            problems.append("%s exists and is not Buckets': the carried-over KMS needs that name" % c)
+        if not os.environ.get("KES_IMAGE"):
+            problems.append("no buckets-kes image: name it with --kes-image (or set the operator's BUCKETS_KES_IMAGE)")
+        if not os.environ.get("KES_PIN") and kms.get("kes"):
+            kms["kes"].pop("image", None)  # the operator's own, which follows its upgrades
+        # Buckets' KES replaces config.env's KMS settings (they would override it)
+        clean, gone = adopt_kes.without_kms_lines(config_env)
+        if gone:
+            notes.append("config.env's MINIO_KMS_* settings stay with MinIO: Buckets reads a copy without them "
+                         "(Secret %s-buckets-config)" % tenant)
+            kms["configCopy"] = {"name": tenant + "-buckets-config", "configEnv": clean}
+            config = tenant + "-buckets-config"
+        # credentials: into their own file, never the plan (the plan is saved and printed)
+        with open(os.path.join(os.environ["WORK"], "kms-secrets.json"), "w") as f:
+            json.dump({"settings": kms.pop("settings", None), "configCopy": kms.pop("configCopy", None)}, f)
 # the S3 Service's port as clients know it
 svc = svcs.get(tenant)
 port = (svc["spec"]["ports"][0]["port"] if svc else None) or (443 if tls else 80)
@@ -170,6 +259,8 @@ if not rel or rel.group(1) < "2024-10-29":
                  "what it writes; remove it once there is no going back")
 if tls:
     bc["spec"]["tls"] = {"certSecret": {"name": tls}}
+if kms and kms.get("kes"):
+    bc["spec"]["kms"] = {"kes": kms["kes"]}
 for pname, servers, nvol, src in pools:
     pool = {"name": pname, "servers": servers, "volumesPerServer": nvol}
     tmpl = (src.get("volumeClaimTemplate") or {}).get("spec") if source == "Tenant" else \
@@ -185,6 +276,7 @@ for pname, servers, nvol, src in pools:
 print(json.dumps({"source": source, "pools": [(p[0], p[1], p[2]) for p in pools], "claims": claims,
                   "pods": [f"{tenant}-{p[0]}-{i}" for p in pools for i in range(p[1])],
                   "problems": problems, "notes": notes, "bucketscluster": bc,
+                  "kms": {k: kms[k] for k in ("summary", "serviceAccount", "checkPod") if kms and k in kms} if kms else None,
                   "statefulsets": [s["metadata"]["name"] for s in sts]}))
 PY
 field() { python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print($1)" "$WORK/plan.json"; }
@@ -204,10 +296,49 @@ if [[ -n $problems ]]; then say "cannot adopt"; sed 's/^/   /' <<<"$problems"; e
 
 say "the BucketsCluster"
 field 'json.dumps(d["bucketscluster"], indent=2)' | sed 's/^/   /'
-if [[ -z $APPLY ]]; then echo; echo "dry run: nothing changed. Run again with --apply to adopt."; exit 0; fi
+HAS_KES=$(field '"yes" if d.get("kms") else ""')
+if [[ -n $HAS_KES ]]; then
+  say "KES"
+  echo "   Secret $TENANT-kms: $(field 'd["kms"]["summary"]') (credentials from the tenant's KES, not shown)"
+fi
 
-# ---- 1. save what rollback needs ------------------------------------------
-say "1/4 saving the tenant to $STATE"
+# buckets-kes reads the default key with the tenant's own KES configuration, in a one-off pod
+check_kes() {
+  local pod="$TENANT-buckets-kes-check"
+  k delete pod "$pod" --ignore-not-found --wait=true >/dev/null
+  field 'json.dumps(d["kms"]["checkPod"])' | k apply -f - >/dev/null
+  local phase=""
+  for _ in $(seq 90); do
+    phase=$(k get pod "$pod" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+    [[ $phase == Succeeded || $phase == Failed ]] && break
+    sleep 2
+  done
+  k logs "$pod" 2>/dev/null | tail -5 | sed 's/^/   /'
+  [[ $phase == Succeeded || $phase == Failed ]] || k get pod "$pod" -o jsonpath='{range .status.containerStatuses[*]}   {.state.waiting.reason}: {.state.waiting.message}{"\n"}{end}' 2>/dev/null
+  k delete pod "$pod" --ignore-not-found --wait=false >/dev/null
+  [[ $phase == Succeeded ]]
+}
+if [[ -n $HAS_KES && -z $APPLY && -n $CHECK_KES ]]; then
+  say "checking that buckets-kes reads the tenant's key (a one-off pod)"
+  if check_kes; then echo "   ok"; else echo "   buckets-kes cannot read the key with these settings: adoption would stop here"; exit 1; fi
+fi
+if [[ -z $APPLY ]]; then
+  echo
+  [[ -n $HAS_KES && -z $CHECK_KES ]] && echo "dry run: nothing changed (--check-kes also has buckets-kes read the tenant's key first). Run again with --apply to adopt." \
+    || echo "dry run: nothing changed. Run again with --apply to adopt."
+  exit 0
+fi
+
+# ---- 1. the keys before anything else ----------------------------------------
+if [[ -n $HAS_KES ]]; then
+  say "1/5 checking that buckets-kes reads the tenant's key (a one-off pod)"
+  check_kes || die "buckets-kes cannot read the tenant's default key with its KES settings; nothing changed"
+else
+  say "1/5 no KES to check"
+fi
+
+# ---- 2. save what rollback needs ------------------------------------------
+say "2/5 saving the tenant to $STATE"
 mkdir -p "$STATE"
 [[ -e $STATE/done ]] && die "$STATE already holds an adoption; use another --state"
 field 'json.dumps(d, indent=2)' > "$STATE/plan.json"
@@ -225,8 +356,8 @@ items=[s for s in json.load(sys.stdin)['items'] if s['metadata']['name'] in (t, 
 print(json.dumps({'apiVersion':'v1','kind':'List','items':items}))" "$TENANT" > "$STATE/services.json"
 fi
 
-# ---- 2. no step may lose data ---------------------------------------------
-say "2/4 setting the drives' PersistentVolumes to Retain"
+# ---- 3. no step may lose data ---------------------------------------------
+say "3/5 setting the drives' PersistentVolumes to Retain"
 for pv in $PVS; do
   [[ ${RECLAIM[$pv]} == Retain ]] || kc patch pv "$pv" -p '{"spec":{"persistentVolumeReclaimPolicy":"Retain"}}' >/dev/null
 done
@@ -234,8 +365,8 @@ for pv in $PVS; do
   [[ $(kc get pv "$pv" -o jsonpath='{.spec.persistentVolumeReclaimPolicy}') == Retain ]] || die "PV $pv is not Retain"
 done
 
-# ---- 3. stop MinIO, keep the PVCs ------------------------------------------
-say "3/4 stopping MinIO (the PVCs stay)"
+# ---- 4. stop MinIO, keep the PVCs ------------------------------------------
+say "4/5 stopping MinIO (the PVCs stay)"
 if [[ $(field 'd["source"]') == Tenant ]]; then
   k delete tenants.minio.min.io "$TENANT" --wait=true >/dev/null
 fi
@@ -248,12 +379,29 @@ for _ in $(seq 150); do [[ -z $(running) ]] && break; sleep 2; done
 for c in $(field '" ".join(c["pvc"] for c in d["claims"])'); do k get pvc "$c" -o name >/dev/null || die "PVC $c is gone"; done
 touch "$STATE/stopped"
 
-# ---- 4. Buckets on the same drives -----------------------------------------
-say "4/4 creating the BucketsCluster"
+# ---- 5. Buckets on the same drives -----------------------------------------
+say "5/5 creating the BucketsCluster"
+if [[ -n $HAS_KES ]]; then
+  # the key store settings (and config.env's copy without KMS lines), straight from the plan's private
+  # file; applied server side, so no last-applied annotation repeats them
+  python3 - "$WORK/kms-secrets.json" "$TENANT" "$NS" <<'PY' | k apply --server-side --field-manager=adopt-minio -f - >/dev/null
+import json, sys
+p, t, ns = json.load(open(sys.argv[1])), sys.argv[2], sys.argv[3]
+items = [{"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+          "metadata": {"name": t + "-kms", "namespace": ns, "labels": {"buckets.io/cluster": t}},
+          "stringData": {"settings.json": json.dumps(p["settings"])}}]
+if p.get("configCopy"):
+    items.append({"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+                  "metadata": {"name": p["configCopy"]["name"], "namespace": ns, "labels": {"buckets.io/cluster": t}},
+                  "stringData": {"config.env": p["configCopy"]["configEnv"]}})
+print(json.dumps({"apiVersion": "v1", "kind": "List", "items": items}))
+PY
+fi
 field 'json.dumps(d["bucketscluster"])' | k apply -f - >/dev/null
 k wait --for=jsonpath='{.status.phase}'=Ready "bc/$TENANT" --timeout="${TIMEOUT}s" >/dev/null || {
   echo "not Ready after ${TIMEOUT}s; the drives are untouched. Look at:"
   echo "  kubectl -n $NS get bc,pods; kubectl -n $NS logs $TENANT-<pool>-0"
+  [[ -n $HAS_KES ]] && echo "  KES: kubectl -n $NS get bc $TENANT -o jsonpath='{.status.kms.message}'"
   echo "or roll back: scripts/rollback-to-minio.sh -n $NS -t $TENANT --state $STATE --apply"
   exit 1
 }
