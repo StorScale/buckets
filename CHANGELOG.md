@@ -6,6 +6,25 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- buckets-kes refused request bodies sent without a length, which is how stock MinIO's KES client sends them, so MinIO could not generate data keys from it ("request body too large"). Bodies are now read however they arrive, up to the route's limit.
+- buckets-kes now matches MinIO KES where it differed:
+  - the error body layout;
+  - 404s for unknown APIs;
+  - the 1000000-byte body limit;
+  - `os` on macOS;
+  - import errors (no body, not JSON);
+  - the identity list, which now includes the admin, is sorted, and matches by prefix;
+  - `created_by` in identity descriptions;
+  - `/v1/identity/self/describe` for identities without a policy (404 rather than 403);
+  - new keys' cipher, which KES chooses by CPU.
+- `/v1/identity/self/describe` answers non-admin identities in the shape KES's client decodes, so `kes identity info` works against buckets-kes. KES itself answers only its admin, because of a lookup bug.
+- `tests/unit/test_object.c` built on Linux only (`mkdtemp` needs `<unistd.h>` on macOS).
+
+### Added
+- `buckets-kes identity of` takes a KES API key (`kes:v1:...`) as well as a certificate.
+- `tests/integration/kes-diff.sh`: buckets-kes and a real MinIO KES answer the same 111 requests, are compared, and then serve each other's keystore (`KES_BIN`, `KMSREQ`, with `tests/integration/kmsreq` sending the requests with Go's TLS). `kes.sh` also runs MinIO and Buckets against buckets-kes (`BUCKETS_KES`) or a real KES (`KES_BIN`).
+
 ## [1.0.0] - 2026-10-03
 
 The first stable release. Buckets takes over existing MinIO deployments in place and hands them back: `scripts/adopt-minio.sh` adopts a tenant's drives with no data copy, KES and its keys included, and `scripts/rollback-to-minio.sh` returns them to MinIO, both tested end to end on Kubernetes. Buckets no longer depends on MinIO's images: it ships its own KES-compatible key server, `buckets-kes`. Encryption is set up from the console, and existing objects can be encrypted in place.

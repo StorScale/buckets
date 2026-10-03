@@ -3,7 +3,8 @@
  * configuration file.
  *
  *   buckets-kes server --config FILE [--addr HOST:PORT]
- *   buckets-kes identity of CERT      the identity of a certificate (as "kes identity of")
+ *   buckets-kes identity of CERT|KEY  the identity of a certificate or of a KES API key
+ *                                     ("kes:v1:..."), as "kes identity of"
  *   buckets-kes check --config FILE --key NAME
  *                                     signs in to the configuration's key store and reads
  *                                     key NAME (exit 1 and why when it cannot): KES's own
@@ -16,12 +17,15 @@
 #include <string.h>
 #include <time.h>
 
+#include <openssl/crypto.h>
+#include <openssl/evp.h>
 #include <openssl/pem.h>
 #include <openssl/x509.h>
 
 #include "core/log.h"
 #include "core/loop.h"
 #include "core/pool.h"
+#include "crypto/base64.h"
 #include "crypto/hex.h"
 #include "crypto/sha256.h"
 #include "kes/key.h"
@@ -69,7 +73,35 @@ static int die(const char *msg) {
   return 1;
 }
 
+static void print_identity(const uint8_t *spki, size_t n) {
+  uint8_t h[32];
+  char hex[65];
+  buckets_sha256(spki, n, h);
+  buckets_hex_encode(h, 32, hex);
+  hex[64] = '\0';
+  printf("%s\n", hex);
+}
+
+/* A KES API key: "kes:v1:" and base64 of 0 (Ed25519) and the 32-byte seed; its
+ * identity is that of the Ed25519 certificate the client makes from it. */
+static int api_key_identity(const char *key) {
+  const char *b = key + 7;
+  uint8_t raw[48];
+  size_t bl = strlen(b);
+  if (bl > 60 || buckets_base64_decode(b, bl, raw) != 33 || raw[0] != 0) return die("invalid API key");
+  EVP_PKEY *k = EVP_PKEY_new_raw_private_key(EVP_PKEY_ED25519, NULL, raw + 1, 32);
+  OPENSSL_cleanse(raw, sizeof(raw));
+  uint8_t spki[44] = {0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00};
+  size_t pn = 32;
+  bool ok = k && EVP_PKEY_get_raw_public_key(k, spki + 12, &pn) == 1 && pn == 32;
+  EVP_PKEY_free(k);
+  if (!ok) return die("invalid API key");
+  print_identity(spki, sizeof(spki));
+  return 0;
+}
+
 static int identity_of(const char *path) {
+  if (strncmp(path, "kes:v1:", 7) == 0) return api_key_identity(path);
   FILE *f = fopen(path, "r");
   X509 *x = f ? PEM_read_X509(f, NULL, NULL, NULL) : NULL;
   if (f) fclose(f);
@@ -77,13 +109,8 @@ static int identity_of(const char *path) {
   unsigned char *der = NULL;
   int n = i2d_X509_PUBKEY(X509_get_X509_PUBKEY(x), &der);
   X509_free(x);
-  uint8_t h[32];
-  char hex[65];
-  buckets_sha256(der, (size_t)n, h);
+  print_identity(der, (size_t)n);
   OPENSSL_free(der);
-  buckets_hex_encode(h, 32, hex);
-  hex[64] = '\0';
-  printf("%s\n", hex);
   return 0;
 }
 
@@ -150,7 +177,7 @@ int main(int argc, char **argv) {
   }
   if (argc < 2 || strcmp(argv[1], "server") != 0 || !config) {
     fprintf(stderr, "usage: buckets-kes server --config FILE [--addr HOST:PORT]\n"
-                    "       buckets-kes identity of CERT\n"
+                    "       buckets-kes identity of CERT|KES-API-KEY\n"
                     "       buckets-kes check --config FILE --key NAME\n");
     return 2;
   }
