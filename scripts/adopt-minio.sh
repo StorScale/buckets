@@ -192,6 +192,13 @@ config = os.environ.get("CONFIG_SECRET") or config
 tls = os.environ.get("TLS_SECRET") or tls
 if not config:
     problems.append("no configuration Secret (config.env with the root credentials) found; name it with --configuration")
+# the operator mounts tls.crt and tls.key (a kubernetes.io/tls Secret, as cert-manager makes)
+tls_keys = read_secret(tls) if tls else None
+if tls and tls_keys is None:
+    problems.append(f"the TLS Secret {tls} cannot be read")
+elif tls and not {"tls.crt", "tls.key"} <= set(tls_keys):
+    problems.append(f"the TLS Secret {tls} has no tls.crt and tls.key (it has {', '.join(sorted(tls_keys)) or 'nothing'}): "
+                    "Buckets mounts those; add them (the same certificate and key) or name another Secret with --tls")
 
 # KES: settings in config.env count too (MinIO without its operator)
 config_env = (read_secret(config) or {}).get("config.env", "") if config else ""
