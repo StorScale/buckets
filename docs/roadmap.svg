@@ -7,10 +7,10 @@
 <rect x="24" y="80" width="712" height="84" rx="8" fill="none" stroke="#9aa2b1" stroke-width="1.25"/>
 <line x1="322" y1="94" x2="322" y2="150" stroke="#e2e5ea"/>
 <text x="40" y="114" font-size="14" font-weight="600" fill="#1d2330">Phase 0 · Housekeeping</text>
-<text x="40" y="136" font-size="11.5" fill="#5f6778">Days of work; shows the project is alive</text>
-<text x="338" y="106" fill="#1d2330">README and VERSION agree; require OpenSSL 3.2+</text>
-<text x="338" y="128" fill="#1d2330">Users page spinner; envtest rolling-update race</text>
-<text x="338" y="150" fill="#1d2330">Changelog kept current; security contact</text>
+<text x="40" y="136" font-size="11.5" fill="#1f8a4c">✓ Done 2026-10-02</text>
+<text x="338" y="106" fill="#1d2330"><tspan fill="#1f8a4c">✓</tspan> README and VERSION agree; require OpenSSL 3.2+</text>
+<text x="338" y="128" fill="#1d2330"><tspan fill="#1f8a4c">✓</tspan> Users page spinner; envtest rolling-update race</text>
+<text x="338" y="150" fill="#1d2330"><tspan fill="#1f8a4c">✓</tspan> Changelog kept current; security contact</text>
 <line x1="154" y1="164" x2="154" y2="180" stroke="#9aa2b1" stroke-width="1.25"/>
 <polygon points="146,188 154,180 162,188 154,196" fill="none" stroke="#9aa2b1" stroke-width="1.25"/>
 <line x1="154" y1="196" x2="154" y2="211" stroke="#9aa2b1" stroke-width="1.25" marker-end="url(#arrow)"/>
@@ -18,14 +18,14 @@
 <rect x="24" y="212" width="712" height="84" rx="8" fill="#0a66d1" fill-opacity="0.12" stroke="#0a66d1" stroke-width="2"/>
 <line x1="322" y1="226" x2="322" y2="282" stroke="#e2e5ea"/>
 <text x="40" y="246" font-size="14" font-weight="600" fill="#1d2330">Phase 1 · Home for MinIO users</text>
-<text x="40" y="268" font-size="11.5" fill="#5f6778">Packaging and tooling, not storage work</text>
-<text x="338" y="238" fill="#1d2330">Operator adopts existing MinIO tenants in place</text>
-<text x="338" y="260" fill="#1d2330">Tested rollback to MinIO; compatibility promise</text>
-<text x="338" y="282" fill="#1d2330">Signed images, Helm chart, SBOM, migration guide</text>
+<text x="40" y="268" font-size="11.5" fill="#5f6778">In progress: adoption, rollback, KMS done</text>
+<text x="338" y="238" fill="#1d2330"><tspan fill="#1f8a4c">✓</tspan> Adopt MinIO tenants in place; tested rollback</text>
+<text x="338" y="260" fill="#1d2330"><tspan fill="#1f8a4c">✓</tspan> Own KES key server; KMS set up from the console</text>
+<text x="338" y="282" fill="#1d2330">Compatibility promise; signed images; migration guide</text>
 <line x1="154" y1="296" x2="154" y2="312" stroke="#9aa2b1" stroke-width="1.25"/>
 <polygon points="146,320 154,312 162,320 154,328" fill="none" stroke="#9aa2b1" stroke-width="1.25"/>
 <line x1="154" y1="328" x2="154" y2="343" stroke="#9aa2b1" stroke-width="1.25" marker-end="url(#arrow)"/>
-<text x="176" y="324" font-size="12" fill="#5f6778">Gate: a MinIO tenant moves to Buckets and back in CI</text>
+<text x="176" y="324" font-size="12" fill="#5f6778">Gate: a MinIO tenant moves to Buckets and back in CI (passes on the dev cluster)</text>
 <rect x="24" y="344" width="712" height="84" rx="8" fill="#0a66d1" fill-opacity="0.12" stroke="#0a66d1" stroke-width="2"/>
 <line x1="322" y1="358" x2="322" y2="414" stroke="#e2e5ea"/>
 <text x="40" y="378" font-size="14" font-weight="600" fill="#1d2330">Phase 2 · Enterprise identity</text>

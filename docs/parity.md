@@ -140,9 +140,9 @@ Source: `cmd/admin-router.go`
 | ✅ | `InfoCannedPolicy` |  |
 | ✅ | `InfoServiceAccount` |  |
 | ✅ | `InspectDataHandler` |  |
-| ✅ | `KMSCreateKeyHandler` | builtin KMS |
-| ✅ | `KMSKeyStatusHandler` | builtin KMS |
-| ✅ | `KMSStatusHandler` | builtin KMS |
+| ✅ | `KMSCreateKeyHandler` | builtin KMS and KES |
+| ✅ | `KMSKeyStatusHandler` | builtin KMS and KES |
+| ✅ | `KMSStatusHandler` | builtin KMS and KES |
 | ✅ | `ListAccessKeysBulk` |  |
 | ✅ | `ListAccessKeysLDAP` |  |
 | ✅ | `ListAccessKeysLDAPBulk` |  |
@@ -240,13 +240,13 @@ Source: `cmd/kms-router.go`
 
 | | Handler | Notes |
 |---|---|---|
-| ✅ | `KMSAPIsHandler` | builtin KMS |
-| ✅ | `KMSCreateKeyHandler` | builtin KMS |
-| ✅ | `KMSKeyStatusHandler` | builtin KMS |
-| ✅ | `KMSListKeysHandler` | builtin KMS |
-| ✅ | `KMSMetricsHandler` | builtin KMS |
-| ✅ | `KMSStatusHandler` | builtin KMS |
-| ✅ | `KMSVersionHandler` | builtin KMS |
+| ✅ | `KMSAPIsHandler` | builtin KMS and KES |
+| ✅ | `KMSCreateKeyHandler` | builtin KMS and KES |
+| ✅ | `KMSKeyStatusHandler` | builtin KMS and KES |
+| ✅ | `KMSListKeysHandler` | builtin KMS and KES |
+| ✅ | `KMSMetricsHandler` | builtin KMS and KES |
+| ✅ | `KMSStatusHandler` | builtin KMS and KES |
+| ✅ | `KMSVersionHandler` | builtin KMS and KES |
 
 ## Metrics (5/5)
 
@@ -276,7 +276,7 @@ Source: `cmd/healthcheck-router.go`
 Subsystems with no single handler, tracked by phase in `docs/architecture.md`.
 
 Done: erasure coding and bitrot, xl.meta v2, pools, distributed locking, healing, the scanner with data
-usage and lifecycle expiry, SSE-S3/KMS/C with the builtin KMS, S2 compression, IAM (LDAP, OpenID,
+usage and lifecycle expiry, SSE-S3/KMS/C with the builtin KMS or KES (MinIO's, or `buckets-kes`), S2 compression, IAM (LDAP, OpenID,
 plugins, OPA), notifications (10 targets), audit, metrics v2/v3, bucket and site replication, ILM
 transitions and tiering (S3, MinIO, Azure, GCS), batch jobs (replicate, keyrotate, expire), pool
 decommission and rebalance, the operator
@@ -290,7 +290,7 @@ bucket metadata export/import, each compared with MinIO.
 
 FTP (`--ftp`, `tests/integration/ftp.sh`) and SFTP (`--sftp`, `tests/integration/sftp.sh`).
 
-KES (`tests/integration/kes.sh`).
+KES (`tests/integration/kes.sh`), and Buckets' own `buckets-kes` in its place, keys shared with MinIO's both ways (`tests/integration/buckets-kes.sh`).
 
 Extensions to MinIO's APIs (MinIO ignores what it does not know, so a job file or bucket written with
 them still loads there):

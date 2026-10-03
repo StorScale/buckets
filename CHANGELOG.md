@@ -7,16 +7,52 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- `buckets-kes` (`src/kes`, image `buckets-kes`): Buckets' own key server.
+  - **Compatibility:** it speaks MinIO KES's API and reads its configuration file.
+  - **Same storage:** it keeps keys as KES does, so either server reads the other's keys and ciphertexts.
+  - **Key stores:**
+    - HashiCorp Vault: KV v1/v2, Transit, AppRole or Kubernetes sign-in.
+    - AWS Secrets Manager: static keys, environment, IRSA, EKS Pod Identity or IMDSv2.
+    - Azure Key Vault: client secret, workload identity or managed identity.
+    - Google Secret Manager: a service account key or the metadata server.
+    - A directory, for tests.
+  - **Operator:** runs it by default. MinIO's KES still works in its place.
+- KMS setup in the console. Encryption → Set up the KMS chooses a key store, connects to it, names the default key, then tests and applies.
+  - **Test:** a temporary key server (`<cluster>-kes-test`) signs in to the key store, makes sure the default key exists, and encrypts and decrypts with it. It also checks that every key in use is there. Each step is reported with the key store's own error.
+  - **Apply:** saves the settings in Secret `<cluster>-kms` and sets `spec.kms.kes`. The operator then runs the key server and switches the storage servers over one at a time.
+  - **Status:** `status.kms` reports it.
+  - **Access:** the console runs as its own ServiceAccount, allowed only its cluster and the two KMS Secrets, and needs `admin:ConfigUpdate`.
+- Encrypt existing objects. A keyrotate job with `encryption.includeUnencrypted` (or `onlyUnencrypted`) rewrites unencrypted versions encrypted, in place.
+  - Each version keeps its ID, modification time, metadata, tags, object lock and checksum.
+  - A version changed during the rewrite is left alone.
+  - Bucket settings start the job ("Encrypt existing objects") and show its progress.
+- The console's Encryption page: the KMS backend, default key and endpoints, and every key with a live check and the buckets using it. KES keys can be created there, and deleted after typing the key's name.
+- `POST /minio/kms/v1/key/delete?key-id=` (`kms:DeleteKey`). It refuses the default key and keys a bucket encrypts with by default (409 `KMSKeyInUse`).
+- Bucket settings pick the SSE-KMS key from the KMS's keys.
+- Adopting a MinIO Operator tenant's volumes in place, and handing them back:
+  - `scripts/adopt-minio.sh`;
+  - `scripts/rollback-to-minio.sh`;
+  - `tests/e2e-k8s/adopt-minio.sh`, which passes 29/29 on the shared cluster.
+
+  It comes with the `BucketsCluster` fields `configuration`, `drives`, `securityContext`, `servicePort`, `volumes` and `volumeMounts`.
+- `MINIO_CONFIG_ENV_FILE` (`BUCKETS_CONFIG_ENV_FILE`), as MinIO reads it.
+- `BUCKETS_XL_META_VERSION=2` keeps drives readable by MinIO older than `RELEASE.2024-10-29`, which refuses xl.meta metaVersion 3. `tests/integration/minio-rollback.sh` checks it.
+- `docs/encryption.md`, and `operator/examples/cluster-kms.yaml`.
 - `spec.console.tls.certSecret`: the console serves HTTPS itself (`consoled --certs-dir`), so it can sit behind a LoadBalancer on 443 without an Ingress. Its probes switch to HTTPS, its Service port becomes `https-console`, and a console Ingress gets ingress-nginx's `backend-protocol: HTTPS` unless one is set.
 - `spec.console.env`: extra environment for the console, after the operator's own, with `valueFrom` allowed. It carries the console's OpenID sign-in settings.
 - The console's Users page lists people from the OpenID provider that Buckets knows of (signed in now, or holding access keys), read-only, with their name, sign-in name and roles. `ListAccessKeysOpenIDBulk` returns `displayName`, `email` and `policies` for them, a Buckets extension that MinIO clients ignore.
 - `BUCKETS_CONSOLE_LOCAL_USERS`: whether the Users page offers Create user. Off by default while OpenID sign-in is on; `login-methods` reports it as `localUsers`.
 - `docs/identity.md`: sign-in with Microsoft Entra ID and role-based access from Entra app roles, with `operator/examples/cluster-entra.yaml`.
 - `docs/roadmap.md`: what comes next, and why.
-- A GitLab pipeline (`.gitlab-ci.yml`) that builds the `bucketsd`, `buckets-operator` and `buckets-console` images with Kaniko and pushes them to Harbor.
+- A GitLab pipeline (`.gitlab-ci.yml`) that builds the `bucketsd`, `buckets-operator`, `buckets-console` and `buckets-kes` images with Kaniko and pushes them to Harbor.
 - `SECURITY.md`: how to report a vulnerability (a confidential GitLab issue) and which releases get fixes.
 
 ### Fixed
+- bucketsd listed no keys from KES. It asked for every key with an empty name prefix, which Go's KES answers only through a redirect. It now asks for `*`, and a pattern's trailing `*` is taken off.
+- Choosing SSE-KMS in bucket settings without a key ID always failed (the key ID is required). The KMS's default key is now named.
+- The HTTP client refused responses without a `Content-Length`: bodyless ones such as Vault's 204, and ones that end when the connection closes.
+- Under UBSan, bucketsd stopped at startup on a zero-length `memcpy` in replication's health check.
+- The operator wrote CA files for TLS clusters to `/tmp` on a read-only root filesystem. It now gets an `emptyDir` there.
 - Configure accepted a system OpenSSL older than 3.2, and the build then failed in `src/crypto/madmin.c` (Argon2id). It now requires 3.2 and builds the pinned release when the system's is older, as on Ubuntu 24.04 (3.0).
 - The Users page flashed a loading spinner under the provider's users while it loaded the hidden local-users list.
 - `tests/e2e-k8s/envtest.sh` failed in its rolling-update step when the operator deleted a pod between `kubectl apply`'s read and its patch; the test's stand-in for the StatefulSet controller now retries.
@@ -25,6 +61,13 @@ All notable changes to this project are documented here. The format follows
 - Test data committed by mistake with the batch jobs (`src/sb`, about 19 MB of random bytes) is gone.
 
 ### Changed
+- The operator's RBAC adds:
+  - patching `bucketsclusters`, which it grants to each console;
+  - updating and deleting Secrets;
+  - managing ServiceAccounts, Roles and RoleBindings;
+  - reading pod logs.
+
+  Its Kubernetes client moved into libbuckets (`src/k8s`), so the console uses it too.
 - The console has a new logo (a bucket of data blocks, in `console/web/public` with the artwork in `docs/brand`) and a blue accent to match; dark mode uses a lighter blue with dark text on primary buttons.
 - Streamed responses are sent by the worker that produces them, straight from the stream's own buffer when it offers one (`stream_view`/`stream_consume`; object GETs send from the verified shard buffers without a copy), until the socket is full, the response ends or 4 MiB have gone. They no longer cross three threads per 256 KiB. Under warp, 10 MiB GETs at 16 clients went from 8.5% behind MinIO to 3% behind, and 1 MiB GETs from 7% to 23% ahead.
 

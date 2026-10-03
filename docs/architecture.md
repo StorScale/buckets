@@ -15,17 +15,24 @@ The MinIO source at that tag is the behavioral spec. Each subsystem below names 
                         │                                 ▼                                            │
   S3 clients ─Ingress─▶ │ Service <cluster>  ──▶  StatefulSet per pool: bucketsd ×N (PVCs per drive)   │
                         │                          headless Service for peer DNS + internode RPC       │
+                        │                                 │ SSE-S3/KMS data keys (mTLS)                │
+                        │                                 ▼                                            │
+                        │ <cluster>-kes (Deployment): buckets-kes ×2 ──▶ Vault / AWS / Azure / Google  │
                         └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
 - **`bucketsd`** is the storage server. It serves the S3, admin, STS and metrics APIs, internode RPC, the background services (scanner, heal, ILM, replication, notifications), and SFTP/FTP. There is one StatefulSet per server pool.
-- **`buckets-operator`** is written in C. It uses the Kubernetes REST API directly (libcurl plus watch streams) and handles:
+- **`buckets-operator`** is written in C. It uses the Kubernetes REST API directly (libbuckets' HTTP client, `src/k8s`; it resyncs on an interval rather than watching) and handles:
   - reconciling the `buckets.io/v1alpha1` CRDs
   - pool expansion
   - rolling upgrades paced by `/minio/health/cluster`
   - decommissioning
   - TLS
   - leader election through a Lease
+- **`buckets-kes`** is the key server behind SSE-S3 and SSE-KMS (`src/kes`).
+  - **API:** KES's, with identities from client certificates and allow/deny policies, so bucketsd talks to it as to MinIO's KES.
+  - **Keys:** generated and wrapped in the server and cached, and kept in Vault, AWS Secrets Manager, Azure Key Vault or Google Secret Manager in MinIO KES's layout, so keys move freely between the two.
+  - **Run by the operator** for `spec.kms.kes`, with a certificate and API keys it generates. The console's Encryption page sets it up and tests it (see `docs/encryption.md`).
 - **`buckets-console`** is stateless and scales independently of storage. It never touches drives: it only talks to `bucketsd` over the S3 and admin APIs, like any other client. `consoled` serves the SPA itself, over HTTPS when `spec.console.tls` gives it a certificate, and signs people in with access keys, LDAP or OpenID Connect (see `docs/identity.md`).
 
 ## `bucketsd` layers
@@ -121,7 +128,7 @@ The S3 core runs on one drive, many drives, several pools, or a cluster of nodes
   - one StatefulSet per pool (`Parallel`, `OnDelete`, and `BUCKETS_VOLUMES` naming every pool's pods)
   - PodDisruptionBudgets
   - generated root credentials, which deliberately outlive the cluster
-  - with `spec.kms.kes`, a KES server for SSE-S3/KMS, whose key store the console sets up and tests first (see `docs/encryption.md`)
+  - with `spec.kms.kes`, `buckets-kes` for SSE-S3/KMS, whose key store the console sets up and tests first (see `docs/encryption.md`)
 - **Restarts:** a topology change (pools, erasure settings) restarts every server together. Any other template change rolls one server at a time, only while all are ready.
 - **Status:** phase, servers ready, and a `Ready` condition.
 - **Leader election:** on a Lease.

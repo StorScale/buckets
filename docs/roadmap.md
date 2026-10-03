@@ -8,13 +8,20 @@ Buckets should become the maintained home for MinIO users, then win on enterpris
 
 The order below leads with what builds on work that already exists (MinIO on-disk compatibility, the operator, Entra ID sign-in) and needs no storage-engine changes. Performance claims wait until benchmarks back them.
 
+A successor can't depend on what it replaces. MinIO no longer publishes its images or binaries, so Buckets now ships its own key server (`buckets-kes`) in place of MinIO's KES, and keeps mirrors of MinIO's last images only for adoption and rollback.
+
+**Where things stand (2026-10-02):** Phase 0 is done. In Phase 1:
+
+- **Done:** adoption, rollback and encryption.
+- **Left:** carrying over a tenant's KES, the compatibility promise, release artifacts, the migration guide, and running the round trip in CI.
+
 ## Priorities at a glance
 
 ![Buckets roadmap: five phases, each with the gate that must pass before the next](roadmap.svg)
 
 Phases 1 and 2 carry the case for choosing Buckets; Phases 3 and 4 make it easier to adopt and to sell to regulated teams. No dates are set yet: each phase starts when the gate before it passes.
 
-## Phase 0: Housekeeping
+## Phase 0: Housekeeping (done)
 
 Small fixes that decide whether people trust Buckets as the maintained successor. Each is days of work, not weeks.
 
@@ -24,23 +31,36 @@ Small fixes that decide whether people trust Buckets as the maintained successor
 - [x] Fix the envtest rolling-update step, which fails on a race with or without recent changes ("pod not found").
 - [x] Keep CHANGELOG.md current with each release, and publish a security contact so users can report issues.
 
-## Phase 1: The maintained home for MinIO users
+## Phase 1: The maintained home for MinIO users (in progress)
 
 The goal is a safe, supported move from an archived MinIO deployment to Buckets. Buckets already reads and writes MinIO's exact on-disk format, so this is packaging and tooling, not storage work.
 
-- **Adopt existing MinIO tenants.** The operator takes over a running MinIO deployment's volumes in place, with no data copy.
-- **A tested rollback.** Document and test switching the same volumes back to MinIO `RELEASE.2025-10-15T17-29-55Z`.
-- **A compatibility promise.** State what stays compatible across releases: the on-disk format, `mc`, the AWS and MinIO SDKs, and the admin API.
-- **Release artifacts.** Signed images in a public registry, a published Helm chart for the operator, and an SBOM per release.
-- **A migration guide** covering identity (MinIO config to Entra ID or Okta), TLS, and monitoring.
+- [x] **Adopt existing MinIO tenants.** The operator takes over a MinIO Operator tenant's volumes in place, with no data copy.
+  - `scripts/adopt-minio.sh` plans by default, and with `--apply` saves the tenant, keeps its PVs and creates the `BucketsCluster`.
+  - The operator gained the tenant's layout: `configuration` (config.env), `drives`, `securityContext`, `servicePort`, and extra volumes.
+- [x] **A tested rollback.** `scripts/rollback-to-minio.sh` hands the drives back.
+  - `tests/e2e-k8s/adopt-minio.sh` passes 29/29 on the shared cluster, from MinIO `RELEASE.2024-10-13` to Buckets and back with nothing lost.
+  - MinIO older than `RELEASE.2024-10-29` can't read xl.meta metaVersion 3. For those, adoption sets `BUCKETS_XL_META_VERSION=2`, checked in `tests/integration/minio-rollback.sh`.
+- [x] **Encryption without MinIO's components.**
+  - `buckets-kes` is Buckets' own KES-compatible key server. It keeps keys exactly as MinIO KES does, so keys from an adopted deployment stay readable. It works with HashiCorp Vault, AWS Secrets Manager, Azure Key Vault and Google Secret Manager.
+  - The console's Encryption page sets it up: choose the key store, test the connection with a temporary key server, then apply.
+  - Keys can be created and deleted safely.
+  - Objects stored unencrypted can be encrypted in place. See `docs/encryption.md`.
+- [ ] **Carry over a tenant's KES.** Adoption still refuses tenants that use KES. The keys are already readable; what's left is mapping the tenant's KES configuration onto `spec.kms.kes`.
+- [ ] **A compatibility promise.** State what stays compatible across releases: the on-disk format, `mc`, the AWS and MinIO SDKs, the admin API and the KES API.
+- [ ] **Release artifacts.** Signed images in a public registry, a published Helm chart for the operator, and an SBOM per release.
+- [ ] **A migration guide** covering:
+  - mirroring MinIO's images first, since they're gone upstream;
+  - identity (MinIO config to Entra ID or Okta), TLS and monitoring;
+  - KES.
 
-Done when: a MinIO tenant with real data moves to Buckets and back again in CI, with no data loss.
+Done when: a MinIO tenant with real data moves to Buckets and back again in CI, with no data loss. The round trip passes on the shared cluster; it doesn't run in CI yet.
 
 ## Phase 2: Enterprise identity
 
 Identity-provider sign-in with role-based access should be a feature people choose Buckets for, not a set of environment variables. Entra ID sign-in with app roles works today; this phase makes it easy to set up and to audit.
 
-- **Guided setup in the console** for Entra ID, Okta and Keycloak, replacing hand-written `MINIO_IDENTITY_OPENID_*` settings.
+- **Guided setup in the console** for Entra ID, Okta and Keycloak, replacing hand-written `MINIO_IDENTITY_OPENID_*` settings. The KMS setup is the pattern: a form per provider, the provider-side steps filled in, a real test before anything changes, then apply.
 - **Per-bucket and per-team roles.** Ship policy templates such as `team-<name>-rw`, with matching app-role guidance for each identity provider.
 - **Automatic provisioning and removal (SCIM).** People who leave lose access and their access keys without manual cleanup.
 - **An access review page.** Answer "who can read this bucket, and why", and test whether a given user would be allowed an action.
@@ -74,6 +94,7 @@ The full admin console and OpenSSL 3 are already in place; this phase turns them
 
 - **FIPS 140-3 mode** using the OpenSSL 3 FIPS provider. Buckets links OpenSSL 3.5, which makes this more practical than in a Go codebase.
 - **WORM compliance reports** built on the existing object lock: which buckets are locked, in which mode, until when.
+- **Encryption coverage reports:** which buckets encrypt by default, with which key, and how many objects are still stored unencrypted.
 - **Ransomware alerts** for unusual bursts of deletes or overwrites, using the existing event notifications.
 
 Done when: an auditor can get usage, access and retention reports from the console, and FIPS mode is documented and tested.
@@ -92,6 +113,13 @@ The roadmap builds on what exists: MinIO's exact on-disk format, 220 of 222 MinI
 
 | Date | Change | What it gives |
 | --- | --- | --- |
+| 2026-10-02 | `buckets-kes` | Buckets' own key server, compatible with MinIO KES's API and stored keys; Vault, AWS, Azure and Google key stores |
+| 2026-10-02 | KMS setup in the console | Choose a key store, test it with a temporary key server, apply; the operator runs the key server and switches the storage servers over one at a time |
+| 2026-10-02 | Encrypt existing objects | Unencrypted objects encrypted in place, keeping version IDs, dates, metadata and object lock |
+| 2026-10-02 | Encryption page | KMS status, keys with a live check, and key deletion guarded against keys in use; SSE-KMS key picker for buckets |
+| 2026-10-02 | MinIO tenant adoption and rollback | A MinIO Operator tenant's volumes taken over in place and handed back; 29/29 on the shared cluster |
+| 2026-10-02 | MinIO images mirrored to Harbor | The lakehouse tenant's MinIO, KES, operator and DirectPV images, no longer published upstream |
+| 2026-10-02 | Phase 0 | OpenSSL 3.2 floor, envtest race, Users page spinner, changelog and security policy |
 | 2026-10-02 | Users page lists Entra ID users | Name, sign-in name and roles of people who have signed in; no local users by default |
 | 2026-10-02 | Session cookie fix | Entra ID sign-in works; headers over 1 KB were cut off |
 | 2026-10-02 | `spec.console.env` | Console sign-in settings, with the client secret from a Kubernetes Secret |
@@ -102,8 +130,11 @@ The roadmap builds on what exists: MinIO's exact on-disk format, 220 of 222 MinI
 ## Risks and open questions
 
 - **Taking over live MinIO data is high-stakes.** One bad adoption loses trust permanently. Mitigation: read-only dry runs, a tested rollback, and the CI round trip before any release claims it.
+- **Cloud key stores are tested against emulators.** Vault is tested for real (AppRole and Kubernetes sign-in), but AWS, Azure and Google have only been tested against moto, Lowkey Vault and a mock. Run the console's Test step on a real account before relying on one, and test each in a real account before release.
+- **Keys are the data.** Losing a key store or deleting a key makes objects unreadable. The console refuses to delete keys in use, but backups of the key store are the operator's responsibility; the migration guide should say so.
 - **AGPL licensing.** Buckets inherits MinIO's AGPL-3.0. Confirm how that affects internal use and any hosted offering before positioning beyond internal use.
 - **Scope versus team size.** Five phases is a lot for a small team; Phases 0 to 2 are the core, and 3 and 4 can slip.
 - **Identity-provider differences.** Entra ID is proven; Okta and Keycloak send roles in different claims and need their own tests.
 - Who owns the roadmap, and who are the first users outside this team?
 - Should FIPS mode come before Phase 3, if a regulated customer needs it?
+- Which key store will production use, and who owns its backups?
