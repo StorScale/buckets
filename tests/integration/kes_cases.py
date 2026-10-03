@@ -7,6 +7,7 @@ fresh: both servers write encrypted objects and answer the KMS APIs; swapped:
 each server, now on the other's drives, reads what the other wrote.
 """
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -71,6 +72,8 @@ if PHASE == "fresh":
             body = re.sub(r"127\.0\.0\.1:\d+", "<addr>", body)
             body = re.sub(r'"RequestId":"[^"]*"|<RequestId>[^<]*</RequestId>|"HostId":"[^"]*"|<HostId>[^<]*</HostId>',
                           "", body)
+            if name == "apis" and c == 200:  # KES lists its routes in map order
+                body = json.dumps(sorted(json.loads(body), key=lambda r: (r.get("Path"), r.get("Method"))))
             res.append((c, h.get("content-type"), body if "create" not in name or c >= 400 else ""))
         compare(f"KMS API, {name}", *res)
     if MC:

@@ -5,6 +5,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#if defined(__linux__) && defined(__aarch64__)
+#include <asm/hwcap.h>
+#include <sys/auxv.h>
+#endif
 
 #include <openssl/crypto.h>
 #include <yyjson.h>
@@ -29,9 +33,23 @@ static void set_creator(buckets_kes_key *k, const char *created_by) {
   snprintf(k->created_by, sizeof(k->created_by), "%s", created_by ? created_by : "");
 }
 
+/* crypto.DetermineSecretKeyType: AES-256 where Go has AES-GCM in hardware
+ * (x86 AES-NI and PCLMULQDQ; arm64 AES and PMULL, as golang.org/x/sys/cpu
+ * sees them, which it does not on macOS), else ChaCha20. */
+static buckets_kes_cipher default_cipher(void) {
+#if defined(__x86_64__) || defined(__i386__)
+  __builtin_cpu_init();
+  if (__builtin_cpu_supports("aes") && __builtin_cpu_supports("pclmul")) return BUCKETS_KES_AES256;
+#elif defined(__linux__) && defined(__aarch64__)
+  unsigned long hw = getauxval(AT_HWCAP);
+  if ((hw & HWCAP_AES) && (hw & HWCAP_PMULL)) return BUCKETS_KES_AES256;
+#endif
+  return BUCKETS_KES_CHACHA20;
+}
+
 void buckets_kes_key_new(buckets_kes_key *k, const char *created_by) {
   memset(k, 0, sizeof(*k));
-  k->cipher = BUCKETS_KES_AES256;
+  k->cipher = default_cipher();
   buckets_random(k->key, 32);
   k->has_hmac = true;
   buckets_random(k->hmac, 32);

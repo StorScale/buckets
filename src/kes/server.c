@@ -30,7 +30,7 @@
 #define BUCKETS_COMMIT ""
 #endif
 
-#define MAX_BODY (1 << 20)
+#define MAX_BODY 1000000 /* KES's mem.MB */
 
 /* ---- configuration ------------------------------------------------------------------ */
 
@@ -385,12 +385,22 @@ static void reply_json(buckets_http_response *resp, int status, yyjson_mut_doc *
   free(js);
 }
 
+/* KES's api.Fail: {"message": and json.Encoder's output, whose newline
+ * lands before the closing brace. */
 static void fail(buckets_http_response *resp, int status, const char *msg) {
   yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
-  yyjson_mut_val *o = yyjson_mut_obj(d);
-  yyjson_mut_doc_set_root(d, o);
-  yyjson_mut_obj_add_strcpy(d, o, "message", msg);
-  reply_json(resp, status, d);
+  yyjson_mut_val *v = yyjson_mut_strcpy(d, msg);
+  yyjson_mut_doc_set_root(d, v);
+  size_t n;
+  char *js = yyjson_mut_write(d, 0, &n);
+  yyjson_mut_doc_free(d);
+  resp->status = status;
+  buckets_http_resp_header_set(resp, "Content-Type", "application/json");
+  buckets_buf_reset(&resp->body);
+  buckets_buf_append_c(&resp->body, "{\"message\":");
+  buckets_buf_append(&resp->body, js, n);
+  buckets_buf_append_c(&resp->body, "\n}");
+  free(js);
 }
 
 static void ok_empty(buckets_http_response *resp) {
@@ -483,7 +493,7 @@ static bool match(const char *pattern, const char *path) {
 
 /* ---- routes ---------------------------------------------------------------------------- */
 
-typedef enum { AUTH_NONE, AUTH_IDENTITY } auth_kind;
+typedef enum { AUTH_NONE, AUTH_IDENTIFY, AUTH_IDENTITY } auth_kind; /* IDENTIFY: a certificate, no policy */
 
 typedef struct {
   const char *method, *path; /* path: a prefix when it ends in '/' */
@@ -526,7 +536,11 @@ static void h_status(buckets_kes_server *s, const buckets_http_request *req, con
   yyjson_mut_val *o;
   yyjson_mut_doc *d = obj(&o);
   yyjson_mut_obj_add_str(d, o, "version", BUCKETS_VERSION);
+#if defined(__APPLE__)
+  yyjson_mut_obj_add_str(d, o, "os", "darwin"); /* runtime.GOOS */
+#else
   yyjson_mut_obj_add_str(d, o, "os", "linux");
+#endif
 #if defined(__aarch64__)
   yyjson_mut_obj_add_str(d, o, "arch", "arm64");
 #else
@@ -842,6 +856,17 @@ static void h_policy_list(buckets_kes_server *s, const buckets_http_request *req
   reply_json(resp, 200, d);
 }
 
+static int cmp_strp(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+
+static void add_rules(yyjson_mut_doc *d, yyjson_mut_val *o, const char *key, char **rules, size_t n) {
+  if (!n) return; /* omitempty */
+  yyjson_mut_val *m = yyjson_mut_obj_add_obj(d, o, key);
+  for (size_t i = 0; i < n; i++) yyjson_mut_obj_add(m, yyjson_mut_strcpy(d, rules[i]), yyjson_mut_obj(d));
+}
+
+/* describe: KES's describeIdentity. self: every identity gets an answer (KES
+ * answers only the admin, looking the caller up by an empty resource), in the
+ * shape kms-go's DescribeSelf decodes: the policy's name, its rules beside it. */
 static void h_identity(buckets_kes_server *s, const buckets_http_request *req, const char *res, const char *id,
                        yyjson_val *body, buckets_http_response *resp) {
   (void)body;
@@ -854,38 +879,49 @@ static void h_identity(buckets_kes_server *s, const buckets_http_request *req, c
   if (self) yyjson_mut_obj_add_strcpy(d, o, "identity", who);
   if (*s->admin && strcasecmp(who, s->admin) == 0) {
     yyjson_mut_obj_add_bool(d, o, "admin", true);
+    yyjson_mut_obj_add_strcpy(d, o, "created_at", at);
   } else {
     const ident *found = NULL;
     for (size_t i = 0; i < s->nidents; i++)
       if (strcasecmp(s->idents[i].id, who) == 0) found = &s->idents[i];
     if (!found) {
       yyjson_mut_doc_free(d);
-      { fail(resp, 404, "identity does not exist"); return; }
+      fail(resp, 404, "identity does not exist");
+      return;
     }
     const policy *p = &s->policies[found->policy];
-    yyjson_mut_obj_add_strcpy(d, o, self ? "policy_name" : "policy", p->name);
+    if (!self) yyjson_mut_obj_add_strcpy(d, o, "policy", p->name);
+    yyjson_mut_obj_add_strcpy(d, o, "created_at", at);
+    if (*s->admin) yyjson_mut_obj_add_strcpy(d, o, "created_by", s->admin);
     if (self) {
-      yyjson_mut_val *pol = yyjson_mut_obj_add_obj(d, o, "policy");
-      yyjson_mut_val *a = yyjson_mut_obj_add_obj(d, pol, "allow"), *dn = yyjson_mut_obj_add_obj(d, pol, "deny");
-      for (size_t i = 0; i < p->nallow; i++) yyjson_mut_obj_add(a, yyjson_mut_strcpy(d, p->allow[i]), yyjson_mut_obj(d));
-      for (size_t i = 0; i < p->ndeny; i++) yyjson_mut_obj_add(dn, yyjson_mut_strcpy(d, p->deny[i]), yyjson_mut_obj(d));
+      yyjson_mut_obj_add_strcpy(d, o, "policy", p->name);
+      add_rules(d, o, "allow", p->allow, p->nallow);
+      add_rules(d, o, "deny", p->deny, p->ndeny);
     }
   }
-  yyjson_mut_obj_add_strcpy(d, o, "created_at", at);
   reply_json(resp, 200, d);
 }
 
+/* KES's listIdentities: the admin and the policies' identities, sorted; "" and
+ * "*" list all, anything else is a prefix (a trailing '*' dropped). */
 static void h_identity_list(buckets_kes_server *s, const buckets_http_request *req, const char *res, const char *id,
                             yyjson_val *body, buckets_http_response *resp) {
   (void)req, (void)id, (void)body;
   size_t rl = strlen(res);
+  bool all = !rl || strcmp(res, "*") == 0;
+  size_t pl = rl && res[rl - 1] == '*' ? rl - 1 : rl;
+  const char **ids = buckets_xcalloc(s->nidents + 2, sizeof(char *));
+  size_t n = 0;
+  if (*s->admin && (all || strncmp(s->admin, res, pl) == 0)) ids[n++] = s->admin;
+  for (size_t i = 0; i < s->nidents; i++)
+    if (all || strncmp(s->idents[i].id, res, pl) == 0) ids[n++] = s->idents[i].id;
+  qsort(ids, n, sizeof(char *), cmp_strp);
   yyjson_mut_val *o;
   yyjson_mut_doc *d = obj(&o);
   yyjson_mut_val *a = yyjson_mut_obj_add_arr(d, o, "identities");
-  for (size_t i = 0; i < s->nidents; i++)
-    if (strcmp(res, "*") == 0 || (rl && res[rl - 1] == '*' ? strncmp(s->idents[i].id, res, rl - 1) == 0 : strcmp(s->idents[i].id, res) == 0))
-      yyjson_mut_arr_add_strcpy(d, a, s->idents[i].id);
+  for (size_t i = 0; i < n; i++) yyjson_mut_arr_add_strcpy(d, a, ids[i]);
   yyjson_mut_obj_add_str(d, o, "continue_at", "");
+  free(ids);
   reply_json(resp, 200, d);
 }
 
@@ -914,7 +950,7 @@ static const route ROUTES[] = {
     {"GET", "/v1/policy/read/", 0, 15, AUTH_IDENTITY, h_policy},
     {"GET", "/v1/policy/list/", 0, 15, AUTH_IDENTITY, h_policy_list},
     {"GET", "/v1/identity/describe/", 0, 15, AUTH_IDENTITY, h_identity},
-    {"GET", "/v1/identity/self/describe", 0, 15, AUTH_IDENTITY, h_identity},
+    {"GET", "/v1/identity/self/describe", 0, 15, AUTH_IDENTIFY, h_identity},
     {"GET", "/v1/identity/list/", 0, 15, AUTH_IDENTITY, h_identity_list},
     {"GET", "/v1/log/error", 0, 0, AUTH_IDENTITY, h_logs},
     {"GET", "/v1/log/audit", 0, 0, AUTH_IDENTITY, h_logs},
@@ -966,7 +1002,14 @@ void buckets_kes_server_handle(const buckets_http_request *req, buckets_http_res
                : strcmp(path, ROUTES[i].path) == 0)
       r = &ROUTES[i];
   }
-  if (!r) { fail(resp, 404, "not found"); return; }
+  if (!r) { /* http.NotFound */
+    resp->status = 404;
+    buckets_http_resp_header_set(resp, "Content-Type", "text/plain; charset=utf-8");
+    buckets_http_resp_header_set(resp, "X-Content-Type-Options", "nosniff");
+    buckets_buf_reset(&resp->body);
+    buckets_buf_append_c(&resp->body, "404 page not found\n");
+    return;
+  }
   /* POST stands in for PUT, as with KES */
   if (!buckets_str_eq_c(req->method, r->method) && !(buckets_str_eq_c(req->method, "POST") && strcmp(r->method, "PUT") == 0)) {
     buckets_http_resp_header_set(resp, "Accept", r->method);
@@ -982,7 +1025,7 @@ void buckets_kes_server_handle(const buckets_http_request *req, buckets_http_res
     char err[120];
     if (!req->secure) { fail(resp, 400, "insecure connection: TLS is required"); return; }
     if (!buckets_kes_cert_identity(req->peer_certs, req->npeer_certs, id, err, sizeof(err))) { fail(resp, 400, err); return; }
-    if (!*s->admin || strcmp(id, s->admin) != 0) {
+    if (r->auth == AUTH_IDENTITY && (!*s->admin || strcmp(id, s->admin) != 0)) {
       const policy *p = NULL;
       for (size_t i = 0; i < s->nidents && !p; i++)
         if (strcmp(s->idents[i].id, id) == 0) p = &s->policies[s->idents[i].policy];
@@ -997,10 +1040,32 @@ void buckets_kes_server_handle(const buckets_http_request *req, buckets_http_res
     }
   }
   yyjson_doc *body = NULL;
-  if (r->max_body && req->body_len > 0) {
-    if (req->body_len > r->max_body || req->body_fd >= 0 || req->pipe) { fail(resp, 413, "request body too large"); return; }
-    body = yyjson_read(req->body.p, req->body.n, 0);
-    if (!body) { fail(resp, 400, "invalid request body"); return; }
+  bool import = r->fn == h_import;
+  const char *bad_body = import ? "invalid import key request body" : "invalid request body";
+  if (r->max_body && req->body_len != 0) {
+    /* however it came (in memory, spooled, streamed, or chunked as MinIO's
+     * kms-go sends it: no length), up to the route's limit */
+    buckets_buf raw = BUCKETS_BUF_INIT;
+    buckets_http_body_cursor cur = {req, 0};
+    char chunk[16384];
+    long k;
+    bool too_large = false;
+    while ((k = buckets_http_body_read(&cur, chunk, sizeof(chunk))) > 0 && !too_large) {
+      if (raw.len + (size_t)k > (size_t)r->max_body) too_large = true;
+      else buckets_buf_append(&raw, chunk, (size_t)k);
+    }
+    if (too_large || k < 0) {
+      buckets_buf_free(&raw);
+      fail(resp, too_large ? 413 : 400, too_large ? "request body too large" : bad_body);
+      return;
+    }
+    body = raw.len ? yyjson_read(raw.data, raw.len, 0) : NULL;
+    if (raw.data) OPENSSL_cleanse(raw.data, raw.len);
+    buckets_buf_free(&raw);
+    if (!body && (import || cur.off > 0)) { fail(resp, 400, bad_body); return; }
+  } else if (import) { /* json.Decode of nothing: EOF */
+    fail(resp, 400, bad_body);
+    return;
   }
   r->fn(s, req, resource, id, yyjson_doc_get_root(body), resp);
   if (body) yyjson_doc_free(body);
