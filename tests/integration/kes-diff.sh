@@ -32,7 +32,8 @@ cd "$WORK"
 openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=127.0.0.1" -addext "subjectAltName=IP:127.0.0.1" \
   -keyout server.key -out server.crt >/dev/null 2>&1
 for c in admin app ops stranger; do
-  openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=$c" \
+  # not a CA (OpenSSL 3 marks self-signed certificates CA:TRUE by default; KES ignores CA certificates as identities)
+  openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=$c" -addext "basicConstraints=critical,CA:FALSE" \
     -keyout "$c.key" -out "$c.crt" >/dev/null 2>&1
   eval "ID_$c=\$(\"$KMS\" identity of $c.crt)"
 done
