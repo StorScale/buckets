@@ -14,7 +14,7 @@ import {
   OidcSettings,
   OidcTest,
 } from "../api";
-import { ErrorBanner, Spinner } from "../components";
+import { Copy, ErrorBanner, Spinner } from "../components";
 
 // The OpenID providers, as people know them, and what each needs.
 const PROVIDERS: { id: OidcProvider; title: string; blurb: string }[] = [
@@ -284,25 +284,6 @@ function OnOff({ on, onChange, testId }: { on: boolean; onChange: (on: boolean) 
 }
 
 // ---- OpenID ------------------------------------------------------------------------
-
-function Copy({ text }: { text: string }) {
-  const [done, setDone] = useState(false);
-  return (
-    <span className="copy-inline">
-      <span className="mono">{text}</span>{" "}
-      <button
-        className="link"
-        onClick={() => {
-          navigator.clipboard?.writeText(text);
-          setDone(true);
-          setTimeout(() => setDone(false), 1500);
-        }}
-      >
-        {done ? "Copied" : "Copy"}
-      </button>
-    </span>
-  );
-}
 
 function ProviderSteps({ provider, redirectUri, cluster }: { provider: OidcProvider; redirectUri: string; cluster: string }) {
   const ru = <Copy text={redirectUri} />;

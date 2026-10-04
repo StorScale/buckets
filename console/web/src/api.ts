@@ -740,3 +740,21 @@ export function listenEvents(
     for (const r of item.Records ?? []) onItem(r as EventRecord);
   }, signal);
 }
+
+// ---- teams (consoled's /api/v1/teams: a team is its team-<name>-<level> policies) ----
+
+export type TeamLevel = "ro" | "rw" | "admin";
+export const TEAM_LEVELS: TeamLevel[] = ["ro", "rw", "admin"];
+export type Team = { name: string; buckets: string[]; prefixes: string[]; levels: TeamLevel[] };
+export type TeamMembers = Partial<Record<TeamLevel, { users: string[]; groups: string[] }>>;
+export type TeamInfo = Team & { edited: TeamLevel[]; members: TeamMembers };
+export const teamPolicy = (team: string, level: TeamLevel) => `team-${team}-${level}`;
+export async function listTeams(): Promise<{ teams: TeamInfo[]; ldap: boolean }> {
+  return (await call("GET", "/api/v1/teams")).json();
+}
+export async function saveTeam(team: Team, overwrite = false): Promise<Team> {
+  return (await call("PUT", `/api/v1/teams/${encodeURIComponent(team.name)}`, jsonBody({ team, overwrite }))).json();
+}
+export const deleteTeam = (name: string) => call("DELETE", `/api/v1/teams/${encodeURIComponent(name)}`);
+export const teamMember = (team: string, level: TeamLevel, who: { user?: string; group?: string }, remove = false) =>
+  call("POST", `/api/v1/teams/${encodeURIComponent(team)}/members`, jsonBody({ level, ...who, remove }));

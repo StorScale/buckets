@@ -120,3 +120,23 @@ export function useLoad<T>(load: () => Promise<T>, deps: unknown[]) {
   }, [...deps, tick]);
   return { data, error, loading, reload: () => setTick((t) => t + 1), setError };
 }
+
+// A value to copy into another system, with a button that copies it.
+export function Copy({ text }: { text: string }) {
+  const [done, setDone] = useState(false);
+  return (
+    <span className="copy-inline">
+      <span className="mono">{text}</span>{" "}
+      <button
+        className="link"
+        onClick={() => {
+          navigator.clipboard?.writeText(text);
+          setDone(true);
+          setTimeout(() => setDone(false), 1500);
+        }}
+      >
+        {done ? "Copied" : "Copy"}
+      </button>
+    </span>
+  );
+}

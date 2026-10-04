@@ -256,6 +256,55 @@ test.describe("identity", () => {
     await expect(page.getByTestId(`policy-${policy}`)).toHaveCount(0);
   });
 
+  test("teams: create, give access, edit, delete", async ({ page }) => {
+    const team = unique("pt");
+    const member = `tm-${team}`;
+    await login(page);
+    const h = { "X-Console-Request": "1" };
+    await page.request.put(`/api/v1/admin/add-user?accessKey=${member}`, {
+      headers: { ...h, "X-Console-Encrypt": "1" },
+      data: JSON.stringify({ secretKey: "membersecret", status: "enabled" }),
+    });
+    expect((await page.request.put(`/api/v1/s3/${team}-data`, { headers: h })).status()).toBe(200);
+    await page.getByRole("link", { name: "Teams" }).click();
+    await page.getByTestId("create-team").click();
+    await page.getByTestId("team-name").fill(team);
+    await page.getByTestId(`team-bucket-${team}-data`).check();
+    await page.getByTestId("team-prefixes").fill(`${team}-q`);
+    await page.getByTestId("team-level-admin").check();
+    await page.getByTestId("team-save").click();
+
+    // saved: the access dialog says what to set up for each level, and takes members
+    const access = page.getByRole("dialog", { name: `Access to ${team}` });
+    await expect(access.getByTestId("team-access-rw")).toContainText(`team-${team}-rw`);
+    if (!process.env.CONSOLE_URL) await expect(access.getByTestId("team-access-rw")).toContainText("claim");
+    await access.getByTestId("team-member-level").selectOption("rw");
+    await access.getByTestId("team-member-kind").selectOption("user");
+    await access.getByTestId("team-member-name").fill(member);
+    await access.getByTestId("team-member-add").click();
+    await expect(access.getByTestId("team-access-rw")).toContainText(member);
+    await page.keyboard.press("Escape");
+    await expect(access).toHaveCount(0);
+    const row = page.getByTestId(`team-${team}`);
+    await expect(row).toContainText(`${team}-data, ${team}-q*`);
+    await expect(row).toContainText("1");
+
+    // a level dropped is warned about, then gone
+    await page.getByTestId(`team-edit-${team}`).click();
+    await page.getByTestId("team-level-ro").uncheck();
+    await expect(page.getByRole("dialog")).toContainText("Removing ro deletes that policy");
+    await page.getByTestId("team-save").click();
+    await expect(access).toBeVisible(); // saving opens the access dialog again
+    await page.keyboard.press("Escape");
+    await expect(access).toHaveCount(0);
+    await expect(row).not.toContainText("ro");
+    await expect(row).toContainText("admin");
+
+    await page.getByTestId(`team-delete-${team}`).click();
+    await page.getByTestId(`team-delete-${team}-yes`).click();
+    await expect(row).toHaveCount(0);
+  });
+
   test("access keys show their secret once", async ({ page }) => {
     await login(page);
     await page.getByRole("link", { name: "Access Keys" }).click();

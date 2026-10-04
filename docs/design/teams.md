@@ -92,8 +92,9 @@ the console and the operator:
 - **`src/iam/teams.{c,h}`**: generates the policies for a team (name, buckets,
   prefixes, levels), and reads a team back from its policies. Checks names
   (`[a-z0-9-]`, 1 to 40 characters, so `team-<name>-admin` stays a valid
-  provider role value) and bucket names, and refuses a prefix that would cover
-  another team's buckets without saying so.
+  provider role value) and bucket names, and refuses a prefix that overlaps another
+  team's prefix, so no bucket can fall under two teams by accident. Named
+  buckets may be shared: two teams can both list `ledger`.
 - **The console** (`src/console/teams.c`): `GET/PUT/DELETE
   /api/v1/teams[/<name>]`, using the signed-in admin's own credentials for
   `add-canned-policy`, `remove-canned-policy`, `list-canned-policies` and the

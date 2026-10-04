@@ -44,7 +44,23 @@ Role values can name the built-in policies, so no custom policies are needed to 
 | `readwrite` | built in | Read and write every bucket |
 | `readonly` | built in | List and download from every bucket |
 
-For finer access, create a policy (for example `team-finance-rw`, limited to the team's buckets) and an app role with the same value. Values are matched exactly, including case.
+For access to some buckets only, set up a team on the Teams page (below) and give people its roles, such as `team-finance-rw`. Values are matched exactly, including case.
+
+### Teams
+
+**Identity → Teams** gives a group of people their own buckets without writing policies by hand. A team is a name and its buckets: buckets named one by one, and prefixes such as `finance-` that cover every bucket whose name starts with them, including buckets created later. Each access level you choose becomes a policy:
+
+| Level | Policy | Access to the team's buckets |
+|---|---|---|
+| Read | `team-<name>-ro` | List and download |
+| Read and write | `team-<name>-rw` | Read, upload and delete objects |
+| Admin | `team-<name>-admin` | Read and write, and the buckets' settings (versioning, lifecycle, encryption, notifications, object lock, replication, tags, CORS); create and delete buckets under the team's prefixes |
+
+None of the levels can reach other buckets or the admin API, and Admin cannot set bucket policies, so a team cannot share its buckets or make them public. Team members see only their team's buckets when they list buckets.
+
+People get a level the way they get any policy: from the identity provider (an Entra app role, an Okta group or a Keycloak realm role named after the policy; the Access dialog shows the step for the provider set up), or as members added on the Teams page (local users and groups, and LDAP users and groups by their DN). Changing a team's buckets applies at once, even to people already signed in.
+
+Teams are stored only as their policies, so they work the same without the operator and survive a move to MinIO and back. A team policy changed by hand (for example with `mc admin policy create`) shows as **edited**, and saving the team asks before replacing the change. Removing a level, or deleting the team, detaches its members and deletes the policies.
 
 ## Microsoft Entra ID
 
