@@ -59,7 +59,7 @@ bool bc_parse(yyjson_val *obj, const char *cluster_domain, bc_spec *out, char *e
     return false;
   }
   out->image = str_at(spec, "image");
-  if (!out->image) out->image = "ghcr.io/storscale/bucketsd:1.2.1";
+  if (!out->image) out->image = "ghcr.io/storscale/bucketsd:1.2.2";
   out->pull_policy = str_at(spec, "imagePullPolicy");
   if (!out->pull_policy) out->pull_policy = "IfNotPresent";
   out->pull_secrets = yyjson_obj_get(spec, "imagePullSecrets");
