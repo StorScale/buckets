@@ -154,6 +154,7 @@ add_library(buckets STATIC
   iam/policy.c
   iam/iam.c
   iam/openid.c
+  iam/idpsettings.c
   iam/ldapidp.c
   iam/plugins.c
   crypto/jwt.c
