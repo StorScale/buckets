@@ -435,7 +435,11 @@ static void handle_ldap_test(buckets_console_idp *m, yyjson_val *body, const buc
     buckets_ldapidp_release(p);
   }
   yyjson_mut_obj_add_bool(d, o, "passed", passed);
-  if (c.raw) buckets_console_idp_record_test(m, c.hash, "ldap", d);
+  /* Recorded unless a lookup of these settings passed already: a wrong user name or password is
+   * about that person, and must not take back what the settings have shown. */
+  yyjson_val *prev = tests_of(&c);
+  bool had_pass = yyjson_get_bool(yyjson_obj_get(yyjson_obj_get(prev, "ldap"), "passed"));
+  if (c.raw && (passed || !had_pass)) buckets_console_idp_record_test(m, c.hash, "ldap", d);
   saved_free(&c);
   reply(resp, 200, d);
 }

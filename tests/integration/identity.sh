@@ -139,6 +139,8 @@ check "an unknown user" "$(api -d '{"username":"zed"}' "$C/api/v1/identity-confi
 check "a wrong password" "$(api -d '{"username":"alice","password":"nope"}' "$C/api/v1/identity-config/ldap-test" | jq_ 'd["passed"], d["error"].startswith("The user cannot sign in")')" \
   "False True"
 api -d '{"username":"alice","password":"alice123"}' "$C/api/v1/identity-config/ldap-test" >/dev/null
+api -d '{"username":"alice","password":"nope"}' "$C/api/v1/identity-config/ldap-test" >/dev/null
+check "a later failed lookup does not take back a pass" "$(api "$C/api/v1/identity-config" | jq_ 'd["test"]["ldap"]["passed"]')" True
 HASH=$(api "$C/api/v1/identity-config" | jq_ 'd["candidateHash"]')
 check "a passed LDAP test can be applied" "$(api -d '{"candidateHash":"'"$HASH"'"}' "$C/api/v1/identity-config/apply" | jq_ 'd["applied"]')" True
 BADL=${LDAP/lookup123/wrongpw}
