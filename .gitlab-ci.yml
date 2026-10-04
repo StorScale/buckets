@@ -1,28 +1,33 @@
-# GitLab CI/CD for Buckets: build the images and push them to Harbor, then
-# (on release tags, or by hand on main) move a MinIO tenant to Buckets and
-# back on the shared cluster with those images.
+# GitLab CI/CD for Buckets: build the images and push them to an internal
+# registry, then (on release tags, or by hand on main) move a MinIO tenant to
+# Buckets and back on a development cluster with those images. The public
+# images come from GitHub Actions (.github/workflows/images.yml).
 #
-#   harbor.os.harlandclarke.internal/vericast/bucketsd          (docker/Dockerfile.bucketsd)
-#   harbor.os.harlandclarke.internal/vericast/buckets-operator  (docker/Dockerfile.operator)
-#   harbor.os.harlandclarke.internal/vericast/buckets-console   (docker/Dockerfile.console)
+#   $HARBOR_HOST/$HARBOR_PROJECT/{bucketsd,buckets-operator,buckets-console,buckets-kes}
 #
 # Tags pushed:
 #   - branches main and the default branch: <short-sha> and <branch-slug>
 #   - git tags:                              <tag without a leading v> and latest
 #
-# Required CI/CD variables (Settings > CI/CD > Variables), masked + protected:
-#   HARBOR_USERNAME  Harbor robot account, e.g. robot$vericast+gitlab
-#   HARBOR_PASSWORD  the robot account token
+# CI/CD variables (Settings > CI/CD > Variables):
+#   HARBOR_HOST      the registry's host name
+#   HARBOR_PROJECT   the registry project the images go to
+#   RUNNER_TAG       the tag of the runner the jobs run on
+#   HARBOR_USER      a robot account with push on the project (masked, protected)
+#   HARBOR_PASSWORD  its token (masked, protected)
+# If the variables are protected, main must be a protected branch or they
+# arrive empty.
 #
-# The robot needs push on the "vericast" Harbor project. If the variables are
-# protected, main must be a protected branch or they arrive empty.
-#
-# The round trip (stage e2e) needs the shared cluster, one of:
+# The round trip (stage e2e) needs the cluster, one of:
 #   KUBE_CONTEXT     a GitLab agent's context (<agent project path>:<agent name>),
 #                    once the agent's config lists this project under ci_access
 #   KUBECONFIG       a File variable: a kubeconfig whose account may create and
 #                    delete namespaces, patch PersistentVolumes and install the
 #                    operator (CRDs and RBAC)
+# and the images it runs (the registry the cluster pulls from):
+#   E2E_MINIO_IMAGE  MinIO (its images are no longer published upstream: a mirror)
+#   E2E_KES_IMAGE    MinIO's KES, for the KES variant
+#   E2E_VAULT_IMAGE  optional (default hashicorp/vault:1.18)
 #   E2E_AVOID_NODES  optional: node names the test pods must not run on
 
 stages:
@@ -30,12 +35,12 @@ stages:
   - e2e
 
 variables:
-  REGISTRY_HOST: harbor.os.harlandclarke.internal
-  REGISTRY_PROJECT: $REGISTRY_HOST/vericast
+  REGISTRY_HOST: $HARBOR_HOST
+  REGISTRY_PROJECT: $HARBOR_HOST/$HARBOR_PROJECT
 
 default:
   tags:
-    - sa1x-k8s-dev-1a
+    - $RUNNER_TAG
 
 workflow:
   rules:
@@ -129,7 +134,8 @@ adopt-roundtrip:
     # the images build pushed: <tag without v> for a release tag, else the short SHA
     - export BUCKETS_TAG=${CI_COMMIT_TAG:+${CI_COMMIT_TAG#v}}
     - export BUCKETS_TAG=${BUCKETS_TAG:-$CI_COMMIT_SHORT_SHA}
-    - export AVOID_NODES="$E2E_AVOID_NODES"
+    - export AVOID_NODES="$E2E_AVOID_NODES" REGISTRY="$REGISTRY_PROJECT" MINIO_IMAGE="$E2E_MINIO_IMAGE" KES_IMAGE="$E2E_KES_IMAGE"
+    - if [ -n "$E2E_VAULT_IMAGE" ]; then export VAULT_IMAGE="$E2E_VAULT_IMAGE"; fi
     - if [ "$VARIANT" = kes ]; then export KES=1; fi
     - bash tests/e2e-k8s/adopt-minio.sh
   after_script:

@@ -119,7 +119,7 @@ The roadmap builds on what exists: MinIO's exact on-disk format, 220 of 222 MinI
 | 2026-10-02 | Encrypt existing objects | Unencrypted objects encrypted in place, keeping version IDs, dates, metadata and object lock |
 | 2026-10-02 | Encryption page | KMS status, keys with a live check, and key deletion guarded against keys in use; SSE-KMS key picker for buckets |
 | 2026-10-02 | MinIO tenant adoption and rollback | A MinIO Operator tenant's volumes taken over in place and handed back; 29/29 on the shared cluster |
-| 2026-10-02 | MinIO images mirrored to Harbor | The lakehouse tenant's MinIO, KES, operator and DirectPV images, no longer published upstream |
+| 2026-10-02 | MinIO images mirrored | A production tenant's MinIO, KES, operator and DirectPV images, copied to an internal registry because they're no longer published upstream |
 | 2026-10-02 | Phase 0 | OpenSSL 3.2 floor, envtest race, Users page spinner, changelog and security policy |
 | 2026-10-02 | Users page lists Entra ID users | Name, sign-in name and roles of people who have signed in; no local users by default |
 | 2026-10-02 | Session cookie fix | Entra ID sign-in works; headers over 1 KB were cut off |

@@ -147,7 +147,7 @@ cosign verify ghcr.io/storscale/bucketsd:<version> \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
-`.gitlab-ci.yml` builds the same images into the internal Harbor (`harbor.os.harlandclarke.internal/vericast/<image>`) for the shared development cluster, and runs the MinIO round trip there (`adopt-roundtrip`). It runs only on pushes to the GitLab copy, and needs the CI/CD variables `HARBOR_USER` and `HARBOR_PASSWORD`.
+`.gitlab-ci.yml` builds the same images into an internal registry for a development cluster, and runs the MinIO round trip there (`adopt-roundtrip`). It runs only on pushes to a GitLab copy of the repository; the variables it needs are listed at its top.
 
 ## Layout
 

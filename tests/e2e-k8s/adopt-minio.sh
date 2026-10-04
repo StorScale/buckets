@@ -10,10 +10,10 @@
 #
 # KUBECONTEXT     the cluster (default: the current context)
 # NS              a namespace it creates and deletes (default buckets-adopt-test)
-# REGISTRY        where bucketsd and buckets-operator images live
-#                 (default harbor.os.harlandclarke.internal/vericast)
-# MINIO_IMAGE     default harbor.os.harlandclarke.internal/vericast/minio:RELEASE.2024-10-13T13-34-11Z
-#                 (quay.io and Docker Hub no longer serve MinIO images: use a mirror)
+# REGISTRY        where the bucketsd, buckets-operator and buckets-kes images live,
+#                 e.g. ghcr.io/storscale (required)
+# MINIO_IMAGE     the MinIO image, e.g. <mirror>/minio:RELEASE.2024-10-13T13-34-11Z
+#                 (required: quay.io and Docker Hub no longer serve MinIO images)
 # MINIO_BINARY_URL, MINIO_BINARY_SHA256
 #                 instead of an image: a static minio binary the pods fetch
 #                 (checked against the hash) and run on busybox. MinIO's
@@ -24,8 +24,8 @@
 # KES=1           the tenant encrypts with MinIO's KES on a Vault (KV v1, AppRole), laid out as
 #                 the MinIO Operator lays it out (StatefulSet <t>-kes, ${VAR}s from Secrets); the
 #                 adoption carries it over to buckets-kes ($REGISTRY/buckets-kes:$BUCKETS_TAG)
-# KES_IMAGE       MinIO's KES (default harbor.os.harlandclarke.internal/vericast/minio-kes:2024-09-11T07-22-50Z)
-# VAULT_IMAGE     default harbor.os.harlandclarke.internal/dockerhub/hashicorp/vault:1.18
+# KES_IMAGE       MinIO's KES, e.g. <mirror>/minio-kes:2024-09-11T07-22-50Z (required with KES=1)
+# VAULT_IMAGE     default hashicorp/vault:1.18
 # KEEP=1          leaves the namespace (and its PVs) for a look afterwards
 # Needs the buckets.io CRDs (operator/deploy/crds) and permission to create a
 # namespace, a namespaced operator (Helm) and to patch PersistentVolumes.
@@ -33,11 +33,14 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 NS=${NS:-buckets-adopt-test}
 T=minio
-REGISTRY=${REGISTRY:-harbor.os.harlandclarke.internal/vericast}
-MINIO_IMAGE=${MINIO_IMAGE:-harbor.os.harlandclarke.internal/vericast/minio:RELEASE.2024-10-13T13-34-11Z}
-KES_IMAGE=${KES_IMAGE:-harbor.os.harlandclarke.internal/vericast/minio-kes:2024-09-11T07-22-50Z}
-VAULT_IMAGE=${VAULT_IMAGE:-harbor.os.harlandclarke.internal/dockerhub/hashicorp/vault:1.18}
+REGISTRY=${REGISTRY:-}
+MINIO_IMAGE=${MINIO_IMAGE:-}
+KES_IMAGE=${KES_IMAGE:-}
+VAULT_IMAGE=${VAULT_IMAGE:-hashicorp/vault:1.18}
 KES=${KES:-}
+[[ -n $REGISTRY ]] || { echo "set REGISTRY to where the bucketsd, buckets-operator and buckets-kes images live"; exit 2; }
+[[ -n $MINIO_IMAGE ]] || { echo "set MINIO_IMAGE to a MinIO image the cluster can pull (MinIO no longer publishes any)"; exit 2; }
+[[ -z $KES || -n $KES_IMAGE ]] || { echo "KES=1 needs KES_IMAGE: MinIO's KES, from a mirror"; exit 2; }
 [[ -n ${BUCKETS_TAG:-} ]] || { echo "set BUCKETS_TAG to the bucketsd/buckets-operator image tag"; exit 2; }
 CTXARG=${KUBECONTEXT:+--context $KUBECONTEXT}
 k() { kubectl $CTXARG -n "$NS" "$@"; }
