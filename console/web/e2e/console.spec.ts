@@ -322,12 +322,15 @@ test.describe("encryption", () => {
   });
 });
 
-test.describe("KMS setup", () => {
+test.describe("KMS and sign-in setup", () => {
   // the mock Kubernetes API (kubemock.py) stands in for the API server and buckets-operator
   const kubeState = async (page: import("@playwright/test").Page) =>
     (await (await page.request.get("https://127.0.0.1:19892/_state", { ignoreHTTPSErrors: true })).json()) as {
       cluster: { spec: { kms?: { kes?: { keyName?: string } } } };
-      secrets: Record<string, Record<string, { settings?: { vault?: { approle?: { secret?: string; id?: string } } }; vault?: { approle?: { secret?: string; id?: string } } }>>;
+      secrets: Record<
+        string,
+        Record<string, { settings?: { vault?: { approle?: { secret?: string; id?: string } } }; vault?: { approle?: { secret?: string; id?: string } }; openid?: { clientSecret?: string } }>
+      >;
     };
 
   test("Vault: a failed test says why, a passed one applies, and saved secrets are kept", async ({ page }) => {
@@ -397,6 +400,43 @@ test.describe("KMS setup", () => {
     await expect(page.getByTestId("kms-rollout")).toBeVisible();
     st = await kubeState(page);
     expect(st.secrets["store-kms"]["settings.json"].vault?.approle).toEqual({ id: "role-2", secret: "secret-1" });
+  });
+
+  test("sign-in: steps for the provider, a test sign-in in a popup, then apply", async ({ page }) => {
+    test.skip(!!process.env.CONSOLE_URL, "needs the mock Kubernetes API and provider of the local setup");
+    await login(page);
+    await page.goto("/identity/sign-in");
+    await expect(page.getByTestId("signin-status")).toContainText("Not set up here yet");
+    await page.getByTestId("oidc-on").getByRole("radio", { name: "On" }).click();
+    // the provider's own steps, with this console's redirect URI to register
+    await expect(page.getByTestId("provider-steps")).toContainText("App registrations");
+    await expect(page.getByTestId("provider-steps")).toContainText("/oauth_callback");
+    await page.getByTestId("oidc-provider-generic").click();
+    await expect(page.getByTestId("signin-missing")).toContainText("the discovery URL");
+    await expect(page.getByTestId("signin-save")).toBeDisabled();
+    await page.getByTestId("oidc-config-url").fill("http://127.0.0.1:19891/.well-known/openid-configuration");
+    await page.getByTestId("oidc-client-id").fill("console");
+    await page.getByTestId("oidc-client-secret").fill("s3cr3t");
+    await expect(page.getByTestId("signin-apply")).toBeDisabled();
+    await page.getByTestId("signin-save").click();
+    await expect(page.getByTestId("signin-save")).toHaveText("Saved");
+    await expect(page.getByTestId("oidc-client-secret")).toHaveAttribute("placeholder", /saved/);
+    // the test: a real sign-in at the provider, in a popup that reports back
+    const popup = page.waitForEvent("popup");
+    await page.getByTestId("signin-test").click();
+    await expect((await popup).locator("body")).toContainText("Signed in as oidcuser", { timeout: 15000 });
+    await expect(page.getByTestId("oidc-result")).toContainText("Signed in as oidcuser", { timeout: 15000 });
+    await expect(page.getByTestId("oidc-result")).toContainText("readwrite");
+    // still the admin: the test made no session
+    expect((await (await page.request.get("/api/v1/session")).json()).accessKey).toBe(ROOT_USER);
+    await page.getByTestId("signin-apply").click();
+    await expect(page.getByTestId("signin-apply")).toHaveText("Applied");
+    await expect(page.getByTestId("signin-status")).toContainText("People sign in with", { timeout: 15000 });
+    const st = await kubeState(page);
+    expect(st.secrets["store-identity"]["settings.json"].openid?.clientSecret).toBe("s3cr3t");
+    // an edit is a new candidate: tested again before it applies
+    await page.getByTestId("oidc-client-id").fill("other");
+    await expect(page.getByTestId("signin-apply")).toBeDisabled();
   });
 
   test("settings the server refuses are explained before any test", async ({ page }) => {
