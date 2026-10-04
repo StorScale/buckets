@@ -60,7 +60,7 @@ Done when: a MinIO tenant with real data moves to Buckets and back again in CI, 
 
 Identity-provider sign-in with role-based access should be a feature people choose Buckets for, not a set of environment variables. Entra ID sign-in with app roles works today; this phase makes it easy to set up and to audit.
 
-- **Guided setup in the console** for Entra ID, Okta and Keycloak, replacing hand-written `MINIO_IDENTITY_OPENID_*` settings. The KMS setup is the pattern: a form per provider, the provider-side steps filled in, a real test before anything changes, then apply.
+- **Guided setup in the console** for Entra ID, Okta and Keycloak, replacing hand-written `MINIO_IDENTITY_OPENID_*` settings. The KMS setup is the pattern: a form per provider, the provider-side steps filled in, a real test before anything changes, then apply. *Built, with LDAP and Active Directory as well (Identity → Sign-in; see [identity.md](identity.md)); a shared-cluster run against real Keycloak and OpenLDAP is left.*
 - **Per-bucket and per-team roles.** Ship policy templates such as `team-<name>-rw`, with matching app-role guidance for each identity provider.
 - **Automatic provisioning and removal (SCIM).** People who leave lose access and their access keys without manual cleanup.
 - **An access review page.** Answer "who can read this bucket, and why", and test whether a given user would be allowed an action.

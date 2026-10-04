@@ -7,6 +7,13 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Sign-in set up from the console (Identity → Sign-in), where buckets-operator runs the cluster: Microsoft Entra ID, Okta, Keycloak or another OpenID provider, and LDAP or Active Directory.
+  - **Guided:** the page lists the steps to take in the provider, with the console's redirect URI to copy, and fills in each provider's claim, scopes and discovery URL (or the directory's filters).
+  - **Tested before it applies:** a test sign-in in a popup checks the ID token as the servers will and shows the roles and the policies they map to, without changing the session; an LDAP lookup shows a user's DN, groups and policies. Only settings that passed apply, and only the very settings tested.
+  - **Applied by the operator:** settings live in Secret `<cluster>-identity`. The operator gives them to the servers through the admin API (OpenID at once; LDAP, read at startup, by restarting the servers one at a time), then to the console, which takes them up without a restart. `status.identity` reports the outcome. It refuses while `spec.env`, `spec.console.env` or `config.env` also set sign-in, naming them.
+  - `src/iam/idpsettings.{c,h}`: the settings, their checks and their renderings; `tests/integration/identity.sh` and a Playwright test cover them.
+
+### Added
 - `docs/compatibility.md`: the compatibility promise. What every 1.x release keeps compatible, across releases and with MinIO (on-disk format, S3, admin and STS APIs, clients and SDKs, events, audit and trace, metrics, configuration, KES, the CRDs, rolling upgrades), the test that proves each, and what is not promised.
 
 ### Changed
