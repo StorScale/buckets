@@ -2,13 +2,6 @@ import { useEffect, useState } from "react";
 import { configHelp, ConfigHelp, getConfig, setConfig } from "../api";
 import { ErrorBanner, Notice, Spinner, useLoad } from "../components";
 
-// The subsystems shown (MinIO's `mc admin config` names).
-const SUBSYSTEMS = [
-  "api", "scanner", "compression", "storage_class", "site", "region", "identity_openid", "identity_ldap", "policy_opa",
-  "notify_webhook", "notify_amqp", "notify_kafka", "notify_mqtt", "notify_nats", "notify_nsq", "notify_redis",
-  "notify_postgres", "notify_mysql", "notify_elasticsearch", "logger_webhook", "audit_webhook", "audit_kafka",
-];
-
 // "subsys[:target] k=v k2=\"v 2\"" -> {k: v}
 function parseKv(text: string): Record<string, string> {
   const out: Record<string, string> = {};
@@ -21,6 +14,10 @@ function parseKv(text: string): Record<string, string> {
 
 export default function Configuration() {
   const [subsys, setSubsys] = useState("api");
+  // The subsystems the server documents (help without one lists them): deprecated ones it keeps
+  // only for old settings, such as policy_opa and region, have no help and are not shown.
+  const all = useLoad(() => configHelp(), []);
+  const subsystems = all.data?.keysHelp.map((k) => k.key) ?? [];
   const help = useLoad(() => configHelp(subsys), [subsys]);
   const [values, setValues] = useState<Record<string, string>>({});
   const [original, setOriginal] = useState<Record<string, string>>({});
@@ -65,7 +62,7 @@ export default function Configuration() {
       <h1>Configuration</h1>
       <div className="split">
         <nav className="subnav">
-          {SUBSYSTEMS.map((s) => (
+          {subsystems.map((s) => (
             <a
               key={s}
               href="#"
@@ -81,7 +78,7 @@ export default function Configuration() {
           ))}
         </nav>
         <div className="grow">
-          <ErrorBanner error={error ?? help.error} onClose={() => setError(undefined)} />
+          <ErrorBanner error={error ?? help.error ?? all.error} onClose={() => setError(undefined)} />
           <Notice text={notice} />
           {(help.loading || loadedFor !== subsys) && <Spinner />}
           {help.data && <p className="muted">{help.data.description}</p>}

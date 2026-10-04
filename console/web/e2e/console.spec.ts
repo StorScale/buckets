@@ -284,6 +284,21 @@ test("configuration: read and change a setting", async ({ page }) => {
   await expect(page.getByTestId("cfg-speed")).toHaveValue("slow");
 });
 
+test("configuration: every subsystem listed opens without an error", async ({ page }) => {
+  await login(page);
+  await page.getByRole("link", { name: "Configuration" }).click();
+  await expect(page.getByTestId("config-identity_openid")).toBeVisible();
+  await expect(page.getByTestId("config-policy_opa")).toHaveCount(0);
+  await expect(page.getByTestId("config-region")).toHaveCount(0);
+  const ids = await page.locator('[data-testid^="config-"]:not([data-testid="config-save"])').evaluateAll((els) => els.map((e) => e.getAttribute("data-testid")!));
+  expect(ids.length).toBeGreaterThan(20);
+  for (const id of ids) {
+    await page.getByTestId(id).click();
+    await expect(page.locator(".muted").first()).toBeVisible();
+    await expect(page.getByText("XMinioConfigError")).toHaveCount(0);
+  }
+});
+
 test.describe("encryption", () => {
   test("the KMS and its keys, a bucket encrypted with one, and its existing objects", async ({ page }) => {
     test.skip(!!process.env.CONSOLE_URL, "needs the static KMS key of the local setup");
