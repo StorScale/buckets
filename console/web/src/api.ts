@@ -410,6 +410,91 @@ export async function kmsConfigTest(req: { settings: KmsSettings; keyName: strin
 export const kmsConfigApply = (testId: string) =>
   call("POST", "/api/v1/kms-config/apply", { body: JSON.stringify({ testId }), headers: { "Content-Type": "application/json" } });
 
+// ---- sign-in settings (the Identity page; see src/console/idpconfig.h) ----------------------
+export type OidcProvider = "entra" | "okta" | "keycloak" | "generic";
+export type OidcSettings = {
+  provider: OidcProvider;
+  displayName?: string;
+  tenantId?: string;
+  domain?: string;
+  authServer?: string;
+  url?: string;
+  realm?: string;
+  configUrl?: string;
+  clientId: string;
+  clientSecret?: string;
+  claimName?: string;
+  scopes?: string;
+  redirectUri?: string;
+  rolePolicy?: string;
+  claimUserinfo?: boolean;
+};
+export type LdapSettings = {
+  preset: "ad" | "openldap" | "custom";
+  serverAddr: string;
+  tls?: "ldaps" | "starttls" | "plain";
+  skipVerify?: boolean;
+  lookupBindDn: string;
+  lookupBindPassword?: string;
+  userSearchBase: string;
+  userSearchFilter?: string;
+  groupSearchBase?: string;
+  groupSearchFilter?: string;
+};
+export type IdentitySettings = { openid?: OidcSettings | null; ldap?: LdapSettings | null; secretsSet?: string[] };
+export type OidcTest = { passed: boolean; error?: string; user?: string; claimName?: string; roles?: string[]; policies?: string[]; unmatched?: string[]; at?: number };
+export type LdapTest = { passed: boolean; error?: string; note?: string; dn?: string; groups?: string[]; policies?: string[]; at?: number };
+export type IdentityConfig = {
+  managed: boolean;
+  cluster?: string;
+  namespace?: string;
+  redirectUri?: string;
+  settings?: IdentitySettings | null;
+  description?: string;
+  candidate?: IdentitySettings | null;
+  candidateHash?: string;
+  test?: { hash?: string; openid?: OidcTest; ldap?: LdapTest };
+  status?: { phase?: string; message?: string; description?: string };
+};
+const jsonBody = (v: unknown) => ({ body: JSON.stringify(v), headers: { "Content-Type": "application/json" } });
+// null: this session may not set up sign-in (it needs admin:ConfigUpdate)
+export async function identityConfig(): Promise<IdentityConfig | null> {
+  try {
+    return await (await call("GET", "/api/v1/identity-config")).json();
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 403) return null;
+    throw e;
+  }
+}
+export async function identitySaveCandidate(settings: IdentitySettings): Promise<{ candidate: IdentitySettings; candidateHash: string }> {
+  return (await call("PUT", "/api/v1/identity-config/candidate", jsonBody({ settings }))).json();
+}
+export async function identityLdapTest(username: string, password?: string): Promise<LdapTest> {
+  return (await call("POST", "/api/v1/identity-config/ldap-test", jsonBody({ username, password }))).json();
+}
+export const identityApply = (candidateHash: string) => call("POST", "/api/v1/identity-config/apply", jsonBody({ candidateHash }));
+// The OpenID test: a sign-in with the candidate in a popup, which tells this window when it ends.
+export function identityTestSignIn(): Promise<boolean> {
+  return new Promise((resolve) => {
+    const w = window.open("/api/v1/login/oidc?test=1", "buckets-identity-test", "width=520,height=680");
+    let done = false;
+    const finish = (passed: boolean) => {
+      if (done) return;
+      done = true;
+      window.removeEventListener("message", onMsg);
+      clearInterval(t);
+      resolve(passed);
+    };
+    const onMsg = (e: MessageEvent) => {
+      if (e.origin === window.location.origin && e.data?.type === "buckets-identity-test") finish(!!e.data.passed);
+    };
+    window.addEventListener("message", onMsg);
+    const t = setInterval(() => {
+      if (!w || w.closed) finish(false);
+    }, 500);
+  });
+}
+
 // Buckets whose default encryption is SSE-KMS, by key (the KMS's default key
 // when the bucket names none).
 export async function kmsKeyUsage(defaultKey: string): Promise<Map<string, string[]>> {

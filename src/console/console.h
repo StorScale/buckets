@@ -52,7 +52,13 @@ typedef struct {
   const char *oidc_redirect_uri; /* NULL: <scheme>://<Host>/oauth_callback */
   const char *oidc_display_name; /* the sign-in button's label */
   const char *oidc_ca_file;
-  bool local_users; /* the Users page offers Create user (off by default while OpenID sign-in is on) */
+  /* The sign-in settings the operator applied (Identity page): a JSON file,
+   * {"oidc": {...} | null, "ldap": {...} | null} (iam/idpsettings.h), read
+   * again whenever it changes; while it is there it replaces the oidc_ and
+   * ldap settings above. NULL: none. */
+  const char *identity_file;
+  bool local_users;     /* the Users page offers Create user */
+  bool local_users_set; /* local_users was given; else it is off while OpenID sign-in is on */
 } buckets_console_config;
 
 typedef struct buckets_console buckets_console;

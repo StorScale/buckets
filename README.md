@@ -17,7 +17,7 @@ Real MinIO and Buckets can serve each other's drives, clusters included.
 | [docs/parity.md](docs/parity.md) | Every MinIO API handler and its status |
 | [docs/compatibility.md](docs/compatibility.md) | What every 1.x release keeps compatible, across releases and with MinIO, and the test behind each promise |
 | [docs/migration.md](docs/migration.md) | Moving a MinIO deployment to Buckets in place, KES included, and back |
-| [docs/identity.md](docs/identity.md) | Sign-in with Microsoft Entra ID (or another OpenID provider) and role-based access |
+| [docs/identity.md](docs/identity.md) | Sign-in set up from the console: Microsoft Entra ID, Okta, Keycloak, another OpenID provider, or LDAP and Active Directory |
 | [docs/encryption.md](docs/encryption.md) | Setting up the KMS in the console: KES with Vault, AWS, Azure or Google |
 | [docs/performance.md](docs/performance.md) | Benchmarks against MinIO and how to run them |
 | [docs/roadmap.md](docs/roadmap.md) | What comes next, and why |

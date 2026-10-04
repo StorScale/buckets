@@ -7,8 +7,8 @@
 #
 # Tags pushed:
 #   - pushes to main:   <short sha (8)> and main
-#   - pushes to perf/*: <short sha (8)> and the branch name (slashes as dashes),
-#                       to measure a change on a cluster before it reaches main
+#   - pushes to perf/* and feature/*: <short sha (8)> and the branch name (slashes
+#                       as dashes), to try a change on a cluster before it reaches main
 #   - tags v<version>:  <version> and latest; the images are also signed with
 #                       cosign (keyless: this workflow's GitHub identity), and the
 #                       operator's Helm chart goes to oci://ghcr.io/storscale/charts
@@ -22,7 +22,7 @@ name: images
 
 on:
   push:
-    branches: [main, 'perf/**']
+    branches: [main, 'perf/**', 'feature/**']
     tags: ['v*']
   workflow_dispatch:
 

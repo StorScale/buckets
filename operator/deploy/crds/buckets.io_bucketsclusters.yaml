@@ -261,6 +261,10 @@ spec:
                   type: object
                   description: The KES server, and the latest trial of new key store settings (test).
                   x-kubernetes-preserve-unknown-fields: true
+                identity:
+                  type: object
+                  description: "Sign-in settings from the console (Secret <name>-identity): phase (NotManaged, Ready, Conflict, Error), message, description, and the applied settings' hashes."
+                  x-kubernetes-preserve-unknown-fields: true
                 pools:
                   type: array
                   items:

@@ -352,6 +352,35 @@ expect "saying why the servers wait" "$(jp bc/adoptk '{.status.conditions[?(@.ty
 expect "still no servers" "$(k -n tenant get sts adoptk-pool-0 -o name 2>/dev/null || echo none)" none
 k -n tenant delete bc adoptk >/dev/null
 
+echo "== identity settings from the console: Secrets, not managed, refused while spec.env sets sign-in"
+k apply -f - >/dev/null <<YAML
+apiVersion: buckets.io/v1alpha1
+kind: BucketsCluster
+metadata: {name: idc, namespace: tenant}
+spec:
+  image: bucketsd:test
+  console: {enabled: true}
+  pools: [{servers: 4, volumesPerServer: 1}]
+YAML
+until_true '[[ $(jp bc/idc "{.status.identity.phase}") == NotManaged ]]'
+expect "nothing saved: not managed" "$(jp bc/idc '{.status.identity.phase}')" NotManaged
+for sec in idc-identity idc-identity-candidate; do expect "Secret $sec" "$(jp secret/$sec '{.metadata.name}')" "$sec"; done
+expect "the console mounts its sign-in settings" "$(jp deploy/idc-console '{.spec.template.spec.volumes[?(@.name=="identity")].secret.secretName}')" \
+  idc-identity-console
+expect "the console may update the settings" "$(k -n tenant auth can-i update secret/idc-identity --as=system:serviceaccount:tenant:idc-console)" yes
+expect "but not the console's own copy" "$(k -n tenant auth can-i get secret/idc-identity-console --as=system:serviceaccount:tenant:idc-console)" no
+idsettings='{"openid":{"provider":"entra","tenantId":"t-1","clientId":"app","clientSecret":"s"}}'
+k -n tenant create secret generic idc-identity --from-literal=settings.json="$idsettings" --dry-run=client -o yaml | k apply -f - >/dev/null
+until_true '[[ $(jp bc/idc "{.status.identity.phase}") == Error ]]'
+expect "saved, but no servers answer" "$(jp bc/idc '{.status.identity.phase}')" Error
+expect "status names the provider" "$(jp bc/idc '{.status.identity.description}')" "Microsoft Entra ID (tenant t-1)"
+expect "the console's copy waits for the servers" "$(k -n tenant get secret idc-identity-console -o name 2>/dev/null || echo none)" none
+k -n tenant patch bc idc --type=merge -p '{"spec":{"env":[{"name":"MINIO_IDENTITY_OPENID_CLIENT_ID","value":"x"}]}}' >/dev/null
+until_true '[[ $(jp bc/idc "{.status.identity.phase}") == Conflict ]]'
+expect "spec.env setting sign-in too: refused" "$(jp bc/idc '{.status.identity.message}' | grep -o 'spec.env MINIO_IDENTITY_OPENID_CLIENT_ID')" \
+  "spec.env MINIO_IDENTITY_OPENID_CLIENT_ID"
+k -n tenant delete bc idc >/dev/null
+
 echo "== leader election"
 start_operator opb
 sleep 3

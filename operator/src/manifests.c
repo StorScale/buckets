@@ -362,7 +362,9 @@ static bc_object statefulset(const bc_spec *s, size_t pi, const char *volumes, c
   mval *tmpl = ADD_OBJ(d, spec, "template");
   mval *tmeta = ADD_OBJ(d, tmpl, "metadata");
   labels(d, ADD_OBJ(d, tmeta, "labels"), s, bp->name);
-  ADD_STR(d, ADD_OBJ(d, tmeta, "annotations"), "buckets.io/topology", topology);
+  mval *tann = ADD_OBJ(d, tmeta, "annotations");
+  ADD_STR(d, tann, "buckets.io/topology", topology);
+  if (s->identity.ldap_hash[0]) ADD_STR(d, tann, "buckets.io/identity-ldap", s->identity.ldap_hash);
   mval *pod = ADD_OBJ(d, tmpl, "spec");
   mval *sec = ADD_OBJ(d, pod, "securityContext");
   ADD_INT(d, sec, "runAsUser", s->run_as_user);
@@ -632,6 +634,7 @@ static bc_object console_deployment(const bc_spec *s) {
   if (s->tls_secret) env_value(d, env, "BUCKETS_CONSOLE_CA_DIR", "/etc/buckets/ca");
   if (s->console.s3_url) env_value(d, env, "BUCKETS_CONSOLE_S3_URL", s->console.s3_url);
   env_value(d, env, "BUCKETS_CONSOLE_CLUSTER", s->name);
+  env_value(d, env, "BUCKETS_CONSOLE_IDENTITY_FILE", BC_CONSOLE_IDENTITY_DIR "/identity.json");
   mval *nse = yyjson_mut_arr_add_obj(d, env);
   ADD_STR(d, nse, "name", "BUCKETS_CONSOLE_NAMESPACE");
   ADD_STR(d, ADD_OBJ(d, ADD_OBJ(d, nse, "valueFrom"), "fieldRef"), "fieldPath", "metadata.namespace");
@@ -678,6 +681,20 @@ static bc_object console_deployment(const bc_spec *s) {
     mval *it = yyjson_mut_arr_add_obj(d, ADD_ARR(d, src, "items"));
     ADD_STR(d, it, "key", "ca.crt");
     ADD_STR(d, it, "path", "ca.crt");
+  }
+  { /* the sign-in settings the operator applied; optional, so the console starts before any exist,
+     * and a mounted Secret follows its changes, which consoled reloads */
+    char idn[160];
+    bc_identity_console_secret_name(s, idn, sizeof(idn));
+    m = yyjson_mut_arr_add_obj(d, mounts);
+    ADD_STR(d, m, "name", "identity");
+    ADD_STR(d, m, "mountPath", BC_CONSOLE_IDENTITY_DIR);
+    ADD_BOOL(d, m, "readOnly", true);
+    v = yyjson_mut_arr_add_obj(d, vols);
+    ADD_STR(d, v, "name", "identity");
+    mval *src = ADD_OBJ(d, v, "secret");
+    ADD_STR(d, src, "secretName", idn);
+    ADD_BOOL(d, src, "optional", true);
   }
   if (s->console.tls_secret) { /* consoled's own HTTPS: public.crt and private.key, as bucketsd lays them out */
     m = yyjson_mut_arr_add_obj(d, mounts);
@@ -826,6 +843,13 @@ void bc_kes_endpoint(const bc_spec *s, bool trial, char *out, size_t cap) {
   snprintf(out, cap, "https://%s.%s.svc.%s:%d", n, s->ns, s->cluster_domain, BC_KES_PORT);
 }
 void bc_kms_settings_secret_name(const bc_spec *s, char *out, size_t cap) { snprintf(out, cap, "%s-kms", s->name); }
+void bc_identity_secret_name(const bc_spec *s, char *out, size_t cap) { snprintf(out, cap, "%s-identity", s->name); }
+void bc_identity_candidate_secret_name(const bc_spec *s, char *out, size_t cap) {
+  snprintf(out, cap, "%s-identity-candidate", s->name);
+}
+void bc_identity_console_secret_name(const bc_spec *s, char *out, size_t cap) {
+  snprintf(out, cap, "%s-identity-console", s->name);
+}
 void bc_kms_candidate_secret_name(const bc_spec *s, char *out, size_t cap) {
   snprintf(out, cap, "%s-kms-candidate", s->name);
 }
@@ -1051,6 +1075,16 @@ yyjson_mut_doc *bc_kms_empty_secret(const bc_spec *s, const char *name) {
   return d;
 }
 
+yyjson_mut_doc *bc_identity_console_secret(const bc_spec *s, const char *json) {
+  mdoc *d = yyjson_mut_doc_new(NULL);
+  char name[160];
+  bc_identity_console_secret_name(s, name, sizeof(name));
+  mval *root = object(d, "v1", "Secret", s, name, NULL);
+  ADD_STR(d, root, "type", "Opaque");
+  ADD_STR(d, ADD_OBJ(d, root, "stringData"), "identity.json", json);
+  return d;
+}
+
 yyjson_mut_doc *bc_kes_tls_secret(const bc_spec *s, const char *cert, const char *key) {
   mdoc *d = yyjson_mut_doc_new(NULL);
   char name[128];
@@ -1076,13 +1110,15 @@ yyjson_mut_doc *bc_kes_identity_secret(const bc_spec *s, const char *admin, cons
 }
 
 /* The console's ServiceAccount and what it may do: read and change its own
- * cluster (the KMS settings' spec.kms, the test annotation) and the two KMS
- * settings Secrets. */
+ * cluster (the KMS settings' spec.kms, the test annotation), the two KMS
+ * settings Secrets and the two identity settings Secrets. */
 static size_t console_rbac(const bc_spec *s, bc_object *o) {
-  char name[128], kms[128], cand[128];
+  char name[128], kms[128], cand[128], idn[160], idc[160];
   bc_console_secret_name(s, name, sizeof(name));
   bc_kms_settings_secret_name(s, kms, sizeof(kms));
   bc_kms_candidate_secret_name(s, cand, sizeof(cand));
+  bc_identity_secret_name(s, idn, sizeof(idn));
+  bc_identity_candidate_secret_name(s, idc, sizeof(idc));
   size_t k = 0;
   mdoc *d = yyjson_mut_doc_new(NULL);
   console_object(d, "v1", "ServiceAccount", s, name);
@@ -1104,6 +1140,8 @@ static size_t console_rbac(const bc_spec *s, bc_object *o) {
   mval *names = ADD_ARR(d, r, "resourceNames");
   yyjson_mut_arr_add_strcpy(d, names, kms);
   yyjson_mut_arr_add_strcpy(d, names, cand);
+  yyjson_mut_arr_add_strcpy(d, names, idn);
+  yyjson_mut_arr_add_strcpy(d, names, idc);
   verbs = ADD_ARR(d, r, "verbs");
   yyjson_mut_arr_add_str(d, verbs, "get");
   yyjson_mut_arr_add_str(d, verbs, "update");

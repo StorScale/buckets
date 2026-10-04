@@ -162,8 +162,10 @@ int main(int argc, char **argv) {
   /* With OpenID sign-in, people come from the identity provider: no local
    * users unless asked for. */
   const char *local = env2("BUCKETS_CONSOLE_LOCAL_USERS", NULL);
+  cfg.local_users_set = local != NULL;
   cfg.local_users = local ? (strcasecmp(local, "on") == 0 || strcasecmp(local, "true") == 0 || strcmp(local, "1") == 0)
                           : !(cfg.oidc_config_url && cfg.oidc_client_id);
+  cfg.identity_file = env2("BUCKETS_CONSOLE_IDENTITY_FILE", NULL);
   buckets_console *console = buckets_console_new(&cfg);
 
   g_loop = buckets_loop_new();

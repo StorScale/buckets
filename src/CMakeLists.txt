@@ -90,6 +90,7 @@ add_library(buckets STATIC
   s3/apiname.c
   console/console.c
   console/kmsconfig.c
+  console/idpconfig.c
   net/http.c
   net/tls.c
   net/client.c
@@ -154,6 +155,7 @@ add_library(buckets STATIC
   iam/policy.c
   iam/iam.c
   iam/openid.c
+  iam/idpsettings.c
   iam/ldapidp.c
   iam/plugins.c
   crypto/jwt.c
