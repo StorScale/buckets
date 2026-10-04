@@ -6,6 +6,9 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- The console's Configuration page listed policy_opa and region, deprecated subsystems the server keeps only for old settings and has no help for, so opening them showed "unknown sub-system policy_opa (XMinioConfigError)". The page now lists the subsystems the server documents, which also adds the ones it was missing (batch, heal, ilm, browser, identity_tls, identity_plugin, policy_plugin, lambda_webhook, etcd and others).
+
 ## [1.2.1] - 2026-10-04
 
 ### Fixed
