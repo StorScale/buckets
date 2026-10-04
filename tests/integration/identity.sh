@@ -53,9 +53,16 @@ for _ in $(seq 100); do curl -s -o /dev/null "$ISS/jwks" && curl -s -o /dev/null
   nc -z 127.0.0.1 "$LPORT" 2>/dev/null && [[ -f $WORK/kube-ca.pem ]] && curl -sk -o /dev/null "https://127.0.0.1:$KPORT/_state" && break; sleep 0.1; done
 
 mkdir -p "$WORK"/d{1..4} "$WORK/identity"
+BASE=dc=example,dc=com
+# the servers have LDAP too, so the LDAP lookup can report the policies attached in the directory's terms
 env BUCKETS_ROOT_USER=rootadmin BUCKETS_ROOT_PASSWORD=rootsecret123 \
   MINIO_IDENTITY_OPENID_CONFIG_URL="$ISS/.well-known/openid-configuration" MINIO_IDENTITY_OPENID_CLIENT_ID=idp-console \
   MINIO_IDENTITY_OPENID_CLAIM_NAME=roles \
+  MINIO_IDENTITY_LDAP_SERVER_ADDR="127.0.0.1:$LPORT" MINIO_IDENTITY_LDAP_SERVER_INSECURE=on \
+  MINIO_IDENTITY_LDAP_LOOKUP_BIND_DN="cn=lookup,ou=svc,$BASE" MINIO_IDENTITY_LDAP_LOOKUP_BIND_PASSWORD=lookup123 \
+  MINIO_IDENTITY_LDAP_USER_DN_SEARCH_BASE_DN="ou=people,$BASE" MINIO_IDENTITY_LDAP_USER_DN_SEARCH_FILTER="(uid=%s)" \
+  MINIO_IDENTITY_LDAP_GROUP_SEARCH_BASE_DN="ou=groups,$BASE" \
+  MINIO_IDENTITY_LDAP_GROUP_SEARCH_FILTER="(&(objectclass=groupOfNames)(member=%d))" \
   "$BIN" server --address "127.0.0.1:$PORT" "$WORK/d{1...4}" 2>"$WORK/log" &
 PIDS+=($!)
 for _ in $(seq 150); do curl -s -o /dev/null "$EP/minio/health/live" && break; sleep 0.1; done
@@ -136,13 +143,19 @@ check "a forged blob is refused" "$(api -d '{"blob":"bm90LWEtYmxvYg"}' "$C/api/v
   "False The test expired or di"
 
 echo "== LDAP"
-BASE=dc=example,dc=com
 LDAP='{"preset":"openldap","serverAddr":"127.0.0.1:'"$LPORT"'","tls":"plain","lookupBindDn":"cn=lookup,ou=svc,'"$BASE"'","lookupBindPassword":"lookup123","userSearchBase":"ou=People,'"$BASE"'","groupSearchBase":"ou=groups,'"$BASE"'"}'
 api -X PUT -d '{"settings":{"ldap":'"$LDAP"'}}' "$C/api/v1/identity-config/candidate" >/dev/null
 L=$(api -d '{"username":"alice"}' "$C/api/v1/identity-config/ldap-test")
 check "a user found, with groups" "$(jq_ 'd["passed"], d["dn"], d["groups"]' <<<"$L")" \
   "True uid=alice,ou=People,$BASE ['cn=devs,ou=groups,$BASE']"
 check "no policy attached yet: said so" "$(jq_ 'd["note"].startswith("Found, but no policy is attached")' <<<"$L")" True
+MC_BIN=${MC_BIN:-$(command -v mc)}
+mc() { "$MC_BIN" --config-dir "$WORK/mc" --no-color "$@"; }
+mc alias set it "$EP" rootadmin rootsecret123 >/dev/null
+mc idp ldap policy attach it readwrite --group "cn=devs,ou=groups,$BASE" >/dev/null
+L=$(api -d '{"username":"alice"}' "$C/api/v1/identity-config/ldap-test")
+check "her group's policy, once attached" "$(jq_ 'd["passed"], d["policies"], d.get("note")' <<<"$L")" "True ['readwrite'] None"
+mc idp ldap policy detach it readwrite --group "cn=devs,ou=groups,$BASE" >/dev/null
 check "an unknown user" "$(api -d '{"username":"zed"}' "$C/api/v1/identity-config/ldap-test" | jq_ 'd["passed"], d["error"].startswith("No such user under the user search base")')" \
   "False True"
 check "a wrong password" "$(api -d '{"username":"alice","password":"nope"}' "$C/api/v1/identity-config/ldap-test" | jq_ 'd["passed"], d["error"].startswith("The user cannot sign in")')" \
