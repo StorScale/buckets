@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-04
+
 ### Changed
 - The main repository is now https://github.com/StorScale/buckets. GitHub Actions (`.github/workflows/images.yml`) builds the four images into `ghcr.io/storscale` on every push to `main` and on tags, each with an SBOM and build provenance; release images are signed with cosign (keyless) and the operator's Helm chart is published to `oci://ghcr.io/storscale/charts`.
 - The operator's default images, the CRDs' and Helm chart's defaults and the examples now name `ghcr.io/storscale/...` (were `ghcr.io/buckets-io/...`).

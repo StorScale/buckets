@@ -2,7 +2,7 @@
 
 S3-compatible object storage written in C, built to run natively on Kubernetes. It is a rewrite of MinIO's last public release (`RELEASE.2025-10-15T17-29-55Z`; the upstream project was archived in April 2026).
 
-**Status: 1.0.0. All build phases are done:** Buckets implements 220 of MinIO's 222 API handlers (the other two are dropped on purpose) in MinIO's exact on-disk format, on anything from one drive to multi-pool clusters of nodes:
+**Status: 1.1.0. All build phases are done:** Buckets implements 220 of MinIO's 222 API handlers (the other two are dropped on purpose) in MinIO's exact on-disk format, on anything from one drive to multi-pool clusters of nodes:
 - erasure coding, bitrot protection and healing; survives drive and node loss
 - IAM, STS, and sign-in with LDAP or OpenID Connect (Microsoft Entra ID with app roles is in use)
 - versioning, object lock, lifecycle, SSE with KMS, compression, replication, tiering, batch jobs, S3 Select, SFTP/FTP
