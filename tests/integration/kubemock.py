@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""A minimal Kubernetes API for the console's KMS settings tests, standing in
-for the API server and for buckets-operator: one BucketsCluster and its KMS
-Secrets, over HTTPS.
+"""A minimal Kubernetes API for the console's KMS and identity settings tests,
+standing in for the API server and for buckets-operator: one BucketsCluster
+and its KMS and identity Secrets, over HTTPS.
 
   python3 kubemock.py PORT WORKDIR NAMESPACE CLUSTER
 
@@ -10,8 +10,9 @@ operator, it answers the cluster's buckets.io/kms-test annotation with a trial
 in status.kms.test: running at first, then passed -- or failed, when the
 settings' address or URL contains "unreachable" (Vault's own words), or the
 default key is "missing-key" and may not be created. Applying settings
-(spec.kms.kes) makes status.kms Ready. GET /_state shows what was stored, the
-Secrets decoded, for assertions."""
+(spec.kms.kes) makes status.kms Ready, and saved identity settings make
+status.identity Ready. GET /_state shows what was stored, the Secrets decoded,
+for assertions."""
 import base64, copy, http.server, json, os, ssl, subprocess, sys, threading, time
 
 port, work, ns, name = int(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
@@ -25,7 +26,8 @@ cluster = {"apiVersion": "buckets.io/v1alpha1", "kind": "BucketsCluster",
            "metadata": {"name": name, "namespace": ns, "uid": "u-1", "resourceVersion": "1", "annotations": {}},
            "spec": {"pools": [{"servers": 4, "volumesPerServer": 1}], "console": {"enabled": True}},
            "status": {"kms": {"phase": "Off"}}}
-secrets = {f"{name}-kms": {}, f"{name}-kms-candidate": {}}  # name -> data (base64 values)
+secrets = {f"{name}-kms": {}, f"{name}-kms-candidate": {}, f"{name}-identity": {},
+           f"{name}-identity-candidate": {}}  # name -> data (base64 values)
 trials = {}  # test id -> time started
 
 
@@ -93,6 +95,8 @@ def operator():
                                        {"name": "Default key " + cand.get("keyName", ""), "status": "ok",
                                         "message": "created" if cand.get("createKey") else "exists"},
                                        {"name": "Encrypt and decrypt with it", "status": "ok"}])
+            if decoded(f"{name}-identity", "settings.json") is not None:
+                cluster["status"]["identity"] = {"phase": "Ready"}
             kes = cluster["spec"].get("kms", {}).get("kes")
             live = decoded(f"{name}-kms", "settings.json")
             if kes is not None and live:

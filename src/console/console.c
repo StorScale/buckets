@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <stdatomic.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -25,7 +26,9 @@
 #include "crypto/madmin.h"
 #include "crypto/sha256.h"
 #include "s3/sign.h"
+#include "console/idpconfig.h"
 #include "console/kmsconfig.h"
+#include "iam/idpsettings.h"
 
 #define COOKIE_NAME "buckets-session"
 #define COOKIE_AD "buckets-console-v1"
@@ -36,10 +39,154 @@ struct buckets_console {
   buckets_http_client *http;
   char host_header[300];
   uint8_t key[32];
-  pthread_mutex_t oidc_mu;
-  char *oidc_authorize, *oidc_token; /* from discovery, once fetched */
-  buckets_console_kms *kms;          /* KMS settings through the operator; NULL outside Kubernetes */
+  pthread_mutex_t signin_mu; /* guards signin and the file's last state */
+  struct signin *signin;      /* how people sign in now */
+  time_t signin_checked;      /* when identity_file was last looked at */
+  struct stat signin_st;      /* identity_file as last read */
+  buckets_console_kms *kms;   /* KMS settings through the operator; NULL outside Kubernetes */
+  buckets_console_idp *idp;   /* the Identity page through the operator; NULL outside Kubernetes */
 };
+
+/* ---- how people sign in -------------------------------------------------------------- */
+
+/* One set of sign-in settings, shared by the requests using it while a newer
+ * one may replace it (identity_file changed). */
+typedef struct signin {
+  _Atomic int refs;
+  char *config_url, *client_id, *client_secret, *scopes, *display_name, *redirect_uri; /* OpenID: config_url set */
+  bool ldap;
+  bool from_file;
+  pthread_mutex_t mu;
+  char *authorize, *token; /* from discovery, once fetched */
+} signin;
+
+static char *dup_or_null(const char *s) { return s && *s ? buckets_xstrdup(s) : NULL; }
+
+static signin *signin_new(void) {
+  signin *g = buckets_xcalloc(1, sizeof(*g));
+  atomic_init(&g->refs, 1);
+  pthread_mutex_init(&g->mu, NULL);
+  return g;
+}
+
+static void wipe_free(char *s) {
+  if (s) OPENSSL_cleanse(s, strlen(s));
+  free(s);
+}
+
+static void signin_release(signin *g) {
+  if (!g || atomic_fetch_sub(&g->refs, 1) != 1) return;
+  free(g->config_url);
+  free(g->client_id);
+  wipe_free(g->client_secret);
+  free(g->scopes);
+  free(g->display_name);
+  free(g->redirect_uri);
+  free(g->authorize);
+  free(g->token);
+  pthread_mutex_destroy(&g->mu);
+  free(g);
+}
+
+static void signin_defaults(signin *g) {
+  if (!g->scopes) g->scopes = buckets_xstrdup("openid profile email");
+  if (!g->display_name) g->display_name = buckets_xstrdup("OpenID");
+  if (!g->client_id) {
+    free(g->config_url);
+    g->config_url = NULL;
+  }
+}
+
+static signin *signin_from_cfg(const buckets_console_config *cfg) {
+  signin *g = signin_new();
+  g->config_url = dup_or_null(cfg->oidc_config_url);
+  g->client_id = dup_or_null(cfg->oidc_client_id);
+  g->client_secret = dup_or_null(cfg->oidc_client_secret);
+  g->scopes = dup_or_null(cfg->oidc_scopes);
+  g->display_name = dup_or_null(cfg->oidc_display_name);
+  g->redirect_uri = dup_or_null(cfg->oidc_redirect_uri);
+  g->ldap = cfg->ldap;
+  signin_defaults(g);
+  return g;
+}
+
+/* From the console's view of identity settings ({"oidc", "ldap"}). */
+static signin *signin_from_view(yyjson_val *v) {
+  signin *g = signin_new();
+  yyjson_val *o = yyjson_obj_get(v, "oidc");
+  if (yyjson_is_obj(o)) {
+    g->config_url = dup_or_null(yyjson_get_str(yyjson_obj_get(o, "configUrl")));
+    g->client_id = dup_or_null(yyjson_get_str(yyjson_obj_get(o, "clientId")));
+    g->client_secret = dup_or_null(yyjson_get_str(yyjson_obj_get(o, "clientSecret")));
+    g->scopes = dup_or_null(yyjson_get_str(yyjson_obj_get(o, "scopes")));
+    g->display_name = dup_or_null(yyjson_get_str(yyjson_obj_get(o, "displayName")));
+    g->redirect_uri = dup_or_null(yyjson_get_str(yyjson_obj_get(o, "redirectUri")));
+  }
+  g->ldap = yyjson_is_obj(yyjson_obj_get(v, "ldap"));
+  signin_defaults(g);
+  return g;
+}
+
+/* From identity settings (the Identity page's candidate), as the operator
+ * would give them to the console. */
+static signin *signin_from_settings(yyjson_val *settings) {
+  yyjson_mut_doc *m = yyjson_mut_doc_new(NULL);
+  yyjson_mut_doc_set_root(m, buckets_idp_console_view(m, settings));
+  yyjson_doc *v = yyjson_mut_doc_imut_copy(m, NULL);
+  yyjson_mut_doc_free(m);
+  signin *g = signin_from_view(yyjson_doc_get_root(v));
+  yyjson_doc_free(v);
+  return g;
+}
+
+static bool same_file(const struct stat *a, const struct stat *b) {
+  return a->st_ino == b->st_ino && a->st_dev == b->st_dev && a->st_size == b->st_size &&
+         a->st_mtim.tv_sec == b->st_mtim.tv_sec && a->st_mtim.tv_nsec == b->st_mtim.tv_nsec;
+}
+
+/* Reads identity_file again when it changed (signin_mu held); its absence
+ * brings back the startup settings. */
+static void signin_reload(buckets_console *c) {
+  time_t now = time(NULL);
+  if (now == c->signin_checked) return;
+  c->signin_checked = now;
+  struct stat st;
+  if (stat(c->cfg.identity_file, &st) != 0) {
+    if (c->signin->from_file) {
+      buckets_log_info("console: %s is gone; signing in with the startup settings", c->cfg.identity_file);
+      signin_release(c->signin);
+      c->signin = signin_from_cfg(&c->cfg);
+      memset(&c->signin_st, 0, sizeof(c->signin_st));
+    }
+    return;
+  }
+  if (c->signin->from_file && same_file(&st, &c->signin_st)) return;
+  yyjson_read_err e;
+  yyjson_doc *d = yyjson_read_file(c->cfg.identity_file, 0, NULL, &e);
+  if (!d) {
+    buckets_log_warn("console: %s: %s; keeping the current sign-in settings", c->cfg.identity_file, e.msg);
+    c->signin_st = st;
+    return;
+  }
+  signin *g = signin_from_view(yyjson_doc_get_root(d));
+  yyjson_doc_free(d);
+  g->from_file = true;
+  buckets_log_info("console: sign-in settings from %s: %s%s%s", c->cfg.identity_file, g->config_url ? g->display_name : "",
+                   g->config_url && g->ldap ? " and " : "", g->ldap ? "LDAP" : g->config_url ? "" : "access keys only");
+  signin_release(c->signin);
+  c->signin = g;
+  c->signin_st = st;
+}
+
+/* The current sign-in settings; release with signin_release. */
+static signin *signin_get(buckets_console *c) {
+  pthread_mutex_lock(&c->signin_mu);
+  if (c->cfg.identity_file) signin_reload(c);
+  signin *g = c->signin;
+  atomic_fetch_add(&g->refs, 1);
+  pthread_mutex_unlock(&c->signin_mu);
+  return g;
+}
 
 buckets_console *buckets_console_new(const buckets_console_config *cfg) {
   buckets_console *c = buckets_xcalloc(1, sizeof(*c));
@@ -48,10 +195,10 @@ buckets_console *buckets_console_new(const buckets_console_config *cfg) {
   if (!c->cfg.region || !*c->cfg.region) c->cfg.region = "us-east-1";
   c->http = buckets_http_client_new(cfg->upstream_host, cfg->upstream_port, cfg->upstream_tls, 5 * 60 * 1000);
   snprintf(c->host_header, sizeof(c->host_header), "%s:%d", cfg->upstream_host, cfg->upstream_port);
-  pthread_mutex_init(&c->oidc_mu, NULL);
+  pthread_mutex_init(&c->signin_mu, NULL);
+  c->signin = signin_from_cfg(&c->cfg);
   c->kms = buckets_console_kms_new();
-  if (!c->cfg.oidc_scopes || !*c->cfg.oidc_scopes) c->cfg.oidc_scopes = "openid profile email";
-  if (!c->cfg.oidc_display_name || !*c->cfg.oidc_display_name) c->cfg.oidc_display_name = "OpenID";
+  c->idp = buckets_console_idp_new();
   /* MinIO console: the cookie key comes from CONSOLE_PBKDF_PASSPHRASE/SALT;
    * without them every restart (and every replica) gets its own key. */
   if (cfg->passphrase && *cfg->passphrase) {
@@ -69,10 +216,10 @@ void buckets_console_free(buckets_console *c) {
   if (!c) return;
   buckets_http_client_free(c->http);
   OPENSSL_cleanse(c->key, sizeof(c->key));
-  pthread_mutex_destroy(&c->oidc_mu);
+  signin_release(c->signin);
+  pthread_mutex_destroy(&c->signin_mu);
   buckets_console_kms_free(c->kms);
-  free(c->oidc_authorize);
-  free(c->oidc_token);
+  buckets_console_idp_free(c->idp);
   free(c);
 }
 
@@ -283,7 +430,10 @@ static void handle_login(buckets_console *c, const buckets_http_request *req, bu
   }
   const char *method = yyjson_get_str(yyjson_obj_get(o, "method"));
   bool ldap = method && strcmp(method, "ldap") == 0;
-  if (ldap && !c->cfg.ldap) {
+  signin *g = signin_get(c);
+  bool ldap_on = g->ldap;
+  signin_release(g);
+  if (ldap && !ldap_on) {
     yyjson_doc_free(d);
     json_error(resp, 400, "InvalidRequest", "LDAP sign-in is not enabled");
     return;
@@ -359,12 +509,15 @@ static void handle_login_methods(buckets_console *c, buckets_http_response *resp
   yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
   yyjson_mut_val *o = yyjson_mut_obj(d);
   yyjson_mut_doc_set_root(d, o);
-  yyjson_mut_obj_add_bool(d, o, "ldap", c->cfg.ldap);
+  signin *g = signin_get(c);
+  yyjson_mut_obj_add_bool(d, o, "ldap", g->ldap);
   yyjson_mut_obj_add_bool(d, o, "share", c->cfg.s3_url != NULL);
-  bool oidc = c->cfg.oidc_config_url && c->cfg.oidc_client_id;
+  bool oidc = g->config_url != NULL;
   yyjson_mut_obj_add_bool(d, o, "oidc", oidc);
-  if (oidc) yyjson_mut_obj_add_str(d, o, "oidcName", c->cfg.oidc_display_name);
-  yyjson_mut_obj_add_bool(d, o, "localUsers", c->cfg.local_users);
+  if (oidc) yyjson_mut_obj_add_strcpy(d, o, "oidcName", g->display_name);
+  /* with OpenID sign-in, people come from the identity provider: no local users unless asked for */
+  yyjson_mut_obj_add_bool(d, o, "localUsers", c->cfg.local_users_set ? c->cfg.local_users : !oidc);
+  signin_release(g);
   json_reply(resp, d);
 }
 
@@ -373,19 +526,19 @@ static void handle_login_methods(buckets_console *c, buckets_http_response *resp
 #define OIDC_COOKIE "buckets-oidc"
 #define OIDC_AD "buckets-console-oidc-v1"
 
-/* The provider's endpoints, from its discovery document (fetched once). */
-static bool oidc_endpoints(buckets_console *c, char **authorize, char **token, char *err, size_t errlen) {
-  pthread_mutex_lock(&c->oidc_mu);
-  if (!c->oidc_authorize) {
+/* The provider's endpoints, from its discovery document (fetched once per settings). */
+static bool oidc_endpoints(const buckets_console *c, signin *g, char **authorize, char **token, char *err, size_t errlen) {
+  pthread_mutex_lock(&g->mu);
+  if (!g->authorize) {
     buckets_http_result res;
-    if (buckets_fetch("GET", c->cfg.oidc_config_url, c->cfg.oidc_ca_file, NULL, 0, NULL, 0, 10000, &res, err, errlen)) {
+    if (buckets_fetch("GET", g->config_url, c->cfg.oidc_ca_file, NULL, 0, NULL, 0, 10000, &res, err, errlen)) {
       yyjson_doc *d = res.status == 200 ? yyjson_read(res.body.data ? res.body.data : "", res.body.len, 0) : NULL;
       yyjson_val *o = d ? yyjson_doc_get_root(d) : NULL;
       const char *a = yyjson_get_str(yyjson_obj_get(o, "authorization_endpoint"));
       const char *t = yyjson_get_str(yyjson_obj_get(o, "token_endpoint"));
       if (a && t) {
-        c->oidc_authorize = buckets_xstrdup(a);
-        c->oidc_token = buckets_xstrdup(t);
+        g->authorize = buckets_xstrdup(a);
+        g->token = buckets_xstrdup(t);
       } else {
         snprintf(err, errlen, "the discovery document (%d) lacks authorization or token endpoints", res.status);
       }
@@ -393,18 +546,18 @@ static bool oidc_endpoints(buckets_console *c, char **authorize, char **token, c
       buckets_http_result_free(&res);
     }
   }
-  bool ok = c->oidc_authorize != NULL;
+  bool ok = g->authorize != NULL;
   if (ok) {
-    *authorize = buckets_xstrdup(c->oidc_authorize);
-    *token = buckets_xstrdup(c->oidc_token);
+    *authorize = buckets_xstrdup(g->authorize);
+    *token = buckets_xstrdup(g->token);
   }
-  pthread_mutex_unlock(&c->oidc_mu);
+  pthread_mutex_unlock(&g->mu);
   return ok;
 }
 
-static void redirect_uri(const buckets_console *c, const buckets_http_request *req, buckets_buf *out) {
-  if (c->cfg.oidc_redirect_uri) {
-    buckets_buf_append_c(out, c->cfg.oidc_redirect_uri);
+static void redirect_uri(const signin *g, const buckets_http_request *req, buckets_buf *out) {
+  if (g && g->redirect_uri) {
+    buckets_buf_append_c(out, g->redirect_uri);
     return;
   }
   buckets_str host = buckets_http_header_get(req, "Host"), proto = buckets_http_header_get(req, "X-Forwarded-Proto");
@@ -426,15 +579,117 @@ static void login_error_redirect(buckets_http_response *resp, const char *msg) {
   buckets_buf_free(&loc);
 }
 
+static bool may_configure(buckets_console *c, const buckets_console_session *s);
+
+/* What the Identity page's endpoints and tests do as the signed-in admin. */
+typedef struct {
+  buckets_console *c;
+  const buckets_console_session *s;
+} admin_ctx;
+
+static int admin_get(void *ud, const char *api, const char *query, bool decrypt, buckets_buf *out) {
+  admin_ctx *a = ud;
+  buckets_sigv4_creds cr = {.access_key = a->s->access_key, .secret_key = a->s->secret_key,
+                            .session_token = a->s->session_token, .region = a->c->cfg.region};
+  char path[256];
+  snprintf(path, sizeof(path), "/minio/admin/v3/%s", api);
+  buckets_http_result res;
+  if (!upstream_call(a->c, &cr, "GET", path, query, NULL, 0, NULL, 0, &res)) return 0;
+  int st = res.status;
+  if (st == 200 && decrypt) {
+    if (!buckets_madmin_decrypt(a->s->secret_key, res.body.data ? res.body.data : "", res.body.len, out)) st = 0;
+  } else {
+    buckets_buf_append(out, res.body.data ? res.body.data : "", res.body.len);
+  }
+  buckets_http_result_free(&res);
+  return st;
+}
+
+static void idp_session(buckets_console *c, const buckets_http_request *req, admin_ctx *a, buckets_buf *callback,
+                        buckets_console_idp_session *out) {
+  signin *g = signin_get(c);
+  redirect_uri(g, req, callback);
+  signin_release(g);
+  *out = (buckets_console_idp_session){admin_get, a, c->cfg.region, c->cfg.oidc_ca_file, callback->data};
+}
+
+static void html_escape(buckets_buf *b, const char *s) {
+  for (; *s; s++) {
+    if (*s == '<') buckets_buf_append_c(b, "&lt;");
+    else if (*s == '>') buckets_buf_append_c(b, "&gt;");
+    else if (*s == '&') buckets_buf_append_c(b, "&amp;");
+    else if (*s == '"') buckets_buf_append_c(b, "&quot;");
+    else buckets_buf_append_char(b, *s);
+  }
+}
+
+/* The test sign-in's popup ends here: it tells the Identity page and closes. */
+static void test_page(buckets_http_response *resp, bool passed, const char *message) {
+  uint8_t r[16];
+  char nonce[32];
+  buckets_random(r, sizeof(r));
+  buckets_base64url_raw_encode(r, sizeof(r), nonce);
+  resp->status = 200;
+  buckets_http_resp_header(resp, "Content-Type", "text/html; charset=utf-8");
+  buckets_http_resp_header(resp, "Cache-Control", "no-store");
+  buckets_http_resp_headerf(resp, "Content-Security-Policy",
+                            "default-src 'none'; script-src 'nonce-%s'; style-src 'unsafe-inline'; frame-ancestors 'none'", nonce);
+  buckets_buf_append_c(&resp->body, "<!doctype html><meta charset=\"utf-8\"><title>Sign-in test</title>"
+                                    "<body style=\"font:14px system-ui,sans-serif;padding:24px\"><p>");
+  html_escape(&resp->body, message);
+  buckets_buf_appendf(&resp->body,
+                      "</p><p>You can close this window.</p><script nonce=\"%s\">try{window.opener&&window.opener.postMessage("
+                      "{type:'buckets-identity-test',passed:%s},location.origin)}catch(e){}setTimeout(function(){window.close()},"
+                      "%d)</script>",
+                      nonce, passed ? "true" : "false", passed ? 1200 : 6000);
+}
+
+/* GET /api/v1/login/oidc: to the provider. With test=1 (the Identity page's
+ * popup, as an admin who may change the configuration), to the provider of
+ * the candidate settings instead, to try them without signing in. */
 static void handle_oidc_start(buckets_console *c, const buckets_http_request *req, buckets_http_response *resp) {
-  if (!c->cfg.oidc_config_url || !c->cfg.oidc_client_id) {
+  buckets_query q = {0};
+  buckets_query_parse(req->query, &q);
+  bool test = buckets_query_get(&q, "test") != NULL;
+  buckets_query_free(&q);
+  signin *g = NULL;
+  char hash[17] = "";
+  if (test) {
+    buckets_console_session s;
+    bool ok = request_session(c, req, &s) && may_configure(c, &s);
+    OPENSSL_cleanse(&s, sizeof(s));
+    if (!ok) {
+      test_page(resp, false, "Testing sign-in needs an administrator's session (admin:ConfigUpdate).");
+      return;
+    }
+    yyjson_doc *cand = c->idp ? buckets_console_idp_candidate(c->idp, hash) : NULL;
+    yyjson_val *cs = yyjson_doc_get_root(cand);
+    if (!yyjson_is_obj(yyjson_obj_get(cs, "openid"))) {
+      yyjson_doc_free(cand);
+      test_page(resp, false, "Save OpenID settings before testing them.");
+      return;
+    }
+    g = signin_from_settings(cs);
+    yyjson_doc_free(cand);
+  } else {
+    g = signin_get(c);
+  }
+  if (!g->config_url) {
+    signin_release(g);
     json_error(resp, 404, "NotConfigured", "OpenID sign-in is not configured");
     return;
   }
   char *authorize = NULL, *token = NULL, err[512] = "";
-  if (!oidc_endpoints(c, &authorize, &token, err, sizeof(err))) {
+  if (!oidc_endpoints(c, g, &authorize, &token, err, sizeof(err))) {
     buckets_log_warn("console: OpenID discovery: %s", err);
-    login_error_redirect(resp, "The identity provider cannot be reached.");
+    if (test) {
+      char msg[700];
+      snprintf(msg, sizeof(msg), "The identity provider cannot be reached: %s", err);
+      test_page(resp, false, msg);
+    } else {
+      login_error_redirect(resp, "The identity provider cannot be reached.");
+    }
+    signin_release(g);
     return;
   }
   uint8_t r[32];
@@ -443,28 +698,30 @@ static void handle_oidc_start(buckets_console *c, const buckets_http_request *re
   buckets_base64url_raw_encode(r, 24, state);
   buckets_random(r, sizeof(r));
   buckets_base64url_raw_encode(r, 24, nonce);
-  char json[256];
-  int jn = snprintf(json, sizeof(json), "{\"state\":\"%s\",\"nonce\":\"%s\",\"exp\":%lld}", state, nonce,
-                    (long long)time(NULL) + 600);
+  char json[320];
+  int jn = snprintf(json, sizeof(json), "{\"state\":\"%s\",\"nonce\":\"%s\",\"exp\":%lld,\"test\":\"%s\"}", state, nonce,
+                    (long long)time(NULL) + 600, hash);
   buckets_buf ck = BUCKETS_BUF_INIT, loc = BUCKETS_BUF_INIT, ru = BUCKETS_BUF_INIT;
   seal_blob(c, OIDC_AD, json, (size_t)jn, &ck);
   /* Lax: the provider's redirect back is a cross-site navigation. */
   buckets_http_resp_headerf(resp, "Set-Cookie", OIDC_COOKIE "=%s; Path=/oauth_callback; Max-Age=600; HttpOnly; SameSite=Lax%s", ck.data,
                             c->cfg.secure_cookie ? "; Secure" : "");
-  redirect_uri(c, req, &ru);
+  redirect_uri(g, req, &ru);
   buckets_buf_appendf(&loc, "%s%sresponse_type=code&client_id=", authorize, strchr(authorize, '?') ? "&" : "?");
-  form_escape(&loc, c->cfg.oidc_client_id);
+  form_escape(&loc, g->client_id);
   buckets_buf_append_c(&loc, "&redirect_uri=");
   form_escape(&loc, ru.data);
   buckets_buf_append_c(&loc, "&scope=");
-  form_escape(&loc, c->cfg.oidc_scopes);
+  form_escape(&loc, g->scopes);
   buckets_buf_appendf(&loc, "&state=%s&nonce=%s", state, nonce);
+  if (test) buckets_buf_append_c(&loc, "&prompt=login"); /* a real sign-in, not a remembered one */
   redirect(resp, loc.data);
   buckets_buf_free(&ck);
   buckets_buf_free(&loc);
   buckets_buf_free(&ru);
   free(authorize);
   free(token);
+  signin_release(g);
 }
 
 /* A display name from the ID token's claims (bucketsd verifies the token). */
@@ -489,6 +746,34 @@ static void token_user(const char *jwt, char *out, size_t cap) {
   free(raw);
 }
 
+/* The test sign-in's ID token, checked against the candidate it tested, and
+ * the outcome recorded for the Identity page (and its Apply). */
+static void finish_test(buckets_console *c, const buckets_http_request *req, buckets_http_response *resp, yyjson_val *cand,
+                        const char *hash, const char *id_token, const char *access_token) {
+  buckets_console_session s;
+  if (!request_session(c, req, &s) || !may_configure(c, &s)) {
+    OPENSSL_cleanse(&s, sizeof(s));
+    test_page(resp, false, "Your console session ended during the test: sign in to the console again and retry.");
+    return;
+  }
+  admin_ctx a = {c, &s};
+  buckets_buf cb = BUCKETS_BUF_INIT;
+  buckets_console_idp_session sess;
+  idp_session(c, req, &a, &cb, &sess);
+  yyjson_mut_doc *r = buckets_console_idp_check_token(cand, id_token, access_token, &sess);
+  buckets_console_idp_record_test(c->idp, hash, "openid", r);
+  yyjson_mut_val *root = yyjson_mut_doc_get_root(r);
+  bool passed = yyjson_mut_get_bool(yyjson_mut_obj_get(root, "passed"));
+  const char *e = yyjson_mut_get_str(yyjson_mut_obj_get(root, "error"));
+  char msg[1400];
+  if (passed) snprintf(msg, sizeof(msg), "Signed in as %s: the settings work.", yyjson_mut_get_str(yyjson_mut_obj_get(root, "user")));
+  else snprintf(msg, sizeof(msg), "%s", e ? e : "The test failed.");
+  test_page(resp, passed, msg);
+  yyjson_mut_doc_free(r);
+  buckets_buf_free(&cb);
+  OPENSSL_cleanse(&s, sizeof(s));
+}
+
 static void handle_oidc_callback(buckets_console *c, const buckets_http_request *req, buckets_http_response *resp) {
   buckets_http_resp_headerf(resp, "Set-Cookie", OIDC_COOKIE "=; Path=/oauth_callback; Max-Age=0; HttpOnly; SameSite=Lax");
   buckets_query q = {0};
@@ -498,40 +783,49 @@ static void handle_oidc_callback(buckets_console *c, const buckets_http_request 
   if (!perr) perr = buckets_query_get(&q, "error");
   buckets_buf st = BUCKETS_BUF_INIT, ru = BUCKETS_BUF_INIT, body = BUCKETS_BUF_INIT;
   buckets_str ck = cookie_value(req, OIDC_COOKIE);
-  yyjson_doc *sd = NULL, *td = NULL;
+  yyjson_doc *sd = NULL, *td = NULL, *cand = NULL;
   char *authorize = NULL, *token = NULL;
   buckets_http_result tres = {0}, sres = {0};
   bool have_t = false, have_s = false;
-  if (perr) {
-    login_error_redirect(resp, perr);
-    goto out;
-  }
-  if (!code || !state || !ck.p || !open_blob(c, OIDC_AD, ck.p, ck.n, &st)) {
-    login_error_redirect(resp, "The sign-in expired or did not start here; please try again.");
-    goto out;
-  }
-  sd = yyjson_read(st.data, st.len, 0);
+  signin *g = NULL;
+  /* the state names the test, when the sign-in is one */
+  bool opened = ck.p && open_blob(c, OIDC_AD, ck.p, ck.n, &st);
+  if (opened) sd = yyjson_read(st.data, st.len, 0);
+  const char *test = yyjson_get_str(yyjson_obj_get(yyjson_doc_get_root(sd), "test"));
+  if (test && !*test) test = NULL;
+#define FAIL(msg) \
+  do { \
+    if (test) test_page(resp, false, msg); \
+    else login_error_redirect(resp, msg); \
+    goto out; \
+  } while (0)
+  if (perr) FAIL(perr);
   const char *want = yyjson_get_str(yyjson_obj_get(yyjson_doc_get_root(sd), "state"));
-  if (!want || strcmp(want, state) != 0 || yyjson_get_sint(yyjson_obj_get(yyjson_doc_get_root(sd), "exp")) < time(NULL)) {
-    login_error_redirect(resp, "The sign-in expired or did not start here; please try again.");
-    goto out;
+  if (!code || !state || !opened || !want || strcmp(want, state) != 0 ||
+      yyjson_get_sint(yyjson_obj_get(yyjson_doc_get_root(sd), "exp")) < time(NULL))
+    FAIL("The sign-in expired or did not start here; please try again.");
+  if (test) {
+    char hash[17] = "";
+    cand = c->idp ? buckets_console_idp_candidate(c->idp, hash) : NULL;
+    if (!cand || strcmp(hash, test) != 0) FAIL("The settings changed during the test: test them again.");
+    g = signin_from_settings(yyjson_doc_get_root(cand));
+  } else {
+    g = signin_get(c);
   }
   char err[512] = "";
-  if (!oidc_endpoints(c, &authorize, &token, err, sizeof(err))) {
-    login_error_redirect(resp, "The identity provider cannot be reached.");
-    goto out;
-  }
+  if (!g->config_url || !oidc_endpoints(c, g, &authorize, &token, err, sizeof(err)))
+    FAIL("The identity provider cannot be reached.");
   /* the code for tokens */
-  redirect_uri(c, req, &ru);
+  redirect_uri(g, req, &ru);
   buckets_buf_append_c(&body, "grant_type=authorization_code&code=");
   form_escape(&body, code);
   buckets_buf_append_c(&body, "&redirect_uri=");
   form_escape(&body, ru.data);
   buckets_buf_append_c(&body, "&client_id=");
-  form_escape(&body, c->cfg.oidc_client_id);
-  if (c->cfg.oidc_client_secret) {
+  form_escape(&body, g->client_id);
+  if (g->client_secret) {
     buckets_buf_append_c(&body, "&client_secret=");
-    form_escape(&body, c->cfg.oidc_client_secret);
+    form_escape(&body, g->client_secret);
   }
   buckets_http_kv fh[] = {{"Content-Type", "application/x-www-form-urlencoded"}, {"Accept", "application/json"}};
   have_t = buckets_fetch("POST", token, c->cfg.oidc_ca_file, fh, 2, body.data, body.len, 10000, &tres, err, sizeof(err));
@@ -539,7 +833,22 @@ static void handle_oidc_callback(buckets_console *c, const buckets_http_request 
   const char *id_token = yyjson_get_str(yyjson_obj_get(yyjson_doc_get_root(td), "id_token"));
   if (!id_token) {
     buckets_log_warn("console: OpenID token exchange failed (%d): %s", have_t ? tres.status : 0, have_t ? "" : err);
-    login_error_redirect(resp, "The identity provider did not issue a token.");
+    if (test) {
+      /* the provider's own words: a wrong secret or redirect URI shows here */
+      yyjson_doc *ed = have_t ? yyjson_read(tres.body.data ? tres.body.data : "", tres.body.len, 0) : NULL;
+      const char *why = yyjson_get_str(yyjson_obj_get(yyjson_doc_get_root(ed), "error_description"));
+      if (!why) why = yyjson_get_str(yyjson_obj_get(yyjson_doc_get_root(ed), "error"));
+      char msg[900];
+      snprintf(msg, sizeof(msg), "The provider did not issue a token for this client%s%s", why ? ": " : ".", why ? why : "");
+      yyjson_doc_free(ed);
+      test_page(resp, false, msg);
+      goto out;
+    }
+    FAIL("The identity provider did not issue a token.");
+  }
+  if (test) {
+    finish_test(c, req, resp, yyjson_doc_get_root(cand), test, id_token,
+                yyjson_get_str(yyjson_obj_get(yyjson_doc_get_root(td), "access_token")));
     goto out;
   }
   /* the token for credentials */
@@ -570,13 +879,17 @@ static void handle_oidc_callback(buckets_console *c, const buckets_http_request 
     login_error_redirect(resp, msg);
   }
   OPENSSL_cleanse(&s, sizeof(s));
+#undef FAIL
 out:
   if (have_t) buckets_http_result_free(&tres);
   if (have_s) buckets_http_result_free(&sres);
   yyjson_doc_free(sd);
   yyjson_doc_free(td);
+  yyjson_doc_free(cand);
+  signin_release(g);
   free(authorize);
   free(token);
+  OPENSSL_cleanse(body.data ? body.data : (char *)"", body.len);
   buckets_buf_free(&st);
   buckets_buf_free(&ru);
   buckets_buf_free(&body);
@@ -1006,6 +1319,19 @@ void buckets_console_handle(const buckets_http_request *req, buckets_http_respon
       char sub[64];
       snprintf(sub, sizeof(sub), "%.*s", (int)(path.n - 18), path.p + 18);
       buckets_console_kms_handle(c->kms, req, sub, resp);
+    }
+  } else if (buckets_str_eq_c(path, "/api/v1/identity-config") || buckets_str_has_prefix(path, "/api/v1/identity-config/")) {
+    if (!may_configure(c, &s)) {
+      json_error(resp, 403, "AccessDenied", "Setting up sign-in needs the admin:ConfigUpdate permission.");
+    } else {
+      char sub[64];
+      snprintf(sub, sizeof(sub), "%.*s", (int)(path.n - 23), path.p + 23);
+      admin_ctx a = {c, &s};
+      buckets_buf cb = BUCKETS_BUF_INIT;
+      buckets_console_idp_session sess;
+      idp_session(c, req, &a, &cb, &sess);
+      buckets_console_idp_handle(c->idp, req, sub, &sess, resp);
+      buckets_buf_free(&cb);
     }
   } else if (buckets_str_has_prefix(path, "/api/v1/kms/")) { /* the KMS API: keys, status */
     char up[4096];
