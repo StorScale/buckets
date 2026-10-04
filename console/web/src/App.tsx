@@ -14,6 +14,7 @@ import AccessKeys from "./pages/AccessKeys";
 import Configuration from "./pages/Configuration";
 import Encryption from "./pages/Encryption";
 import SignInSetup from "./pages/SignIn";
+import Teams from "./pages/Teams";
 import KmsSetup from "./pages/KmsSetup";
 import Trace from "./pages/Trace";
 import Logs from "./pages/Logs";
@@ -68,6 +69,7 @@ export default function App() {
         <div className="nav-group">Identity</div>
         <NavLink to="/identity/users">Users</NavLink>
         <NavLink to="/identity/groups">Groups</NavLink>
+        <NavLink to="/identity/teams">Teams</NavLink>
         <NavLink to="/identity/policies">Policies</NavLink>
         <NavLink to="/identity/access-keys">Access Keys</NavLink>
         <NavLink to="/identity/sign-in">Sign-in</NavLink>
@@ -98,6 +100,7 @@ export default function App() {
           <Route path="/buckets/:bucket/settings" element={<BucketSettings />} />
           <Route path="/identity/users" element={<Users />} />
           <Route path="/identity/groups" element={<Groups />} />
+          <Route path="/identity/teams" element={<Teams />} />
           <Route path="/identity/policies" element={<Policies />} />
           <Route path="/identity/access-keys" element={<AccessKeys />} />
           <Route path="/identity/sign-in" element={<SignInSetup />} />

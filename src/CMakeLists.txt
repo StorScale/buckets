@@ -91,6 +91,7 @@ add_library(buckets STATIC
   console/console.c
   console/kmsconfig.c
   console/idpconfig.c
+  console/teams.c
   net/http.c
   net/tls.c
   net/client.c
@@ -156,6 +157,7 @@ add_library(buckets STATIC
   iam/iam.c
   iam/openid.c
   iam/idpsettings.c
+  iam/teams.c
   iam/ldapidp.c
   iam/plugins.c
   crypto/jwt.c

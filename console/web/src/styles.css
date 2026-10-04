@@ -234,3 +234,13 @@ details.guide[open] > summary { margin-bottom: 8px; }
 .test-result dd { margin: 0; word-break: break-all; }
 .inline-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .inline-form input { width: auto; min-width: 180px; }
+
+/* Teams */
+.check-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 2px 12px; margin-bottom: 8px; }
+.team-level { border-top: 1px solid var(--line); padding: 8px 0; }
+.team-level h3, .inline-form h3 { margin: 4px 0; font-size: 14px; }
+.members { list-style: none; padding: 0; margin: 4px 0; }
+.members li { padding: 2px 0; }
+.inline-form { border-top: 1px solid var(--line); padding-top: 8px; }
+.inline-form .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.inline-form .row input { flex: 1 1 220px; min-width: 0; }
