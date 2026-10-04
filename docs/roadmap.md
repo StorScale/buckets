@@ -13,7 +13,7 @@ A successor can't depend on what it replaces. MinIO no longer publishes its imag
 **Where things stand (2026-10-04):** Phase 0 is done, and so is every item of Phase 1: adoption (KES included), rollback, encryption, signed release artifacts, the migration guide and the compatibility promise. Buckets 1.0.0, 1.1.0 and 1.1.1 are released, and the main repository is https://github.com/StorScale/buckets.
 
 - **Left in Phase 1:** its gate, the round trip in CI. The job (`adopt-roundtrip`) is built and waits for access to the cluster it runs on.
-- **Next:** Phase 2, guided identity-provider setup in the console.
+- **In Phase 2:** guided sign-in setup in the console is done (1.2.0): Entra ID, Okta, Keycloak, other OpenID providers, and LDAP. Next are per-team roles, SCIM and an access review page.
 
 ## Priorities at a glance
 
@@ -60,7 +60,7 @@ Done when: a MinIO tenant with real data moves to Buckets and back again in CI, 
 
 Identity-provider sign-in with role-based access should be a feature people choose Buckets for, not a set of environment variables. Entra ID sign-in with app roles works today; this phase makes it easy to set up and to audit.
 
-- **Guided setup in the console** for Entra ID, Okta and Keycloak, replacing hand-written `MINIO_IDENTITY_OPENID_*` settings. The KMS setup is the pattern: a form per provider, the provider-side steps filled in, a real test before anything changes, then apply. *Built, with LDAP and Active Directory as well (Identity → Sign-in; see [identity.md](identity.md)); a shared-cluster run against real Keycloak and OpenLDAP is left.*
+- [x] **Guided setup in the console** for Entra ID, Okta and Keycloak, replacing hand-written `MINIO_IDENTITY_OPENID_*` settings, with LDAP and Active Directory as well (Identity → Sign-in; see [identity.md](identity.md)). Each provider's steps are shown with the redirect URI to copy; a test sign-in (or LDAP lookup) checks the settings as the servers will before anything changes; the operator applies them to the servers (OpenID at once, LDAP with a rolling restart) and the console. `tests/e2e-k8s/identity.sh` passes on the shared cluster against a real Keycloak and OpenLDAP.
 - **Per-bucket and per-team roles.** Ship policy templates such as `team-<name>-rw`, with matching app-role guidance for each identity provider.
 - **Automatic provisioning and removal (SCIM).** People who leave lose access and their access keys without manual cleanup.
 - **An access review page.** Answer "who can read this bucket, and why", and test whether a given user would be allowed an action.
@@ -114,6 +114,7 @@ The roadmap builds on what exists: MinIO's exact on-disk format, 220 of 222 MinI
 
 | Date | Change | What it gives |
 | --- | --- | --- |
+| 2026-10-04 | 1.2.0: sign-in set up from the console | Entra ID, Okta, Keycloak, other OpenID providers and LDAP, each tested before it applies; real Keycloak and OpenLDAP on the shared cluster |
 | 2026-10-04 | Compatibility promise | What every 1.x release keeps compatible, across releases and with MinIO, and the test behind each promise |
 | 2026-10-04 | 1.1.1: faster reads in clusters | Reads no longer check the bucket on every drive in turn, and read locks are released in the background; 64 KiB GETs from about 2,000 to 3,850 op/s on the shared cluster (MinIO: 2,800) |
 | 2026-10-04 | Cluster benchmark | `tests/bench/cluster.sh`: MinIO and Buckets under the same load on the same Kubernetes volumes and nodes |

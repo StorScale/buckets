@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-10-04
+
+Sign-in set up from the console. Identity → Sign-in connects Microsoft Entra ID, Okta, Keycloak or another OpenID provider, and LDAP or Active Directory: it shows the steps to take in the provider, tests a sign-in (or an LDAP lookup) before anything changes, and applies through buckets-operator, which carries the settings to the servers and the console. Tested on the shared cluster against a real Keycloak and OpenLDAP.
+
 ### Added
 - Sign-in set up from the console (Identity → Sign-in), where buckets-operator runs the cluster: Microsoft Entra ID, Okta, Keycloak or another OpenID provider, and LDAP or Active Directory.
   - **Guided:** the page lists the steps to take in the provider, with the console's redirect URI to copy, and fills in each provider's claim, scopes and discovery URL (or the directory's filters).
