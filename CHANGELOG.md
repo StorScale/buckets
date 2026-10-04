@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-10-04
+
 ### Added
 - Teams (Identity → Teams): a team is a name and its buckets, named or by prefix, and each access level (read, read and write, admin) becomes a `team-<name>-<level>` policy. The page shows the identity-provider step for each level, adds local and LDAP members, warns before replacing a policy edited by hand, and keeps teams as plain policies that survive a MinIO round trip. See [identity.md](docs/identity.md#teams).
 

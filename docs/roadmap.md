@@ -13,7 +13,7 @@ A successor can't depend on what it replaces. MinIO no longer publishes its imag
 **Where things stand (2026-10-04):** Phase 0 is done, and so is every item of Phase 1: adoption (KES included), rollback, encryption, signed release artifacts, the migration guide and the compatibility promise. Buckets 1.0.0, 1.1.0 and 1.1.1 are released, and the main repository is https://github.com/StorScale/buckets.
 
 - **Left in Phase 1:** its gate, the round trip in CI. The job (`adopt-roundtrip`) is built and waits for access to the cluster it runs on.
-- **In Phase 2:** guided sign-in setup in the console is done (1.2.0): Entra ID, Okta, Keycloak, other OpenID providers, and LDAP. Next are per-team roles, SCIM and an access review page.
+- **In Phase 2:** guided sign-in setup in the console is done (1.2.0): Entra ID, Okta, Keycloak, other OpenID providers, and LDAP. So are per-team roles (1.3.0). Next are SCIM and an access review page.
 
 ## Priorities at a glance
 
@@ -61,7 +61,7 @@ Done when: a MinIO tenant with real data moves to Buckets and back again in CI, 
 Identity-provider sign-in with role-based access should be a feature people choose Buckets for, not a set of environment variables. Entra ID sign-in with app roles works today; this phase makes it easy to set up and to audit.
 
 - [x] **Guided setup in the console** for Entra ID, Okta and Keycloak, replacing hand-written `MINIO_IDENTITY_OPENID_*` settings, with LDAP and Active Directory as well (Identity → Sign-in; see [identity.md](identity.md)). Each provider's steps are shown with the redirect URI to copy; a test sign-in (or LDAP lookup) checks the settings as the servers will before anything changes; the operator applies them to the servers (OpenID at once, LDAP with a rolling restart) and the console. `tests/e2e-k8s/identity.sh` passes on the shared cluster against a real Keycloak and OpenLDAP.
-- **Per-bucket and per-team roles.** Ship policy templates such as `team-<name>-rw`, with matching app-role guidance for each identity provider.
+- [x] **Per-bucket and per-team roles** (1.3.0; Identity → Teams, see [identity.md](identity.md#teams) and [the design](design/teams.md)). A team is a name and its buckets, named or by prefix; each level becomes a `team-<name>-ro`, `-rw` or `-admin` policy, with the matching step for each identity provider. Teams are stored only as those policies, so they survive the MinIO round trip, which `tests/e2e-k8s/adopt-minio.sh` checks.
 - **Automatic provisioning and removal (SCIM).** People who leave lose access and their access keys without manual cleanup.
 - **An access review page.** Answer "who can read this bucket, and why", and test whether a given user would be allowed an action.
 - **Local-users policy.** Keep the current default (no local users while identity-provider sign-in is on), and report any local users that remain.
