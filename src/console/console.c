@@ -746,32 +746,109 @@ static void token_user(const char *jwt, char *out, size_t cap) {
   free(raw);
 }
 
-/* The test sign-in's ID token, checked against the candidate it tested, and
- * the outcome recorded for the Identity page (and its Apply). */
-static void finish_test(buckets_console *c, const buckets_http_request *req, buckets_http_response *resp, yyjson_val *cand,
-                        const char *hash, const char *id_token, const char *access_token) {
-  buckets_console_session s;
-  if (!request_session(c, req, &s) || !may_configure(c, &s)) {
-    OPENSSL_cleanse(&s, sizeof(s));
-    test_page(resp, false, "Your console session ended during the test: sign in to the console again and retry.");
+#define IDTEST_AD "buckets-console-idtest-v1"
+
+/* The test sign-in's callback arrives from the provider, a cross-site
+ * navigation that carries no session cookie (SameSite=Strict). So it hands
+ * the tokens, sealed with the console's key, to a page whose script sends
+ * them back from the console's own origin, with the session: then they are
+ * checked as the admin (test-finish) and the outcome is recorded. */
+static void test_handoff(const buckets_console *c, buckets_http_response *resp, const char *hash, const char *id_token,
+                         const char *access_token) {
+  yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
+  yyjson_mut_val *o = yyjson_mut_obj(d);
+  yyjson_mut_doc_set_root(d, o);
+  yyjson_mut_obj_add_strcpy(d, o, "h", hash);
+  yyjson_mut_obj_add_strcpy(d, o, "id", id_token);
+  if (access_token) yyjson_mut_obj_add_strcpy(d, o, "at", access_token);
+  yyjson_mut_obj_add_int(d, o, "exp", (int64_t)time(NULL) + 300);
+  size_t jn;
+  char *json = yyjson_mut_write(d, 0, &jn);
+  yyjson_mut_doc_free(d);
+  buckets_buf blob = BUCKETS_BUF_INIT;
+  bool sealed = seal_blob(c, IDTEST_AD, json, jn, &blob);
+  OPENSSL_cleanse(json, jn);
+  free(json);
+  if (!sealed) {
+    buckets_buf_free(&blob);
+    test_page(resp, false, "The test could not continue: try again.");
     return;
   }
-  admin_ctx a = {c, &s};
-  buckets_buf cb = BUCKETS_BUF_INIT;
-  buckets_console_idp_session sess;
-  idp_session(c, req, &a, &cb, &sess);
-  yyjson_mut_doc *r = buckets_console_idp_check_token(cand, id_token, access_token, &sess);
-  buckets_console_idp_record_test(c->idp, hash, "openid", r);
-  yyjson_mut_val *root = yyjson_mut_doc_get_root(r);
-  bool passed = yyjson_mut_get_bool(yyjson_mut_obj_get(root, "passed"));
-  const char *e = yyjson_mut_get_str(yyjson_mut_obj_get(root, "error"));
-  char msg[1400];
-  if (passed) snprintf(msg, sizeof(msg), "Signed in as %s: the settings work.", yyjson_mut_get_str(yyjson_mut_obj_get(root, "user")));
-  else snprintf(msg, sizeof(msg), "%s", e ? e : "The test failed.");
-  test_page(resp, passed, msg);
-  yyjson_mut_doc_free(r);
-  buckets_buf_free(&cb);
-  OPENSSL_cleanse(&s, sizeof(s));
+  uint8_t r[16];
+  char nonce[32];
+  buckets_random(r, sizeof(r));
+  buckets_base64url_raw_encode(r, sizeof(r), nonce);
+  resp->status = 200;
+  buckets_http_resp_header(resp, "Content-Type", "text/html; charset=utf-8");
+  buckets_http_resp_header(resp, "Cache-Control", "no-store");
+  buckets_http_resp_headerf(resp, "Content-Security-Policy",
+                            "default-src 'none'; script-src 'nonce-%s'; connect-src 'self'; style-src 'unsafe-inline'; "
+                            "frame-ancestors 'none'",
+                            nonce);
+  /* the blob is base64url: safe inside a JS string */
+  buckets_buf_appendf(
+      &resp->body,
+      "<!doctype html><meta charset=\"utf-8\"><title>Sign-in test</title>"
+      "<body style=\"font:14px system-ui,sans-serif;padding:24px\"><p id=\"m\">Checking the sign-in\u2026</p>"
+      "<p>You can close this window.</p><script nonce=\"%s\">(function(){var m=document.getElementById('m');"
+      "function done(ok,t){m.textContent=t;try{window.opener&&window.opener.postMessage({type:'buckets-identity-test',passed:ok},"
+      "location.origin)}catch(e){}setTimeout(function(){window.close()},ok?1200:8000)}"
+      "fetch('/api/v1/identity-config/test-finish',{method:'POST',credentials:'same-origin',headers:{'Content-Type':"
+      "'application/json','X-Console-Request':'1'},body:JSON.stringify({blob:'%s'})}).then(function(r){return r.json()})"
+      ".then(function(j){done(!!j.passed,j.message||'The test failed.')},function(){done(false,'The console did not answer: "
+      "try again.')})})()</script>",
+      nonce, blob.data);
+  buckets_buf_free(&blob);
+}
+
+/* POST /api/v1/identity-config/test-finish {"blob"}: the test sign-in's tokens, back from the
+ * handoff page with the admin's session; checked, recorded, and the outcome in words. */
+static void handle_test_finish(buckets_console *c, const buckets_http_request *req, buckets_http_response *resp,
+                               const buckets_console_session *s) {
+  yyjson_doc *bd = req->body_fd < 0 && !req->pipe ? yyjson_read(req->body.p ? req->body.p : "", req->body.n, 0) : NULL;
+  const char *b = yyjson_get_str(yyjson_obj_get(yyjson_doc_get_root(bd), "blob"));
+  buckets_buf raw = BUCKETS_BUF_INIT;
+  yyjson_doc *td = NULL, *cand = NULL;
+  yyjson_mut_doc *out = yyjson_mut_doc_new(NULL);
+  yyjson_mut_val *o = yyjson_mut_obj(out);
+  yyjson_mut_doc_set_root(out, o);
+  bool passed = false;
+  char msg[1400] = "";
+  if (!b || !open_blob(c, IDTEST_AD, b, strlen(b), &raw) || !(td = yyjson_read(raw.data, raw.len, 0)) ||
+      yyjson_get_sint(yyjson_obj_get(yyjson_doc_get_root(td), "exp")) < time(NULL)) {
+    snprintf(msg, sizeof(msg), "The test expired or did not start here: test again.");
+  } else {
+    yyjson_val *t = yyjson_doc_get_root(td);
+    const char *want = yyjson_get_str(yyjson_obj_get(t, "h"));
+    char hash[17] = "";
+    cand = c->idp ? buckets_console_idp_candidate(c->idp, hash) : NULL;
+    if (!cand || !want || strcmp(hash, want) != 0) {
+      snprintf(msg, sizeof(msg), "The settings changed during the test: test them again.");
+    } else {
+      admin_ctx a = {c, s};
+      buckets_buf cb = BUCKETS_BUF_INIT;
+      buckets_console_idp_session sess;
+      idp_session(c, req, &a, &cb, &sess);
+      yyjson_mut_doc *r = buckets_console_idp_check_token(yyjson_doc_get_root(cand), yyjson_get_str(yyjson_obj_get(t, "id")),
+                                                           yyjson_get_str(yyjson_obj_get(t, "at")), &sess);
+      buckets_console_idp_record_test(c->idp, hash, "openid", r);
+      yyjson_mut_val *root = yyjson_mut_doc_get_root(r);
+      passed = yyjson_mut_get_bool(yyjson_mut_obj_get(root, "passed"));
+      const char *e = yyjson_mut_get_str(yyjson_mut_obj_get(root, "error"));
+      if (passed) snprintf(msg, sizeof(msg), "Signed in as %s: the settings work.", yyjson_mut_get_str(yyjson_mut_obj_get(root, "user")));
+      else snprintf(msg, sizeof(msg), "%s", e ? e : "The test failed.");
+      yyjson_mut_doc_free(r);
+      buckets_buf_free(&cb);
+    }
+  }
+  yyjson_mut_obj_add_bool(out, o, "passed", passed);
+  yyjson_mut_obj_add_strcpy(out, o, "message", msg);
+  json_reply(resp, out);
+  if (raw.data) OPENSSL_cleanse(raw.data, raw.len);
+  buckets_buf_free(&raw);
+  yyjson_doc_free(td);
+  yyjson_doc_free(cand);
+  yyjson_doc_free(bd);
 }
 
 static void handle_oidc_callback(buckets_console *c, const buckets_http_request *req, buckets_http_response *resp) {
@@ -847,8 +924,7 @@ static void handle_oidc_callback(buckets_console *c, const buckets_http_request 
     FAIL("The identity provider did not issue a token.");
   }
   if (test) {
-    finish_test(c, req, resp, yyjson_doc_get_root(cand), test, id_token,
-                yyjson_get_str(yyjson_obj_get(yyjson_doc_get_root(td), "access_token")));
+    test_handoff(c, resp, test, id_token, yyjson_get_str(yyjson_obj_get(yyjson_doc_get_root(td), "access_token")));
     goto out;
   }
   /* the token for credentials */
@@ -1326,6 +1402,11 @@ void buckets_console_handle(const buckets_http_request *req, buckets_http_respon
     } else {
       char sub[64];
       snprintf(sub, sizeof(sub), "%.*s", (int)(path.n - 23), path.p + 23);
+      if (strcmp(sub, "/test-finish") == 0 && buckets_str_eq_c(req->method, "POST")) {
+        handle_test_finish(c, req, resp, &s);
+        OPENSSL_cleanse(&s, sizeof(s));
+        return;
+      }
       admin_ctx a = {c, &s};
       buckets_buf cb = BUCKETS_BUF_INIT;
       buckets_console_idp_session sess;

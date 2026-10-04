@@ -56,13 +56,42 @@ class Browser:
         return st
 
     def keycloak(self, start_url, user, password):
-        """Follows start_url to Keycloak's login form, signs in, and returns the page the console ends on."""
+        """Follows start_url to Keycloak's login form and signs in, as a browser does: the redirect back
+        to the console is a cross-site navigation, so it carries no SameSite=Strict session cookie; a
+        test sign-in's handoff page then posts its sealed tokens from the console, with the session.
+        Returns the page the console ends on (for a test, the outcome's words)."""
         st, url, page = self.req("GET", start_url)
         m = re.search(r'<form[^>]*id="kc-form-login"[^>]*action="([^"]+)"', page)
         if not m:
             return st, url, page
-        st, url, page = self.req("POST", html.unescape(m.group(1)), form={"username": user, "password": password, "credentialId": ""})
+        noredir = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.jar), NoRedirect)
+        r = urllib.request.Request(html.unescape(m.group(1)), method="POST",
+                                   data=urllib.parse.urlencode({"username": user, "password": password, "credentialId": ""}).encode(),
+                                   headers={"Content-Type": "application/x-www-form-urlencoded"})
+        try:
+            with noredir.open(r, timeout=60) as resp:
+                return resp.status, resp.geturl(), resp.read().decode("utf-8", "replace")  # no redirect: the form again
+        except urllib.error.HTTPError as e:
+            if e.code not in (301, 302, 303):
+                return e.code, e.geturl(), e.read().decode("utf-8", "replace")
+            back = e.headers["Location"]
+        strict = [c for c in self.jar if c.name == "buckets-session"]
+        for c in strict:
+            self.jar.clear(c.domain, c.path, c.name)
+        st, url, page = self.req("GET", back)
+        for c in strict:
+            if not any(x.name == "buckets-session" for x in self.jar):
+                self.jar.set_cookie(c)
+        b = re.search(r"blob:'([A-Za-z0-9_-]+)'", page)
+        if b:
+            st, r = self.api("POST", "/api/v1/identity-config/test-finish", {"blob": b.group(1)})
+            page = r.get("message", "") + (" passed:true" if r.get("passed") else " passed:false")
         return st, url, page
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *a, **k):
+        return None
 
 
 def wait(what, fn, secs=240):

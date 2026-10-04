@@ -92,15 +92,21 @@ check "an edit without the secret keeps it" "$(state 'd["secrets"]["store-identi
 check "apply before a test: refused" "$(api -d '{"candidateHash":"'"$HASH"'"}' "$C/api/v1/identity-config/apply" | jq_ 'd["code"]')" NotTested
 
 echo "== the test sign-in"
-signin_test() { # follows the popup: console start -> provider -> console callback; prints the page
-  local loc
+signin_test() { # follows the popup as a browser does: console start -> provider -> console callback,
+  # which (a cross-site navigation) carries no session cookie (SameSite=Strict); then the handoff
+  # page's script posts the sealed tokens back from the console with the session. Prints what the page shows.
+  local loc page blob
   loc=$(curl -s -b "$R" -c "$R" -o /dev/null -w '%{redirect_url}' "$C/api/v1/login/oidc?test=1")
   loc=$(curl -s -o /dev/null -w '%{redirect_url}' "$loc")
-  curl -s -b "$R" -c "$R" "$loc"
+  grep -v buckets-session "$R" > "$R.cross"
+  page=$(curl -s -b "$R.cross" "$loc")
+  blob=$(grep -o "blob:'[A-Za-z0-9_-]*'" <<<"$page" | cut -d"'" -f2)
+  if [[ -z $blob ]]; then echo "$page"; return; fi
+  api -d '{"blob":"'"$blob"'"}' "$C/api/v1/identity-config/test-finish" | jq_ 'd["message"] + (" passed:true" if d["passed"] else " passed:false")'
 }
 PAGE=$(signin_test)
 check "the page says it worked" "$(grep -o 'Signed in as admin1: the settings work.' <<<"$PAGE")" "Signed in as admin1: the settings work."
-check "and tells the Identity page" "$(grep -o "type:'buckets-identity-test',passed:true" <<<"$PAGE")" "type:'buckets-identity-test',passed:true"
+check "and tells the Identity page" "$(grep -o "passed:true" <<<"$PAGE")" "passed:true"
 T=$(api "$C/api/v1/identity-config" | jq_ 'json.dumps(d["test"]["openid"])')
 check "recorded: roles matched to policies" "$(jq_ 'd["passed"], d["user"], d["claimName"], d["policies"], d["unmatched"]' <<<"$T")" \
   "True admin1 roles ['readwrite'] ['nosuchrole']"
@@ -125,6 +131,9 @@ check "a wrong client secret: the provider's words" "$(grep -o 'did not issue a 
   "did not issue a token for this client: invalid_grant"
 check "a test needs an admin session" "$(curl -s "$C/api/v1/login/oidc?test=1" | grep -o "needs an administrator's session")" \
   "needs an administrator's session"
+check "the finish needs the session too" "$(code -H "$H" -H "$J" -d '{"blob":"x"}' "$C/api/v1/identity-config/test-finish")" 401
+check "a forged blob is refused" "$(api -d '{"blob":"bm90LWEtYmxvYg"}' "$C/api/v1/identity-config/test-finish" | jq_ 'd["passed"], d["message"][:22]')" \
+  "False The test expired or di"
 
 echo "== LDAP"
 BASE=dc=example,dc=com
