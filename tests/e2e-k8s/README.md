@@ -4,6 +4,7 @@
 |---|---|
 | `envtest.sh` | The operator against a real kube-apiserver and etcd (no nodes); needs nothing but curl |
 | `kind.sh` | One 4-server cluster on kind: pod loss, drive (PVC) replacement, pool expansion, image rollout, and the console as its own Deployment (its Playwright suite when npm is present) |
+| `adopt-minio.sh` | A MinIO tenant (with `KES=1`, encrypting through MinIO's KES on Vault) adopted in place by `scripts/adopt-minio.sh`, written to, and rolled back with `scripts/rollback-to-minio.sh`, with every object compared at each step. Runs on a real cluster with pushed images (`BUCKETS_TAG`); the pipeline's `adopt-roundtrip` job runs it on release tags and by hand on main |
 | `multisite.sh` | Two Buckets clusters and a MinIO site: bucket replication Buckets↔MinIO (active-active), three-site site replication (Buckets, MinIO, Buckets), and a forwarded multi-server decommission |
 
 Both kind scripts build the images from this checkout (`docker/Dockerfile.*`),
