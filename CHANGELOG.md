@@ -6,6 +6,9 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- The Sign-in page's LDAP lookup always said no policy was attached to the user or their groups, even when one was: it read the servers' policy mappings under the wrong field names. It now lists the policies that apply.
+
 ## [1.2.2] - 2026-10-04
 
 ### Fixed
