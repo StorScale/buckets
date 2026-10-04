@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- `docs/compatibility.md`: the compatibility promise. What every 1.x release keeps compatible, across releases and with MinIO (on-disk format, S3, admin and STS APIs, clients and SDKs, events, audit and trace, metrics, configuration, KES, the CRDs, rolling upgrades), the test that proves each, and what is not promised.
+
+### Changed
+- Roadmap: Phase 1's items are all done; its gate, the round trip in CI, waits for cluster access. Cluster throughput is measured; memory is not yet.
+
 ## [1.1.1] - 2026-10-04
 
 Faster reads in distributed clusters. On a development Kubernetes cluster, 64 KiB GETs went from about 2,000 to 3,850 op/s (MinIO on the same volumes: 2,800) and 1 MiB GETs from 384 to 604 MiB/s (MinIO: 544); see `docs/performance.md`.

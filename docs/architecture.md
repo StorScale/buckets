@@ -50,6 +50,8 @@ net/  core/      HTTP/1.1 server (llhttp), event loop (epoll/kqueue, io_uring pl
 
 ## Compatibility contract
 
+The promise for releases, with the test behind each line, is in [compatibility.md](compatibility.md).
+
 | Surface | Compatible with MinIO | Why |
 |---|---|---|
 | S3 API, error codes | yes, byte-identical errors (`scripts/gen-s3-errors.py`) | SDKs, `mint`, `warp` |

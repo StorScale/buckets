@@ -15,6 +15,7 @@ Real MinIO and Buckets can serve each other's drives, clusters included.
 |---|---|
 | [docs/architecture.md](docs/architecture.md) | Components, layers, the compatibility contract, build phases |
 | [docs/parity.md](docs/parity.md) | Every MinIO API handler and its status |
+| [docs/compatibility.md](docs/compatibility.md) | What every 1.x release keeps compatible, across releases and with MinIO, and the test behind each promise |
 | [docs/migration.md](docs/migration.md) | Moving a MinIO deployment to Buckets in place, KES included, and back |
 | [docs/identity.md](docs/identity.md) | Sign-in with Microsoft Entra ID (or another OpenID provider) and role-based access |
 | [docs/encryption.md](docs/encryption.md) | Setting up the KMS in the console: KES with Vault, AWS, Azure or Google |
@@ -179,7 +180,7 @@ docker/      container images
 operator/    the Kubernetes operator (C): CRDs, RBAC, Helm chart, manifests, examples
 console/     the web console: web/ (React + TypeScript SPA, Playwright e2e) served by
              src/console + src/cmd/consoled (the C backend-for-frontend)
-docs/        architecture, parity, migration, identity, encryption, performance, roadmap; docs/brand holds the logo artwork
+docs/        architecture, parity, compatibility, migration, identity, encryption, performance, roadmap; docs/brand holds the logo artwork
 ```
 
 ## License
