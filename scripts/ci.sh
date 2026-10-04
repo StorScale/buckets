@@ -77,6 +77,7 @@ run tests/integration/kms-delete.sh build-ci-asan/src/bucketsd
 run tests/integration/buckets-kes.sh build-ci-asan/src/bucketsd build-ci-asan/src/buckets-kes
 run tests/integration/encrypt-existing.sh build-ci-asan/src/bucketsd
 run tests/integration/console.sh build-ci-asan/src/bucketsd build-ci-asan/src/consoled
+run tests/integration/teams.sh build-ci-asan/src/bucketsd build-ci-asan/src/consoled
 # The console: SPA build, typecheck and Playwright e2e against the sanitized
 # bucketsd and consoled (skipped without npm).
 if command -v npm >/dev/null; then

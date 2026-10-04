@@ -33,6 +33,7 @@ buckets_unit_test(test_object)
 buckets_unit_test(test_kes)
 buckets_unit_test(test_keskey)
 buckets_unit_test(test_idp)
+buckets_unit_test(test_teams)
 
 # scripts/adopt_kes.py (the adoption script's KES carry-over)
 find_package(Python3 COMPONENTS Interpreter)

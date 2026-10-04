@@ -27,6 +27,7 @@
 #include "crypto/sha256.h"
 #include "s3/sign.h"
 #include "console/idpconfig.h"
+#include "console/teams.h"
 #include "console/kmsconfig.h"
 #include "iam/idpsettings.h"
 
@@ -595,6 +596,32 @@ static int admin_get(void *ud, const char *api, const char *query, bool decrypt,
   snprintf(path, sizeof(path), "/minio/admin/v3/%s", api);
   buckets_http_result res;
   if (!upstream_call(a->c, &cr, "GET", path, query, NULL, 0, NULL, 0, &res)) return 0;
+  int st = res.status;
+  if (st == 200 && decrypt) {
+    if (!buckets_madmin_decrypt(a->s->secret_key, res.body.data ? res.body.data : "", res.body.len, out)) st = 0;
+  } else {
+    buckets_buf_append(out, res.body.data ? res.body.data : "", res.body.len);
+  }
+  buckets_http_result_free(&res);
+  return st;
+}
+
+/* Any admin API call as the signed-in person, for the Teams page. */
+static int admin_call(void *ud, const char *method, const char *api, const char *query, const void *body, size_t n,
+                      bool encrypt, bool decrypt, buckets_buf *out) {
+  admin_ctx *a = ud;
+  buckets_sigv4_creds cr = {.access_key = a->s->access_key, .secret_key = a->s->secret_key,
+                            .session_token = a->s->session_token, .region = a->c->cfg.region};
+  char path[256];
+  snprintf(path, sizeof(path), "/minio/admin/v3/%s", api);
+  buckets_buf sealed = BUCKETS_BUF_INIT;
+  if (encrypt && !buckets_madmin_encrypt(a->s->secret_key, body, n, &sealed)) return 0;
+  buckets_http_kv h[] = {{"Content-Type", encrypt ? "application/octet-stream" : "application/json"}};
+  buckets_http_result res;
+  bool sent = upstream_call(a->c, &cr, method, path, query, body ? h : NULL, body ? 1 : 0,
+                            encrypt ? sealed.data : body, encrypt ? sealed.len : n, &res);
+  buckets_buf_free(&sealed);
+  if (!sent) return 0;
   int st = res.status;
   if (st == 200 && decrypt) {
     if (!buckets_madmin_decrypt(a->s->secret_key, res.body.data ? res.body.data : "", res.body.len, out)) st = 0;
@@ -1414,6 +1441,13 @@ void buckets_console_handle(const buckets_http_request *req, buckets_http_respon
       buckets_console_idp_handle(c->idp, req, sub, &sess, resp);
       buckets_buf_free(&cb);
     }
+  } else if (buckets_str_eq_c(path, "/api/v1/teams") || buckets_str_has_prefix(path, "/api/v1/teams/")) {
+    /* no check here: each admin call is the signed-in person's, and the servers decide */
+    char sub[128];
+    snprintf(sub, sizeof(sub), "%.*s", (int)(path.n - 13), path.p + 13);
+    admin_ctx a = {c, &s};
+    buckets_console_teams_session sess = {admin_call, &a};
+    buckets_console_teams_handle(req, sub, &sess, resp);
   } else if (buckets_str_has_prefix(path, "/api/v1/kms/")) { /* the KMS API: keys, status */
     char up[4096];
     snprintf(up, sizeof(up), "/minio/kms/v1/%.*s", (int)(path.n - 12), path.p + 12);
