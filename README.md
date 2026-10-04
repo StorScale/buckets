@@ -43,6 +43,14 @@ To build with sanitizers, add `-DBUCKETS_SANITIZE=address,undefined` or `-DBUCKE
 BUCKETS_ROOT_USER=admin BUCKETS_ROOT_PASSWORD=change-me-now build/src/bucketsd server --address :9000 /srv/buckets
 ```
 
+Or run the published image, without building anything. Every release's images are on `ghcr.io/storscale`: `bucketsd`, `buckets-operator`, `buckets-console` and `buckets-kes`, tagged with the version and `latest`, and signed (see [Test](#test) for verifying them):
+
+```bash
+docker run -p 9000:9000 -v buckets-data:/data \
+  -e BUCKETS_ROOT_USER=admin -e BUCKETS_ROOT_PASSWORD=change-me-now \
+  ghcr.io/storscale/bucketsd:1.1.0
+```
+
 Several drives form erasure sets, and each ellipsis argument is a server pool:
 
 ```bash
@@ -60,19 +68,20 @@ For HTTPS, put `public.crt` and `private.key` in `~/.buckets/certs` or a `--cert
 
 ### On Kubernetes
 
-The operator runs `BucketsCluster` objects as StatefulSets (one per pool), with a Service, root credentials, and PodDisruptionBudgets:
+The operator runs `BucketsCluster` objects as StatefulSets (one per pool), with a Service, root credentials, and PodDisruptionBudgets. Install it, with its CRDs, from the published Helm chart (`watchNamespace` limits it, and its RBAC, to one namespace), then create a cluster:
 
 ```bash
-kubectl apply -f operator/deploy/crds/
-kubectl apply -f operator/deploy/operator.yaml
+helm install buckets-operator oci://ghcr.io/storscale/charts/buckets-operator \
+  --version 1.1.0 -n buckets-system --create-namespace
 kubectl apply -f operator/examples/cluster.yaml     # 4 servers x 4 drives
 kubectl get bucketsclusters                          # SERVERS 4/4, PHASE Ready
 ```
 
-Or install the operator with Helm (`watchNamespace` limits it, and its RBAC, to one namespace):
+The chart is signed like the images (`cosign verify ghcr.io/storscale/charts/buckets-operator:<version>` with the same identity). From a checkout, install the chart in `operator/helm/buckets-operator` instead, or apply the plain manifests:
 
 ```bash
-helm install buckets-operator operator/helm/buckets-operator -n buckets-system --create-namespace
+kubectl apply -f operator/deploy/crds/
+kubectl apply -f operator/deploy/operator.yaml
 ```
 
 Root credentials land in the Secret `<name>-root` unless `spec.credsSecret` names your own. Pools can be appended to expand a cluster; the operator then restarts every server together. Image changes roll one server at a time. `operator/examples/cluster-tls.yaml` shows TLS with cert-manager.

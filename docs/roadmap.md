@@ -48,8 +48,8 @@ The goal is a safe, supported move from an archived MinIO deployment to Buckets.
   - Objects stored unencrypted can be encrypted in place. See `docs/encryption.md`.
 - [x] **Carry over a tenant's KES.** `scripts/adopt-minio.sh` maps the tenant's running KES configuration onto Secret `<tenant>-kms` and `spec.kms.kes` (`createKey: false`, the tenant's KES account and scheduling). `buckets-kes check` reads the default key before MinIO stops, and the servers wait for KES. `KES=1 tests/e2e-k8s/adopt-minio.sh` passes 44/44 on the shared cluster: MinIO's own KES on Vault, adopted by buckets-kes and rolled back, with MinIO decrypting what Buckets encrypted.
 - [ ] **A compatibility promise.** State what stays compatible across releases: the on-disk format, `mc`, the AWS and MinIO SDKs, the admin API and the KES API.
-- [ ] **Release artifacts.** Signed images in a public registry, a published Helm chart for the operator, and an SBOM per release.
-- [ ] **A migration guide** covering:
+- [x] **Release artifacts.** Since 1.1.0, each release tag publishes the four images to `ghcr.io/storscale`, signed with cosign (keyless, as the release workflow) and carrying an SBOM and build provenance. It also publishes the operator's Helm chart to `oci://ghcr.io/storscale/charts/buckets-operator`, signed the same way. All of these are public.
+- [x] **A migration guide.** [docs/migration.md](migration.md) covers:
   - mirroring MinIO's images first, since they're gone upstream;
   - identity (MinIO config to Entra ID or Okta), TLS and monitoring;
   - KES.

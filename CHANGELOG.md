@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- README: install the operator from the published Helm chart (`oci://ghcr.io/storscale/charts/buckets-operator`) and run `bucketsd` from its published image; installing from a checkout is the alternative.
+- Roadmap: release artifacts (public signed images, a signed Helm chart, SBOMs) and the migration guide are done.
+
 ## [1.1.0] - 2026-10-04
 
 ### Changed
