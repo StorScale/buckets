@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-10-04
+
+### Fixed
+- The Sign-in page's test sign-in failed in browsers with a provider on another site (Entra ID, Okta, a hosted Keycloak): coming back from the provider is a cross-site navigation, which leaves off the console's session cookie (SameSite=Strict), and the test said "Your console session ended during the test". The tokens now go back to the console from its own origin, sealed, and are checked there with the session.
+
 ## [1.2.0] - 2026-10-04
 
 Sign-in set up from the console. Identity → Sign-in connects Microsoft Entra ID, Okta, Keycloak or another OpenID provider, and LDAP or Active Directory: it shows the steps to take in the provider, tests a sign-in (or an LDAP lookup) before anything changes, and applies through buckets-operator, which carries the settings to the servers and the console. Tested on the shared cluster against a real Keycloak and OpenLDAP.
