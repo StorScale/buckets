@@ -11,6 +11,7 @@
 #include "core/timefmt.h"
 #include "core/uuid.h"
 #include "iam.h"
+#include "identity.h"
 #include "kms.h"
 #include "manifests.h"
 
@@ -214,7 +215,8 @@ done:
 
 /* kms: status.kms as reconciled; NULL keeps what the status has. */
 static void write_status(op_ctx *o, yyjson_val *bc, const bc_spec *s, const char *phase, bool ready, const char *reason,
-                         const char *message, const char *topology, yyjson_val **sts, size_t nsts, yyjson_mut_val *kms) {
+                         const char *message, const char *topology, yyjson_val **sts, size_t nsts, yyjson_mut_val *kms,
+                         yyjson_mut_val *idn) {
   yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
   yyjson_mut_val *root = yyjson_mut_obj(d);
   yyjson_mut_doc_set_root(d, root);
@@ -259,6 +261,9 @@ static void write_status(op_ctx *o, yyjson_val *bc, const bc_spec *s, const char
   yyjson_val *old_kms = yyjson_obj_get(yyjson_obj_get(bc, "status"), "kms");
   if (kms) yyjson_mut_obj_add_val(d, st, "kms", yyjson_mut_val_mut_copy(d, kms));
   else if (old_kms) yyjson_mut_obj_add_val(d, st, "kms", yyjson_val_mut_copy(d, old_kms));
+  yyjson_val *old_idn = yyjson_obj_get(yyjson_obj_get(bc, "status"), "identity");
+  if (idn) yyjson_mut_obj_add_val(d, st, "identity", yyjson_mut_val_mut_copy(d, idn));
+  else if (old_idn) yyjson_mut_obj_add_val(d, st, "identity", yyjson_val_mut_copy(d, old_idn));
   /* Ready condition; its transition time only moves when the status flips. */
   const char *want = ready ? "True" : "False";
   char when[32];
@@ -307,15 +312,15 @@ static void reconcile_cluster(op_ctx *o, yyjson_val *bc) {
   char err[512];
   if (!bc_parse(bc, o->cluster_domain, &s, err, sizeof(err))) {
     buckets_log_warn("%s/%s: invalid spec: %s", get_str(bc, "metadata.namespace"), get_str(bc, "metadata.name"), err);
-    write_status(o, bc, NULL, "Invalid", false, "InvalidSpec", err, NULL, NULL, 0, NULL);
+    write_status(o, bc, NULL, "Invalid", false, "InvalidSpec", err, NULL, NULL, 0, NULL, NULL);
     return;
   }
   if (!ensure_creds(o, &s, err, sizeof(err))) {
-    write_status(o, bc, &s, "Pending", false, "Credentials", err, NULL, NULL, 0, NULL);
+    write_status(o, bc, &s, "Pending", false, "Credentials", err, NULL, NULL, 0, NULL, NULL);
     return;
   }
   if (s.console.enabled && !ensure_console_secret(o, &s, err, sizeof(err))) {
-    write_status(o, bc, &s, "Pending", false, "ConsoleSecret", err, NULL, NULL, 0, NULL);
+    write_status(o, bc, &s, "Pending", false, "ConsoleSecret", err, NULL, NULL, 0, NULL, NULL);
     return;
   }
   /* the KMS first: whether bucketsd uses KES is part of its pods' spec */
@@ -323,6 +328,9 @@ static void reconcile_cluster(op_ctx *o, yyjson_val *bc) {
   yyjson_mut_val *kroot = yyjson_mut_obj(kd);
   yyjson_mut_doc_set_root(kd, kroot);
   op_kms_reconcile(o, bc, &s, kd, kroot);
+  /* identity next: an LDAP change is on the servers' pod template */
+  yyjson_mut_val *iroot = yyjson_mut_obj(kd);
+  op_identity_reconcile(o, bc, &s, kd, iroot);
   char topo[17];
   bc_topology(&s, topo);
   bc_object *objs;
@@ -349,11 +357,11 @@ static void reconcile_cluster(op_ctx *o, yyjson_val *bc) {
     if (kind && strcmp(kind, "StatefulSet") == 0 && nsts < BC_MAX_POOLS) sts[nsts++] = r;
   }
   if (failed) {
-    write_status(o, bc, &s, "Error", false, "ApplyFailed", err, topo, sts, nsts, kroot);
+    write_status(o, bc, &s, "Error", false, "ApplyFailed", err, topo, sts, nsts, kroot, iroot);
   } else if (hold) {
     const char *km = yyjson_mut_get_str(yyjson_mut_obj_get(kroot, "message"));
     snprintf(err, sizeof(err), "the servers start once KES serves key %s: %s", s.kes.key_name, km ? km : "KES is starting");
-    write_status(o, bc, &s, "WaitingForKMS", false, "WaitingForKMS", err, topo, sts, nsts, kroot);
+    write_status(o, bc, &s, "WaitingForKMS", false, "WaitingForKMS", err, topo, sts, nsts, kroot, iroot);
   } else {
     size_t outdated = 0;
     int restarted = restart_pods(o, &s, topo, sts, nsts, &outdated);
@@ -367,7 +375,7 @@ static void reconcile_cluster(op_ctx *o, yyjson_val *bc) {
     char msg[128];
     snprintf(msg, sizeof(msg), "%lld of %lld servers ready", ready, servers);
     const char *reason = outdated ? "Updating" : ready == servers ? "AllServersReady" : "ServersNotReady";
-    write_status(o, bc, &s, phase, !outdated && ready == servers, reason, msg, topo, sts, nsts, kroot);
+    write_status(o, bc, &s, phase, !outdated && ready == servers, reason, msg, topo, sts, nsts, kroot, iroot);
   }
   for (size_t i = 0; i < n; i++) yyjson_doc_free(applied[i]);
   /* A disabled console (or Ingress) goes away. */

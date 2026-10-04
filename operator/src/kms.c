@@ -186,6 +186,27 @@ static yyjson_doc *secret_json(op_ctx *o, const bc_spec *s, const char *name, co
   return d;
 }
 
+bool op_secret_ensure_empty(op_ctx *o, const bc_spec *s, const char *name, char *err, size_t errlen) {
+  yyjson_doc *doc = NULL;
+  bool ok = ensure_secret(o, s, name, make_empty, (void *)name, &doc, err, errlen);
+  yyjson_doc_free(doc);
+  return ok;
+}
+
+char *op_secret_text(op_ctx *o, const bc_spec *s, const char *name, const char *key) {
+  char *path = secret_path(s, name);
+  yyjson_doc *sec = NULL;
+  int st = kube_get(o->k, path, &sec);
+  free(path);
+  char *v = st == 200 ? secret_value(yyjson_doc_get_root(sec), key) : NULL;
+  yyjson_doc_free(sec);
+  return v;
+}
+
+yyjson_doc *op_secret_json(op_ctx *o, const bc_spec *s, const char *name, const char *key) {
+  return secret_json(o, s, name, key);
+}
+
 /* ---- KES servers ------------------------------------------------------------- */
 
 static bool apply_all(op_ctx *o, const bc_spec *s, bc_object *objs, size_t n, long long *ready, char *err,

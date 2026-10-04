@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "identity.h"
 #include "kms.h"
 #include "manifests.h"
 
@@ -429,7 +430,7 @@ static void test_kes_spec(void **state) {
       vol = !strcmp(yyjson_mut_get_str(AT(v, "secret", "secretName")), "store-kes-tls");
   }
   assert_true(vol);
-  /* the console runs as its own account, which may touch its cluster and the KMS Secrets only */
+  /* the console runs as its own account, which may touch its cluster and the KMS and identity Secrets only */
   yyjson_mut_val *role = NULL;
   for (size_t k = 0; k < n; k++)
     if (strstr(o[k].path, "/roles/store-console")) role = yyjson_mut_doc_get_root(o[k].doc);
@@ -437,7 +438,7 @@ static void test_kes_spec(void **state) {
   yyjson_mut_val *r0 = yyjson_mut_arr_get(yyjson_mut_obj_get(role, "rules"), 0);
   yyjson_mut_val *r1 = yyjson_mut_arr_get(yyjson_mut_obj_get(role, "rules"), 1);
   assert_string_equal(yyjson_mut_get_str(yyjson_mut_arr_get_first(yyjson_mut_obj_get(r0, "resourceNames"))), "store");
-  assert_int_equal(yyjson_mut_arr_size(yyjson_mut_obj_get(r1, "resourceNames")), 2);
+  assert_int_equal(yyjson_mut_arr_size(yyjson_mut_obj_get(r1, "resourceNames")), 4);
   assert_string_equal(yyjson_mut_get_str(yyjson_mut_arr_get(yyjson_mut_obj_get(r1, "resourceNames"), 1)), "store-kms-candidate");
   for (size_t k = 0; k < n; k++) {
     if (!strstr(o[k].path, "/deployments/store-console")) continue;
@@ -596,12 +597,91 @@ static void test_kes_log_reason(void **state) {
   assert_string_equal(r, "");
 }
 
+static yyjson_mut_val *object_at(bc_object *o, size_t n, const char *frag) {
+  for (size_t i = 0; i < n; i++)
+    if (strstr(o[i].path, frag)) return yyjson_mut_doc_get_root(o[i].doc);
+  return NULL;
+}
+
+/* The console's identity settings: a mounted, optional Secret it reloads, the
+ * two settings Secrets in its Role, and LDAP's hash on the servers' template. */
+static void test_identity(void **state) {
+  (void)state;
+  bc_spec s;
+  yyjson_doc *d = parse(k_console, &s, true);
+  bc_object *o;
+  size_t n = bc_desired(&s, &o);
+  yyjson_mut_val *dep = object_at(o, n, "/deployments/store-console");
+  yyjson_mut_val *pod = AT(dep, "spec", "template", "spec");
+  yyjson_mut_val *c = yyjson_mut_arr_get_first(yyjson_mut_obj_get(pod, "containers"));
+  bool env = false, mount = false, vol = false;
+  size_t i, max;
+  yyjson_mut_val *e;
+  yyjson_mut_arr_foreach(yyjson_mut_obj_get(c, "env"), i, max, e) {
+    if (!strcmp(yyjson_mut_get_str(yyjson_mut_obj_get(e, "name")), "BUCKETS_CONSOLE_IDENTITY_FILE"))
+      env = !strcmp(yyjson_mut_get_str(yyjson_mut_obj_get(e, "value")), "/etc/buckets/identity/identity.json");
+  }
+  yyjson_mut_arr_foreach(yyjson_mut_obj_get(c, "volumeMounts"), i, max, e) {
+    if (!strcmp(yyjson_mut_get_str(yyjson_mut_obj_get(e, "name")), "identity"))
+      mount = !strcmp(yyjson_mut_get_str(yyjson_mut_obj_get(e, "mountPath")), "/etc/buckets/identity");
+  }
+  yyjson_mut_arr_foreach(yyjson_mut_obj_get(pod, "volumes"), i, max, e) {
+    if (strcmp(yyjson_mut_get_str(yyjson_mut_obj_get(e, "name")), "identity") != 0) continue;
+    vol = !strcmp(yyjson_mut_get_str(AT(e, "secret", "secretName")), "store-identity-console") &&
+          yyjson_mut_get_bool(AT(e, "secret", "optional"));
+  }
+  assert_true(env);
+  assert_true(mount);
+  assert_true(vol);
+  yyjson_mut_val *role = object_at(o, n, "/roles/store-console");
+  yyjson_mut_val *names = yyjson_mut_obj_get(yyjson_mut_arr_get(yyjson_mut_obj_get(role, "rules"), 1), "resourceNames");
+  bool id = false, cand = false;
+  yyjson_mut_arr_foreach(names, i, max, e) {
+    id = id || !strcmp(yyjson_mut_get_str(e), "store-identity");
+    cand = cand || !strcmp(yyjson_mut_get_str(e), "store-identity-candidate");
+  }
+  assert_true(id);
+  assert_true(cand);
+  yyjson_mut_val *sts = object_at(o, n, "/statefulsets/");
+  assert_null(yyjson_mut_obj_get(AT(sts, "spec", "template", "metadata", "annotations"), "buckets.io/identity-ldap"));
+  bc_objects_free(o, n);
+  snprintf(s.identity.ldap_hash, sizeof(s.identity.ldap_hash), "0123456789abcdef");
+  n = bc_desired(&s, &o);
+  sts = object_at(o, n, "/statefulsets/");
+  assert_string_equal(yyjson_mut_get_str(yyjson_mut_obj_get(AT(sts, "spec", "template", "metadata", "annotations"),
+                                                            "buckets.io/identity-ldap")),
+                      "0123456789abcdef");
+  bc_objects_free(o, n);
+  yyjson_doc_free(d);
+}
+
+/* Settings elsewhere would override the console's: the operator names them. */
+static void test_identity_conflicts(void **state) {
+  (void)state;
+  bc_spec s;
+  yyjson_doc *d = parse("{\"metadata\":{\"name\":\"store\",\"namespace\":\"data\",\"uid\":\"u\"},\"spec\":{"
+                        "\"env\":[{\"name\":\"MINIO_IDENTITY_OPENID_CONFIG_URL\",\"value\":\"x\"},{\"name\":\"MINIO_REGION\",\"value\":\"r\"}],"
+                        "\"console\":{\"enabled\":true,\"env\":[{\"name\":\"BUCKETS_CONSOLE_OIDC_CLIENT_ID\",\"value\":\"c\"}]},"
+                        "\"pools\":[{\"servers\":4,\"volumesPerServer\":1}]}}",
+                        &s, true);
+  char out[512];
+  op_identity_conflicts(&s, "export MINIO_ROOT_USER=a\n# MINIO_IDENTITY_LDAP_SERVER_ADDR=x\nexport MINIO_IDENTITY_LDAP_SERVER_ADDR=dc1\n", out,
+                        sizeof(out));
+  assert_string_equal(out, "spec.env MINIO_IDENTITY_OPENID_CONFIG_URL, spec.console.env BUCKETS_CONSOLE_OIDC_CLIENT_ID, "
+                           "config.env MINIO_IDENTITY_LDAP_SERVER_ADDR");
+  yyjson_doc_free(d);
+  d = parse(k_console, &s, true);
+  op_identity_conflicts(&s, "export MINIO_ROOT_USER=a\n", out, sizeof(out));
+  assert_string_equal(out, "");
+  yyjson_doc_free(d);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_volumes_and_topology), cmocka_unit_test(test_desired_objects), cmocka_unit_test(test_tls),
       cmocka_unit_test(test_root_secret_not_owned), cmocka_unit_test(test_invalid),
       cmocka_unit_test(test_console), cmocka_unit_test(test_console_tls), cmocka_unit_test(test_console_env),
-      cmocka_unit_test(test_minio_tenant_layout), cmocka_unit_test(test_kes_spec), cmocka_unit_test(test_kes_objects), cmocka_unit_test(test_kes_log_reason), cmocka_unit_test(test_kes_adopted),
+      cmocka_unit_test(test_minio_tenant_layout), cmocka_unit_test(test_kes_spec), cmocka_unit_test(test_kes_objects), cmocka_unit_test(test_kes_log_reason), cmocka_unit_test(test_kes_adopted), cmocka_unit_test(test_identity), cmocka_unit_test(test_identity_conflicts),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

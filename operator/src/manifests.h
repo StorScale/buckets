@@ -60,6 +60,12 @@ typedef struct {
     yyjson_val *resources, *annotations;
     yyjson_val *env; /* extra environment for consoled, e.g. its OpenID sign-in */
   } console;
+  /* The identity settings the operator applied (identity.c), not from the
+   * spec: ldap_hash is set while LDAP sign-in is configured, and is on the
+   * servers' pod template, so changing LDAP (read at startup) restarts them. */
+  struct {
+    char ldap_hash[17];
+  } identity;
   /* spec.kms.kes: a KES server the operator runs for the cluster, its key
    * store settings in Secret <name>-kms (settings.json, written by the
    * console; see kms/kesutil.h). */
@@ -116,6 +122,16 @@ yyjson_mut_doc *bc_console_secret(const bc_spec *s, const char *passphrase, cons
 
 /* ---- KES ------------------------------------------------------------------------- */
 
+/* The identity settings: <name>-identity (applied), <name>-identity-candidate
+ * (being tried by the console), <name>-identity-console (what consoled signs
+ * in with, written by the operator once the servers have the settings). */
+void bc_identity_secret_name(const bc_spec *s, char *out, size_t cap);
+void bc_identity_candidate_secret_name(const bc_spec *s, char *out, size_t cap);
+void bc_identity_console_secret_name(const bc_spec *s, char *out, size_t cap);
+/* Secret <name>-identity-console with identity.json = json, owned by the cluster. */
+yyjson_mut_doc *bc_identity_console_secret(const bc_spec *s, const char *json);
+/* Where consoled finds the console Secret's identity.json. */
+#define BC_CONSOLE_IDENTITY_DIR "/etc/buckets/identity"
 /* <name>-kes, or <name>-kes-test for a trial of new settings. */
 void bc_kes_name(const bc_spec *s, bool trial, char *out, size_t cap);
 void bc_kes_endpoint(const bc_spec *s, bool trial, char *out, size_t cap);

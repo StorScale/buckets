@@ -7,6 +7,7 @@ add_library(buckets_operator STATIC
   src/s3client.c
   src/iam.c
   src/kms.c
+  src/identity.c
 )
 target_include_directories(buckets_operator PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(buckets_operator PUBLIC buckets)

@@ -173,6 +173,27 @@ static bool cluster_connect(op_ctx *o, yyjson_val *bc, conn *cn, char *err, size
   return cn->c != NULL;
 }
 
+struct op_admin {
+  conn cn;
+};
+
+op_admin *op_cluster_admin(op_ctx *o, yyjson_val *bc, char *err, size_t errlen) {
+  op_admin *a = buckets_xcalloc(1, sizeof(*a));
+  if (!cluster_connect(o, bc, &a->cn, err, errlen)) {
+    free(a);
+    return NULL;
+  }
+  return a;
+}
+
+struct s3c *op_admin_client(op_admin *a) { return a ? a->cn.c : NULL; }
+
+void op_cluster_admin_free(op_admin *a) {
+  if (!a) return;
+  conn_free(&a->cn);
+  free(a);
+}
+
 /* ---- object helpers ---------------------------------------------------------------- */
 
 static void object_path(buckets_buf *p, yyjson_val *obj, const char *plural, const char *sub) {
