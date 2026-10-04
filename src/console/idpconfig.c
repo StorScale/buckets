@@ -399,12 +399,12 @@ static void handle_ldap_test(buckets_console_idp *m, yyjson_val *body, const buc
       int st = sess->admin_get(sess->ud, "idp/ldap/policy-entities", q.data, true, &pb);
       yyjson_doc *pd = st == 200 ? yyjson_read(pb.data ? pb.data : "", pb.len, 0) : NULL;
       yyjson_mut_val *pa = yyjson_mut_obj_add_arr(d, o, "policies");
-      static const char *const lists[] = {"UserMappings", "GroupMappings"};
+      static const char *const lists[] = {"userMappings", "groupMappings"}; /* madmin.PolicyEntitiesResult */
       for (size_t l = 0; l < 2; l++) {
         size_t i, n, j, k;
         yyjson_val *e, *pn;
         yyjson_arr_foreach(yyjson_obj_get(yyjson_doc_get_root(pd), lists[l]), i, n, e) {
-          yyjson_arr_foreach(yyjson_obj_get(e, "Policies"), j, k, pn) {
+          yyjson_arr_foreach(yyjson_obj_get(e, "policies"), j, k, pn) {
             const char *name = yyjson_get_str(pn);
             bool dup = false;
             size_t x, xn;
