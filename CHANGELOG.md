@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-10-04
+
+Faster reads in distributed clusters. On a development Kubernetes cluster, 64 KiB GETs went from about 2,000 to 3,850 op/s (MinIO on the same volumes: 2,800) and 1 MiB GETs from 384 to 604 MiB/s (MinIO: 544); see `docs/performance.md`.
+
+### Fixed
+- Every read stat-ed the bucket on every drive of the pool, one drive after another, before looking up the object: in a distributed cluster, one internode round trip per remote drive on every GET and HEAD (7.6 round trips and 6.6 ms of a 12.7 ms 64 KiB GET). Reads now check the bucket only when the object is missing, to answer `NoSuchBucket` rather than `NoSuchKey`, and the check, which PUTs, deletes and multipart uploads still make, asks every drive at once.
+- A read's distributed lock was released synchronously, so the request waited for the release to reach every node (2.5 ms per GET). Read locks are now released in the background, as MinIO does; write locks are still released before the request finishes.
+
+### Added
+- `tests/bench/cluster.sh`: MinIO and Buckets under the same load on a Kubernetes cluster, on the same volumes and nodes (MinIO, adopted by Buckets, rolled back to MinIO), with `tests/bench/s3bench` from a client pod.
+- `.github/workflows/images.yml` also builds pushes to `perf/*` branches, so a change can be measured on a cluster before it reaches `main`.
+
 ### Changed
 - README: install the operator from the published Helm chart (`oci://ghcr.io/storscale/charts/buckets-operator`) and run `bucketsd` from its published image; installing from a checkout is the alternative.
 - Migration guide: install the operator from the published Helm chart; the adoption uses the published `bucketsd` image unless `--image` names a mirror.
