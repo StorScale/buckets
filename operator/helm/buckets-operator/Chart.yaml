@@ -7,4 +7,4 @@ appVersion: "1.0.0"
 annotations:
   licenses: AGPL-3.0-or-later
 keywords: [s3, object-storage, buckets, operator]
-home: https://github.com/buckets-io/buckets
+home: https://github.com/StorScale/buckets

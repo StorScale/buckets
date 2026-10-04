@@ -2,17 +2,16 @@
 
 ## Reporting a vulnerability
 
-Report security problems privately, not in a public issue or merge request:
+Report security problems privately, not in a public issue or pull request:
 
-1. Open a new issue in the project on GitLab: https://gitlab.com/vericast/HarlandClarke/hc-corpit/buckets/-/issues/new
-2. Tick **This issue is confidential**, so only project members can see it.
-3. Describe the problem, the affected version or commit, and how to reproduce it. Leave out real credentials, keys and customer data.
+1. On GitHub, open the repository's **Security** tab and choose **Report a vulnerability**: https://github.com/StorScale/buckets/security/advisories/new
+2. Describe the problem, the affected version or commit, and how to reproduce it. Leave out real credentials, keys and customer data.
 
-A maintainer acknowledges the report and keeps the confidential issue updated until a fix ships. Fixes are listed under **Security** in [CHANGELOG.md](CHANGELOG.md).
+A maintainer acknowledges the report and keeps the private advisory updated until a fix ships. Fixes are listed under **Security** in [CHANGELOG.md](CHANGELOG.md).
 
 ## Supported versions
 
-Security fixes go into the next release from `main`. Only the latest release (currently 0.10.x) is supported; older releases get no backported fixes.
+Security fixes go into the next release from `main`. Only the latest release (currently 1.0.x) is supported; older releases get no backported fixes.
 
 ## Scope
 

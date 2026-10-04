@@ -139,7 +139,15 @@ With OpenID sign-in, the Users page also lists the provider's people that Bucket
 | `tests/fuzz/soak.sh` | Every fuzz target under libFuzzer with ASan/UBSan in a Linux container, for `SECONDS` each (needs docker) |
 | `scripts/ci.sh` | The full gate: release, ASan/UBSan and TSan builds, unit, smoke and interop tests |
 
-`.gitlab-ci.yml` builds the `bucketsd`, `buckets-operator`, `buckets-console` and `buckets-kes` images with Kaniko on every push to `main` and on tags, and pushes them to Harbor (`harbor.os.harlandclarke.internal/vericast/<image>`), tagged with the short commit SHA and the branch name, or with the tag (without a leading `v`) and `latest`. It needs the CI/CD variables `HARBOR_USER` and `HARBOR_PASSWORD`.
+`.github/workflows/images.yml` builds the `bucketsd`, `buckets-operator`, `buckets-console` and `buckets-kes` images on every push to `main` and on tags, and pushes them to `ghcr.io/storscale/<image>`: the short commit SHA (8 characters) and `main`, or the version (the tag without its `v`) and `latest`. Each image carries an SBOM and build provenance. Release images are signed with cosign, keyless, as this workflow, and the operator's Helm chart is pushed to `oci://ghcr.io/storscale/charts/buckets-operator`. To verify an image:
+
+```bash
+cosign verify ghcr.io/storscale/bucketsd:<version> \
+  --certificate-identity-regexp '^https://github.com/StorScale/buckets/\.github/workflows/images\.yml@refs/tags/v' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+`.gitlab-ci.yml` builds the same images into the internal Harbor (`harbor.os.harlandclarke.internal/vericast/<image>`) for the shared development cluster, and runs the MinIO round trip there (`adopt-roundtrip`). It runs only on pushes to the GitLab copy, and needs the CI/CD variables `HARBOR_USER` and `HARBOR_PASSWORD`.
 
 ## Layout
 

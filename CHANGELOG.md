@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- The main repository is now https://github.com/StorScale/buckets. GitHub Actions (`.github/workflows/images.yml`) builds the four images into `ghcr.io/storscale` on every push to `main` and on tags, each with an SBOM and build provenance; release images are signed with cosign (keyless) and the operator's Helm chart is published to `oci://ghcr.io/storscale/charts`.
+- The operator's default images, the CRDs' and Helm chart's defaults and the examples now name `ghcr.io/storscale/...` (were `ghcr.io/buckets-io/...`).
+- Security reports go to GitHub's private vulnerability reporting.
+
+### Added
+- CI: `adopt-roundtrip` in the GitLab pipeline moves a MinIO tenant to Buckets and back on the shared cluster, without and with KES, on release tags and by hand on main.
+- `buckets-kes identity of` takes a KES API key (`kes:v1:...`) as well as a certificate.
+- `tests/integration/kes-diff.sh`: buckets-kes and a real MinIO KES answer the same 111 requests, are compared, and then serve each other's keystore (`KES_BIN`, `KMSREQ`, with `tests/integration/kmsreq` sending the requests with Go's TLS). `kes.sh` also runs MinIO and Buckets against buckets-kes (`BUCKETS_KES`) or a real KES (`KES_BIN`).
+
 ### Fixed
 - buckets-kes refused request bodies sent without a length, which is how stock MinIO's KES client sends them, so MinIO could not generate data keys from it ("request body too large"). Bodies are now read however they arrive, up to the route's limit.
 - buckets-kes now matches MinIO KES where it differed:
@@ -20,10 +30,6 @@ All notable changes to this project are documented here. The format follows
   - new keys' cipher, which KES chooses by CPU.
 - `/v1/identity/self/describe` answers non-admin identities in the shape KES's client decodes, so `kes identity info` works against buckets-kes. KES itself answers only its admin, because of a lookup bug.
 - `tests/unit/test_object.c` built on Linux only (`mkdtemp` needs `<unistd.h>` on macOS).
-
-### Added
-- `buckets-kes identity of` takes a KES API key (`kes:v1:...`) as well as a certificate.
-- `tests/integration/kes-diff.sh`: buckets-kes and a real MinIO KES answer the same 111 requests, are compared, and then serve each other's keystore (`KES_BIN`, `KMSREQ`, with `tests/integration/kmsreq` sending the requests with Go's TLS). `kes.sh` also runs MinIO and Buckets against buckets-kes (`BUCKETS_KES`) or a real KES (`KES_BIN`).
 
 ## [1.0.0] - 2026-10-03
 

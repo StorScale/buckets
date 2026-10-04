@@ -41,7 +41,7 @@ spec:
                 image:
                   type: string
                   description: bucketsd container image.
-                  default: ghcr.io/buckets-io/bucketsd:1.0.0
+                  default: ghcr.io/storscale/bucketsd:1.0.0
                 imagePullPolicy:
                   type: string
                   enum: [Always, IfNotPresent, Never]
@@ -179,7 +179,7 @@ spec:
                         AWS Secrets Manager, Azure Key Vault, Google Secret Manager) is in Secret <name>-kms
                         (settings.json), which the console's Encryption page writes after testing it.
                       properties:
-                        image: {type: string, description: "Defaults to the operator's BUCKETS_KES_IMAGE, else ghcr.io/buckets-io/buckets-kes (MinIO's KES works too)."}
+                        image: {type: string, description: "Defaults to the operator's BUCKETS_KES_IMAGE, else ghcr.io/storscale/buckets-kes (MinIO's KES works too)."}
                         replicas: {type: integer, minimum: 1, default: 2}
                         keyName: {type: string, default: buckets-default, description: The default key for SSE-S3 and for SSE-KMS without a key ID; created when missing.}
                         createKey: {type: boolean, default: true, description: "Create the default key when the key store lacks it. False (an adopted tenant's keys): a missing key is an error, and the servers do not start."}
@@ -203,7 +203,7 @@ spec:
                   properties:
                     enabled: {type: boolean, default: false}
                     replicas: {type: integer, minimum: 1, default: 1}
-                    image: {type: string, description: "Defaults to ghcr.io/buckets-io/buckets-console at the operator's version."}
+                    image: {type: string, description: "Defaults to ghcr.io/storscale/buckets-console at the operator's version."}
                     serviceType:
                       type: string
                       enum: [ClusterIP, NodePort, LoadBalancer]
