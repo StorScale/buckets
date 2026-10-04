@@ -246,12 +246,35 @@ static void test_overlaps(void **state) {
   yyjson_doc_free(teams);
 }
 
+/* tests/data/team-plain-rw.json, which tests/e2e-k8s/adopt-minio.sh hands to MinIO, is what teams.c writes.
+ * BUCKETS_UPDATE_FIXTURES=1 rewrites it. */
+static void test_round_trip_fixture(void **state) {
+  (void)state;
+  char *json = policy_json("{\"name\":\"plain\",\"buckets\":[\"plain\"],\"levels\":[\"rw\"]}", "rw");
+  const char *path = BUCKETS_TEST_DATA_DIR "/team-plain-rw.json";
+  if (getenv("BUCKETS_UPDATE_FIXTURES")) {
+    FILE *f = fopen(path, "w");
+    assert_non_null(f);
+    fprintf(f, "%s\n", json);
+    fclose(f);
+  }
+  FILE *f = fopen(path, "r");
+  assert_non_null(f);
+  char got[8192] = "";
+  size_t n = fread(got, 1, sizeof(got) - 1, f);
+  fclose(f);
+  got[n] = '\0';
+  if (n && got[n - 1] == '\n') got[n - 1] = '\0';
+  assert_string_equal(got, json);
+  free(json);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_levels),        cmocka_unit_test(test_no_prefix_no_create),
       cmocka_unit_test(test_read_back),     cmocka_unit_test(test_sorted_and_marker_must_match_name),
       cmocka_unit_test(test_edited),        cmocka_unit_test(test_checks),
-      cmocka_unit_test(test_overlaps),
+      cmocka_unit_test(test_overlaps),      cmocka_unit_test(test_round_trip_fixture),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

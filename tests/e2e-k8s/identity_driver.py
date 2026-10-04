@@ -3,7 +3,7 @@
 drives the console's Sign-in page API, and signs in at Keycloak by filling in
 its real login form.
 
-  python3 identity_driver.py oidc|ldap|ldap-signin
+  python3 identity_driver.py oidc|teams|ldap|ldap-signin
 
 Environment: CONSOLE (the console's URL), ROOT_USER, ROOT_PASSWORD, KEYCLOAK
 (its base URL), LDAP_ADDR (host:port). Prints "ok <what>" or "FAIL <what>: ..."
@@ -146,6 +146,30 @@ def oidc():
     expect("a wrong password stays at Keycloak", bad.api("GET", "/api/v1/session")[0], 401)
 
 
+def teams():
+    root = Browser()
+    expect("root signs in to the console", root.login_root(), 204)
+    for b in ("finance-reports", "hr-payroll"):
+        expect("bucket " + b, root.req("PUT", C + "/api/v1/s3/" + b)[0], 200)
+    team = {"name": "finance", "buckets": ["finance-reports"], "prefixes": ["finance-"], "levels": ["rw"]}
+    st, r = root.api("PUT", "/api/v1/teams/finance", {"team": team})
+    expect("the team saved", (st, r.get("name")), (200, "finance"))
+    # kcteam's only role is team-finance-rw: a real sign-in through Keycloak
+    b = Browser()
+    b.keycloak(C + "/api/v1/login/oidc", "kcteam", "kcteam123")
+    expect("kcteam signs in", b.api("GET", "/api/v1/session")[1].get("accessKey"), "kcteam")
+    st, _, listing = b.req("GET", C + "/api/v1/s3/")
+    names = re.findall(r"<Name>([^<]+)</Name>", listing)
+    expect("kcteam sees only the team's buckets", (st, names), (200, ["finance-reports"]))
+    st, _, _ = b.req("PUT", C + "/api/v1/s3/finance-reports/hello.txt", body="hi")
+    expect("writes the team's bucket", st, 200)
+    expect("not another bucket", b.req("GET", C + "/api/v1/s3/hr-payroll/")[0], 403)
+    expect("nor creates buckets (rw)", b.req("PUT", C + "/api/v1/s3/finance-q1")[0], 403)
+    st, r = root.api("DELETE", "/api/v1/teams/finance")
+    expect("the team deleted", st, 204)
+    expect("kcteam loses the bucket at once", b.req("GET", C + "/api/v1/s3/finance-reports/")[0], 403)
+
+
 def ldap():
     b = Browser()
     expect("root signs in to the console", b.login_root(), 204)
@@ -187,5 +211,5 @@ def ldap_signin():
     expect("Keycloak sign-in still works", b2.api("GET", "/api/v1/session")[1].get("accessKey"), "kcuser")
 
 
-{"oidc": oidc, "ldap": ldap, "ldap-signin": ldap_signin}[sys.argv[1]]()
+{"oidc": oidc, "teams": teams, "ldap": ldap, "ldap-signin": ldap_signin}[sys.argv[1]]()
 sys.exit(1 if failed else 0)

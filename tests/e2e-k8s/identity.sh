@@ -2,7 +2,8 @@
 # The console's Sign-in page on a real cluster, against a real Keycloak and a
 # real OpenLDAP: settings saved and tested (Keycloak's own login form, in a
 # client pod playing the browser), applied by the operator to the servers,
-# taken up by the console without a restart, and a real sign-in; then LDAP
+# taken up by the console without a restart, and a real sign-in; a team made
+# on the Teams page, reached by a Keycloak user whose only role names it; then LDAP
 # added, looked up, tested again, applied (the servers restart one at a time
 # for it) and offered by the console.
 #
@@ -134,7 +135,13 @@ kca create users -r buckets -s username=kcuser -s enabled=true -s email=kcuser@e
   -s firstName=KC -s lastName=User >/dev/null
 kca set-password -r buckets --username kcuser --new-password kcpass123 >/dev/null
 kca add-roles -r buckets --uusername kcuser --rolename readwrite >/dev/null
-echo "   Keycloak: realm buckets, client buckets-console, user kcuser with readwrite"
+# a team member: only the team's role (the Teams page makes the policy)
+kca create roles -r buckets -s name=team-finance-rw >/dev/null
+kca create users -r buckets -s username=kcteam -s enabled=true -s email=kcteam@example.org -s emailVerified=true \
+  -s firstName=KC -s lastName=Team >/dev/null
+kca set-password -r buckets --username kcteam --new-password kcteam123 >/dev/null
+kca add-roles -r buckets --uusername kcteam --rolename team-finance-rw >/dev/null
+echo "   Keycloak: realm buckets, client buckets-console, user kcuser with readwrite, kcteam with team-finance-rw"
 
 echo "== the operator and a cluster with its console ($REGISTRY, $BUCKETS_TAG)"
 kc apply --server-side --force-conflicts -f "$ROOT/operator/deploy/crds/" >/dev/null
@@ -185,6 +192,9 @@ drive() { k exec client -- python3 /driver/identity_driver.py "$1" || rc=1; }
 echo "== Keycloak: saved, tested, applied, taken up by the console, a real sign-in"
 drive oidc
 echo "   status.identity: $(k get bc idp -o jsonpath='{.status.identity.phase}: {.status.identity.description}')"
+
+echo "== Teams: a team made on the page, and a Keycloak role that names its policy"
+drive teams
 
 echo "== LDAP added: looked up, tested again, applied"
 before=$(k get pods -l buckets.io/cluster=idp -o jsonpath='{range .items[*]}{.metadata.uid}{" "}{end}')

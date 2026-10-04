@@ -26,6 +26,9 @@
 #                 adoption carries it over to buckets-kes ($REGISTRY/buckets-kes:$BUCKETS_TAG)
 # KES_IMAGE       MinIO's KES, e.g. <mirror>/minio-kes:2024-09-11T07-22-50Z (required with KES=1)
 # VAULT_IMAGE     default hashicorp/vault:1.18
+# MC_BIN          an mc binary here: adds a team (tests/data/team-plain-rw.json, as the console's
+#                 Teams page writes it) and a user with it on Buckets, through a port-forward, and
+#                 checks MinIO enforces it, and keeps the team's marker, after the rollback
 # KEEP=1          leaves the namespace (and its PVs) for a look afterwards
 # Needs the buckets.io CRDs (operator/deploy/crds) and permission to create a
 # namespace, a namespaced operator (Helm) and to patch PersistentVolumes.
@@ -367,6 +370,32 @@ if [[ -n $KES ]]; then
   expect "and makes no key of its own" "$(V list -format=json kv/minio | tr -d ' \n')" '["minio-key"]'
 fi
 
+# a team, as the Teams page writes it: its policy and a user with it, through the admin API
+pf_mc() { # mc against the tenant through a fresh port-forward (pods come and go between uses)
+  local port=19443 pid r=0
+  kubectl $CTXARG -n "$NS" port-forward "svc/$T" "$port:443" >/dev/null 2>&1 &
+  pid=$!
+  for _ in $(seq 50); do nc -z 127.0.0.1 "$port" 2>/dev/null && break; sleep 0.2; done
+  "$MC_BIN" --config-dir "$WORK/mc" --insecure --no-color alias set t "https://127.0.0.1:$port" "$ROOT_USER" "$ROOT_PASS" >/dev/null &&
+    "$MC_BIN" --config-dir "$WORK/mc" --insecure --no-color "$@" || r=$?
+  kill "$pid" 2>/dev/null
+  wait "$pid" 2>/dev/null || true
+  return $r
+}
+team_s3() { k exec cli -- env AWS_ACCESS_KEY_ID=teamer AWS_SECRET_ACCESS_KEY=teamersecret123 aws --endpoint-url "$EP" "$@"; }
+check_team() { # label: the team's user reads and writes plain, and cannot reach versioned
+  expect "$1: the team's user reads its bucket" "$(team_s3 s3 cp --quiet s3://plain/meta.bin /tmp/t >/dev/null 2>&1 && echo yes || echo no)" yes
+  expect "$1: and writes it" "$(team_s3 s3 cp --quiet /tmp/o1 s3://plain/team-probe >/dev/null 2>&1 && team_s3 s3 rm --quiet s3://plain/team-probe >/dev/null 2>&1 && echo yes || echo no)" yes
+  expect "$1: but not another bucket" "$(team_s3 s3 ls s3://versioned 2>&1 | grep -c AccessDenied)" 1
+}
+if [[ -n ${MC_BIN:-} ]]; then
+  echo "== a team on Buckets"
+  pf_mc admin policy create t team-plain-rw "$ROOT/tests/data/team-plain-rw.json" >/dev/null
+  pf_mc admin user add t teamer teamersecret123 >/dev/null
+  pf_mc admin policy attach t team-plain-rw --user teamer >/dev/null
+  check_team "Buckets"
+fi
+
 echo "== Buckets writes, then hands the drives back"
 s3 s3 cp --quiet /tmp/o3 s3://plain/by-buckets.bin
 s3 s3 cp --quiet /tmp/o3 s3://versioned/by-buckets.txt
@@ -382,6 +411,11 @@ if [[ -n $KES ]]; then
   expect "the KMS settings went with Buckets" "$(k get secret $T-kms -o name 2>/dev/null || echo gone)" gone
 fi
 expect "MinIO sees Buckets' versioned object" "$(s3 s3api list-object-versions --bucket versioned --prefix by-buckets --query 'length(Versions)' --output text)" 1
+if [[ -n ${MC_BIN:-} ]]; then
+  check_team "MinIO after rollback"
+  expect "MinIO keeps the team's marker, so Buckets reads it back as a team" \
+    "$(pf_mc admin policy info t team-plain-rw | grep -o 'buckets-team:v1:plain:rw"' | head -1)" 'buckets-team:v1:plain:rw"'
+fi
 
 echo "adopt-minio: $pass passed, $fail failed"
 [[ $fail -eq 0 ]]
