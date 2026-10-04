@@ -19,6 +19,9 @@
 #define VALIDITY_MS 60000
 #define REFRESH_MS 10000
 #define PEER_BACKOFF_MS 1000
+/* Threads releasing read locks in the background (each release fans out to
+ * every node from its own thread and those of this pool). */
+#define RELEASE_THREADS 16
 #define NBUCKETS 1024
 
 static int64_t now_ms(void) {
@@ -291,6 +294,7 @@ struct buckets_dsync {
   dlock *held;
   bool stop;
   pthread_t refresher;
+  buckets_pool *release; /* read unlocks, which nobody waits for */
 };
 
 typedef struct {
@@ -359,6 +363,26 @@ static size_t run(buckets_dsync *d, fan *f) {
   return ok;
 }
 
+/* A read lock's release, owned by the release pool's job. */
+typedef struct {
+  fan f;
+  dlock *l;
+} release_job;
+
+static void release_one(void *ctx, size_t i) {
+  release_job *j = ctx;
+  fan_one(&j->f, i);
+}
+
+static void release_run(void *ctx, size_t i) {
+  (void)i;
+  release_job *j = ctx;
+  buckets_parallel(j->f.d->release, nodes(j->f.d), release_one, j);
+  free(j->l->resource);
+  free(j->l);
+  free(j);
+}
+
 static void *refresh_loop(void *arg) {
   buckets_dsync *d = arg;
   pthread_mutex_lock(&d->mu);
@@ -404,6 +428,7 @@ buckets_dsync *buckets_dsync_new(buckets_http_client *const *peers, size_t npeer
   pthread_mutex_init(&d->mu, NULL);
   pthread_cond_init(&d->cv, NULL);
   if (pthread_create(&d->refresher, NULL, refresh_loop, d) != 0) buckets_fatal("start lock refresher");
+  d->release = buckets_pool_new(RELEASE_THREADS);
   return d;
 }
 
@@ -414,6 +439,7 @@ void buckets_dsync_free(buckets_dsync *d) {
   pthread_cond_broadcast(&d->cv);
   pthread_mutex_unlock(&d->mu);
   pthread_join(d->refresher, NULL);
+  buckets_pool_free(d->release); /* finishes the releases still queued */
   while (d->held) {
     dlock *l = d->held;
     d->held = l->next;
@@ -482,6 +508,16 @@ void buckets_dsync_unlock(buckets_dsync *d, void *handle) {
   else d->held = l->next;
   if (l->next) l->next->prev = l->prev;
   pthread_mutex_unlock(&d->mu);
+  if (!l->write && d->release) {
+    /* A read lock is released in the background, as MinIO does: the request
+     * that held it is done, and a release that never arrives expires on the
+     * lock servers once it stops being refreshed (it left d->held above). */
+    release_job *j = buckets_xcalloc(1, sizeof(*j));
+    j->l = l;
+    j->f = (fan){.d = d, .op = "unlock", .resource = l->resource, .uid = l->uid, .write = false};
+    buckets_pool_submit(d->release, release_run, j);
+    return;
+  }
   fan u = {.d = d, .op = "unlock", .resource = l->resource, .uid = l->uid, .write = l->write};
   run(d, &u);
   free(l->resource);
