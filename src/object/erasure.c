@@ -167,14 +167,29 @@ void buckets_bucket_info_free(buckets_bucket_info *b, size_t n) {
 
 static size_t bucket_quorum(const buckets_epool *L) { return L->nall / 2 + 1; }
 
+typedef struct {
+  buckets_epool *L;
+  const char *bucket;
+  buckets_drive_err *err;
+} stat_vol_ctx;
+
+static void stat_vol_one(void *ctx, size_t i) {
+  stat_vol_ctx *c = ctx;
+  c->err[i] = c->L->all[i] ? buckets_drive_stat_vol(c->L->all[i], c->bucket, NULL) : BUCKETS_DRIVE_ERR_OFFLINE;
+}
+
+/* Every drive at once: most are other nodes', and one after another they cost
+ * a network round trip each. */
 buckets_obj_err buckets_ep_stat_bucket(buckets_epool *L, const char *bucket) {
   size_t ok = 0, missing = 0;
+  buckets_drive_err *err = buckets_xcalloc(L->nall ? L->nall : 1, sizeof(*err));
+  stat_vol_ctx c = {L, bucket, err};
+  buckets_io_parallel(L->nall, stat_vol_one, &c);
   for (size_t i = 0; i < L->nall; i++) {
-    if (!L->all[i]) continue;
-    buckets_drive_err e = buckets_drive_stat_vol(L->all[i], bucket, NULL);
-    if (e == BUCKETS_DRIVE_OK) ok++;
-    else if (e == BUCKETS_DRIVE_ERR_NOT_FOUND) missing++;
+    if (err[i] == BUCKETS_DRIVE_OK) ok++;
+    else if (err[i] == BUCKETS_DRIVE_ERR_NOT_FOUND) missing++;
   }
+  free(err);
   if (ok && ok >= missing) return BUCKETS_OBJ_OK;
   if (missing) return BUCKETS_OBJ_ERR_NO_SUCH_BUCKET;
   return BUCKETS_OBJ_ERR_READ_QUORUM;
@@ -1160,14 +1175,24 @@ void buckets_obj_reader_free(buckets_obj_reader *r) {
 
 static buckets_obj_err resolve(buckets_epool *L, const char *bucket, const char *object, const char *version_id,
                                buckets_eset **set, dmeta *m, long *vidx, buckets_xl_object *o) {
-  buckets_obj_err err = buckets_ep_stat_bucket(L, bucket);
-  if (err) return err;
-  if ((err = buckets_obj_check_name(object)) != BUCKETS_OBJ_OK) return err;
+  buckets_obj_err err = buckets_obj_check_name(object);
+  if (err != BUCKETS_OBJ_OK) return err;
   *set = buckets_ep_set_for(L, object);
   char *op = obj_path(object);
   load_metas(*set, bucket, op, m);
   free(op);
   err = quorum_version(m, (*set)->n, version_id, o, vidx);
+  /* The bucket is checked only when the object is not there: metadata read
+   * from a quorum of drives lives inside the bucket, so the bucket exists.
+   * Checking it first cost every read a fan-out to every drive. */
+  if (err == BUCKETS_OBJ_ERR_NO_SUCH_KEY || err == BUCKETS_OBJ_ERR_NO_SUCH_VERSION ||
+      err == BUCKETS_OBJ_ERR_READ_QUORUM) {
+    buckets_obj_err berr = buckets_ep_stat_bucket(L, bucket);
+    if (berr) {
+      free_metas(m, (*set)->n);
+      return berr;
+    }
+  }
   if (!err && o->type == BUCKETS_XL_TYPE_DELETE &&
       buckets_xl_kv_get(o->meta_sys, o->nmeta_sys, BUCKETS_XL_META_FREE_VERSION)) {
     buckets_xl_object_free(o);
