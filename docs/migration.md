@@ -21,7 +21,15 @@ Then point the Tenant (and the MinIO Operator) at the mirror before adopting. Ad
 - The key store (Vault, AWS, Azure or Google), if objects are encrypted. **Keys are the data:** a lost key makes every object encrypted with it unreadable, for MinIO and Buckets alike. Adoption never moves or changes keys, but the key store is outside both.
 - The Tenant, its Secrets and its `config.env`. The adoption saves the objects it deletes in its state directory (see below), but a copy of your own costs nothing.
 
-**3. Install the operator.** Install buckets-operator (the Helm chart in `operator/helm/buckets-operator`) so that it watches the tenant's namespace, and apply its CRDs. Set `image` and `kesImage` to images your cluster can pull.
+**3. Install the operator.** Install buckets-operator from its published Helm chart, which brings the CRDs, so that it watches the tenant's namespace:
+
+```bash
+helm install buckets-operator oci://ghcr.io/storscale/charts/buckets-operator \
+  --version 1.1.0 -n buckets-system --create-namespace \
+  --set watchNamespace=<namespace>          # leave out to watch every namespace
+```
+
+The chart and Buckets' images (`bucketsd`, `buckets-operator`, `buckets-console`, `buckets-kes`) are public on `ghcr.io/storscale` and signed; the README shows how to verify them. If the cluster can't pull from ghcr.io, mirror them as you did MinIO's, and point the chart's `image.repository` and `kesImage` at the mirror, pass `--image` to the adoption below, and set `spec.console.image` if you enable the console. From a checkout, the same chart is in `operator/helm/buckets-operator`.
 
 **4. Know the outage.** The servers stop and start once: MinIO's pods are deleted, then Buckets' pods start on the same drives. Expect S3 to be unavailable for a few minutes, and longer with large pools or slow volume attachment.
 
@@ -56,9 +64,10 @@ The script runs from a machine with `kubectl` and Python 3 (PyYAML too, if the t
 ### 1. Dry run
 
 ```bash
-scripts/adopt-minio.sh --context <ctx> -n <namespace> -t <tenant> --state ./adopt-<tenant> \
-  --image <registry>/bucketsd:1.0.0
+scripts/adopt-minio.sh --context <ctx> -n <namespace> -t <tenant> --state ./adopt-<tenant>
 ```
+
+The servers run the operator's default image, `ghcr.io/storscale/bucketsd` at its version. To run a mirrored or pinned image, add `--image <registry>/bucketsd:1.1.0`, here and when applying.
 
 Without `--apply`, nothing changes. The script reads the Tenant (or the StatefulSets), its PVCs and PVs, and prints:
 
@@ -75,8 +84,7 @@ MinIO releases before `RELEASE.2024-10-29` can't read the newest `xl.meta` versi
 ### 2. Apply
 
 ```bash
-scripts/adopt-minio.sh --context <ctx> -n <namespace> -t <tenant> --state ./adopt-<tenant> \
-  --image <registry>/bucketsd:1.0.0 --apply
+scripts/adopt-minio.sh --context <ctx> -n <namespace> -t <tenant> --state ./adopt-<tenant> --apply
 ```
 
 In order:
