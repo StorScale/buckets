@@ -95,7 +95,9 @@ static const char *state_name(buckets_drive_health h) {
 
 buckets_drive_health buckets_drive_health_check(buckets_drive *d) {
   if (!d || d->remote) return BUCKETS_DRIVE_HEALTH_OK;
-  atomic_store(&d->check_started_ms, now_ms());
+  if (atomic_exchange(&d->checking, true)) return buckets_drive_health_state(d); /* one is running: its answer */
+  long long started = now_ms();
+  atomic_store(&d->check_started_ms, started);
   int e = check_identity(d);
   buckets_drive_health h = BUCKETS_DRIVE_HEALTH_OK;
   if (e) {
@@ -105,11 +107,12 @@ buckets_drive_health buckets_drive_health_check(buckets_drive *d) {
   } else if ((e = check_writable(d)) != 0) {
     h = BUCKETS_DRIVE_HEALTH_FAULTY;
   }
-  long long took = now_ms() - atomic_load(&d->check_started_ms);
+  long long took = now_ms() - started;
   if (!e && took > timeout_ms()) h = BUCKETS_DRIVE_HEALTH_FAULTY, e = ETIMEDOUT; /* answered, but too slowly */
   buckets_drive_health was = (buckets_drive_health)atomic_exchange(&d->health, (int)h);
   atomic_store(&d->health_errno, e);
   atomic_store(&d->check_started_ms, 0);
+  atomic_store(&d->checking, false);
   if (was != h) {
     char why[256];
     buckets_drive_health_describe(d, why, sizeof(why));
@@ -159,6 +162,12 @@ void buckets_drive_health_describe(buckets_drive *d, char *out, size_t cap) {
       snprintf(out, cap, "%s: %s", state_name(h), e == ETIMEDOUT ? "a check took longer than the timeout" : strerror(e));
   }
 }
+
+bool buckets_drive_health_unformatted(buckets_drive *d) {
+  return buckets_drive_health_state(d) == BUCKETS_DRIVE_HEALTH_CHANGED && atomic_load(&d->health_errno) == ENOENT;
+}
+
+long buckets_drive_health_interval(void) { return env_seconds("BUCKETS_DRIVE_CHECK_INTERVAL", 15); }
 
 bool buckets_drive_health_refuses(buckets_drive *d) {
   buckets_drive_health h = buckets_drive_health_state(d);

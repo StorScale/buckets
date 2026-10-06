@@ -3,7 +3,10 @@
 # two drives each. A drive that cannot be written, or whose format.json is
 # gone, goes offline within a check: its own node's and the other nodes'
 # metrics say so (what BucketsDriveOffline watches), so does `mc admin info`,
-# S3 keeps working on the rest, the log says why; and it comes back.
+# S3 keeps working on the rest, the log says why; and it comes back. A drive
+# wiped while its server runs (a replaced disk) is formatted back into its
+# slot and healed; one that still holds data but lost its format.json is
+# left alone.
 #   tests/integration/drive-health.sh [bucketsd]
 # MC_BIN (optional) adds the `mc admin info` checks.
 set -euo pipefail
@@ -100,6 +103,31 @@ expect "reads of what was written" "$(get 4 a.txt)" hello
 chmod 755 "$WORK/n1/d1" "$WORK/n2/d1"
 until_true '[[ $(offline 3 cluster) == 0 ]]' || true
 expect "both back" "$(offline 3 cluster)" 0
+
+echo "== a drive replaced while its server runs"
+for i in $(seq 1 12); do put 1 "obj$i" "r$i.txt" >/dev/null; done
+slot=$(python3 -c "import json; print(json.load(open('$WORK/n4/d1/.minio.sys/format.json'))['xl']['this'])")
+had=$(find "$WORK/n4/d1/photos" -name xl.meta | wc -l)
+rm -rf "$WORK/n4/d1/photos" "$WORK/n4/d1/.minio.sys"
+until_true "[[ -f $WORK/n4/d1/.minio.sys/format.json ]]" || true
+expect "formatted back" "$([[ -f $WORK/n4/d1/.minio.sys/format.json ]] && echo yes)" yes
+expect "into its own slot" "$(python3 -c "import json; print(json.load(open('$WORK/n4/d1/.minio.sys/format.json'))['xl']['this'])")" "$slot"
+until_true "[[ \$(find $WORK/n4/d1/photos -name xl.meta 2>/dev/null | wc -l) == $had ]]" || true
+expect "every object healed back onto it ($had)" "$(find "$WORK/n4/d1/photos" -name xl.meta 2>/dev/null | wc -l | tr -d ' ')" "$had"
+until_true "[[ ! -f $WORK/n4/d1/.minio.sys/buckets-healing.json ]]" || true
+expect "healing finished" "$([[ -f $WORK/n4/d1/.minio.sys/buckets-healing.json ]] && echo pending || echo done)" done
+expect "online everywhere" "$(offline 1 cluster) $(offline 4 node)" "0 0"
+expect "the log says so" "$(grep -c "drive $WORK/n4/d1 was replaced: formatted into its slot as $slot" "$WORK/log4")" 1
+expect "reads" "$(get 2 r7.txt)" obj7
+
+echo "== a drive that lost only its format.json is left alone"
+mv "$WORK/n3/d1/.minio.sys/format.json" "$WORK/format3.keep"
+until_true "grep -q 'drive $WORK/n3/d1 has no format.json and was not formatted: it holds data' $WORK/log3" || true
+sleep 3
+expect "not formatted, told once" "$([[ -f $WORK/n3/d1/.minio.sys/format.json ]] && echo formatted || echo left) $(grep -c "drive $WORK/n3/d1 has no format.json" "$WORK/log3")" "left 1"
+mv "$WORK/format3.keep" "$WORK/n3/d1/.minio.sys/format.json"
+until_true '[[ $(offline 1 cluster) == 0 ]]' || true
+expect "back once it is restored" "$(offline 1 cluster)" 0
 
 echo "drive-health: $pass passed, $fail failed"
 [[ $fail -eq 0 ]]

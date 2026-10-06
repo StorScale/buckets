@@ -9,6 +9,8 @@
 #include <yyjson.h>
 
 #include "core/buf.h"
+#include "storage/format.h"
+#include "storage/health.h"
 #include "core/log.h"
 #include "storage/drive.h"
 
@@ -35,6 +37,10 @@ struct buckets_healer {
   size_t qlen;
   bool stop, busy, drives_pending;
   buckets_healer_stats st;
+  pthread_t monitor; /* formats drives replaced while the server runs */
+  bool *refused;     /* per drive: told already why it was not formatted */
+  pthread_cond_t monitor_cv;
+  bool monitoring;
 };
 
 
@@ -246,6 +252,58 @@ static void heal_drives(buckets_healer *h) {
   }
 }
 
+/* ---- drives replaced while the server runs ------------------------------------------------ */
+
+/* MinIO's monitorLocalDisksAndHeal: a local drive found empty (drive health: format.json gone) is formatted
+ * into its slot and healed. */
+static void replace_drives(buckets_healer *h) {
+  buckets_objlayer *L = h->L;
+  for (size_t i = 0; i < L->nall; i++) {
+    buckets_drive *d = L->all[i];
+    if (!d || d->remote || !buckets_drive_health_unformatted(d)) {
+      h->refused[i] = false;
+      continue;
+    }
+    buckets_drive_place pl;
+    buckets_objlayer_place(L, i, &pl);
+    size_t first = pl.pool_first + pl.set * pl.set_size;
+    char err[256];
+    if (!buckets_format_replace(d, L->all + first, pl.set_size, err, sizeof(err))) {
+      if (!h->refused[i]) buckets_log_warn("drive %s has no format.json and was not formatted: %s", d->root, err);
+      h->refused[i] = true;
+      continue;
+    }
+    h->refused[i] = false;
+    tracker t = {0};
+    tracker_save(d, &t);
+    buckets_log_info("drive %s was replaced: formatted into its slot as %s; healing it in the background", d->root,
+                     d->drive_id);
+    buckets_drive_health_check(d); /* online again at once */
+    pthread_mutex_lock(&h->mu);
+    h->drives_pending = true;
+    pthread_cond_broadcast(&h->cv);
+    pthread_mutex_unlock(&h->mu);
+  }
+}
+
+static void *monitor(void *arg) {
+  buckets_healer *h = arg;
+  long interval = buckets_drive_health_interval();
+  pthread_mutex_lock(&h->mu);
+  while (!h->stop) {
+    struct timespec until;
+    clock_gettime(CLOCK_REALTIME, &until);
+    until.tv_sec += interval;
+    pthread_cond_timedwait(&h->monitor_cv, &h->mu, &until);
+    if (h->stop) break;
+    pthread_mutex_unlock(&h->mu);
+    replace_drives(h);
+    pthread_mutex_lock(&h->mu);
+  }
+  pthread_mutex_unlock(&h->mu);
+  return NULL;
+}
+
 /* ---- the thread ------------------------------------------------------------------ */
 
 static void *run(void *arg) {
@@ -261,11 +319,12 @@ static void *run(void *arg) {
       h->busy = false;
       continue;
     }
-    while (!h->head && !h->stop) {
+    while (!h->head && !h->stop && !h->drives_pending) { /* a replaced drive wakes it too */
       pthread_cond_broadcast(&h->idle_cv);
       pthread_cond_wait(&h->cv, &h->mu);
     }
     if (h->stop) break;
+    if (h->drives_pending) continue;
     /* the first entry that is due; otherwise wait for the soonest */
     int64_t now = mono_ms(), soonest = INT64_MAX;
     mrf *e = NULL, *prev = NULL;
@@ -356,6 +415,9 @@ buckets_healer *buckets_healer_start(buckets_objlayer *L) {
   h->drives_pending = true;
   buckets_objlayer_set_degraded_hook(L, on_degraded, h);
   if (pthread_create(&h->thread, NULL, run, h) != 0) buckets_fatal("start healer thread");
+  pthread_cond_init(&h->monitor_cv, NULL);
+  h->refused = buckets_xcalloc(L->nall ? L->nall : 1, sizeof(bool));
+  h->monitoring = buckets_drive_health_interval() > 0 && pthread_create(&h->monitor, NULL, monitor, h) == 0;
   return h;
 }
 
@@ -365,8 +427,12 @@ void buckets_healer_stop(buckets_healer *h) {
   pthread_mutex_lock(&h->mu);
   h->stop = true;
   pthread_cond_broadcast(&h->cv);
+  pthread_cond_broadcast(&h->monitor_cv);
   pthread_mutex_unlock(&h->mu);
   pthread_join(h->thread, NULL);
+  if (h->monitoring) pthread_join(h->monitor, NULL);
+  pthread_cond_destroy(&h->monitor_cv);
+  free(h->refused);
   for (mrf *e = h->head, *next; e; e = next) {
     next = e->next;
     mrf_free(e);

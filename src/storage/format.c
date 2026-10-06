@@ -3,7 +3,10 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <dirent.h>
+#include <errno.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <yyjson.h>
 
 #include "core/log.h"
@@ -271,5 +274,79 @@ bool buckets_format_negotiate(buckets_drive **drives, size_t n, size_t set_size,
   }
   free(f);
   if (!ok) buckets_format_result_free(out);
+  return ok;
+}
+
+/* ---- a drive replaced while the server runs ------------------------------------------------ */
+
+/* Whether dir holds nothing but the allowed names (missing counts as empty). */
+static bool only(const char *dir, const char *const *allowed) {
+  DIR *dp = opendir(dir);
+  if (!dp) return errno == ENOENT;
+  bool ok = true;
+  struct dirent *e;
+  while (ok && (e = readdir(dp))) {
+    if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
+    bool fine = false;
+    for (const char *const *a = allowed; *a && !fine; a++) fine = strcmp(e->d_name, *a) == 0;
+    ok = fine;
+  }
+  closedir(dp);
+  return ok;
+}
+
+bool buckets_format_replace(buckets_drive *d, buckets_drive *const *set, size_t n, char *err, size_t errlen) {
+  struct stat st;
+  if (stat(d->root, &st) != 0 || !S_ISDIR(st.st_mode)) {
+    snprintf(err, errlen, "its directory is missing (the drive is not mounted?)");
+    return false;
+  }
+  static const char *const root_ok[] = {BUCKETS_META_BUCKET, "lost+found", NULL};
+  static const char *const meta_ok[] = {"tmp", "buckets", "multipart", "config", NULL};
+  static const char *const none[] = {NULL};
+  char meta[4096], sub[4200];
+  snprintf(meta, sizeof(meta), "%s/" BUCKETS_META_BUCKET, d->root);
+  bool empty = only(d->root, root_ok) && only(meta, meta_ok);
+  for (size_t i = 0; empty && meta_ok[i]; i++) {
+    if (strcmp(meta_ok[i], "tmp") == 0) continue; /* scratch: anything there is disposable */
+    snprintf(sub, sizeof(sub), "%s/%s", meta, meta_ok[i]);
+    empty = only(sub, none);
+  }
+  if (!empty) {
+    snprintf(err, errlen, "it holds data, so it is left alone (heal or wipe it by hand)");
+    return false;
+  }
+  /* the deployment's format, from another drive of the set */
+  yyjson_doc *ref = NULL;
+  for (size_t i = 0; i < n && !ref; i++) {
+    if (!set[i] || set[i] == d) continue;
+    buckets_buf raw = BUCKETS_BUF_INIT;
+    if (buckets_drive_read_all(set[i], BUCKETS_META_BUCKET, FORMAT_PATH, &raw) == BUCKETS_DRIVE_OK) {
+      ref = yyjson_read(raw.data, raw.len, 0);
+      const char *id = yyjson_get_str(yyjson_obj_get(yyjson_doc_get_root(ref), "id"));
+      if (!id || strcmp(id, d->deployment_id) != 0) yyjson_doc_free(ref), ref = NULL;
+    }
+    buckets_buf_free(&raw);
+  }
+  if (!ref) {
+    snprintf(err, errlen, "no other drive of its set could give the deployment's format");
+    return false;
+  }
+  yyjson_mut_doc *m = yyjson_doc_mut_copy(ref, NULL);
+  yyjson_doc_free(ref);
+  yyjson_mut_val *xl = yyjson_mut_obj_get(yyjson_mut_doc_get_root(m), "xl");
+  yyjson_mut_obj_put(xl, yyjson_mut_str(m, "this"), yyjson_mut_strcpy(m, d->drive_id));
+  size_t len;
+  char *json = yyjson_mut_write(m, 0, &len);
+  yyjson_mut_doc_free(m);
+  for (size_t i = 0; meta_ok[i]; i++) { /* the layout a fresh drive gets */
+    snprintf(sub, sizeof(sub), "%s/%s", meta, meta_ok[i]);
+    mkdir(meta, 0755);
+    mkdir(sub, 0755);
+  }
+  bool ok = json && buckets_drive_write_all(d, BUCKETS_META_BUCKET, FORMAT_PATH, json, len) == BUCKETS_DRIVE_OK;
+  free(json);
+  if (!ok) snprintf(err, errlen, "format.json could not be written");
+  else d->freshly_formatted = true;
   return ok;
 }
