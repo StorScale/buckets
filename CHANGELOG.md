@@ -6,6 +6,9 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- Monitoring with the Prometheus Operator (docs/monitoring.md). For each BucketsCluster, the operator makes a metrics user allowed only `admin:Prometheus`, its bearer token, and ServiceMonitors for the servers and the console (`spec.monitoring`, `status.monitoring`). The Helm chart ships 12 alert rules, each with a runbook: drives or servers offline, an erasure set at its write quorum, drive errors, slow healing, capacity, server errors, failed sign-ins, KMS failures, scraping down. It also ships four Grafana dashboards. The console counts failed sign-ins (`buckets_console_logins_failed_total`) on `/metrics`.
+
 ### Fixed
 - `bucketsd` built with the undefined-behaviour sanitizer aborted on `/minio/metrics/v3/cluster/health` (and the other v3 paths that report tiering) when no storage tier was configured: the tiering statistics were copied from a null pointer. Release builds were not affected.
 

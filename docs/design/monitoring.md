@@ -1,6 +1,6 @@
 # Design: monitoring shipped with the operator
 
-Status: agreed, being built. Roadmap: Phase 3, "Monitoring shipped with the
+Status: agreed, built. What changed while building it is under "As built" at the end. Roadmap: Phase 3, "Monitoring shipped with the
 operator". Phase 3 is done when, among other things, "a failing drive raises
 an alert without anyone looking".
 
@@ -193,3 +193,33 @@ metrics that `bucketsd` exports, which a test enforces (see below).
 5. **Dashboards go to `monitoring.dashboards.namespace`**, defaulting to the
    chart's namespace. On Rancher it is set to `cattle-dashboards`, as the
    docs and the chart's notes say.
+
+## As built
+
+What changed from the design while building it:
+
+- **Every server is scraped for every endpoint.** A ServiceMonitor scrapes a
+  Service's pods, not its address, so the cluster and bucket endpoints are
+  scraped on every server too. The rules take `max` over servers for the
+  cluster-wide figures.
+- **A third endpoint.** Per-bucket figures exist only on
+  `/minio/v2/metrics/bucket`, so the ServiceMonitor scrapes it too
+  (`scope="bucket"`).
+- **The headless Service.** The ServiceMonitor selects it by a new label,
+  `buckets.io/service: headless`. The console Service gets
+  `buckets.io/service: console`.
+- **`BucketsKMSOffline` became `BucketsKMSFailing`.** `minio_cluster_kms_online`
+  is 1 whenever a KMS is configured, even an unreachable external KES, so the
+  alert watches KMS request failures instead.
+- **`BucketsIAMSyncFailing` is left out.** `minio_node_iam_sync_*` exists only
+  with an identity plugin, as in MinIO, so it would be silent on almost every
+  cluster.
+- **Fixed capacity thresholds.** They are 15% and 5%, not chart values: the
+  rule file is shipped verbatim, so it works without Helm too.
+- **Checking the console's token.** The console cannot check a token itself, so
+  it asks `bucketsd`: the same Authorization header on
+  `/minio/metrics/v3/cluster/health`, cached for a minute. That way exactly
+  the tokens `bucketsd` accepts read the console's metrics.
+- **A bug found and fixed.** The console's test found that the sanitizer
+  builds of `bucketsd` aborted on that v3 path when no storage tier was
+  configured (a `memcpy` from NULL). That was fixed on `main` first.
