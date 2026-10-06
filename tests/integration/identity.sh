@@ -149,13 +149,17 @@ L=$(api -d '{"username":"alice"}' "$C/api/v1/identity-config/ldap-test")
 check "a user found, with groups" "$(jq_ 'd["passed"], d["dn"], d["groups"]' <<<"$L")" \
   "True uid=alice,ou=People,$BASE ['cn=devs,ou=groups,$BASE']"
 check "no policy attached yet: said so" "$(jq_ 'd["note"].startswith("Found, but no policy is attached")' <<<"$L")" True
-MC_BIN=${MC_BIN:-$(command -v mc)}
-mc() { "$MC_BIN" --config-dir "$WORK/mc" --no-color "$@"; }
-mc alias set it "$EP" rootadmin rootsecret123 >/dev/null
-mc idp ldap policy attach it readwrite --group "cn=devs,ou=groups,$BASE" >/dev/null
-L=$(api -d '{"username":"alice"}' "$C/api/v1/identity-config/ldap-test")
-check "her group's policy, once attached" "$(jq_ 'd["passed"], d["policies"], d.get("note")' <<<"$L")" "True ['readwrite'] None"
-mc idp ldap policy detach it readwrite --group "cn=devs,ou=groups,$BASE" >/dev/null
+MC_BIN=${MC_BIN:-$(command -v mc || true)}
+if [[ -n $MC_BIN ]]; then # attaching a policy to the group needs mc
+  mc() { "$MC_BIN" --config-dir "$WORK/mc" --no-color "$@"; }
+  mc alias set it "$EP" rootadmin rootsecret123 >/dev/null
+  mc idp ldap policy attach it readwrite --group "cn=devs,ou=groups,$BASE" >/dev/null
+  L=$(api -d '{"username":"alice"}' "$C/api/v1/identity-config/ldap-test")
+  check "her group's policy, once attached" "$(jq_ 'd["passed"], d["policies"], d.get("note")' <<<"$L")" "True ['readwrite'] None"
+  mc idp ldap policy detach it readwrite --group "cn=devs,ou=groups,$BASE" >/dev/null
+else
+  echo "  (skipped: a policy attached to her group, which needs mc; set MC_BIN)"
+fi
 check "an unknown user" "$(api -d '{"username":"zed"}' "$C/api/v1/identity-config/ldap-test" | jq_ 'd["passed"], d["error"].startswith("No such user under the user search base")')" \
   "False True"
 check "a wrong password" "$(api -d '{"username":"alice","password":"nope"}' "$C/api/v1/identity-config/ldap-test" | jq_ 'd["passed"], d["error"].startswith("The user cannot sign in")')" \
