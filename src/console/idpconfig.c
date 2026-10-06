@@ -14,6 +14,7 @@
 #include "crypto/hex.h"
 #include "crypto/sha256.h"
 #include "iam/idpsettings.h"
+#include "iam/idsync.h"
 #include "iam/ldapidp.h"
 #include "iam/openid.h"
 #include "k8s/kube.h"
@@ -444,6 +445,62 @@ static void handle_ldap_test(buckets_console_idp *m, yyjson_val *body, const buc
   reply(resp, 200, d);
 }
 
+/* Removing people who leave: one person looked up in Microsoft Graph with the saved settings, which shows the
+ * app may read the directory (Graph's User.Read.All). Recorded as the "removal" test. */
+static void handle_removal_test(buckets_console_idp *m, yyjson_val *body, buckets_http_response *resp) {
+  const char *user = yyjson_get_str(yyjson_obj_get(body, "user"));
+  if (!user || !*user) {
+    fail(resp, 400, "InvalidRequest", "Enter a person's sign-in name (user principal name) or object ID.");
+    return;
+  }
+  saved c;
+  saved_load(m, "-identity-candidate", &c);
+  buckets_idp_removal rm;
+  if (!buckets_idp_removal_of(yyjson_doc_get_root(c.settings), &rm)) {
+    saved_free(&c);
+    fail(resp, 409, "NoCandidate", "Turn on removing people who leave, and save, before testing it.");
+    return;
+  }
+  buckets_idsync_settings st = {0};
+  snprintf(st.provider, sizeof(st.provider), "entra");
+  snprintf(st.tenant, sizeof(st.tenant), "%s", rm.tenant);
+  snprintf(st.client_id, sizeof(st.client_id), "%s", rm.client_id);
+  snprintf(st.client_secret, sizeof(st.client_secret), "%s", rm.client_secret);
+  const char *login = getenv("BUCKETS_OPENID_SYNC_LOGIN_URL"), *graph = getenv("BUCKETS_OPENID_SYNC_GRAPH_URL");
+  snprintf(st.login_url, sizeof(st.login_url), "%s", login && *login ? login : "https://login.microsoftonline.com");
+  snprintf(st.graph_url, sizeof(st.graph_url), "%s", graph && *graph ? graph : "https://graph.microsoft.com");
+  buckets_idsync_entra *e = buckets_idsync_entra_new(&st);
+  memset(st.client_secret, 0, sizeof(st.client_secret));
+  buckets_idsync_person who;
+  char err[1024] = "";
+  buckets_idsync_state state = buckets_idsync_entra_lookup(e, user, &who, err, sizeof(err));
+  buckets_idsync_entra_free(e);
+  yyjson_mut_val *o;
+  yyjson_mut_doc *d = new_obj(&o);
+  bool passed = state == BUCKETS_IDSYNC_ACTIVE || state == BUCKETS_IDSYNC_DISABLED;
+  yyjson_mut_obj_add_strcpy(d, o, "user", user);
+  if (passed) {
+    yyjson_mut_obj_add_str(d, o, "state", buckets_idsync_state_name(state));
+    yyjson_mut_obj_add_strcpy(d, o, "id", who.id);
+    yyjson_mut_obj_add_strcpy(d, o, "displayName", who.display_name);
+    yyjson_mut_obj_add_strcpy(d, o, "userPrincipalName", who.upn);
+  } else if (state == BUCKETS_IDSYNC_GONE) {
+    yyjson_mut_obj_add_str(d, o, "error", "No one by that name in the directory. The app can read it: try someone who exists.");
+  } else {
+    char msg[1400];
+    snprintf(msg, sizeof(msg),
+             "%s. The app needs Microsoft Graph's User.Read.All application permission, with admin consent.", err);
+    yyjson_mut_obj_add_strcpy(d, o, "error", msg);
+  }
+  yyjson_mut_obj_add_bool(d, o, "passed", passed);
+  /* as the LDAP test: a person not found must not take back a passed test of these settings */
+  yyjson_val *prev = tests_of(&c);
+  bool had_pass = yyjson_get_bool(yyjson_obj_get(yyjson_obj_get(prev, "removal"), "passed"));
+  if (c.raw && (passed || !had_pass)) buckets_console_idp_record_test(m, c.hash, "removal", d);
+  saved_free(&c);
+  reply(resp, 200, d);
+}
+
 /* ---- GET, save, apply ------------------------------------------------------------------- */
 
 static void add_redacted(yyjson_mut_doc *d, yyjson_mut_val *o, const char *key, yyjson_val *settings) {
@@ -541,8 +598,12 @@ static void handle_apply(buckets_console_idp *m, yyjson_val *body, buckets_http_
   saved_load(m, "-identity-candidate", &c);
   yyjson_val *settings = yyjson_doc_get_root(c.settings), *tests = tests_of(&c);
   bool has_oidc = yyjson_is_obj(yyjson_obj_get(settings, "openid")), has_ldap = yyjson_is_obj(yyjson_obj_get(settings, "ldap"));
+  buckets_idp_removal rm;
+  bool has_removal = buckets_idp_removal_of(settings, &rm);
   if (!c.raw || !want || strcmp(want, c.hash) != 0) {
     fail(resp, 409, "CandidateChanged", "The settings changed since they were tested: test them again.");
+  } else if (has_removal && !part_passed(tests, "removal")) {
+    fail(resp, 409, "NotTested", "Look up a person with the removal settings (Test) before applying them.");
   } else if ((has_oidc && !part_passed(tests, "openid")) || (has_ldap && !part_passed(tests, "ldap"))) {
     fail(resp, 409, "NotTested",
          has_oidc && !part_passed(tests, "openid") ? "Sign in once with the OpenID settings (Test sign-in) before applying them."
@@ -591,6 +652,7 @@ void buckets_console_idp_handle(buckets_console_idp *m, const buckets_http_reque
   yyjson_val *body = yyjson_doc_get_root(bd);
   if (buckets_str_eq_c(req->method, "PUT") && strcmp(sub, "/candidate") == 0) handle_candidate(m, body, resp);
   else if (buckets_str_eq_c(req->method, "POST") && strcmp(sub, "/ldap-test") == 0) handle_ldap_test(m, body, sess, resp);
+  else if (buckets_str_eq_c(req->method, "POST") && strcmp(sub, "/removal-test") == 0) handle_removal_test(m, body, resp);
   else if (buckets_str_eq_c(req->method, "POST") && strcmp(sub, "/apply") == 0) handle_apply(m, body, resp);
   else fail(resp, 404, "NotFound", "unknown identity settings API");
   yyjson_doc_free(bd);

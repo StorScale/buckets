@@ -355,7 +355,7 @@ static void idsync_run(buckets_s3_server *s, const buckets_idsync_settings *st, 
   size_t unknown = 0;
   char err[512] = "";
   for (size_t k = 0; k < np && state_ok; k++) {
-    states[k] = buckets_idsync_entra_lookup(entra, people[k], err, sizeof(err));
+    states[k] = buckets_idsync_entra_lookup(entra, people[k], NULL, err, sizeof(err));
     if (states[k] == BUCKETS_IDSYNC_UNKNOWN && unknown++ == 0) buckets_log_warn("identity sync: %s", err);
   }
   bool failed = !state_ok || unknown;

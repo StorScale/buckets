@@ -5,14 +5,15 @@
 # wrong client secret), an LDAP lookup (ldapmock.py), Apply refused until
 # tested, and consoled taking up the sign-in settings the operator writes to
 # its identity file, and dropping them when it goes. The Kubernetes API and
-# the operator are kubemock.py.
+# the operator are kubemock.py. Removing people who leave: a person looked
+# up in a stand-in for Microsoft Graph, required before Apply.
 #   tests/integration/identity.sh [bucketsd] [consoled]
 set -euo pipefail
 BIN=${1:-build/src/bucketsd}
 CBIN=${2:-build/src/consoled}
 HERE=$(cd "$(dirname "$0")" && pwd)
 PORT=${PORT:-19780}
-CPORT=$((PORT + 1)) KPORT=$((PORT + 2)) OPORT=$((PORT + 3)) O2PORT=$((PORT + 4)) LPORT=$((PORT + 5))
+CPORT=$((PORT + 1)) KPORT=$((PORT + 2)) OPORT=$((PORT + 3)) O2PORT=$((PORT + 4)) LPORT=$((PORT + 5)) GPORT=$((PORT + 6))
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/buckets-identity-XXXXXX")
 EP="http://127.0.0.1:$PORT"
 C="http://127.0.0.1:$CPORT"
@@ -48,6 +49,35 @@ python3 "$HERE/ldapmock.py" "$LPORT" 2>"$WORK/ldap.log" &
 PIDS+=($!)
 python3 "$HERE/kubemock.py" "$KPORT" "$WORK" data store 2>"$WORK/kube.log" &
 PIDS+=($!)
+# Microsoft sign-in and Graph: the app sync-app/sync-secret may read users; noperm-app may not
+cat >"$WORK/graph.py" <<'PY'
+import http.server, json, sys, urllib.parse
+USERS = {"alice@example.com": ("o-alice", "Alice", True), "dave@example.com": ("o-dave", "Dave", False)}
+class H(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def reply(self, status, doc):
+        b = json.dumps(doc).encode()
+        self.send_response(status); self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+    def do_POST(self):
+        f = urllib.parse.parse_qs(self.rfile.read(int(self.headers.get("Content-Length", 0))).decode())
+        app, secret = f.get("client_id", [""])[0], f.get("client_secret", [""])[0]
+        if self.path != "/t-1/oauth2/v2.0/token" or secret != "sync-secret" or app not in ("sync-app", "noperm-app"):
+            return self.reply(401, {"error": "invalid_client", "error_description": "AADSTS7000215: Invalid client secret provided."})
+        self.reply(200, {"access_token": "tok-" + app, "expires_in": 3599})
+    def do_GET(self):
+        u = urllib.parse.urlparse(self.path)
+        if self.headers.get("Authorization") == "Bearer tok-noperm-app":
+            return self.reply(403, {"error": {"code": "Authorization_RequestDenied", "message": "Insufficient privileges to complete the operation."}})
+        who = urllib.parse.unquote(u.path[len("/v1.0/users/"):])
+        for upn, (oid, name, on) in USERS.items():
+            if who in (upn, oid):
+                return self.reply(200, {"id": oid, "accountEnabled": on, "displayName": name, "userPrincipalName": upn})
+        self.reply(404, {"error": {"code": "Request_ResourceNotFound", "message": "Resource '%s' does not exist" % who}})
+http.server.ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+PY
+python3 "$WORK/graph.py" "$GPORT" 2>"$WORK/graph.log" &
+PIDS+=($!)
 ISS="http://127.0.0.1:$OPORT"
 for _ in $(seq 100); do curl -s -o /dev/null "$ISS/jwks" && curl -s -o /dev/null "http://127.0.0.1:$O2PORT/jwks" &&
   nc -z 127.0.0.1 "$LPORT" 2>/dev/null && [[ -f $WORK/kube-ca.pem ]] && curl -sk -o /dev/null "https://127.0.0.1:$KPORT/_state" && break; sleep 0.1; done
@@ -70,6 +100,7 @@ IDFILE="$WORK/identity/identity.json"
 env CONSOLE_MINIO_SERVER="$EP" CONSOLE_PBKDF_PASSPHRASE=it CONSOLE_PBKDF_SALT=it \
   BUCKETS_KUBE_API="https://127.0.0.1:$KPORT" BUCKETS_KUBE_CA="$WORK/kube-ca.pem" BUCKETS_KUBE_TOKEN=kubemock-token \
   BUCKETS_CONSOLE_CLUSTER=store BUCKETS_CONSOLE_NAMESPACE=data BUCKETS_CONSOLE_IDENTITY_FILE="$IDFILE" \
+  BUCKETS_OPENID_SYNC_LOGIN_URL="http://127.0.0.1:$GPORT" BUCKETS_OPENID_SYNC_GRAPH_URL="http://127.0.0.1:$GPORT" \
   "$CBIN" --address "127.0.0.1:$CPORT" 2>"$WORK/clog" &
 PIDS+=($!)
 for _ in $(seq 100); do curl -s -o /dev/null "$C/healthz" && break; sleep 0.1; done
@@ -174,6 +205,33 @@ api -X PUT -d '{"settings":{"ldap":'"$BADL"'}}' "$C/api/v1/identity-config/candi
 check "a wrong service account password" \
   "$(api -d '{"username":"alice"}' "$C/api/v1/identity-config/ldap-test" | jq_ 'd["passed"], d["error"].startswith("The directory cannot be used with these settings")')" \
   "False True"
+
+echo "== removing people who leave: a person looked up in Microsoft Graph"
+ENTRA='{"provider":"entra","tenantId":"t-1","clientId":"sync-app","clientSecret":"sync-secret","removal":{"enabled":true}}'
+api -X PUT -d '{"settings":{"openid":'"$ENTRA"'}}' "$C/api/v1/identity-config/candidate" >/dev/null
+HASH=$(api "$C/api/v1/identity-config" | jq_ 'd["candidateHash"]')
+check "apply before the lookup: refused" "$(api -d '{"candidateHash":"'"$HASH"'"}' "$C/api/v1/identity-config/apply" | jq_ 'd["code"], d["message"]')" \
+  "NotTested Look up a person with the removal settings (Test) before applying them."
+check "a person found" "$(api -d '{"user":"alice@example.com"}' "$C/api/v1/identity-config/removal-test" | jq_ 'd["passed"], d["state"], d["displayName"], d["id"]')" \
+  "True active Alice o-alice"
+check "a disabled one shows as such" "$(api -d '{"user":"dave@example.com"}' "$C/api/v1/identity-config/removal-test" | jq_ 'd["passed"], d["state"]')" "True disabled"
+check "no one by that name" "$(api -d '{"user":"zed@example.com"}' "$C/api/v1/identity-config/removal-test" | jq_ 'd["passed"], d["error"].startswith("No one by that name")')" \
+  "False True"
+check "which does not take back the pass" "$(api "$C/api/v1/identity-config" | jq_ 'd["test"]["removal"]["passed"]')" True
+check "then the sign-in test is what is missing" "$(api -d '{"candidateHash":"'"$HASH"'"}' "$C/api/v1/identity-config/apply" | jq_ 'd["message"]')" \
+  "Sign in once with the OpenID settings (Test sign-in) before applying them."
+api -X PUT -d '{"settings":{"openid":'"${ENTRA/sync-app/noperm-app}"'}}' "$C/api/v1/identity-config/candidate" >/dev/null
+check "an app without the permission: said what it needs" \
+  "$(api -d '{"user":"alice@example.com"}' "$C/api/v1/identity-config/removal-test" | jq_ 'd["passed"], "User.Read.All" in d["error"], "403" in d["error"]')" "False True True"
+api -X PUT -d '{"settings":{"openid":'"${ENTRA/sync-secret/wrong}"'}}' "$C/api/v1/identity-config/candidate" >/dev/null
+check "a wrong secret: Microsoft's reason" \
+  "$(api -d '{"user":"alice@example.com"}' "$C/api/v1/identity-config/removal-test" | jq_ 'd["passed"], "AADSTS7000215" in d["error"]')" "False True"
+check "the secret never shown" "$(api "$C/api/v1/identity-config" | grep -c 'wrong\|sync-secret' || true)" 0
+api -X PUT -d '{"settings":{"openid":{"provider":"keycloak","url":"https://kc","realm":"r","clientId":"a","clientSecret":"b","removal":{"enabled":true}}}}' \
+  "$C/api/v1/identity-config/candidate" >"$WORK/kc.json"
+check "Keycloak: not yet" "$(jq_ '"Entra ID for now" in d["message"]' <"$WORK/kc.json")" True
+check "removal off: no lookup" "$(api -X PUT -d '{"settings":{"openid":'"${ENTRA/true/false}"'}}' "$C/api/v1/identity-config/candidate" >/dev/null;
+  api -d '{"user":"alice@example.com"}' "$C/api/v1/identity-config/removal-test" | jq_ 'd["code"]')" NoCandidate
 
 echo "== consoled takes up the settings the operator applies"
 python3 - "$IDFILE" "$ISS" <<'PY'

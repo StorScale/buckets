@@ -116,8 +116,13 @@ void buckets_idsync_held_free(buckets_idsync_held *h, size_t n);
 typedef struct buckets_idsync_entra buckets_idsync_entra;
 buckets_idsync_entra *buckets_idsync_entra_new(const buckets_idsync_settings *s);
 void buckets_idsync_entra_free(buckets_idsync_entra *e);
-/* One person by object ID; UNKNOWN (and err) when Graph could not answer. */
-buckets_idsync_state buckets_idsync_entra_lookup(buckets_idsync_entra *e, const char *oid, char *err,
-                                                 size_t errlen);
+/* What Graph says about a person besides their state. */
+typedef struct {
+  char id[64], display_name[256], upn[256];
+} buckets_idsync_person;
+/* One person by object ID (or, for the console's check, user principal name); UNKNOWN (and err) when Graph
+ * could not answer. who, when not NULL, gets their ID and names. */
+buckets_idsync_state buckets_idsync_entra_lookup(buckets_idsync_entra *e, const char *oid,
+                                                 buckets_idsync_person *who, char *err, size_t errlen);
 
 #endif

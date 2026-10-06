@@ -428,6 +428,8 @@ export type OidcSettings = {
   redirectUri?: string;
   rolePolicy?: string;
   claimUserinfo?: boolean;
+  // people who leave lose their access (Entra ID for now; docs/design/identity-sync.md)
+  removal?: { enabled: boolean; deleteAfterDays?: number; maxPerSync?: number };
 };
 export type LdapSettings = {
   preset: "ad" | "openldap" | "custom";
@@ -444,6 +446,7 @@ export type LdapSettings = {
 export type IdentitySettings = { openid?: OidcSettings | null; ldap?: LdapSettings | null; secretsSet?: string[] };
 export type OidcTest = { passed: boolean; error?: string; user?: string; claimName?: string; roles?: string[]; policies?: string[]; unmatched?: string[]; at?: number };
 export type LdapTest = { passed: boolean; error?: string; note?: string; dn?: string; groups?: string[]; policies?: string[]; at?: number };
+export type RemovalTest = { passed: boolean; error?: string; user?: string; state?: "active" | "disabled"; id?: string; displayName?: string; userPrincipalName?: string; at?: number };
 export type IdentityConfig = {
   managed: boolean;
   cluster?: string;
@@ -453,7 +456,7 @@ export type IdentityConfig = {
   description?: string;
   candidate?: IdentitySettings | null;
   candidateHash?: string;
-  test?: { hash?: string; openid?: OidcTest; ldap?: LdapTest };
+  test?: { hash?: string; openid?: OidcTest; ldap?: LdapTest; removal?: RemovalTest };
   status?: { phase?: string; message?: string; description?: string };
 };
 const jsonBody = (v: unknown) => ({ body: JSON.stringify(v), headers: { "Content-Type": "application/json" } });
@@ -471,6 +474,9 @@ export async function identitySaveCandidate(settings: IdentitySettings): Promise
 }
 export async function identityLdapTest(username: string, password?: string): Promise<LdapTest> {
   return (await call("POST", "/api/v1/identity-config/ldap-test", jsonBody({ username, password }))).json();
+}
+export async function identityRemovalTest(user: string): Promise<RemovalTest> {
+  return (await call("POST", "/api/v1/identity-config/removal-test", jsonBody({ user }))).json();
 }
 export const identityApply = (candidateHash: string) => call("POST", "/api/v1/identity-config/apply", jsonBody({ candidateHash }));
 // The OpenID test: a sign-in with the candidate in a popup, which tells this window when it ends.

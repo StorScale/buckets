@@ -309,8 +309,9 @@ static bool entra_token(buckets_idsync_entra *e, bool fresh, char *err, size_t e
   return tok != NULL;
 }
 
-buckets_idsync_state buckets_idsync_entra_lookup(buckets_idsync_entra *e, const char *oid, char *err,
-                                                 size_t errlen) {
+buckets_idsync_state buckets_idsync_entra_lookup(buckets_idsync_entra *e, const char *oid,
+                                                 buckets_idsync_person *who, char *err, size_t errlen) {
+  if (who) memset(who, 0, sizeof(*who));
   buckets_idsync_state st = BUCKETS_IDSYNC_UNKNOWN;
   pthread_mutex_lock(&e->mu);
   for (int attempt = 0; attempt < 2; attempt++) {
@@ -318,7 +319,8 @@ buckets_idsync_state buckets_idsync_entra_lookup(buckets_idsync_entra *e, const 
     buckets_buf url = BUCKETS_BUF_INIT, auth = BUCKETS_BUF_INIT;
     buckets_buf_appendf(&url, "%s/v1.0/users/", e->s.graph_url);
     buckets_url_encode(&url, oid, false);
-    buckets_buf_append_c(&url, "?$select=id,accountEnabled");
+    buckets_buf_append_c(&url, who ? "?$select=id,accountEnabled,displayName,userPrincipalName"
+                                   : "?$select=id,accountEnabled");
     buckets_buf_appendf(&auth, "Bearer %s", e->token);
     buckets_http_kv h[] = {{"Authorization", auth.data}, {"Accept", "application/json"}};
     buckets_http_result r;
@@ -328,6 +330,17 @@ buckets_idsync_state buckets_idsync_entra_lookup(buckets_idsync_entra *e, const 
     if (!ok) break;
     int status = r.status;
     st = buckets_idsync_graph_state(status, r.body.data, r.body.len);
+    if (who && status == 200) {
+      yyjson_doc *d = yyjson_read(r.body.data ? r.body.data : "", r.body.len, 0);
+      yyjson_val *root = yyjson_doc_get_root(d);
+      const char *id = yyjson_get_str(yyjson_obj_get(root, "id")),
+                 *dn = yyjson_get_str(yyjson_obj_get(root, "displayName")),
+                 *upn = yyjson_get_str(yyjson_obj_get(root, "userPrincipalName"));
+      snprintf(who->id, sizeof(who->id), "%s", id ? id : "");
+      snprintf(who->display_name, sizeof(who->display_name), "%s", dn ? dn : "");
+      snprintf(who->upn, sizeof(who->upn), "%s", upn ? upn : "");
+      yyjson_doc_free(d);
+    }
     if (st == BUCKETS_IDSYNC_UNKNOWN)
       snprintf(err, errlen, "Microsoft Graph answered %d for user %s: %.200s", status, oid,
                r.body.data ? r.body.data : "");

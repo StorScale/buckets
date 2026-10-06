@@ -441,7 +441,7 @@ test.describe("KMS and sign-in setup", () => {
       cluster: { spec: { kms?: { kes?: { keyName?: string } } } };
       secrets: Record<
         string,
-        Record<string, { settings?: { vault?: { approle?: { secret?: string; id?: string } } }; vault?: { approle?: { secret?: string; id?: string } }; openid?: { clientSecret?: string } }>
+        Record<string, { settings?: { vault?: { approle?: { secret?: string; id?: string } } }; vault?: { approle?: { secret?: string; id?: string } }; openid?: { clientSecret?: string; removal?: { enabled: boolean; deleteAfterDays?: number; maxPerSync?: number } } }>
       >;
     };
 
@@ -549,6 +549,35 @@ test.describe("KMS and sign-in setup", () => {
     // an edit is a new candidate: tested again before it applies
     await page.getByTestId("oidc-client-id").fill("other");
     await expect(page.getByTestId("signin-apply")).toBeDisabled();
+  });
+
+  test("sign-in: people who leave, for Entra ID, with a lookup required before apply", async ({ page }) => {
+    test.skip(!!process.env.CONSOLE_URL, "needs the mock Kubernetes API of the local setup");
+    await login(page);
+    await page.goto("/identity/sign-in");
+    await page.getByTestId("oidc-on").getByRole("radio", { name: "On" }).click();
+    await page.getByTestId("oidc-provider-entra").click();
+    await expect(page.getByTestId("removal")).toContainText("People who leave");
+    await page.getByTestId("removal-on").check();
+    // what the app needs in Entra ID
+    await expect(page.getByTestId("removal")).toContainText("User.Read.All");
+    await expect(page.getByTestId("removal")).toContainText("Grant admin consent");
+    await page.getByTestId("removal-days").fill("14");
+    await page.getByTestId("oidc-tenant").fill("11111111-2222-3333-4444-555555555555");
+    await page.getByTestId("oidc-client-id").fill("app-1");
+    await page.getByTestId("oidc-client-secret").fill("s3cr3t");
+    await expect(page.getByTestId("removal-test")).toBeDisabled(); // saved first
+    await page.getByTestId("signin-save").click();
+    await expect(page.getByTestId("signin-save")).toHaveText("Saved");
+    await expect(page.getByTestId("apply-card")).toContainText("Look up a person in Microsoft Graph");
+    await expect(page.getByTestId("signin-apply")).toBeDisabled();
+    await page.getByTestId("removal-test-user").fill("alice@example.com");
+    await expect(page.getByTestId("removal-test")).toBeEnabled();
+    const st = await kubeState(page);
+    expect(st.secrets["store-identity-candidate"]["settings.json"].openid?.removal).toEqual({ enabled: true, deleteAfterDays: 14 });
+    // other providers have no such section yet
+    await page.getByTestId("oidc-provider-okta").click();
+    await expect(page.getByTestId("removal")).toHaveCount(0);
   });
 
   test("settings the server refuses are explained before any test", async ({ page }) => {
