@@ -26,6 +26,7 @@ Real MinIO and Buckets can serve each other's drives, clusters included.
 | [docs/integrations/jupyterhub.md](docs/integrations/jupyterhub.md) | JupyterHub on Buckets: Keycloak sign-in, and each person's notebooks reaching Buckets as them, runnable and tested |
 | [docs/integrations/superset.md](docs/integrations/superset.md) | Apache Superset on the lakehouse: Keycloak sign-in, groups as roles, and Ranger's policies per person, runnable and tested |
 | [docs/integrations/dremio.md](docs/integrations/dremio.md) | Dremio on the lakehouse's Nessie catalog: Iceberg at any commit, raw files, read-only storage access, runnable and tested |
+| [docs/integrations/airflow.md](docs/integrations/airflow.md) | Apache Airflow on the lakehouse: Keycloak for people, a service account for pipelines, no stored keys, runnable and tested |
 | [docs/performance.md](docs/performance.md) | Benchmarks against MinIO and how to run them |
 | [docs/roadmap.md](docs/roadmap.md) | What comes next, and why |
 | [CHANGELOG.md](CHANGELOG.md) | Changes by release |

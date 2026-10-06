@@ -9,6 +9,9 @@
     },
     {
       "name": "engineers"
+    },
+    {
+      "name": "pipelines"
     }
   ],
   "users": [
@@ -63,6 +66,14 @@
         }
       ],
       "groups": []
+    },
+    {
+      "username": "service-account-airflow-pipelines",
+      "enabled": true,
+      "serviceAccountClientId": "airflow-pipelines",
+      "groups": [
+        "/pipelines"
+      ]
     }
   ],
   "clients": [
@@ -171,6 +182,71 @@
             "access.token.claim": "true",
             "id.token.claim": "true",
             "userinfo.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "airflow",
+      "name": "Apache Airflow",
+      "enabled": true,
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "${AIRFLOW_OAUTH_SECRET:airflow-oauth-secret-change-me}",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "redirectUris": [
+        "http://airflow:8090/auth/oauth-authorized/keycloak"
+      ],
+      "webOrigins": [
+        "http://airflow:8090"
+      ],
+      "protocolMappers": [
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "config": {
+            "claim.name": "groups",
+            "full.path": "false",
+            "access.token.claim": "true",
+            "id.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "airflow-pipelines",
+      "name": "Airflow pipelines (service account)",
+      "enabled": true,
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "${AIRFLOW_PIPELINES_SECRET:airflow-pipelines-secret-change-me}",
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "protocolMappers": [
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "config": {
+            "claim.name": "groups",
+            "full.path": "false",
+            "access.token.claim": "true",
+            "id.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "audience: lakehouse",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "lakehouse",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
           }
         }
       ]

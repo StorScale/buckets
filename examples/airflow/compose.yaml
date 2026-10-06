@@ -1,0 +1,128 @@
+# Apache Airflow on the lakehouse: people sign in to Airflow with Keycloak and
+# their groups are their Airflow roles; pipelines run as a Keycloak service
+# account of their own, and reach Buckets (through STS) and Trino (with its
+# token, under Ranger's policies) with short-lived credentials. Airflow keeps
+# no S3 keys and no Trino password.
+#
+# This includes the whole lakehouse stack (../lakehouse/stack.yaml: Buckets,
+# Nessie, Trino, Ranger, Keycloak), with lakehouse-override.yaml's changes.
+#
+#   docker compose up -d --wait               # build, start, and configure
+#   docker compose run --rm test              # the end-to-end checks
+#   docker compose down -v                    # stop and delete everything
+#
+# In a browser: add "127.0.0.1 keycloak airflow" to /etc/hosts, then open
+# http://airflow:8090. See ../../docs/integrations/airflow.md. Every password is
+# in .env and ../lakehouse/.env, for local use only. Run one example at a time.
+name: buckets-airflow
+
+include:
+  - path: [../lakehouse/stack.yaml, lakehouse-override.yaml]
+    env_file: [../lakehouse/.env, .env]
+
+x-airflow: &airflow
+  build: ./images
+  image: buckets-airflow
+  env_file: .env
+  environment: &airflow-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:${AIRFLOW_DB_PASSWORD}@airflow-db:5432/airflow
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+    AIRFLOW__API__SECRET_KEY: ${AIRFLOW_SECRET_KEY}
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET}
+    AIRFLOW__API__BASE_URL: http://airflow:8090
+    AIRFLOW__API__PORT: "8090"
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow:8090/execution/
+    AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "False"
+    AIRFLOW__DAG_PROCESSOR__REFRESH_INTERVAL: "10"
+  volumes:
+    - ./airflow/webserver_config.py:/opt/airflow/webserver_config.py:ro
+    - ./dags:/opt/airflow/dags:ro
+    - tls:/tls:ro
+
+x-tools: &tools
+  build: ../common/tools
+  image: buckets-examples-tools
+  env_file: [../lakehouse/.env, .env]
+  environment:
+    PYTHONPATH: /common
+  volumes:
+    - ./tools:/work:ro
+    - ../lakehouse/tools:/lakehouse:ro
+    - ../common/tools:/common:ro
+    - tls:/tls
+
+services:
+  airflow-db:
+    image: postgres:18-bookworm
+    environment:
+      POSTGRES_DB: airflow
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: ${AIRFLOW_DB_PASSWORD}
+    volumes:
+      - airflow-db:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      interval: 5s
+      retries: 60
+
+  # Buckets: the landing bucket and the pipelines' policy; Ranger: the
+  # pipelines group's policies; the data. Runs once, then exits.
+  airflow-setup:
+    <<: *tools
+    command: ["python", "-u", "/work/airflow_setup.py"]
+    depends_on:
+      setup: {condition: service_completed_successfully}
+      trino: {condition: service_healthy}
+
+  # Airflow's database, and its one secret: the pipelines' Keycloak client.
+  airflow-init:
+    <<: *airflow
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        airflow db migrate && airflow fab-db migrate &&
+        airflow connections delete keycloak_pipelines >/dev/null 2>&1;
+        airflow connections add keycloak_pipelines --conn-type http --conn-host keycloak --conn-port 8080 \
+          --conn-login airflow-pipelines --conn-password "$$AIRFLOW_PIPELINES_SECRET" \
+          --conn-description "The pipelines' Keycloak service account (client credentials)"
+    depends_on:
+      airflow-db: {condition: service_healthy}
+
+  # The API server and UI. Named "airflow": tokens and redirects use that name.
+  airflow:
+    <<: *airflow
+    command: ["api-server"]
+    ports: ["8090:8090"]
+    depends_on:
+      airflow-init: {condition: service_completed_successfully}
+      airflow-setup: {condition: service_completed_successfully}
+      keycloak: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8090/api/v2/monitor/health"]
+      interval: 5s
+      start_period: 30s
+      retries: 60
+
+  airflow-scheduler:
+    <<: *airflow
+    command: ["scheduler"]
+    depends_on:
+      airflow: {condition: service_healthy}
+
+  airflow-dag-processor:
+    <<: *airflow
+    command: ["dag-processor"]
+    depends_on:
+      airflow: {condition: service_healthy}
+
+  # The end-to-end checks: docker compose run --rm test
+  test:
+    <<: *tools
+    command: ["python", "-u", "/work/test.py"]
+    profiles: ["test"]
+
+volumes:
+  airflow-db:

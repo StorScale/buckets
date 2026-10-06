@@ -1,0 +1,7 @@
+# Changes to the included lakehouse stack (../lakehouse/stack.yaml) for this
+# example: Keycloak gets the secrets of Airflow's two clients.
+services:
+  keycloak:
+    environment:
+      AIRFLOW_OAUTH_SECRET: ${AIRFLOW_OAUTH_SECRET}
+      AIRFLOW_PIPELINES_SECRET: ${AIRFLOW_PIPELINES_SECRET}

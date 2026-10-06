@@ -6,6 +6,8 @@
 #   - jupyterhub: JupyterHub, Keycloak (docs/integrations/jupyterhub.md)
 #   - superset:   Apache Superset on the lakehouse (docs/integrations/superset.md)
 #   - dremio:     Dremio on the lakehouse (docs/integrations/dremio.md)
+#   - airflow:    Apache Airflow on the lakehouse (docs/integrations/airflow.md)
+#   - monitoring: Prometheus and Grafana, with the chart's rules and dashboards (docs/monitoring.md)
 name: examples
 
 on:
@@ -41,7 +43,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        example: [lakehouse, hive-spark, jupyterhub, superset, dremio]
+        example: [lakehouse, hive-spark, jupyterhub, superset, dremio, airflow, monitoring]
     defaults:
       run:
         working-directory: examples/${{ matrix.example }}

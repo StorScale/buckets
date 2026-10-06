@@ -1,0 +1,8 @@
+# The Helm chart's four dashboards (operator/helm/buckets-operator/monitoring/dashboards).
+apiVersion: 1
+providers:
+  - name: buckets
+    folder: Buckets
+    type: file
+    options:
+      path: /var/lib/grafana/dashboards/buckets
