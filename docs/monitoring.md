@@ -242,22 +242,24 @@ network path and its certificate.
 ### BucketsIdentitySyncFailing
 
 **What:** twice within three hours, the identity sync could not learn whether
-the people holding credentials are still in Entra ID ([people who
+the people holding credentials are still in the identity provider ([people who
 leave](identity.md#people-who-leave)). Until it works again, people who left
 keep their access keys.
 
 **Check:** the log of the server leading the first erasure set (the one that
-syncs), for `identity sync:` lines. Microsoft's words follow: an `AADSTS`
-error means the client secret is wrong or expired; `Authorization_RequestDenied`
-means the app lacks Graph's User.Read.All application permission or its admin
-consent; a connection error means the servers cannot reach
-`login.microsoftonline.com` or `graph.microsoft.com`. **Look up a person** on
-the Sign-in page tests the same settings.
+syncs), for `identity sync:` lines; the provider's words follow. Entra: an
+`AADSTS` error means the client secret is wrong or expired, and
+`Authorization_RequestDenied` that the app lacks Graph's User.Read.All
+application permission or its admin consent. Keycloak: a 403 means the client's
+service account lacks realm-management's view-users. Okta: `E0000011` means the
+API token was revoked or expired. A connection error means the servers cannot
+reach the provider. **Look up a person** on the Sign-in page tests the same
+settings.
 
 ### BucketsIdentitySyncHeld
 
-**What:** more people left Entra ID at once than the limit allows (10 unless
-set), so the sync removed no one.
+**What:** more people left the identity provider at once than the limit allows
+(10 unless set), so the sync removed no one.
 
 **Check:** whether so many people really left. If the directory answered wrongly,
 for example after the app was pointed at another tenant, fix that first. If they

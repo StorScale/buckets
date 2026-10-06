@@ -155,43 +155,58 @@ Buckets cannot list everyone your identity provider gives a role. An OpenID role
 
 ## People who leave
 
-With Entra ID, Buckets can take away the access of people who leave. Turning
-someone off in Entra ID stops them signing in, but access keys they made keep
-working. With **People who leave** on, the servers ask Microsoft Graph every
-hour about each person holding Buckets credentials:
+With Entra ID, Keycloak or Okta, Buckets can take away the access of people who
+leave. Turning someone off in the provider stops them signing in, but access
+keys they made keep working. With **People who leave** on, the servers ask the
+provider every hour (**Check every**) about each person holding Buckets
+credentials:
 
-- **Deleted or disabled in Entra ID:** their temporary credentials (and console
-  sessions) end at once. Their access keys are turned off at once, and deleted
-  after 30 days (**Delete their access keys after**).
+- **Deleted or disabled** (in Okta: deactivated or suspended): their temporary
+  credentials (and console sessions) end at once. Their access keys are turned
+  off at once, and deleted after 30 days (**Delete their access keys after**).
 - **Back within those days:** their keys come back on. A key its owner had
   turned off stays off.
-- **Graph can't be reached, or answers an error:** whoever it didn't answer for
-  is left as they are, and the `BucketsIdentitySyncFailing` alert says so.
+- **The provider can't be reached, or answers an error:** whoever it didn't
+  answer for is left as they are, and the `BucketsIdentitySyncFailing` alert
+  says so.
 - **More people leaving at once than the limit** (10 unless set): nobody is
   removed until someone confirms by raising it. This guards against a directory
   that answers wrongly. The `BucketsIdentitySyncHeld` alert says so.
 
-To set it up, on **Identity → Sign-in**, in the single sign-on card:
+To set it up, on **Identity → Sign-in**, in the single sign-on card, give the
+servers a way to read the directory:
 
-1. In the app registration, under **API permissions**, add **Microsoft Graph →
-   Application permissions → User.Read.All**, then **Grant admin consent**. The
-   sync signs in as the same app, with its client secret, and only reads users.
-2. Turn on **Remove the access of people who leave**, and save.
-3. **Look up a person**: the console asks Graph about them as the sync will.
-   Apply needs this to pass.
+| Provider | What to do |
+| --- | --- |
+| Entra ID | In the app registration, under **API permissions**, add **Microsoft Graph → Application permissions → User.Read.All**, then **Grant admin consent**. The sync signs in as the same app, with its client secret. |
+| Keycloak | In the client, under **Settings → Capability config**, turn on **Service accounts roles**. Under **Service accounts roles**, assign **realm-management: view-users**. The sync signs in as the client, with its secret. |
+| Okta | As an administrator who may read users (**Read-only Administrator** is enough), create a token under **Security → API → Tokens**, and paste it into **Okta API token**. Okta tokens expire after 30 days unused; the hourly sync keeps it in use. |
+
+Then turn on **Remove the access of people who leave**, save, and **Look up a
+person**: the console asks the provider about them as the sync will (an Entra
+sign-in name, a Keycloak user name, an Okta login, or an ID). Apply needs this
+to pass. The sync only reads users.
 
 Applying restarts the servers one at a time, as LDAP settings do. Each step is
 in the log of the server leading the first erasure set (`identity sync:`), and
-the counts are in its metrics (`buckets_node_identity_sync_*`). Okta and
-Keycloak, and SCIM from the provider, are planned ([the
-design](design/identity-sync.md)).
+the counts are in its metrics (`buckets_node_identity_sync_*`). People are
+matched by the IDs in their sign-in tokens: Entra's `tid` and `oid`, and the
+issuer and `sub` for Keycloak and Okta. SCIM, for providers that push changes,
+is planned ([the design](design/identity-sync.md)).
 
-Without the console, set `BUCKETS_OPENID_SYNC_PROVIDER=entra` and
-`BUCKETS_OPENID_SYNC_TENANT_ID`, `_CLIENT_ID` and `_CLIENT_SECRET` on the
-servers. `BUCKETS_OPENID_SYNC_INTERVAL` (seconds), `BUCKETS_OPENID_REMOVE_AFTER`
-(days) and `BUCKETS_OPENID_REMOVE_MAX` change the defaults. LDAP needs none of
-this: users removed from the directory lose their credentials at the hourly
-LDAP sync, as with MinIO.
+Without the console, set `BUCKETS_OPENID_SYNC_PROVIDER` on the servers, and:
+
+- **entra:** `BUCKETS_OPENID_SYNC_TENANT_ID`, `_CLIENT_ID` and `_CLIENT_SECRET`.
+- **keycloak:** `BUCKETS_OPENID_SYNC_URL` (Keycloak's base URL), `_REALM`,
+  `_CLIENT_ID` and `_CLIENT_SECRET`.
+- **okta:** `BUCKETS_OPENID_SYNC_URL` (`https://<your domain>`), `_API_TOKEN`
+  and `_ISSUER` (the authorization server's, such as
+  `https://<your domain>/oauth2/default`).
+
+`BUCKETS_OPENID_SYNC_INTERVAL` (seconds), `BUCKETS_OPENID_REMOVE_AFTER` (days)
+and `BUCKETS_OPENID_REMOVE_MAX` change the defaults. LDAP needs none of this:
+users removed from the directory lose their credentials at the hourly LDAP
+sync, as with MinIO.
 
 ## Troubleshooting
 
@@ -209,5 +224,7 @@ LDAP sync, as with MinIO.
 | "The identity provider cannot be reached" | The console cannot reach `login.microsoftonline.com` (network policy, proxy, or DNS) |
 | **Look up a person** says the app needs User.Read.All | Add Microsoft Graph's User.Read.All **application** permission (not delegated) and grant admin consent; it can take a few minutes to apply |
 | **Look up a person** shows an AADSTS error | The client secret is wrong or has expired: create a new one in the app registration |
+| **Look up a person** with Keycloak says the client needs view-users | Turn on **Service accounts roles** for the client, and assign it **realm-management: view-users** |
+| **Look up a person** with Okta says `E0000011` (invalid token) | The API token was revoked, or expired after 30 days unused: create a new one and save it |
 
 To see what a sign-in did on the server side, stream the server trace (`mc admin trace -a <alias>`, or the console's Trace page) while signing in: the `AssumeRoleWithWebIdentity` call shows whether credentials were issued, or why not.

@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- People who leave Keycloak or Okta lose their Buckets access too, as with Entra ID since 1.9.0 ([docs/identity.md](docs/identity.md#people-who-leave)).
+  - **Keycloak:** the sync signs in as the sign-in client, whose service account needs realm-management's `view-users`.
+  - **Okta:** it uses a read-only API token, kept as a secret like the client secret.
+  - **Matching:** their people are matched by the token's issuer and subject.
+  - **Console:** the Sign-in page shows each provider's steps. **Check every** sets how often the servers ask (60 minutes by default). **Look up a person** takes a Keycloak user name or an Okta login.
+  - **Cluster test:** `tests/e2e-k8s/identity.sh` disables a real Keycloak user and checks that their access key turns off, then on again when they return.
+
 ## [1.9.1] - 2026-10-06
 
 ### Fixed
