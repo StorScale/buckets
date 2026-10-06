@@ -88,7 +88,9 @@ groups:
 
       - alert: BucketsCapacityFullIn7Days
         expr: |
-          predict_linear(min by (namespace, buckets_cluster) (minio_cluster_capacity_usable_free_bytes{scope="cluster"})[6h:10m], 7 * 86400) < 0
+          # the most free space each half hour: a server restarting takes its drives out of the others' count
+          # for a few minutes, and those dips are not a trend
+          predict_linear(min by (namespace, buckets_cluster) (max_over_time(minio_cluster_capacity_usable_free_bytes{scope="cluster"}[30m]))[6h:10m], 7 * 86400) < 0
         for: 1h
         labels:
           severity: warning

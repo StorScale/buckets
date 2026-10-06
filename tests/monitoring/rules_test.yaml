@@ -149,6 +149,36 @@ tests:
               summary: "data/store: at the rate of the last 6 hours, usable capacity runs out within 7 days"
               runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketscapacitylow
 
+  # a rolling restart where each server takes a quarter of an hour to rejoin: while it is down, the others count
+  # its drives out of the free space (20.7 GB dropped to 15.5 GB on the dev cluster). An hour of such dips is not
+  # a trend; a real decline still fires (the case above)
+  - interval: 1m
+    input_series:
+      - series: 'minio_cluster_capacity_usable_free_bytes{namespace="data",buckets_cluster="store",scope="cluster",server="s1"}'
+        values: "20700000000x360 15500000000x14 20700000000x1 15500000000x14 20700000000x1 15500000000x14 20700000000x1 15500000000x14 20700000000x1 20700000000x240"
+    alert_rule_test:
+      - eval_time: 7h
+        alertname: BucketsCapacityFullIn7Days
+        exp_alerts: []
+      - eval_time: 7h20m
+        alertname: BucketsCapacityFullIn7Days
+        exp_alerts: []
+      - eval_time: 7h40m
+        alertname: BucketsCapacityFullIn7Days
+        exp_alerts: []
+      - eval_time: 8h
+        alertname: BucketsCapacityFullIn7Days
+        exp_alerts: []
+      - eval_time: 8h30m
+        alertname: BucketsCapacityFullIn7Days
+        exp_alerts: []
+      - eval_time: 9h
+        alertname: BucketsCapacityFullIn7Days
+        exp_alerts: []
+      - eval_time: 10h
+        alertname: BucketsCapacityFullIn7Days
+        exp_alerts: []
+
   # 10% server errors on 10 requests/s, summed over servers; a quiet cluster with errors stays quiet
   - interval: 1m
     input_series:
