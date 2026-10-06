@@ -1,10 +1,11 @@
 """The Grafana dashboards as PNGs, with headless Chromium (Playwright):
 
-    docker compose run --rm screenshots                    # SHOTS=healthy (default)
-    docker compose run --rm -e SHOTS=degraded screenshots  # after a drive fails
+    docker compose run --rm screenshots                    # the four dashboards (SHOTS=healthy)
+    docker compose run --rm -e SHOTS=alerts screenshots    # Prometheus's alerts, while a drive is out
+    docker compose run --rm -e SHOTS=failure screenshots   # Overview and Drives, after a failed drive
 
-Writes ./screenshots/<dashboard>.png (healthy) or <dashboard>-degraded.png,
-in Grafana's dark theme, the last 15 minutes, in kiosk mode (no menus).
+Writes ./screenshots/<dashboard>.png, prometheus-alerts.png, or
+<dashboard>-failure.png: Grafana's dark theme, the last 15 minutes, kiosk mode.
 """
 import base64
 import os
@@ -18,7 +19,7 @@ PROMETHEUS = "http://prometheus:9090"
 AUTH = ("admin", os.environ["GRAFANA_ADMIN_PASSWORD"])
 SHOTS = os.environ.get("SHOTS", "healthy")
 WANT = {"healthy": ["buckets-overview", "buckets-drives", "buckets-buckets", "buckets-access"],
-        "degraded": ["buckets-overview", "buckets-drives"]}[SHOTS]
+        "failure": ["buckets-overview", "buckets-drives"], "alerts": []}[SHOTS]
 
 
 def main():
@@ -38,14 +39,14 @@ def main():
             height = page.evaluate("() => Math.max(...[...document.querySelectorAll('*')].map(e => e.scrollHeight))")
             page.set_viewport_size({"width": 1600, "height": min(max(height, 1000), 4000)})
             time.sleep(6)
-            name = uid.removeprefix("buckets-") + ("-degraded" if SHOTS == "degraded" else "")
+            name = uid.removeprefix("buckets-") + ("-failure" if SHOTS == "failure" else "")
             page.screenshot(path=f"/screenshots/{name}.png")
             print(f"screenshots: {name}.png", flush=True)
-        if SHOTS == "degraded":
+        if SHOTS == "alerts":
             page.set_extra_http_headers({})
             # Prometheus's UI keeps polling, so wait for the page itself, not the network.
-            page.set_viewport_size({"width": 1600, "height": 900})
-            page.goto(f"{PROMETHEUS}/alerts?state=firing", wait_until="load")
+            page.set_viewport_size({"width": 1600, "height": 340})
+            page.goto(f"{PROMETHEUS}/alerts?state=pending&state=firing", wait_until="load")
             time.sleep(5)
             page.screenshot(path="/screenshots/prometheus-alerts.png")
             print("screenshots: prometheus-alerts.png", flush=True)

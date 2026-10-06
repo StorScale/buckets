@@ -122,7 +122,7 @@ console, with the same token. If the servers' metrics are public
 
 ## Try it locally
 
-[`examples/monitoring`](../examples/monitoring) runs all of this on one machine: a four-drive Buckets server with steady traffic, Prometheus scraping it as above with the rules loaded, and Grafana with the four dashboards. Its test checks the scraping, the rules and the dashboards' queries, then empties a drive under load to check that Buckets reports it offline and the drive alerts start.
+[`examples/monitoring`](../examples/monitoring) runs all of this on one machine: a four-drive Buckets server with steady traffic, Prometheus scraping it as above with the rules loaded, and Grafana with the four dashboards. Its test checks the scraping, the rules and the dashboards' queries, then empties a drive under load, as a swapped disk looks, and checks that Buckets reports the drive offline and the drive alerts start.
 
 ```bash
 cd examples/monitoring
