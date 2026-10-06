@@ -6,8 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- `spec.tls.certManager` and `spec.console.tls.certManager`: the operator asks cert-manager for the certificates. They name every Service and each server, and come from your issuer (`issuerRef`) or a CA of the cluster's own. The servers and console pick up renewals without restarting, and `status.tls` shows each certificate's readiness and expiry. Without cert-manager, the cluster says so. `privateKey` picks the key type when an issuer needs one (Vault PKI roles may sign only RSA).
+
 ### Fixed
 - An emptied drive was marked offline but kept taking writes. New objects landed on it, so it never counted as an empty replacement, and the 1.6.0 auto-format and heal never ran. A drive in any offline state now refuses calls. Calls also check, at most once a second, that the drive's `format.json` is still there, so an emptied drive stops taking writes within about a second. What did land in that second is newer than the moment the drive was found empty: it is cleared, and the drive is formatted and healed. Data from before that moment still keeps a drive from being formatted over.
+- `tests/integration/cluster.sh` waits for the peers to notice two nodes are gone before checking the cluster health endpoint, instead of failing now and then.
 
 ## [1.6.0] - 2026-10-06
 

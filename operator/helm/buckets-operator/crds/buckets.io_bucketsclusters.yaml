@@ -118,6 +118,30 @@ spec:
                       description: A Secret whose ca.crt nodes trust (defaults to the certificate's own ca.crt).
                       properties:
                         name: {type: string}
+                    certManager:
+                      type: object
+                      description: "Have cert-manager issue the certificate (Secret <name>-tls). Without issuerRef, the operator makes the cluster a CA of its own. Not with certSecret."
+                      properties:
+                        issuerRef:
+                          type: object
+                          required: [name]
+                          properties:
+                            name: {type: string}
+                            kind: {type: string, description: "Issuer (default) or ClusterIssuer"}
+                            group: {type: string, description: "default cert-manager.io"}
+                        dnsNames:
+                          type: array
+                          items: {type: string}
+                          description: Names besides the ones the operator puts in, for example an external host name.
+                        duration:
+                          type: string
+                          description: "The certificate's lifetime, e.g. 2160h (default: the issuer's)."
+                        privateKey:
+                          type: object
+                          description: "The key's kind (default: ECDSA P-256 from the cluster's own CA, else the issuer's default, RSA 2048). Some issuers sign only RSA (Vault PKI roles, for one)."
+                          properties:
+                            algorithm: {type: string, enum: [RSA, ECDSA, Ed25519]}
+                            size: {type: integer}
                 configuration:
                   type: object
                   description: >-
@@ -246,6 +270,27 @@ spec:
                           description: A kubernetes.io/tls Secret (tls.crt, tls.key) that consoled serves.
                           properties:
                             name: {type: string}
+                        certManager:
+                          type: object
+                          description: "Have cert-manager issue the console's certificate (Secret <name>-console-tls), with its Ingress host. Without issuerRef, from the cluster's own CA. Not with certSecret."
+                          properties:
+                            issuerRef:
+                              type: object
+                              required: [name]
+                              properties:
+                                name: {type: string}
+                                kind: {type: string}
+                                group: {type: string}
+                            dnsNames:
+                              type: array
+                              items: {type: string}
+                            duration: {type: string}
+                            privateKey:
+                              type: object
+                              description: "The key's kind (default: ECDSA P-256 from the cluster's own CA, else the issuer's default, RSA 2048). Some issuers sign only RSA (Vault PKI roles, for one)."
+                              properties:
+                                algorithm: {type: string, enum: [RSA, ECDSA, Ed25519]}
+                                size: {type: integer}
                     resources:
                       type: object
                       x-kubernetes-preserve-unknown-fields: true
@@ -284,6 +329,10 @@ spec:
                 kms:
                   type: object
                   description: The KES server, and the latest trial of new key store settings (test).
+                  x-kubernetes-preserve-unknown-fields: true
+                tls:
+                  type: object
+                  description: "The certificates cert-manager issues for spec.tls.certManager: phase (Ready, Issuing) and each one's readiness and expiry."
                   x-kubernetes-preserve-unknown-fields: true
                 monitoring:
                   type: object

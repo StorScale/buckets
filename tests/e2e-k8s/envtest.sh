@@ -430,6 +430,56 @@ expect "spec.env setting sign-in too: refused" "$(jp bc/idc '{.status.identity.m
   "spec.env MINIO_IDENTITY_OPENID_CLIENT_ID"
 k -n tenant delete bc idc >/dev/null
 
+echo "== spec.tls.certManager: refused without cert-manager, then Issuers and Certificates"
+k apply -f - >/dev/null <<YAML
+apiVersion: buckets.io/v1alpha1
+kind: BucketsCluster
+metadata: {name: certs, namespace: tenant}
+spec:
+  image: bucketsd:test
+  tls: {certManager: {dnsNames: [s3.example.com]}}
+  pools: [{servers: 4, volumesPerServer: 1}]
+YAML
+until_true '[[ $(jp bc/certs "{.status.conditions[0].reason}") == CertManagerMissing ]]' || true
+expect "without cert-manager: said so" "$(jp bc/certs '{.status.conditions[0].reason}')" CertManagerMissing
+expect "and nothing started" "$(k -n tenant get sts certs-pool-0 -o name 2>/dev/null || echo none)" none
+for kind in Certificate Issuer; do # cert-manager's kinds (schemas left open)
+  lower=$(echo "$kind" | tr 'A-Z' 'a-z')
+  k apply -f - >/dev/null <<YAML
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata: {name: ${lower}s.cert-manager.io}
+spec:
+  group: cert-manager.io
+  scope: Namespaced
+  names: {kind: $kind, listKind: ${kind}List, plural: ${lower}s, singular: $lower}
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      subresources: {status: {}}
+      schema: {openAPIV3Schema: {type: object, x-kubernetes-preserve-unknown-fields: true}}
+YAML
+done
+until_true 'k -n tenant get certificate certs-tls' || true
+expect "the cluster's own CA chain" "$(k -n tenant get issuer -o name | sort | tr '\n' ' ')" \
+  "issuer.cert-manager.io/certs-ca issuer.cert-manager.io/certs-selfsigned "
+expect "its CA certificate" "$(jp certificate/certs-ca '{.spec.isCA} {.spec.issuerRef.name}')" "true certs-selfsigned"
+expect "the servers' certificate, from it" "$(jp certificate/certs-tls '{.spec.secretName} {.spec.issuerRef.name}')" "certs-tls certs-ca"
+expect "with the extra name" "$(jp certificate/certs-tls '{.spec.dnsNames[6]}')" s3.example.com
+expect "owned by the cluster" "$(jp certificate/certs-tls '{.metadata.ownerReferences[0].kind}')" BucketsCluster
+until_true 'k -n tenant get sts certs-pool-0' || true
+expect "the servers mount it" "$(jp sts/certs-pool-0 '{.spec.template.spec.volumes[?(@.name=="certs")].projected.sources[0].secret.name}')" certs-tls
+expect "and serve HTTPS" "$(jp sts/certs-pool-0 '{.spec.template.spec.containers[0].readinessProbe.httpGet.scheme}')" HTTPS
+until_true '[[ $(jp bc/certs "{.status.tls.phase}") == Issuing ]]' || true
+expect "status.tls: not issued yet (no cert-manager here to issue it)" "$(jp bc/certs '{.status.tls.phase} {.status.tls.certificates[0].name}')" "Issuing certs-tls"
+# what cert-manager would report once issued
+k -n tenant patch certificate certs-tls --subresource=status --type merge \
+  -p '{"status":{"conditions":[{"type":"Ready","status":"True"}],"notAfter":"2027-01-04T00:00:00Z"}}' >/dev/null
+until_true '[[ $(jp bc/certs "{.status.tls.phase}") == Ready ]]' || true
+expect "status.tls: ready, and until when" "$(jp bc/certs '{.status.tls.phase} {.status.tls.certificates[0].notAfter}')" "Ready 2027-01-04T00:00:00Z"
+k -n tenant delete bc certs --wait=false >/dev/null
+
 echo "== leader election"
 start_operator opb
 sleep 3

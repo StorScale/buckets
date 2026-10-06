@@ -42,6 +42,32 @@ static long long id_at(yyjson_val *o, const char *key) {
   return yyjson_is_int(v) ? yyjson_get_sint(v) : -1;
 }
 
+/* spec.tls.certManager (or the console's): {issuerRef?: {name, kind?, group?}, dnsNames?: [...], duration?}. */
+static bool cert_manager_spec(yyjson_val *cm, const char *cert_secret, const char *where, const char *name,
+                              const char *suffix, bc_cert_manager *out, char *err, size_t errlen) {
+  memset(out, 0, sizeof(*out));
+  if (!cm) return true;
+  if (!yyjson_is_obj(cm)) {
+    snprintf(err, errlen, "%s.certManager must be an object", where);
+    return false;
+  }
+  if (cert_secret) {
+    snprintf(err, errlen, "%s: set certSecret or certManager, not both", where);
+    return false;
+  }
+  out->enabled = true;
+  out->issuer_ref = yyjson_obj_get(cm, "issuerRef");
+  if (out->issuer_ref && !yyjson_get_str(yyjson_obj_get(out->issuer_ref, "name"))) {
+    snprintf(err, errlen, "%s.certManager.issuerRef needs a name", where);
+    return false;
+  }
+  out->dns_names = yyjson_obj_get(cm, "dnsNames");
+  out->private_key = yyjson_obj_get(cm, "privateKey");
+  out->duration = yyjson_get_str(yyjson_obj_get(cm, "duration"));
+  snprintf(out->secret, sizeof(out->secret), "%s-%s", name, suffix);
+  return true;
+}
+
 bool bc_parse(yyjson_val *obj, const char *cluster_domain, bc_spec *out, char *err, size_t errlen) {
   memset(out, 0, sizeof(*out));
   yyjson_val *meta = yyjson_obj_get(obj, "metadata"), *spec = yyjson_obj_get(obj, "spec");
@@ -104,6 +130,10 @@ bool bc_parse(yyjson_val *obj, const char *cluster_domain, bc_spec *out, char *e
   yyjson_val *tls = yyjson_obj_get(spec, "tls");
   out->tls_secret = str_at(yyjson_obj_get(tls, "certSecret"), "name");
   out->ca_secret = str_at(yyjson_obj_get(tls, "caSecret"), "name");
+  if (!cert_manager_spec(yyjson_obj_get(tls, "certManager"), out->tls_secret, "spec.tls", out->name, "tls",
+                         &out->cert_manager, err, errlen))
+    return false;
+  if (out->cert_manager.enabled) out->tls_secret = out->cert_manager.secret;
   out->service_type = str_at(spec, "serviceType");
   if (!out->service_type) out->service_type = "ClusterIP";
   yyjson_val *con = yyjson_obj_get(spec, "console");
@@ -126,6 +156,10 @@ bool bc_parse(yyjson_val *obj, const char *cluster_domain, bc_spec *out, char *e
   out->console.affinity = yyjson_obj_get(con, "affinity");
   out->console.s3_url = str_at(con, "s3URL");
   out->console.tls_secret = str_at(yyjson_obj_get(yyjson_obj_get(con, "tls"), "certSecret"), "name");
+  if (!cert_manager_spec(yyjson_obj_get(yyjson_obj_get(con, "tls"), "certManager"), out->console.tls_secret,
+                         "spec.console.tls", out->name, "console-tls", &out->console_cert_manager, err, errlen))
+    return false;
+  if (out->console_cert_manager.enabled) out->console.tls_secret = out->console_cert_manager.secret;
   yyjson_val *mon = yyjson_obj_get(spec, "monitoring");
   yyjson_val *men = yyjson_obj_get(mon, "enabled");
   out->monitoring.enabled = yyjson_is_bool(men) ? yyjson_get_bool(men) : -1;
@@ -485,6 +519,8 @@ static bc_object statefulset(const bc_spec *s, size_t pi, const char *volumes, c
     }
     mval *ca = ADD_OBJ(d, yyjson_mut_arr_add_obj(d, sources), "secret");
     ADD_STR(d, ca, "name", s->ca_secret ? s->ca_secret : s->tls_secret);
+    /* cert-manager puts ca.crt in only for CA issuers; a public one's certificate needs the system's trust */
+    if (s->cert_manager.enabled && !s->ca_secret) ADD_BOOL(d, ca, "optional", true);
     mval *ci = yyjson_mut_arr_add_obj(d, ADD_ARR(d, ca, "items"));
     ADD_STR(d, ci, "key", "ca.crt");
     ADD_STR(d, ci, "path", "CAs/ca.crt");
@@ -798,11 +834,12 @@ yyjson_mut_doc *bc_console_secret(const bc_spec *s, const char *passphrase, cons
 static size_t console_rbac(const bc_spec *s, bc_object *o);
 
 size_t bc_desired(const bc_spec *s, bc_object **out) {
-  size_t n = 2 + 2 * s->npools + 6, k = 0;
+  size_t n = 2 + 2 * s->npools + 6 + 5, k = 0;
   bc_object *o = buckets_xcalloc(n, sizeof(*o));
   char *vols = bc_volumes(s);
   char topo[17];
   bc_topology(s, topo);
+  k += bc_certificates(s, o + k); /* before the pods that mount them */
   o[k++] = service(s, true);
   o[k++] = service(s, false);
   for (size_t p = 0; p < s->npools; p++) o[k++] = statefulset(s, p, vols, topo);
@@ -1267,4 +1304,112 @@ bc_object bc_console_service_monitor(const bc_spec *s, const char *ca_key) {
   snprintf(server, sizeof(server), "%s-console.%s.svc", s->name, s->ns);
   return service_monitor(s, name, "console", s->console.tls_secret ? "https-console" : "http-console", paths, NULL, 1,
                          s->console.tls_secret, ca_key, server);
+}
+
+/* ---- certificates from cert-manager ------------------------------------------------------- */
+
+static void issuer_ref(mdoc *d, mval *spec, yyjson_val *ref, const char *own) {
+  mval *r = ADD_OBJ(d, spec, "issuerRef");
+  if (!ref) {
+    ADD_STR(d, r, "name", own);
+    ADD_STR(d, r, "kind", "Issuer");
+    ADD_STR(d, r, "group", "cert-manager.io");
+    return;
+  }
+  ADD_STR(d, r, "name", yyjson_get_str(yyjson_obj_get(ref, "name")));
+  const char *kind = yyjson_get_str(yyjson_obj_get(ref, "kind")), *group = yyjson_get_str(yyjson_obj_get(ref, "group"));
+  ADD_STR(d, r, "kind", kind ? kind : "Issuer");
+  ADD_STR(d, r, "group", group ? group : "cert-manager.io");
+}
+
+static bc_object certificate(const bc_spec *s, const char *name, const char *secret, const char *common,
+                             const char *const *dns, size_t ndns, yyjson_val *extra, yyjson_val *ref,
+                             const char *duration, yyjson_val *key, bool ca) {
+  mdoc *d = yyjson_mut_doc_new(NULL);
+  mval *root = object(d, "cert-manager.io/v1", "Certificate", s, name, NULL);
+  mval *spec = ADD_OBJ(d, root, "spec");
+  ADD_STR(d, spec, "secretName", secret);
+  ADD_STR(d, spec, "commonName", common);
+  if (ca) {
+    ADD_BOOL(d, spec, "isCA", true);
+    ADD_STR(d, spec, "duration", "87600h"); /* ten years: what it signs is renewed far more often */
+  } else {
+    mval *names = ADD_ARR(d, spec, "dnsNames");
+    for (size_t i = 0; i < ndns; i++) yyjson_mut_arr_add_strcpy(d, names, dns[i]);
+    size_t i, max;
+    yyjson_val *v;
+    yyjson_arr_foreach(extra, i, max, v) if (yyjson_is_str(v)) yyjson_mut_arr_add_strcpy(d, names, yyjson_get_str(v));
+    mval *u = ADD_ARR(d, spec, "usages");
+    yyjson_mut_arr_add_str(d, u, "server auth");
+    yyjson_mut_arr_add_str(d, u, "client auth"); /* servers also call each other */
+    yyjson_mut_arr_add_str(d, u, "digital signature");
+    yyjson_mut_arr_add_str(d, u, "key encipherment");
+    if (duration) ADD_STR(d, spec, "duration", duration);
+  }
+  /* the key: as asked; ECDSA P-256 from the cluster's own CA; else the issuer's default (cert-manager's RSA
+   * 2048), as an issuer may sign only some kinds (Vault's PKI roles, for one) */
+  mval *pk = ADD_OBJ(d, spec, "privateKey");
+  const char *alg = yyjson_get_str(yyjson_obj_get(key, "algorithm"));
+  if (alg) {
+    ADD_STR(d, pk, "algorithm", alg);
+    if (yyjson_is_int(yyjson_obj_get(key, "size"))) ADD_INT(d, pk, "size", yyjson_get_int(yyjson_obj_get(key, "size")));
+  } else if (ca || !ref) {
+    ADD_STR(d, pk, "algorithm", "ECDSA");
+    ADD_INT(d, pk, "size", 256);
+  }
+  ADD_STR(d, pk, "rotationPolicy", "Always");
+  /* the CA is signed by the self-signed issuer; certificates by the given issuer, else by the cluster's CA */
+  char own[160];
+  snprintf(own, sizeof(own), ca ? "%s-selfsigned" : "%s-ca", s->name);
+  issuer_ref(d, spec, ca ? NULL : ref, own);
+  return (bc_object){path_of("/apis/cert-manager.io/v1", s, "certificates", name), d};
+}
+
+static bc_object issuer(const bc_spec *s, const char *name, const char *ca_secret) {
+  mdoc *d = yyjson_mut_doc_new(NULL);
+  mval *root = object(d, "cert-manager.io/v1", "Issuer", s, name, NULL);
+  mval *spec = ADD_OBJ(d, root, "spec");
+  if (ca_secret) ADD_STR(d, ADD_OBJ(d, spec, "ca"), "secretName", ca_secret);
+  else ADD_OBJ(d, spec, "selfSigned");
+  return (bc_object){path_of("/apis/cert-manager.io/v1", s, "issuers", name), d};
+}
+
+size_t bc_certificates(const bc_spec *s, bc_object *o) {
+  size_t k = 0;
+  const bc_cert_manager *cm[2] = {&s->cert_manager, &s->console_cert_manager};
+  bool own_ca = (cm[0]->enabled && !cm[0]->issuer_ref) || (s->console.enabled && cm[1]->enabled && !cm[1]->issuer_ref);
+  char a[160], b[160], c[160];
+  if (own_ca) { /* the cluster's own CA: self-signed, then the issuer it backs */
+    snprintf(a, sizeof(a), "%s-selfsigned", s->name);
+    snprintf(b, sizeof(b), "%s-ca", s->name);
+    snprintf(c, sizeof(c), "%s Buckets CA", s->name);
+    o[k++] = issuer(s, a, NULL);
+    o[k++] = certificate(s, b, b, c, NULL, 0, NULL, NULL, NULL, NULL, true);
+    o[k++] = issuer(s, b, b);
+  }
+  if (cm[0]->enabled) {
+    char d0[300], d1[300], d2[300], d3[300], d4[300], d5[300];
+    snprintf(d0, sizeof(d0), "%s.%s.svc", s->name, s->ns);
+    snprintf(d1, sizeof(d1), "%s", s->name);
+    snprintf(d2, sizeof(d2), "%s.%s", s->name, s->ns);
+    snprintf(d3, sizeof(d3), "%s.%s.svc.%s", s->name, s->ns, s->cluster_domain ? s->cluster_domain : "cluster.local");
+    snprintf(d4, sizeof(d4), "*.%s-hl.%s.svc.%s", s->name, s->ns, s->cluster_domain ? s->cluster_domain : "cluster.local");
+    snprintf(d5, sizeof(d5), "*.%s-hl.%s.svc", s->name, s->ns);
+    const char *dns[] = {d0, d1, d2, d3, d4, d5};
+    o[k++] = certificate(s, cm[0]->secret, cm[0]->secret, d0, dns, 6, cm[0]->dns_names, cm[0]->issuer_ref,
+                         cm[0]->duration, cm[0]->private_key, false);
+  }
+  if (s->console.enabled && cm[1]->enabled) {
+    char d0[300], d1[300], d2[300], d3[300], d4[300];
+    snprintf(d0, sizeof(d0), "%s-console.%s.svc", s->name, s->ns);
+    snprintf(d1, sizeof(d1), "%s-console", s->name);
+    snprintf(d2, sizeof(d2), "%s-console.%s", s->name, s->ns);
+    snprintf(d3, sizeof(d3), "%s-console.%s.svc.%s", s->name, s->ns, s->cluster_domain ? s->cluster_domain : "cluster.local");
+    snprintf(d4, sizeof(d4), "%s", s->console.ingress_host ? s->console.ingress_host : d0);
+    const char *dns[] = {d0, d1, d2, d3, d4};
+    o[k++] = certificate(s, cm[1]->secret, cm[1]->secret, s->console.ingress_host ? s->console.ingress_host : d0, dns,
+                         s->console.ingress_host ? 5 : 4, cm[1]->dns_names, cm[1]->issuer_ref, cm[1]->duration,
+                         cm[1]->private_key, false);
+  }
+  return k;
 }

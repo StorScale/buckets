@@ -824,13 +824,97 @@ static void test_console_scheduling(void **state) {
   }
 }
 
+static yyjson_mut_val *find_kind(bc_object *o, size_t n, const char *kind, const char *name, size_t *at) {
+  for (size_t i = 0; i < n; i++) {
+    yyjson_mut_val *r = yyjson_mut_doc_get_root(o[i].doc);
+    const char *k = yyjson_mut_get_str(yyjson_mut_obj_get(r, "kind"));
+    const char *nm = yyjson_mut_get_str(AT(r, "metadata", "name"));
+    if (k && strcmp(k, kind) == 0 && (!name || (nm && strcmp(nm, name) == 0))) {
+      if (at) *at = i;
+      return r;
+    }
+  }
+  return NULL;
+}
+
+/* spec.tls.certManager: the cluster's own CA chain, or an issuer it names; the console's certificate. */
+static void test_cert_manager(void **state) {
+  (void)state;
+  bc_spec s;
+  yyjson_doc *d = parse("{\"metadata\":{\"name\":\"store\",\"namespace\":\"data\",\"uid\":\"u\"},\"spec\":{"
+                        "\"tls\":{\"certManager\":{\"dnsNames\":[\"s3.example.com\"]}},"
+                        "\"pools\":[{\"servers\":4,\"volumesPerServer\":1}]}}",
+                        &s, true);
+  assert_true(s.cert_manager.enabled);
+  assert_string_equal(s.tls_secret, "store-tls");
+  bc_object *o;
+  size_t n = bc_desired(&s, &o), ca_at = 0, leaf_at = 0, sts_at = 0;
+  assert_non_null(find_kind(o, n, "Issuer", "store-selfsigned", NULL));
+  yyjson_mut_val *ca = find_kind(o, n, "Certificate", "store-ca", &ca_at);
+  assert_non_null(ca);
+  assert_true(yyjson_mut_get_bool(AT(ca, "spec", "isCA")));
+  assert_string_equal(yyjson_mut_get_str(AT(ca, "spec", "issuerRef", "name")), "store-selfsigned");
+  assert_string_equal(yyjson_mut_get_str(AT(find_kind(o, n, "Issuer", "store-ca", NULL), "spec", "ca", "secretName")), "store-ca");
+  yyjson_mut_val *leaf = find_kind(o, n, "Certificate", "store-tls", &leaf_at);
+  assert_non_null(leaf);
+  assert_string_equal(yyjson_mut_get_str(AT(leaf, "spec", "secretName")), "store-tls");
+  assert_string_equal(yyjson_mut_get_str(AT(leaf, "spec", "issuerRef", "name")), "store-ca");
+  assert_string_equal(yyjson_mut_get_str(AT(leaf, "spec", "issuerRef", "kind")), "Issuer");
+  assert_string_equal(yyjson_mut_get_str(AT(leaf, "spec", "privateKey", "algorithm")), "ECDSA"); /* our own CA */
+  char *names = yyjson_mut_val_write(AT(leaf, "spec", "dnsNames"), 0, NULL);
+  assert_string_equal(names, "[\"store.data.svc\",\"store\",\"store.data\",\"store.data.svc.cluster.local\","
+                             "\"*.store-hl.data.svc.cluster.local\",\"*.store-hl.data.svc\",\"s3.example.com\"]");
+  free(names);
+  find_kind(o, n, "StatefulSet", NULL, &sts_at);
+  assert_true(ca_at < leaf_at && leaf_at < sts_at); /* issued before the pods that mount it */
+  /* the pods mount it, and its ca.crt is optional (a public issuer has none) */
+  char *sts = yyjson_mut_write(o[sts_at].doc, 0, NULL);
+  assert_non_null(strstr(sts, "\"name\":\"store-tls\",\"items\":[{\"key\":\"tls.crt\""));
+  assert_non_null(strstr(sts, "\"name\":\"store-tls\",\"optional\":true"));
+  free(sts);
+  bc_objects_free(o, n);
+  yyjson_doc_free(d);
+
+  /* an issuer of one's own, and the console with its Ingress host */
+  d = parse("{\"metadata\":{\"name\":\"store\",\"namespace\":\"data\",\"uid\":\"u\"},\"spec\":{"
+            "\"tls\":{\"certManager\":{\"issuerRef\":{\"name\":\"corp\",\"kind\":\"ClusterIssuer\"},\"duration\":\"2160h\"}},"
+            "\"console\":{\"enabled\":true,\"ingress\":{\"host\":\"console.example.com\"},"
+            "\"tls\":{\"certManager\":{\"issuerRef\":{\"name\":\"corp\",\"kind\":\"ClusterIssuer\"}}}},"
+            "\"pools\":[{\"servers\":4,\"volumesPerServer\":1}]}}",
+            &s, true);
+  n = bc_desired(&s, &o);
+  assert_null(find_kind(o, n, "Issuer", NULL, NULL)); /* no CA of its own */
+  leaf = find_kind(o, n, "Certificate", "store-tls", NULL);
+  assert_string_equal(yyjson_mut_get_str(AT(leaf, "spec", "issuerRef", "kind")), "ClusterIssuer");
+  assert_string_equal(yyjson_mut_get_str(AT(leaf, "spec", "duration")), "2160h");
+  assert_null(AT(leaf, "spec", "privateKey", "algorithm")); /* the issuer's default: it may sign only RSA */
+  assert_string_equal(yyjson_mut_get_str(AT(leaf, "spec", "privateKey", "rotationPolicy")), "Always");
+  yyjson_mut_val *con = find_kind(o, n, "Certificate", "store-console-tls", NULL);
+  assert_non_null(con);
+  assert_string_equal(yyjson_mut_get_str(AT(con, "spec", "commonName")), "console.example.com");
+  names = yyjson_mut_val_write(AT(con, "spec", "dnsNames"), 0, NULL);
+  assert_non_null(strstr(names, "\"console.example.com\""));
+  assert_non_null(strstr(names, "\"store-console.data.svc\""));
+  free(names);
+  assert_string_equal(s.console.tls_secret, "store-console-tls");
+  bc_objects_free(o, n);
+  yyjson_doc_free(d);
+
+  /* not both */
+  d = parse("{\"metadata\":{\"name\":\"store\",\"namespace\":\"data\",\"uid\":\"u\"},\"spec\":{"
+            "\"tls\":{\"certSecret\":{\"name\":\"mine\"},\"certManager\":{}},"
+            "\"pools\":[{\"servers\":4,\"volumesPerServer\":1}]}}",
+            &s, false);
+  yyjson_doc_free(d);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_volumes_and_topology), cmocka_unit_test(test_desired_objects), cmocka_unit_test(test_tls),
       cmocka_unit_test(test_root_secret_not_owned), cmocka_unit_test(test_invalid),
       cmocka_unit_test(test_console), cmocka_unit_test(test_console_tls), cmocka_unit_test(test_console_env),
       cmocka_unit_test(test_minio_tenant_layout), cmocka_unit_test(test_kes_spec), cmocka_unit_test(test_kes_objects), cmocka_unit_test(test_kes_log_reason), cmocka_unit_test(test_kes_adopted), cmocka_unit_test(test_identity), cmocka_unit_test(test_identity_conflicts),
-      cmocka_unit_test(test_monitoring), cmocka_unit_test(test_console_scheduling),
+      cmocka_unit_test(test_monitoring), cmocka_unit_test(test_console_scheduling), cmocka_unit_test(test_cert_manager),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }
