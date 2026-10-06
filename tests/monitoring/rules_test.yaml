@@ -271,7 +271,7 @@ tests:
             exp_annotations:
               summary: "data/store: the identity sync cannot reach the provider"
               description: "Twice in three hours the sync could not learn whether people with credentials are still in the identity provider. People who left keep their access keys until it works again."
-              runbook_url: https://github.com/StorScale/buckets/blob/main/docs/identity.md#bucketsidentitysyncfailing
+              runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketsidentitysyncfailing
 
   # removals held back: fires after a held sync, quiet again two hours later
   - interval: 30m
@@ -289,7 +289,7 @@ tests:
             exp_annotations:
               summary: "data/store: the identity sync held back removals"
               description: "More people left the identity provider at once than BUCKETS_OPENID_REMOVE_MAX allows, so none were removed. Check the provider; if it is right, raise the limit."
-              runbook_url: https://github.com/StorScale/buckets/blob/main/docs/identity.md#bucketsidentitysyncheld
+              runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketsidentitysyncheld
       - eval_time: 4h30m
         alertname: BucketsIdentitySyncHeld
         exp_alerts: []

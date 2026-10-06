@@ -163,7 +163,11 @@ manifest.
 
 ## Order
 
-1. Entra identity sync: removal, with the grace period and safety limit.
+1. ✅ Entra identity sync: removal, with the grace period and safety limit,
+   set up from the console's Sign-in page ("People who leave"), with metrics,
+   two alerts and docs ([identity.md](../identity.md#people-who-leave)).
+   Showing "owner left" in the access review and on the Access Keys page is
+   left for later: such keys show as off meanwhile.
 2. Roles kept current.
 3. Okta and Keycloak.
 4. SCIM endpoint (optional), acting through the same removal code.

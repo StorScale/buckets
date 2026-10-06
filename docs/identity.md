@@ -153,6 +153,46 @@ Buckets cannot list everyone your identity provider gives a role. An OpenID role
 - **Create user** is hidden while OpenID sign-in is on, so every person signs in through the provider. Local users that already exist are still listed and can be disabled or deleted. Set `BUCKETS_CONSOLE_LOCAL_USERS=on` in `spec.console.env` to offer it again.
 - People who need keys for S3 tools (`mc`, the AWS CLI, SDKs) create access keys from the console after signing in. The keys carry the person's roles.
 
+## People who leave
+
+With Entra ID, Buckets can take away the access of people who leave. Turning
+someone off in Entra ID stops them signing in, but access keys they made keep
+working. With **People who leave** on, the servers ask Microsoft Graph every
+hour about each person holding Buckets credentials:
+
+- **Deleted or disabled in Entra ID:** their temporary credentials (and console
+  sessions) end at once. Their access keys are turned off at once, and deleted
+  after 30 days (**Delete their access keys after**).
+- **Back within those days:** their keys come back on. A key its owner had
+  turned off stays off.
+- **Graph can't be reached, or answers an error:** whoever it didn't answer for
+  is left as they are, and the `BucketsIdentitySyncFailing` alert says so.
+- **More people leaving at once than the limit** (10 unless set): nobody is
+  removed until someone confirms by raising it. This guards against a directory
+  that answers wrongly. The `BucketsIdentitySyncHeld` alert says so.
+
+To set it up, on **Identity → Sign-in**, in the single sign-on card:
+
+1. In the app registration, under **API permissions**, add **Microsoft Graph →
+   Application permissions → User.Read.All**, then **Grant admin consent**. The
+   sync signs in as the same app, with its client secret, and only reads users.
+2. Turn on **Remove the access of people who leave**, and save.
+3. **Look up a person**: the console asks Graph about them as the sync will.
+   Apply needs this to pass.
+
+Applying restarts the servers one at a time, as LDAP settings do. Each step is
+in the log of the server leading the first erasure set (`identity sync:`), and
+the counts are in its metrics (`buckets_node_identity_sync_*`). Okta and
+Keycloak, and SCIM from the provider, are planned ([the
+design](design/identity-sync.md)).
+
+Without the console, set `BUCKETS_OPENID_SYNC_PROVIDER=entra` and
+`BUCKETS_OPENID_SYNC_TENANT_ID`, `_CLIENT_ID` and `_CLIENT_SECRET` on the
+servers. `BUCKETS_OPENID_SYNC_INTERVAL` (seconds), `BUCKETS_OPENID_REMOVE_AFTER`
+(days) and `BUCKETS_OPENID_REMOVE_MAX` change the defaults. LDAP needs none of
+this: users removed from the directory lose their credentials at the hourly
+LDAP sync, as with MinIO.
+
 ## Troubleshooting
 
 | What happens | Likely cause |
@@ -167,5 +207,7 @@ Buckets cannot list everyone your identity provider gives a role. An OpenID role
 | Back on the login page with an error about the policy claim | The token has no `roles` claim: the person holds no app role |
 | Back on the login page with no error | The session cookie did not reach the browser. Consoles older than ab8bdae cut response headers at 1 KB, and Entra ID sessions make a ~2 KB cookie; upgrade the console |
 | "The identity provider cannot be reached" | The console cannot reach `login.microsoftonline.com` (network policy, proxy, or DNS) |
+| **Look up a person** says the app needs User.Read.All | Add Microsoft Graph's User.Read.All **application** permission (not delegated) and grant admin consent; it can take a few minutes to apply |
+| **Look up a person** shows an AADSTS error | The client secret is wrong or has expired: create a new one in the app registration |
 
 To see what a sign-in did on the server side, stream the server trace (`mc admin trace -a <alias>`, or the console's Trace page) while signing in: the `AssumeRoleWithWebIdentity` call shows whether credentials were issued, or why not.

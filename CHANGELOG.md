@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- People who leave Entra ID lose their Buckets access ([docs/identity.md](docs/identity.md#people-who-leave), [the design](docs/design/identity-sync.md)). Every hour, one server asks Microsoft Graph about each person holding credentials.
+  - Someone deleted or disabled loses their temporary credentials and console sessions at once.
+  - Their access keys are turned off at once and deleted after 30 days; they come back on if the person returns before then.
+  - A lookup that fails removes no one, and more people leaving at once than a limit (10) are held until someone raises it. `BucketsIdentitySyncFailing` and `BucketsIdentitySyncHeld` alert on both, from new `buckets_node_identity_sync_*` metrics.
+  - It is set up on **Identity → Sign-in** ("People who leave"), with the sign-in app and Graph's User.Read.All application permission. **Look up a person** tests it, and Apply needs that test to pass. Okta, Keycloak and SCIM come later.
+
 ## [1.8.0] - 2026-10-06
 
 ### Added

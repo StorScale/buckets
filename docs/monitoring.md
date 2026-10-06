@@ -239,6 +239,31 @@ Either way, encrypted objects cannot be read or written meanwhile.
 the operator, its pods and `status.kms`. For an external KES or Vault, the
 network path and its certificate.
 
+### BucketsIdentitySyncFailing
+
+**What:** twice within three hours, the identity sync could not learn whether
+the people holding credentials are still in Entra ID ([people who
+leave](identity.md#people-who-leave)). Until it works again, people who left
+keep their access keys.
+
+**Check:** the log of the server leading the first erasure set (the one that
+syncs), for `identity sync:` lines. Microsoft's words follow: an `AADSTS`
+error means the client secret is wrong or expired; `Authorization_RequestDenied`
+means the app lacks Graph's User.Read.All application permission or its admin
+consent; a connection error means the servers cannot reach
+`login.microsoftonline.com` or `graph.microsoft.com`. **Look up a person** on
+the Sign-in page tests the same settings.
+
+### BucketsIdentitySyncHeld
+
+**What:** more people left Entra ID at once than the limit allows (10 unless
+set), so the sync removed no one.
+
+**Check:** whether so many people really left. If the directory answered wrongly,
+for example after the app was pointed at another tenant, fix that first. If they
+did leave, raise **Most people removed in one sync** on the Sign-in page (or
+`BUCKETS_OPENID_REMOVE_MAX`); the next sync removes them.
+
 ### BucketsMetricsDown
 
 **What:** Prometheus has not been able to scrape a server for 5 minutes. While
