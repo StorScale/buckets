@@ -7,3 +7,14 @@ Create a cluster (see operator/examples in the Buckets repository):
 
 CRDs in the chart's crds/ directory are installed on first install only;
 upgrade them with: kubectl apply -f <chart>/crds/
+{{- if and .Values.monitoring.rules.enabled (not (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1/PrometheusRule")) }}
+
+The Prometheus Operator is not installed, so no alert rules were created.
+Load monitoring/rules.yaml from the chart into Prometheus instead (docs/monitoring.md).
+{{- end }}
+{{- if .Values.monitoring.dashboards.enabled }}
+
+Grafana dashboards: ConfigMaps in {{ default .Release.Namespace .Values.monitoring.dashboards.namespace }} labelled
+{{ toYaml .Values.monitoring.dashboards.labels }}. Grafana's sidecar must watch that namespace
+(on Rancher: --set monitoring.dashboards.namespace=cattle-dashboards).
+{{- end }}

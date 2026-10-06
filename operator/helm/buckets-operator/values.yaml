@@ -46,3 +46,20 @@ tolerations: []
 affinity: {}
 priorityClassName: ""
 extraEnv: []
+
+# Monitoring (docs/monitoring.md). Each BucketsCluster gets a ServiceMonitor
+# from the operator (spec.monitoring); the alert rules and dashboards are the
+# same for every cluster, so the chart installs them once.
+monitoring:
+  rules:
+    # A PrometheusRule with the alerts (monitoring/rules.yaml), when the
+    # Prometheus Operator's CRDs are installed.
+    enabled: true
+    labels: {} # for a Prometheus that selects rules by label
+  dashboards:
+    # ConfigMaps for Grafana's dashboard sidecar (kube-prometheus-stack,
+    # Rancher monitoring). On Rancher, set namespace to cattle-dashboards.
+    enabled: true
+    namespace: "" # default: the release's namespace
+    labels: {grafana_dashboard: "1"}
+    folder: Buckets

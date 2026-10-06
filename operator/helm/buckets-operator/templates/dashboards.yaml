@@ -1,0 +1,22 @@
+{{- /* The Grafana dashboards (monitoring/dashboards), as ConfigMaps for Grafana's dashboard sidecar. */ -}}
+{{- if .Values.monitoring.dashboards.enabled }}
+{{- $root := . }}
+{{- range $path, $_ := .Files.Glob "monitoring/dashboards/*.json" }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ printf "%s-%s" (include "buckets-operator.fullname" $root) (base $path | trimSuffix ".json") | trunc 63 | trimSuffix "-" }}
+  namespace: {{ default $root.Release.Namespace $root.Values.monitoring.dashboards.namespace }}
+  labels:
+    {{- include "buckets-operator.labels" $root | nindent 4 }}
+    {{- with $root.Values.monitoring.dashboards.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  annotations:
+    grafana_folder: {{ $root.Values.monitoring.dashboards.folder | quote }}
+data:
+  {{ base $path }}: |-
+{{ $root.Files.Get $path | indent 4 }}
+{{- end }}
+{{- end }}
