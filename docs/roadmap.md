@@ -72,11 +72,11 @@ Done when: a new admin connects Entra ID from the console without editing enviro
 
 Everything about a Buckets cluster should be declared in Kubernetes and watched by default. The operator already handles pool expansion, drive replacement, rolling upgrades, TLS and console TLS; this phase fills the gaps found while deploying to the dev cluster.
 
-- [x] **More resources as CRDs** (next release; [the design](design/declarative-buckets.md)). A `Bucket` applies and keeps versioning, object lock, quota, default encryption, lifecycle rules and replication, putting back changes made by hand. `BucketsSiteReplication` adds and removes sites. The envtest replicates objects between two servers and sets up site replication across three.
+- [x] **More resources as CRDs** (1.8.0; [the design](design/declarative-buckets.md)). A `Bucket` applies and keeps versioning, object lock, quota, default encryption, lifecycle rules and replication, putting back changes made by hand. `BucketsSiteReplication` adds and removes sites. The envtest replicates objects between two servers and sets up site replication across three.
 - [x] **Monitoring shipped with the operator** (1.5.0; [monitoring.md](monitoring.md), [the design](design/monitoring.md)). The operator gives each cluster a least-privilege metrics user and ServiceMonitors; the chart ships 12 alert rules with runbooks and four Grafana dashboards. `bucketsd` now takes failing, hung and emptied drives offline, and `tests/e2e-k8s/monitoring.sh` checks on the shared cluster that a drive made to fail raises `BucketsDriveOffline`.
 - [x] **cert-manager built in** (1.7.0). `spec.tls.certManager` has the operator ask cert-manager for certificates that name every Service and server, from your issuer or a CA of the cluster's own; renewals need no restarts. TLS stays opt-in, so existing plain-HTTP clusters are unchanged.
 - [x] **Console scheduling fields** (1.6.0). `spec.console` takes `nodeSelector`, `affinity` and `tolerations`, as pools do.
-- [x] **Exportable manifests** (next release; [gitops.md](gitops.md)). A documented repository layout, `operator/examples/gitops`, that the envtest validates against the CRDs, plus how the operator treats what is in Git and an Argo CD health check.
+- [x] **Exportable manifests** (1.8.0; [gitops.md](gitops.md)). A documented repository layout, `operator/examples/gitops`, that the envtest validates against the CRDs, plus how the operator treats what is in Git and an Argo CD health check.
 
 Done when: a cluster, its buckets, policies and replication are created from one Git repository, and a failing drive raises an alert without anyone looking.
 
