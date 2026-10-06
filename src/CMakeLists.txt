@@ -158,6 +158,7 @@ add_library(buckets STATIC
   iam/openid.c
   iam/idpsettings.c
   iam/teams.c
+  iam/access.c
   iam/ldapidp.c
   iam/plugins.c
   crypto/jwt.c
