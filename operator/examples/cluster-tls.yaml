@@ -1,25 +1,25 @@
-# TLS for S3 and internode traffic with a cert-manager Certificate. The DNS
-# names cover the S3 Service and every server's stable name.
-apiVersion: cert-manager.io/v1
-kind: Certificate
-metadata:
-  name: store-tls
-spec:
-  secretName: store-tls
-  issuerRef: {name: my-ca-issuer, kind: ClusterIssuer}
-  dnsNames:
-    - store
-    - store.default.svc
-    - store.default.svc.cluster.local
-    - "*.store-hl.default.svc.cluster.local"
----
+# TLS for S3, internode traffic and the console, with certificates the
+# operator asks cert-manager for (cert-manager must be installed). It names
+# every Service and each server's stable name in them, and the servers pick up
+# renewals without restarting.
+#
+# Without issuerRef, the cluster gets a CA of its own (Issuers store-selfsigned
+# and store-ca); clients trust ca.crt from Secret store-tls:
+#   kubectl get secret store-tls -o jsonpath='{.data.ca\.crt}' | base64 -d > ca.crt
 apiVersion: buckets.io/v1alpha1
 kind: BucketsCluster
 metadata:
   name: store
 spec:
   tls:
-    certSecret: {name: store-tls} # tls.crt, tls.key and ca.crt
+    certManager:
+      # issuerRef: {name: my-ca-issuer, kind: ClusterIssuer}  # an issuer of yours instead
+      dnsNames: [s3.example.com]                              # names besides the cluster's own
+      # privateKey: {algorithm: RSA, size: 2048}              # an issuer may sign only some key types
+  console:
+    enabled: true
+    tls:
+      certManager: {}
   pools:
     - servers: 4
       volumesPerServer: 2

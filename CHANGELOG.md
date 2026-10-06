@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- `spec.tls.certManager` and `spec.console.tls.certManager`: the operator asks cert-manager for the certificates. They name every Service and each server, and come from your issuer (`issuerRef`) or a CA of the cluster's own. The servers and console pick up renewals without restarting, and `status.tls` shows each certificate's readiness and expiry. Without cert-manager, the cluster says so. `privateKey` picks the key type when an issuer needs one (Vault PKI roles may sign only RSA).
+
+### Fixed
+- `tests/integration/cluster.sh` waits for the peers to notice two nodes are gone before checking the cluster health endpoint, instead of failing now and then.
+
 ## [1.6.0] - 2026-10-06
 
 ### Added

@@ -92,10 +92,13 @@ kubectl apply -f operator/deploy/crds/
 kubectl apply -f operator/deploy/operator.yaml
 ```
 
-Root credentials land in the Secret `<name>-root` unless `spec.credsSecret` names your own. Pools can be appended to expand a cluster; the operator then restarts every server together. Image changes roll one server at a time. `operator/examples/cluster-tls.yaml` shows TLS with cert-manager.
+Root credentials land in the Secret `<name>-root` unless `spec.credsSecret` names your own. Pools can be appended to expand a cluster; the operator then restarts every server together. Image changes roll one server at a time.
+
+For TLS, `spec.tls.certManager` has the operator ask cert-manager for a certificate that names every Service and server, from your issuer (`issuerRef`) or a CA of the cluster's own. Renewals are picked up without restarts. `status.tls` shows each certificate and its expiry, and `operator/examples/cluster-tls.yaml` shows it. To use a Secret you manage yourself, name it in `spec.tls.certSecret` instead.
 
 `spec.console.enabled` adds the web console as a Deployment of its own (`<name>-console`, port 9090, optionally behind an Ingress). In `spec.console`:
-- `tls.certSecret` names a `kubernetes.io/tls` Secret that the console serves itself, so it can sit behind a LoadBalancer on 443 without an Ingress;
+- `tls.certManager` (or `tls.certSecret`, a `kubernetes.io/tls` Secret of yours) gives the console a certificate it serves itself, so it can sit behind a LoadBalancer on 443 without an Ingress;
+- `nodeSelector`, `tolerations` and `affinity` place its pods, as for pools;
 - `env` adds environment variables, such as its OpenID sign-in settings, with `valueFrom` for secrets.
 
 `operator/examples/cluster-entra.yaml` puts these together: TLS on the servers and the console, and sign-in with Microsoft Entra ID (see [docs/identity.md](docs/identity.md)).

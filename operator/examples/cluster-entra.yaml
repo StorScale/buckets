@@ -3,8 +3,8 @@
 # on 443. Create first:
 #   - Secret entra-oidc (key client-secret): the app registration's client secret
 #     kubectl create secret generic entra-oidc --from-literal=client-secret='...'
-#   - Secrets store-tls and console-tls: kubernetes.io/tls, from cert-manager as in
-#     cluster-tls.yaml (store-tls also needs ca.crt, for internode trust)
+#   - cert-manager, with an issuer (here a ClusterIssuer my-ca-issuer); the
+#     operator asks it for the certificates, as in cluster-tls.yaml
 # Replace <tenant-id>, <client-id> and the console host name.
 apiVersion: buckets.io/v1alpha1
 kind: BucketsCluster
@@ -12,7 +12,7 @@ metadata:
   name: store
 spec:
   tls:
-    certSecret: {name: store-tls}
+    certManager: {issuerRef: {name: my-ca-issuer, kind: ClusterIssuer}}
   # The servers: app roles arrive in the "roles" claim and name Buckets policies.
   env:
     - {name: MINIO_IDENTITY_OPENID_CONFIG_URL, value: "https://login.microsoftonline.com/<tenant-id>/v2.0/.well-known/openid-configuration"}
@@ -28,7 +28,7 @@ spec:
   console:
     enabled: true
     tls:
-      certSecret: {name: console-tls}
+      certManager: {issuerRef: {name: my-ca-issuer, kind: ClusterIssuer}}
     # The console's sign-in button; the redirect URI must match the app registration.
     env:
       - {name: BUCKETS_CONSOLE_OIDC_CONFIG_URL, value: "https://login.microsoftonline.com/<tenant-id>/v2.0/.well-known/openid-configuration"}
