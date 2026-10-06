@@ -59,6 +59,9 @@ rules:
   - apiGroups: [policy]
     resources: [poddisruptionbudgets]
     verbs: [get, list, watch, create, patch, update]
+  - apiGroups: [monitoring.coreos.com] # each cluster's ServiceMonitor
+    resources: [servicemonitors]
+    verbs: [get, list, watch, create, update, patch, delete]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

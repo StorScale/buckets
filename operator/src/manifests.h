@@ -123,6 +123,10 @@ void bc_prometheus_secret_name(const bc_spec *s, char *out, size_t cap);
 yyjson_mut_doc *bc_prometheus_secret(const bc_spec *s, const char *ak, const char *sk, const char *token);
 /* ca_key: the key of the CA Secret's (ca.crt, or tls.crt for a self-signed certificate) */
 bc_object bc_service_monitor(const bc_spec *s, const char *ca_key);
+/* ServiceMonitor <name>-console: consoled's /metrics (failed sign-ins), with the same token; ca_key: of
+ * spec.console.tls's certificate Secret. */
+void bc_console_service_monitor_name(const bc_spec *s, char *out, size_t cap);
+bc_object bc_console_service_monitor(const bc_spec *s, const char *ca_key);
 #define BC_MONITORING_API "/apis/monitoring.coreos.com/v1"
 
 /* Services, one StatefulSet and one PodDisruptionBudget per pool, then the

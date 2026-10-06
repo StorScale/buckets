@@ -750,6 +750,30 @@ static void test_monitoring(void **state) {
   assert_int_equal(s.monitoring.enabled, 0);
   yyjson_doc_free(d);
 
+  /* the console's: its Service by its own label, /metrics, the token, no scope */
+  d = parse(k_console, &s, true);
+  sm = bc_console_service_monitor(&s, "ca.crt");
+  r = yyjson_mut_doc_get_root(sm.doc);
+  assert_non_null(strstr(sm.path, "/servicemonitors/"));
+  assert_non_null(strstr(yyjson_mut_get_str(AT(r, "metadata", "name")), "-console"));
+  assert_string_equal(yyjson_mut_get_str(AT(r, "spec", "selector", "matchLabels", "buckets.io/service")), "console");
+  ep = yyjson_mut_arr_get_first(AT(r, "spec", "endpoints"));
+  assert_string_equal(yyjson_mut_get_str(yyjson_mut_obj_get(ep, "path")), "/metrics");
+  assert_int_equal(yyjson_mut_arr_size(yyjson_mut_obj_get(ep, "relabelings")), 1);
+  free(sm.path);
+  yyjson_mut_doc_free(sm.doc);
+  bc_object *co;
+  size_t cn = bc_desired(&s, &co);
+  int console_svc = 0;
+  for (size_t i = 0; i < cn; i++) {
+    yyjson_mut_val *cr = yyjson_mut_doc_get_root(co[i].doc);
+    const char *svc = yyjson_mut_get_str(AT(cr, "metadata", "labels", "buckets.io/service"));
+    console_svc += svc && strcmp(svc, "console") == 0;
+  }
+  assert_int_equal(console_svc, 1);
+  bc_objects_free(co, cn);
+  yyjson_doc_free(d);
+
   /* the token: bucketsd's verifier takes it, with the user as subject and prometheus as issuer */
   buckets_buf t = BUCKETS_BUF_INIT;
   op_prometheus_token("store-prometheus", "s3cr3t-key", 1700000000, &t);

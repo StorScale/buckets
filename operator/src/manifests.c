@@ -585,6 +585,8 @@ static bc_object console_service(const bc_spec *s) {
   char name[128];
   bc_console_secret_name(s, name, sizeof(name));
   mval *root = console_object(d, "v1", "Service", s, name);
+  /* the console ServiceMonitor selects this Service, not others someone adds for the same pods */
+  ADD_STR(d, yyjson_mut_obj_get(yyjson_mut_obj_get(root, "metadata"), "labels"), "buckets.io/service", "console");
   mval *spec = ADD_OBJ(d, root, "spec");
   ADD_STR(d, spec, "type", s->console.service_type);
   ADD_STR(d, ADD_OBJ(d, spec, "selector"), "buckets.io/console", s->name);
@@ -1193,9 +1195,14 @@ static void relabel(mdoc *d, mval *arr, const char *label, const char *value) {
   yyjson_mut_obj_add_strcpy(d, r, "replacement", value);
 }
 
-bc_object bc_service_monitor(const bc_spec *s, const char *ca_key) {
+/* A ServiceMonitor selecting the Service labelled buckets.io/service=service, scraping each of paths
+ * (labelled scope=scopes[i], or no scope when NULL) with the metrics token, and over TLS when tls_secret
+ * is set (its ca_key, server: the certificate's name). */
+static bc_object service_monitor(const bc_spec *s, const char *name, const char *service, const char *port,
+                                 const char *const *paths, const char *const *scopes, size_t n, const char *tls_secret,
+                                 const char *ca_key, const char *server) {
   mdoc *d = yyjson_mut_doc_new(NULL);
-  mval *root = object(d, "monitoring.coreos.com/v1", "ServiceMonitor", s, s->name, NULL);
+  mval *root = object(d, "monitoring.coreos.com/v1", "ServiceMonitor", s, name, NULL);
   mval *labels = yyjson_mut_obj_get(yyjson_mut_obj_get(root, "metadata"), "labels");
   size_t i, max;
   yyjson_val *k, *v;
@@ -1204,37 +1211,53 @@ bc_object bc_service_monitor(const bc_spec *s, const char *ca_key) {
   }
   mval *spec = ADD_OBJ(d, root, "spec");
   mval *ml = ADD_OBJ(d, ADD_OBJ(d, spec, "selector"), "matchLabels");
-  ADD_STR(d, ml, "buckets.io/cluster", s->name);
-  ADD_STR(d, ml, "buckets.io/service", "headless");
+  ADD_STR(d, ml, strcmp(service, "console") == 0 ? "buckets.io/console" : "buckets.io/cluster", s->name);
+  ADD_STR(d, ml, "buckets.io/service", service);
   yyjson_mut_arr_add_str(d, ADD_ARR(d, ADD_OBJ(d, spec, "namespaceSelector"), "matchNames"), s->ns);
-  char secret[160], server[300];
+  char secret[160];
   bc_prometheus_secret_name(s, secret, sizeof(secret));
-  snprintf(server, sizeof(server), "%s.%s.svc", s->name, s->ns);
   mval *eps = ADD_ARR(d, spec, "endpoints");
-  static const char *const scopes[] = {"node", "cluster", "bucket"};
-  for (int e = 0; e < 3; e++) {
+  for (size_t e = 0; e < n; e++) {
     mval *ep = yyjson_mut_arr_add_obj(d, eps);
-    ADD_STR(d, ep, "port", s->tls_secret ? "https-s3" : "http-s3");
-    char path[64];
-    snprintf(path, sizeof(path), "/minio/v2/metrics/%s", scopes[e]);
-    yyjson_mut_obj_add_strcpy(d, ep, "path", path);
-    ADD_STR(d, ep, "scheme", s->tls_secret ? "https" : "http");
+    ADD_STR(d, ep, "port", port);
+    ADD_STR(d, ep, "path", paths[e]);
+    ADD_STR(d, ep, "scheme", tls_secret ? "https" : "http");
     ADD_STR(d, ep, "interval", s->monitoring.interval);
     mval *auth = ADD_OBJ(d, ep, "authorization");
     ADD_STR(d, auth, "type", "Bearer");
     mval *cred = ADD_OBJ(d, auth, "credentials");
-    yyjson_mut_obj_add_strcpy(d, cred, "name", secret);
+    ADD_STR(d, cred, "name", secret);
     ADD_STR(d, cred, "key", "token");
-    if (s->tls_secret) {
+    if (tls_secret) {
       mval *tls = ADD_OBJ(d, ep, "tlsConfig");
       mval *ca = ADD_OBJ(d, ADD_OBJ(d, tls, "ca"), "secret");
-      ADD_STR(d, ca, "name", s->ca_secret ? s->ca_secret : s->tls_secret);
-      yyjson_mut_obj_add_strcpy(d, ca, "key", ca_key);
-      yyjson_mut_obj_add_strcpy(d, tls, "serverName", server);
+      ADD_STR(d, ca, "name", tls_secret);
+      ADD_STR(d, ca, "key", ca_key);
+      ADD_STR(d, tls, "serverName", server);
     }
     mval *rl = ADD_ARR(d, ep, "relabelings");
     relabel(d, rl, "buckets_cluster", s->name);
-    relabel(d, rl, "scope", scopes[e]);
+    if (scopes) relabel(d, rl, "scope", scopes[e]);
   }
-  return (bc_object){path_of(BC_MONITORING_API, s, "servicemonitors", s->name), d};
+  return (bc_object){path_of(BC_MONITORING_API, s, "servicemonitors", name), d};
+}
+
+bc_object bc_service_monitor(const bc_spec *s, const char *ca_key) {
+  static const char *const paths[] = {"/minio/v2/metrics/node", "/minio/v2/metrics/cluster", "/minio/v2/metrics/bucket"};
+  static const char *const scopes[] = {"node", "cluster", "bucket"};
+  char server[300];
+  snprintf(server, sizeof(server), "%s.%s.svc", s->name, s->ns);
+  return service_monitor(s, s->name, "headless", s->tls_secret ? "https-s3" : "http-s3", paths, scopes, 3,
+                         s->tls_secret ? (s->ca_secret ? s->ca_secret : s->tls_secret) : NULL, ca_key, server);
+}
+
+void bc_console_service_monitor_name(const bc_spec *s, char *out, size_t cap) { snprintf(out, cap, "%s-console", s->name); }
+
+bc_object bc_console_service_monitor(const bc_spec *s, const char *ca_key) {
+  static const char *const paths[] = {"/metrics"};
+  char name[160], server[300];
+  bc_console_service_monitor_name(s, name, sizeof(name));
+  snprintf(server, sizeof(server), "%s-console.%s.svc", s->name, s->ns);
+  return service_monitor(s, name, "console", s->console.tls_secret ? "https-console" : "http-console", paths, NULL, 1,
+                         s->console.tls_secret, ca_key, server);
 }

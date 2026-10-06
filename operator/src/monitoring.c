@@ -130,6 +130,35 @@ out:
   return ok;
 }
 
+/* The key of a TLS Secret holding the CA to check its certificate with: ca.crt, or the certificate itself
+ * when self-signed. */
+static const char *ca_key_of(op_ctx *o, const bc_spec *s, const char *secret) {
+  char *ca = op_secret_text(o, s, secret, "ca.crt");
+  bool has = ca && *ca;
+  free(ca);
+  return has ? "ca.crt" : "tls.crt";
+}
+
+/* Applies obj (freeing it); false and why on failure. */
+static bool apply(op_ctx *o, bc_object obj, const char *what, char *err, size_t errlen) {
+  yyjson_doc *resp = NULL;
+  int st = kube_apply(o->k, obj.path, obj.doc, &resp);
+  if (st / 100 != 2) snprintf(err, errlen, "%s cannot be written (%d): %s", what, st, kube_error_message(resp));
+  yyjson_doc_free(resp);
+  free(obj.path); /* bc_objects_free would free an array */
+  yyjson_mut_doc_free(obj.doc);
+  return st / 100 == 2;
+}
+
+static void delete_console_monitor(op_ctx *o, const bc_spec *s) {
+  char name[160];
+  bc_console_service_monitor_name(s, name, sizeof(name));
+  buckets_buf p = BUCKETS_BUF_INIT;
+  buckets_buf_appendf(&p, BC_MONITORING_API "/namespaces/%s/servicemonitors/%s", s->ns, name);
+  kube_delete(o->k, p.data);
+  buckets_buf_free(&p);
+}
+
 static void wipe_free(char *p) {
   if (p) memset(p, 0, strlen(p));
   free(p);
@@ -143,6 +172,7 @@ void op_monitoring_reconcile(op_ctx *o, yyjson_val *bc, const bc_spec *s, yyjson
     if (api) {
       int st = kube_delete(o->k, smpath.data);
       if (st / 100 == 2) buckets_log_info("%s/%s: monitoring off: deleted its ServiceMonitor", s->ns, s->name);
+      delete_console_monitor(o, s);
     }
     status(d, mon, "Disabled", "spec.monitoring.enabled is false.");
     goto done;
@@ -192,27 +222,24 @@ void op_monitoring_reconcile(op_ctx *o, yyjson_val *bc, const bc_spec *s, yyjson
     buckets_log_info("%s/%s: monitoring: metrics user %s and its token Secret %s", s->ns, s->name, ak, name);
   }
   {
-    /* the CA Prometheus checks the servers with: ca.crt, or a self-signed certificate itself */
-    const char *ca_key = "ca.crt";
-    if (s->tls_secret) {
-      char *ca = op_secret_text(o, s, s->ca_secret ? s->ca_secret : s->tls_secret, "ca.crt");
-      if (!ca || !*ca) ca_key = "tls.crt";
-      free(ca);
+    const char *srv_tls = s->tls_secret ? (s->ca_secret ? s->ca_secret : s->tls_secret) : NULL;
+    bool ok = apply(o, bc_service_monitor(s, srv_tls ? ca_key_of(o, s, srv_tls) : "ca.crt"), "The ServiceMonitor", err,
+                    sizeof(err));
+    if (ok && s->console.enabled) {
+      const char *ct = s->console.tls_secret;
+      ok = apply(o, bc_console_service_monitor(s, ct ? ca_key_of(o, s, ct) : "ca.crt"), "The console's ServiceMonitor",
+                 err, sizeof(err));
+    } else if (ok) {
+      delete_console_monitor(o, s);
     }
-    bc_object sm = bc_service_monitor(s, ca_key);
-    yyjson_doc *resp = NULL;
-    int st = kube_apply(o->k, sm.path, sm.doc, &resp);
-    if (st / 100 != 2) {
-      snprintf(err, sizeof(err), "ServiceMonitor %s cannot be written (%d): %s", s->name, st, kube_error_message(resp));
+    if (!ok) {
       status(d, mon, "Error", err);
     } else {
       char msg[300];
-      snprintf(msg, sizeof(msg), "Prometheus scrapes every server through ServiceMonitor %s.", s->name);
+      snprintf(msg, sizeof(msg), "Prometheus scrapes every server%s through ServiceMonitor %s%s.",
+               s->console.enabled ? " and the console" : "", s->name, s->console.enabled ? " and its -console one" : "");
       status(d, mon, "Ready", msg);
     }
-    yyjson_doc_free(resp);
-    free(sm.path); /* bc_objects_free would free the array too */
-    yyjson_mut_doc_free(sm.doc);
   }
 creds:
   wipe_free(ak), wipe_free(sk), wipe_free(tok);
