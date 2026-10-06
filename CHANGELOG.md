@@ -10,6 +10,9 @@ All notable changes to this project are documented here. The format follows
 - Images for linux/arm64 as well as linux/amd64. `.github/workflows/images.yml` builds each image natively on amd64 and arm64 runners and publishes both under each tag as one multi-arch image, signed as before. Images up to 1.4.0 are amd64 only.
 - `examples/lakehouse` and [docs/integrations/lakehouse.md](docs/integrations/lakehouse.md): a lakehouse on Buckets. It has Iceberg tables in Buckets, Nessie as the catalog, Trino as the SQL engine, Apache Ranger for access policies, column masks, row filters and audit, and Keycloak as the one identity provider. `docker compose run --rm test` checks 12 claims, including that analysts can't read the warehouse's files around Ranger. `.github/workflows/lakehouse.yml` runs it against Buckets built from each change.
 
+### Fixed
+- `src/console/console.c` didn't build on macOS (`st_mtim` is Linux's name; macOS has `st_mtimespec`), so neither did the unit tests that link it.
+
 ## [1.4.0] - 2026-10-06
 
 ### Added

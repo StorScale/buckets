@@ -142,8 +142,13 @@ static signin *signin_from_settings(yyjson_val *settings) {
 }
 
 static bool same_file(const struct stat *a, const struct stat *b) {
+#ifdef __APPLE__
+  struct timespec ma = a->st_mtimespec, mb = b->st_mtimespec;
+#else
+  struct timespec ma = a->st_mtim, mb = b->st_mtim;
+#endif
   return a->st_ino == b->st_ino && a->st_dev == b->st_dev && a->st_size == b->st_size &&
-         a->st_mtim.tv_sec == b->st_mtim.tv_sec && a->st_mtim.tv_nsec == b->st_mtim.tv_nsec;
+         ma.tv_sec == mb.tv_sec && ma.tv_nsec == mb.tv_nsec;
 }
 
 /* Reads identity_file again when it changed (signin_mu held); its absence
