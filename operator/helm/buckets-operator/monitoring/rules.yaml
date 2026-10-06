@@ -1,0 +1,143 @@
+# Buckets alert rules (docs/monitoring.md). The Helm chart installs them as a
+# PrometheusRule; without the Prometheus Operator, load this file as a
+# Prometheus rule file. Every series carries buckets_cluster (the cluster's
+# name) and scope ("cluster": /minio/v2/metrics/cluster, scraped once through
+# the cluster's Service; "node": /minio/v2/metrics/node, scraped on every
+# server), which the operator's ServiceMonitor (or the scrape configuration in
+# docs/monitoring.md) adds.
+groups:
+  - name: buckets
+    rules:
+      - alert: BucketsDriveOffline
+        expr: max by (namespace, buckets_cluster) (minio_cluster_drive_offline_total{scope="cluster"}) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.namespace }}/{{ $labels.buckets_cluster }}: {{ $value }} drive(s) offline"
+          description: "Data stays available while each erasure set keeps its quorum, but redundancy is reduced until the drive is back or replaced."
+          runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketsdriveoffline
+
+      - alert: BucketsNodeOffline
+        expr: max by (namespace, buckets_cluster) (minio_cluster_nodes_offline_total{scope="cluster"}) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.namespace }}/{{ $labels.buckets_cluster }}: {{ $value }} server(s) offline"
+          description: "Every drive on those servers is unavailable to the cluster."
+          runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketsnodeoffline
+
+      - alert: BucketsErasureSetDegraded
+        expr: |
+          min by (namespace, buckets_cluster, pool, set) (minio_cluster_health_erasure_set_online_drives{scope="cluster"})
+            <= max by (namespace, buckets_cluster, pool, set) (minio_cluster_health_erasure_set_write_quorum{scope="cluster"})
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.namespace }}/{{ $labels.buckets_cluster }}: pool {{ $labels.pool }}, set {{ $labels.set }} is at its write quorum"
+          description: "One more drive failure in this erasure set stops writes to it."
+          runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketserasuresetdegraded
+
+      - alert: BucketsDriveErrors
+        expr: |
+          sum by (namespace, buckets_cluster, server, drive) (
+            increase(minio_node_drive_errors_ioerror{scope="node"}[15m])
+            + increase(minio_node_drive_errors_timeout{scope="node"}[15m])
+          ) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.namespace }}/{{ $labels.buckets_cluster }}: drive {{ $labels.drive }} on {{ $labels.server }} is returning I/O errors or timeouts"
+          description: "{{ $value }} errors in the last 15 minutes. A drive that keeps erroring is often about to fail."
+          runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketsdriveerrors
+
+      - alert: BucketsHealingSlow
+        expr: max by (namespace, buckets_cluster, pool, set) (minio_cluster_health_erasure_set_healing_drives{scope="cluster"}) > 0
+        for: 6h
+        labels:
+          severity: info
+        annotations:
+          summary: "{{ $labels.namespace }}/{{ $labels.buckets_cluster }}: pool {{ $labels.pool }}, set {{ $labels.set }} has been healing for over 6 hours"
+          description: "Large drives take a long time to heal; check that healing is still making progress."
+          runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketshealingslow
+
+      - alert: BucketsCapacityLow
+        expr: |
+          min by (namespace, buckets_cluster) (minio_cluster_capacity_usable_free_bytes{scope="cluster"})
+            / max by (namespace, buckets_cluster) (minio_cluster_capacity_usable_total_bytes{scope="cluster"}) < 0.15
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.namespace }}/{{ $labels.buckets_cluster }}: {{ $value | humanizePercentage }} of usable capacity left"
+          runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketscapacitylow
+
+      - alert: BucketsCapacityCritical
+        expr: |
+          min by (namespace, buckets_cluster) (minio_cluster_capacity_usable_free_bytes{scope="cluster"})
+            / max by (namespace, buckets_cluster) (minio_cluster_capacity_usable_total_bytes{scope="cluster"}) < 0.05
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.namespace }}/{{ $labels.buckets_cluster }}: only {{ $value | humanizePercentage }} of usable capacity left"
+          description: "Writes fail once the drives are full."
+          runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketscapacitylow
+
+      - alert: BucketsCapacityFullIn7Days
+        expr: |
+          predict_linear(min by (namespace, buckets_cluster) (minio_cluster_capacity_usable_free_bytes{scope="cluster"})[6h:10m], 7 * 86400) < 0
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.namespace }}/{{ $labels.buckets_cluster }}: at the rate of the last 6 hours, usable capacity runs out within 7 days"
+          runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketscapacitylow
+
+      - alert: BucketsHighErrorRate
+        expr: |
+          sum by (namespace, buckets_cluster) (rate(minio_s3_requests_5xx_errors_total{scope="node"}[5m]))
+            / sum by (namespace, buckets_cluster) (rate(minio_s3_requests_total{scope="node"}[5m])) > 0.05
+          and sum by (namespace, buckets_cluster) (rate(minio_s3_requests_total{scope="node"}[5m])) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.namespace }}/{{ $labels.buckets_cluster }}: {{ $value | humanizePercentage }} of S3 requests are failing with server errors"
+          runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketshigherrorrate
+
+      - alert: BucketsAuthFailuresSpike
+        expr: |
+          sum by (namespace, buckets_cluster) (
+            rate(minio_s3_requests_rejected_auth_total{scope="node"}[10m])
+            or rate(buckets_console_logins_failed_total[10m])
+          ) > 0.2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.namespace }}/{{ $labels.buckets_cluster }}: {{ $value | humanize }} failed sign-ins per second"
+          description: "S3 requests with bad credentials and failed console sign-ins together: a misconfigured client, or someone guessing passwords."
+          runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketsauthfailuresspike
+
+      - alert: BucketsKMSFailing
+        expr: sum by (namespace, buckets_cluster) (increase(minio_cluster_kms_request_failure{scope="cluster"}[10m])) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.namespace }}/{{ $labels.buckets_cluster }}: requests to the KMS are failing"
+          description: "Encrypted objects cannot be read or written while the KMS is unreachable."
+          runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketskmsfailing
+
+      - alert: BucketsMetricsDown
+        expr: max by (namespace, buckets_cluster, pod) (up{buckets_cluster!=""} == 0)
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.namespace }}/{{ $labels.buckets_cluster }}: Prometheus cannot scrape {{ $labels.pod }}"
+          description: "The server may be down, or the metrics token may be wrong; none of the other alerts can fire for it meanwhile."
+          runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketsmetricsdown

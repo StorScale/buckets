@@ -43,6 +43,7 @@
 #include "scanner/scanner.h"
 #include "scanner/usage.h"
 #include "storage/drivestats.h"
+#include "storage/remote.h"
 
 #ifndef BUCKETS_COMMIT
 #define BUCKETS_COMMIT "DEVELOPMENT.GOGET"
@@ -108,7 +109,7 @@ static size_t drives_of(buckets_s3_server *s, drive_view **out) {
     }
     struct statvfs sv;
     if (dv->d && ep->local && statvfs(ep->path, &sv) == 0) {
-      dv->online = true;
+      dv->online = buckets_drive_is_online(dv->d); /* a faulty, hung or changed drive is offline */
       dv->total = (uint64_t)sv.f_blocks * sv.f_frsize;
       dv->free_b = (uint64_t)sv.f_bfree * sv.f_frsize;
       dv->avail = (uint64_t)sv.f_bavail * sv.f_frsize;

@@ -235,6 +235,55 @@ YAML
 until_true '[[ $(jp bucketsuser/bob {.status.phase}) == Pending ]]' || true
 expect "missing Secret is reported" "$(jp bucketsuser/bob '{.status.phase}')" Pending
 
+echo "== monitoring: a metrics user, its token and a ServiceMonitor, once the Prometheus Operator is there"
+until_true '[[ $(jp bc/store {.status.monitoring.phase}) == NotInstalled ]]' || true
+expect "no Prometheus Operator: said so" "$(jp bc/store '{.status.monitoring.phase}')" NotInstalled
+# the ServiceMonitor kind, as the Prometheus Operator installs it (its schema left open)
+k apply -f - >/dev/null <<YAML
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata: {name: servicemonitors.monitoring.coreos.com}
+spec:
+  group: monitoring.coreos.com
+  scope: Namespaced
+  names: {kind: ServiceMonitor, listKind: ServiceMonitorList, plural: servicemonitors, singular: servicemonitor}
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema: {openAPIV3Schema: {type: object, x-kubernetes-preserve-unknown-fields: true}}
+YAML
+until_true '[[ $(jp bc/store {.status.monitoring.phase}) == Ready ]]' || true
+expect "monitoring ready" "$(jp bc/store '{.status.monitoring.phase}')" Ready
+[[ $(jp bc/store '{.status.monitoring.phase}') == Ready ]] || echo "    status.monitoring: $(jp bc/store '{.status.monitoring.message}'); cluster: $(jp bc/store '{.status.conditions[0].message}')"
+expect "the ServiceMonitor scrapes three endpoints" "$(jp servicemonitor/store '{range .spec.endpoints[*]}{.path} {end}')" \
+  "/minio/v2/metrics/node /minio/v2/metrics/cluster /minio/v2/metrics/bucket "
+expect "on the headless Service" "$(jp servicemonitor/store '{.spec.selector.matchLabels.buckets\.io/service}')" headless
+expect "the headless Service carries the label" "$(jp svc/store-hl '{.metadata.labels.buckets\.io/service}')" headless
+expect "owned by the cluster" "$(jp servicemonitor/store '{.metadata.ownerReferences[0].kind}')" BucketsCluster
+TOKEN=$(jp secret/store-prometheus '{.data.token}' | base64 -d)
+PAK=$(jp secret/store-prometheus '{.data.accessKey}' | base64 -d)
+PSK=$(jp secret/store-prometheus '{.data.secretKey}' | base64 -d)
+scrape() { curl -s -o /dev/null -w '%{http_code}' ${1:+-H "Authorization: Bearer $1"} "http://127.0.0.1:$BPORT/minio/v2/metrics/$2"; }
+expect "the token scrapes the node metrics" "$(scrape "$TOKEN" node)" 200
+expect "and the cluster's" "$(scrape "$TOKEN" cluster)" 200
+expect "and the buckets'" "$(scrape "$TOKEN" bucket)" 200
+expect "nothing without it" "$(scrape "" node)" 403
+expect "the metrics user reads no data" \
+  "$(curl -s -o /dev/null -w '%{http_code}' --aws-sigv4 "aws:amz:us-east-1:s3" --user "$PAK:$PSK" "http://127.0.0.1:$BPORT/photos/a.txt")" 403
+# the user gone from the servers: made again with the same secret, so the token keeps working
+curl -s -o /dev/null --aws-sigv4 "aws:amz:us-east-1:s3" --user "$rootu:$rootp" -X DELETE \
+  "http://127.0.0.1:$BPORT/minio/admin/v3/remove-user?accessKey=$PAK"
+expect "the user removed" "$(scrape "$TOKEN" node)" 403
+until_true '[[ $(scrape "$TOKEN" node) == 200 ]]' || true
+expect "the operator puts it back" "$(scrape "$TOKEN" node)" 200
+expect "with the same token" "$(jp secret/store-prometheus '{.data.token}' | base64 -d)" "$TOKEN"
+k -n tenant patch bc store --type merge -p '{"spec":{"monitoring":{"enabled":false}}}' >/dev/null
+until_true '! k -n tenant get servicemonitor store' || true
+expect "off: the ServiceMonitor goes" "$(k -n tenant get servicemonitor store -o name 2>/dev/null || echo gone)" gone
+expect "and the status says so" "$(jp bc/store '{.status.monitoring.phase}')" Disabled
+k -n tenant patch bc store --type json -p '[{"op":"remove","path":"/spec/monitoring"}]' >/dev/null
+
 echo "== the KMS: Secrets, the console's Role, trials, KES"
 k apply -f - >/dev/null <<YAML
 apiVersion: buckets.io/v1alpha1

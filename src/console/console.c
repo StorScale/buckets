@@ -47,7 +47,17 @@ struct buckets_console {
   struct stat signin_st;      /* identity_file as last read */
   buckets_console_kms *kms;   /* KMS settings through the operator; NULL outside Kubernetes */
   buckets_console_idp *idp;   /* the Identity page through the operator; NULL outside Kubernetes */
+  /* /metrics: failed sign-ins by method, and the bearer token bucketsd last accepted for its metrics */
+  _Atomic unsigned long long logins_failed[3];
+  pthread_mutex_t metrics_mu;
+  char metrics_token[65]; /* hex SHA-256 */
+  time_t metrics_token_until;
 };
+
+enum { LOGIN_PASSWORD, LOGIN_LDAP, LOGIN_OPENID };
+static const char *const k_login_methods[] = {"password", "ldap", "openid"};
+
+static void login_failed(buckets_console *c, int method) { atomic_fetch_add(&c->logins_failed[method], 1); }
 
 /* ---- how people sign in -------------------------------------------------------------- */
 
@@ -203,6 +213,7 @@ buckets_console *buckets_console_new(const buckets_console_config *cfg) {
   c->http = buckets_http_client_new(cfg->upstream_host, cfg->upstream_port, cfg->upstream_tls, 5 * 60 * 1000);
   snprintf(c->host_header, sizeof(c->host_header), "%s:%d", cfg->upstream_host, cfg->upstream_port);
   pthread_mutex_init(&c->signin_mu, NULL);
+  pthread_mutex_init(&c->metrics_mu, NULL);
   c->signin = signin_from_cfg(&c->cfg);
   c->kms = buckets_console_kms_new();
   c->idp = buckets_console_idp_new();
@@ -225,6 +236,7 @@ void buckets_console_free(buckets_console *c) {
   OPENSSL_cleanse(c->key, sizeof(c->key));
   signin_release(c->signin);
   pthread_mutex_destroy(&c->signin_mu);
+  pthread_mutex_destroy(&c->metrics_mu);
   buckets_console_kms_free(c->kms);
   buckets_console_idp_free(c->idp);
   free(c);
@@ -495,6 +507,7 @@ static void handle_login(buckets_console *c, const buckets_http_request *req, bu
     char code[128] = "AccessDenied", msg[512] = "Invalid login";
     xml_text(xml, res.body.len, "Code", code, sizeof(code));
     xml_text(xml, res.body.len, "Message", msg, sizeof(msg));
+    if (res.status < 500) login_failed(c, ldap ? LOGIN_LDAP : LOGIN_PASSWORD);
     json_error(resp, res.status >= 500 ? 502 : 401, code, msg);
   }
   OPENSSL_cleanse(&s, sizeof(s));
@@ -918,8 +931,12 @@ static void handle_oidc_callback(buckets_console *c, const buckets_http_request 
   if (test && !*test) test = NULL;
 #define FAIL(msg) \
   do { \
-    if (test) test_page(resp, false, msg); \
-    else login_error_redirect(resp, msg); \
+    if (test) { \
+      test_page(resp, false, msg); \
+    } else { \
+      login_failed(c, LOGIN_OPENID); \
+      login_error_redirect(resp, msg); \
+    } \
     goto out; \
   } while (0)
   if (perr) FAIL(perr);
@@ -998,6 +1015,7 @@ static void handle_oidc_callback(buckets_console *c, const buckets_http_request 
   } else {
     char msg[512] = "The storage service refused the identity.";
     if (have_s) xml_text(xml, sres.body.len, "Message", msg, sizeof(msg));
+    login_failed(c, LOGIN_OPENID);
     login_error_redirect(resp, msg);
   }
   OPENSSL_cleanse(&s, sizeof(s));
@@ -1371,6 +1389,56 @@ static void serve_static(buckets_console *c, const buckets_http_request *req, bu
   buckets_buf_free(&body);
 }
 
+/* ---- metrics ------------------------------------------------------------------------------------- */
+
+/* Whether bucketsd would let this request read its metrics: the same bearer token (or none, with
+ * MINIO_PROMETHEUS_AUTH_TYPE=public) on its smallest metrics path. A token it accepted is trusted for a
+ * minute. */
+static bool metrics_allowed(buckets_console *c, const buckets_http_request *req) {
+  buckets_str auth = buckets_http_header_get(req, "Authorization");
+  char hash[65] = "";
+  if (auth.p) {
+    uint8_t h[32];
+    buckets_sha256(auth.p, auth.n, h);
+    buckets_hex_encode(h, 32, hash);
+  }
+  pthread_mutex_lock(&c->metrics_mu);
+  bool known = *hash && strcmp(hash, c->metrics_token) == 0 && time(NULL) < c->metrics_token_until;
+  pthread_mutex_unlock(&c->metrics_mu);
+  if (known) return true;
+  char header[4096];
+  snprintf(header, sizeof(header), "%.*s", (int)(auth.p ? auth.n : 0), auth.p ? auth.p : "");
+  buckets_http_kv h[] = {{"Authorization", header}};
+  buckets_http_result res = {0};
+  bool ok = buckets_http_client_do(c->http, "GET", "/minio/metrics/v3/cluster/health", h, auth.p ? 1 : 0, NULL, 0, &res) &&
+            res.status == 200;
+  buckets_http_result_free(&res);
+  OPENSSL_cleanse(header, sizeof(header));
+  if (ok && *hash) {
+    pthread_mutex_lock(&c->metrics_mu);
+    snprintf(c->metrics_token, sizeof(c->metrics_token), "%s", hash);
+    c->metrics_token_until = time(NULL) + 60;
+    pthread_mutex_unlock(&c->metrics_mu);
+  }
+  return ok;
+}
+
+static void handle_metrics(buckets_console *c, const buckets_http_request *req, buckets_http_response *resp) {
+  if (!metrics_allowed(c, req)) {
+    resp->status = 403;
+    buckets_http_resp_header(resp, "Content-Type", "text/plain");
+    buckets_buf_append_c(&resp->body, "the servers did not accept this token for their metrics\n");
+    return;
+  }
+  resp->status = 200;
+  buckets_http_resp_header(resp, "Content-Type", "text/plain; version=0.0.4; charset=utf-8");
+  buckets_buf_append_c(&resp->body, "# HELP buckets_console_logins_failed_total Failed console sign-ins, by method.\n"
+                                    "# TYPE buckets_console_logins_failed_total counter\n");
+  for (int m = 0; m < 3; m++)
+    buckets_buf_appendf(&resp->body, "buckets_console_logins_failed_total{method=\"%s\"} %llu\n", k_login_methods[m],
+                        (unsigned long long)atomic_load(&c->logins_failed[m]));
+}
+
 /* ---- routing -------------------------------------------------------------------------------------- */
 
 void buckets_console_handle(const buckets_http_request *req, buckets_http_response *resp, void *ud) {
@@ -1379,6 +1447,10 @@ void buckets_console_handle(const buckets_http_request *req, buckets_http_respon
   if (buckets_str_eq_c(path, "/healthz")) {
     resp->status = 200;
     buckets_buf_append_c(&resp->body, "ok");
+    return;
+  }
+  if (buckets_str_eq_c(path, "/metrics")) {
+    handle_metrics(c, req, resp);
     return;
   }
   if (buckets_str_eq_c(path, "/oauth_callback")) {

@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 #include "storage/remote.h"
+#include "storage/health.h"
 
 #include <stdatomic.h>
 #include <stdio.h>
@@ -43,7 +44,7 @@ void buckets_rdrive_free(struct buckets_remote *r) {
 
 bool buckets_drive_is_online(buckets_drive *d) {
   if (!d) return false;
-  if (!d->remote) return true;
+  if (!d->remote) return buckets_drive_health_state(d) == BUCKETS_DRIVE_HEALTH_OK; /* storage/health.c */
   return atomic_load(&d->remote->offline_until_ms) <= now_ms();
 }
 

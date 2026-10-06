@@ -6,6 +6,7 @@
 # Parquet cases to tests/integration/select.sh.
 # SFTPCLIENT (tests/integration/sftpclient built with Go) runs tests/integration/sftp.sh;
 # FAKEKES (tests/integration/fakekes built with Go) runs tests/integration/kes.sh and kms-delete.sh.
+# PROMTOOL (Prometheus' promtool) checks and unit-tests the shipped alert rules and dashboard queries.
 # tests/integration/buckets-kes.sh also checks keys with MinIO's kes (KES_BIN), Vault (VAULT_BIN), AWS
 # through moto (MOTO_SERVER) and Azure through Lowkey Vault (LOWKEY_JAR) when they are given.
 # The full CI gate, runnable locally and from any CI host:
@@ -33,6 +34,7 @@ run tests/integration/heal.sh build-ci/src/bucketsd
 run tests/integration/pools.sh build-ci/src/bucketsd
 run tests/integration/tls.sh build-ci/src/bucketsd
 run tests/integration/cluster.sh build-ci/src/bucketsd
+run tests/integration/drive-health.sh build-ci/src/bucketsd
 # IAM, identity providers, configuration and service control (these skip
 # without MC_BIN; iam-interop also needs MINIO_BIN).
 for t in iam iam-interop config openid plugins ldap certsts service usage; do
@@ -48,6 +50,7 @@ run tests/integration/heal.sh build-ci-asan/src/bucketsd
 run tests/integration/pools.sh build-ci-asan/src/bucketsd
 run tests/integration/tls.sh build-ci-asan/src/bucketsd
 run tests/integration/cluster.sh build-ci-asan/src/bucketsd
+run tests/integration/drive-health.sh build-ci-asan/src/bucketsd
 for t in iam config openid plugins ldap certsts service usage; do
   run tests/integration/$t.sh build-ci-asan/src/bucketsd
 done
@@ -79,6 +82,16 @@ run tests/integration/encrypt-existing.sh build-ci-asan/src/bucketsd
 run tests/integration/console.sh build-ci-asan/src/bucketsd build-ci-asan/src/consoled
 run tests/integration/teams.sh build-ci-asan/src/bucketsd build-ci-asan/src/consoled
 run tests/integration/access.sh build-ci-asan/src/bucketsd build-ci-asan/src/consoled
+run tests/integration/console-metrics.sh build-ci-asan/src/bucketsd build-ci-asan/src/consoled
+# Monitoring: the dashboards are what tools/dashboards/gen.py writes; every metric the alert rules and
+# dashboards use is exported; with PROMTOOL, the queries parse and the rules' unit tests pass.
+run python3 tools/dashboards/gen.py >/dev/null
+run git diff --exit-code -- operator/helm/buckets-operator/monitoring/dashboards
+run python3 tests/monitoring/check_metrics.py
+if [[ -n ${PROMTOOL:-} ]]; then
+  run "$PROMTOOL" check rules operator/helm/buckets-operator/monitoring/rules.yaml
+  run "$PROMTOOL" test rules tests/monitoring/rules_test.yaml
+fi
 # The console: SPA build, typecheck and Playwright e2e against the sanitized
 # bucketsd and consoled (skipped without npm).
 if command -v npm >/dev/null; then

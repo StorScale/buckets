@@ -41,6 +41,7 @@
 #include "scanner/scanner.h"
 #include "object/object.h"
 #include "storage/drive.h"
+#include "storage/health.h"
 #include "storage/format.h"
 
 #ifndef BUCKETS_VERSION
@@ -525,6 +526,8 @@ static bool bootstrap(boot_state *b) {
   }
   if (!t->first_local) t->first_local = buckets_objlayer_scratch(layer)->root;
   b->layer = layer;
+  buckets_drive_health_start(layer->all, layer->nall); /* local drives go offline when they fail */
+  buckets_drive_health_share(t->local_drives, t->nlocal, layer->all, layer->nall); /* as peers see them too */
   b->healer = buckets_healer_start(layer);
   atomic_store(&b->s3->healer, b->healer);
   buckets_s3_server_set_layer(b->s3, layer);
@@ -936,6 +939,7 @@ int main(int argc, char **argv) {
   buckets_tls_free(tls);
   buckets_scanner_stop(boot.scanner);
   buckets_healer_stop(boot.healer);
+  buckets_drive_health_stop(); /* its threads check the layer's drives */
   buckets_s3_server_close_targets(&s3); /* the scanner sends lifecycle events */
   buckets_loop_free(g_loop);
   if (boot.layer) buckets_objlayer_set_locker(boot.layer, NULL, NULL, NULL);

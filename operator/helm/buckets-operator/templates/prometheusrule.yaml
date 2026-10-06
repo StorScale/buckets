@@ -1,0 +1,15 @@
+{{- /* The alert rules (monitoring/rules.yaml), for the Prometheus Operator. */ -}}
+{{- if and .Values.monitoring.rules.enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1/PrometheusRule") }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "buckets-operator.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "buckets-operator.labels" . | nindent 4 }}
+    {{- with .Values.monitoring.rules.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+{{ .Files.Get "monitoring/rules.yaml" | indent 2 }}
+{{- end }}

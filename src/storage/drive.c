@@ -7,6 +7,7 @@
 #include "trace/trace.h"
 #include <stdarg.h>
 #include "storage/remote.h"
+#include "storage/health.h"
 
 #include <dirent.h>
 #include <ftw.h>
@@ -768,6 +769,7 @@ static void drive_trace(buckets_drive *d, buckets_drive_op op, struct timespec t
 /* ---- the public calls, timed for the drive metrics ---- */
 
 buckets_drive_err buckets_drive_make_vol(buckets_drive *d, const char *name) {
+  if (buckets_drive_health_refuses(d)) return BUCKETS_DRIVE_ERR_OFFLINE; /* storage/health.c */
   struct timespec t0, t1;
   buckets_drive_stats_begin(d);
   clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -779,6 +781,7 @@ buckets_drive_err buckets_drive_make_vol(buckets_drive *d, const char *name) {
 }
 
 buckets_drive_err buckets_drive_stat_vol(buckets_drive *d, const char *name, time_t *created) {
+  if (buckets_drive_health_refuses(d)) return BUCKETS_DRIVE_ERR_OFFLINE; /* storage/health.c */
   struct timespec t0, t1;
   buckets_drive_stats_begin(d);
   clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -790,6 +793,7 @@ buckets_drive_err buckets_drive_stat_vol(buckets_drive *d, const char *name, tim
 }
 
 buckets_drive_err buckets_drive_delete_vol(buckets_drive *d, const char *name) {
+  if (buckets_drive_health_refuses(d)) return BUCKETS_DRIVE_ERR_OFFLINE; /* storage/health.c */
   struct timespec t0, t1;
   buckets_drive_stats_begin(d);
   clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -801,6 +805,7 @@ buckets_drive_err buckets_drive_delete_vol(buckets_drive *d, const char *name) {
 }
 
 buckets_drive_err buckets_drive_list_vols(buckets_drive *d, buckets_vol_info **vols, size_t *n) {
+  if (buckets_drive_health_refuses(d)) return BUCKETS_DRIVE_ERR_OFFLINE; /* storage/health.c */
   struct timespec t0, t1;
   buckets_drive_stats_begin(d);
   clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -812,6 +817,7 @@ buckets_drive_err buckets_drive_list_vols(buckets_drive *d, buckets_vol_info **v
 }
 
 buckets_drive_err buckets_drive_read_all(buckets_drive *d, const char *vol, const char *path, buckets_buf *out) {
+  if (buckets_drive_health_refuses(d)) return BUCKETS_DRIVE_ERR_OFFLINE; /* storage/health.c */
   struct timespec t0, t1;
   buckets_drive_stats_begin(d);
   clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -824,6 +830,7 @@ buckets_drive_err buckets_drive_read_all(buckets_drive *d, const char *vol, cons
 
 buckets_drive_err buckets_drive_write_all(buckets_drive *d, const char *vol, const char *path, const void *data,
                                           size_t n) {
+  if (buckets_drive_health_refuses(d)) return BUCKETS_DRIVE_ERR_OFFLINE; /* storage/health.c */
   struct timespec t0, t1;
   buckets_drive_stats_begin(d);
   clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -836,6 +843,7 @@ buckets_drive_err buckets_drive_write_all(buckets_drive *d, const char *vol, con
 
 buckets_drive_err buckets_drive_create_file(buckets_drive *d, const char *vol, const char *path,
                                             buckets_drive_writer **w) {
+  if (buckets_drive_health_refuses(d)) return BUCKETS_DRIVE_ERR_OFFLINE; /* storage/health.c */
   struct timespec t0, t1;
   buckets_drive_stats_begin(d);
   clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -848,6 +856,7 @@ buckets_drive_err buckets_drive_create_file(buckets_drive *d, const char *vol, c
 
 buckets_drive_err buckets_drive_append(buckets_drive *d, const char *vol, const char *path, int64_t off,
                                        const void *data, size_t n) {
+  if (buckets_drive_health_refuses(d)) return BUCKETS_DRIVE_ERR_OFFLINE; /* storage/health.c */
   struct timespec t0, t1;
   buckets_drive_stats_begin(d);
   clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -859,6 +868,7 @@ buckets_drive_err buckets_drive_append(buckets_drive *d, const char *vol, const 
 }
 
 buckets_drive_err buckets_drive_fsync_file(buckets_drive *d, const char *vol, const char *path) {
+  if (buckets_drive_health_refuses(d)) return BUCKETS_DRIVE_ERR_OFFLINE; /* storage/health.c */
   struct timespec t0, t1;
   buckets_drive_stats_begin(d);
   clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -870,6 +880,7 @@ buckets_drive_err buckets_drive_fsync_file(buckets_drive *d, const char *vol, co
 }
 
 buckets_drive_err buckets_drive_open_file(buckets_drive *d, const char *vol, const char *path, buckets_drive_file **f) {
+  if (buckets_drive_health_refuses(d)) return BUCKETS_DRIVE_ERR_OFFLINE; /* storage/health.c */
   struct timespec t0, t1;
   buckets_drive_stats_begin(d);
   clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -882,6 +893,7 @@ buckets_drive_err buckets_drive_open_file(buckets_drive *d, const char *vol, con
 
 buckets_drive_err buckets_drive_read_at(buckets_drive *d, const char *vol, const char *path, int64_t off, void *buf,
                                         size_t n, size_t *got) {
+  if (buckets_drive_health_refuses(d)) return BUCKETS_DRIVE_ERR_OFFLINE; /* storage/health.c */
   struct timespec t0, t1;
   buckets_drive_stats_begin(d);
   clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -895,6 +907,7 @@ buckets_drive_err buckets_drive_read_at(buckets_drive *d, const char *vol, const
 buckets_drive_err buckets_drive_rename_data(buckets_drive *d, const char *src_vol, const char *src_dir,
                                             const char *data_dir, const char *dst_vol, const char *dst_path,
                                             const void *xlmeta, size_t xlmeta_len) {
+  if (buckets_drive_health_refuses(d)) return BUCKETS_DRIVE_ERR_OFFLINE; /* storage/health.c */
   struct timespec t0, t1;
   buckets_drive_stats_begin(d);
   clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -907,6 +920,7 @@ buckets_drive_err buckets_drive_rename_data(buckets_drive *d, const char *src_vo
 
 buckets_drive_err buckets_drive_delete(buckets_drive *d, const char *vol, const char *path, bool recursive,
                                        bool prune) {
+  if (buckets_drive_health_refuses(d)) return BUCKETS_DRIVE_ERR_OFFLINE; /* storage/health.c */
   struct timespec t0, t1;
   buckets_drive_stats_begin(d);
   clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -918,6 +932,7 @@ buckets_drive_err buckets_drive_delete(buckets_drive *d, const char *vol, const 
 }
 
 buckets_drive_err buckets_drive_list_dir(buckets_drive *d, const char *vol, const char *dir, buckets_dir_list *out) {
+  if (buckets_drive_health_refuses(d)) return BUCKETS_DRIVE_ERR_OFFLINE; /* storage/health.c */
   struct timespec t0, t1;
   buckets_drive_stats_begin(d);
   clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -929,6 +944,7 @@ buckets_drive_err buckets_drive_list_dir(buckets_drive *d, const char *vol, cons
 }
 
 buckets_drive_err buckets_drive_disk_info(buckets_drive *d, uint64_t *total, uint64_t *free_bytes) {
+  if (!d->remote && buckets_drive_health_state(d) != BUCKETS_DRIVE_HEALTH_OK) return BUCKETS_DRIVE_ERR_OFFLINE;
   struct timespec t0, t1;
   buckets_drive_stats_begin(d);
   clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -940,6 +956,7 @@ buckets_drive_err buckets_drive_disk_info(buckets_drive *d, uint64_t *total, uin
 }
 
 buckets_drive_err buckets_drive_file_size(buckets_drive *d, const char *vol, const char *path, int64_t *size) {
+  if (buckets_drive_health_refuses(d)) return BUCKETS_DRIVE_ERR_OFFLINE; /* storage/health.c */
   struct timespec t0, t1;
   buckets_drive_stats_begin(d);
   clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -952,6 +969,7 @@ buckets_drive_err buckets_drive_file_size(buckets_drive *d, const char *vol, con
 
 buckets_drive_err buckets_drive_rename_file(buckets_drive *d, const char *src_vol, const char *src,
                                             const char *dst_vol, const char *dst) {
+  if (buckets_drive_health_refuses(d)) return BUCKETS_DRIVE_ERR_OFFLINE; /* storage/health.c */
   struct timespec t0, t1;
   buckets_drive_stats_begin(d);
   clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -1082,6 +1100,7 @@ static int stat_cmp(const void *a, const void *b) {
 
 buckets_drive_err buckets_drive_stat_info(buckets_drive *d, const char *vol, const char *path, buckets_stat_info **out,
                                           size_t *n) {
+  if (buckets_drive_health_refuses(d)) return BUCKETS_DRIVE_ERR_OFFLINE; /* storage/health.c */
   *out = NULL;
   *n = 0;
   if (d->remote) return buckets_rdrive_stat_info(d, vol, path, out, n);
