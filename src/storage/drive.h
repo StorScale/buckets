@@ -2,6 +2,7 @@
 #ifndef BUCKETS_STORAGE_DRIVE_H
 #define BUCKETS_STORAGE_DRIVE_H
 
+#include <stdatomic.h>
 #include <time.h>
 
 #include "core/buf.h"
@@ -32,12 +33,19 @@ typedef enum {
 
 struct buckets_remote;
 
-typedef struct {
+typedef struct buckets_drive_s {
   char *root; /* local path, or the endpoint URL of a remote drive */
   struct buckets_remote *remote; /* non-NULL: every call goes over internode RPC */
   char deployment_id[BUCKETS_UUID_STR_LEN + 1];
   char drive_id[BUCKETS_UUID_STR_LEN + 1];
   bool freshly_formatted;
+  /* storage/health.c: a buckets_drive_health, the errno of the last failed check, and when the running check
+   * started (monotonic ms; 0: none running) */
+  _Atomic int health, health_errno;
+  _Atomic long long check_started_ms;
+  /* another object for the same drive whose checks this one shares (the copy served to peers points at the
+   * object layer's) */
+  struct buckets_drive_s *health_of;
 } buckets_drive;
 
 typedef struct {

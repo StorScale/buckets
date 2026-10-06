@@ -128,6 +128,7 @@ add_library(buckets STATIC
   storage/xlmeta.c
   storage/format.c
   storage/remote.c
+  storage/health.c
   dist/internode.c
   dist/storage_server.c
   dist/dsync.c

@@ -9,6 +9,8 @@ All notable changes to this project are documented here. The format follows
 ### Added
 - Monitoring with the Prometheus Operator (docs/monitoring.md). For each BucketsCluster, the operator makes a metrics user allowed only `admin:Prometheus`, its bearer token, and ServiceMonitors for the servers and the console (`spec.monitoring`, `status.monitoring`). The Helm chart ships 12 alert rules, each with a runbook: drives or servers offline, an erasure set at its write quorum, drive errors, slow healing, capacity, server errors, failed sign-ins, KMS failures, scraping down. It also ships four Grafana dashboards. The console counts failed sign-ins (`buckets_console_logins_failed_total`) on `/metrics`.
 
+- Local drive health, as MinIO tracks it. Every 15 seconds each server checks that each of its drives still has its own `format.json` and can be written and read. A drive that fails, hangs (a check over 30 seconds) or was emptied under its mount point goes offline: it no longer counts toward quorum, `mc admin info` and the drive metrics say so on every server, and calls to a failed or hung drive are refused at once instead of waiting on it. It comes back when it works again. `BUCKETS_DRIVE_CHECK_INTERVAL` and `BUCKETS_DRIVE_CHECK_TIMEOUT` tune it. Until now, a server reported its own drives online whatever state they were in.
+
 ### Fixed
 - `bucketsd` built with the undefined-behaviour sanitizer aborted on `/minio/metrics/v3/cluster/health` (and the other v3 paths that report tiering) when no storage tier was configured: the tiering statistics were copied from a null pointer. Release builds were not affected.
 

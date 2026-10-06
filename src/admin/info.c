@@ -24,6 +24,7 @@
 #include "scanner/usage.h"
 #include "s3/internal.h"
 #include "storage/drivestats.h"
+#include "storage/remote.h"
 
 extern char **environ;
 
@@ -181,7 +182,7 @@ static void add_drive(yyjson_mut_doc *d, yyjson_mut_val *arr, const buckets_objl
     disk = (long)(((size_t)slot - pl.pool_first) % pl.set_size);
   }
   struct statvfs sv;
-  bool ok = probe && slot >= 0 && statvfs(ep->path, &sv) == 0;
+  bool ok = probe && slot >= 0 && statvfs(ep->path, &sv) == 0 && buckets_drive_is_online(drv);
   yyjson_mut_val *hi = ok ? heal_info(d, drv, ep, pool, set, disk) : NULL;
   if (hi) yyjson_mut_obj_add_bool(d, o, "healing", true);
   yyjson_mut_obj_add_str(d, o, "state", ok ? "ok" : "offline");
