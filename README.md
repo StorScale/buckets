@@ -1,5 +1,7 @@
 # Buckets
 
+**Website: [storscale.io](https://storscale.io)** · [Migrate from MinIO](https://storscale.io/migrate-from-minio/) · [Integration guides](https://storscale.io/guides/)
+
 S3-compatible object storage written in C, built to run natively on Kubernetes. It is a rewrite of MinIO's last public release (`RELEASE.2025-10-15T17-29-55Z`; the upstream project was archived in April 2026).
 
 **Status: 1.4.2. All build phases are done:** Buckets implements 220 of MinIO's 222 API handlers (the other two are dropped on purpose) in MinIO's exact on-disk format, on anything from one drive to multi-pool clusters of nodes:

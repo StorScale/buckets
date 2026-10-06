@@ -1,10 +1,23 @@
 apiVersion: v2
 name: buckets-operator
-description: "The Buckets operator: BucketsCluster, BucketsUser, BucketsPolicy and Bucket resources on Kubernetes."
+description: "Runs Buckets, the drop-in MinIO replacement written in C, on Kubernetes (BucketsCluster, BucketsUser, BucketsPolicy and Bucket resources), and adopts MinIO Tenants in place."
 type: application
 version: 1.4.2
 appVersion: "1.4.2"
 annotations:
   licenses: AGPL-3.0-or-later
-keywords: [s3, object-storage, buckets, operator]
-home: https://github.com/StorScale/buckets
+  artifacthub.io/license: AGPL-3.0-or-later
+  artifacthub.io/operator: "true"
+  artifacthub.io/operatorCapabilities: Seamless Upgrades
+  artifacthub.io/links: |
+    - name: Website
+      url: https://storscale.io
+    - name: Migrate from MinIO
+      url: https://storscale.io/migrate-from-minio/
+    - name: Source
+      url: https://github.com/StorScale/buckets
+keywords: [s3, object-storage, minio, minio-alternative, buckets, operator, kubernetes]
+home: https://storscale.io
+sources:
+  - https://github.com/StorScale/buckets
+icon: https://storscale.io/assets/img/favicon.svg

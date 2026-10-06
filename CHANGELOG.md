@@ -7,6 +7,7 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- The operator's Helm chart carries Artifact Hub metadata: links to https://storscale.io and the migration guide, the source, keywords, an icon, the license, and its operator capability level.
 - `examples/hive-spark` and [docs/integrations/hive-spark.md](docs/integrations/hive-spark.md): Hive Metastore 4.2.1 (on Postgres) as the one catalog for Spark 4.1.3 (a Spark Connect server) and Trino. It holds Hive tables (partitioned Parquet) and Iceberg tables in Buckets, with Ranger and Keycloak as in the lakehouse. `docker compose run --rm test` checks 13 claims: Spark writes and Trino reads, Trino writes and Spark reads, time travel from both engines, and Ranger's and Buckets' access rules. The guide covers what metastore 4 needs: Spark's Hive 4.1 client, Iceberg through the metastore's REST catalog, separate managed and external warehouse directories, and Trino writing to tables the metastore records as external.
 - `examples/common`: what the examples share. That's Trino's sign-in and Ranger plugin, the Keycloak realm, the Ranger bootstrap stub, and the setup and test image with its helpers (`lakekit.py`).
 
