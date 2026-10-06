@@ -35,8 +35,9 @@ void buckets_format_result_free(buckets_format_result *r);
 
 /* A local drive found empty while the server runs (a replaced disk): formats it into its slot as the
  * deployment's other drives describe it (a set member's format.json, with "this" set to the slot's drive
- * ID), so it can be healed. Only when its directory exists and nothing on it is older than changed_since
- * (wall-clock ms when it was found without its format.json) less 5 seconds: what a moment's writes left
+ * ID), so it can be healed. Only when its directory exists and no file on it is older than changed_since
+ * (wall-clock ms when it was found without its format.json) less 5 seconds; directories don't count, since
+ * a wipe that races writes leaves some behind with older times. What a moment's writes left
  * there before the drive refused them is cleared first, while older data (a drive that lost only its
  * format.json, or one from elsewhere) is left alone. lost+found is kept. set: the drives of d's erasure
  * set (d among them). False and why when it was not formatted. */
