@@ -4,9 +4,11 @@
      metrics-only user, which can read no data;
   2. the Helm chart's alert rules load, with no errors;
   3. the four Grafana dashboards' queries return data from Prometheus;
-  4. a failed drive (here, emptied under load) shows up: Buckets reports it
-     offline and the erasure set degraded, and the alerts for both start.
-     (Rerun on the same stack, this checks the drive that is already offline.)
+  4. a failed drive (here, emptied under load, as a replaced disk looks) shows
+     up: Buckets reports it offline and the erasure set degraded, and the
+     alerts for both start;
+  5. Buckets formats the empty drive back into its slot and heals it: every
+     drive is online again, and the alerts resolve.
 """
 import glob
 import json
@@ -80,30 +82,36 @@ def main():
     check("the Helm chart's alert rules load, with no errors", rules and not bad,
           f"{len(rules)} rules" + (f"; unhealthy: {bad}" if bad else ""))
 
-    # 3. The dashboards' queries.
+    # 3. The dashboards' queries. Bucket usage comes from Buckets' scanner, a
+    # little after startup, so this waits for the data to arrive.
     dashboards = wait(dashboard_queries, 60)
-    total = with_data = 0
-    empty = []
-    for title, targets in sorted(dashboards.items()):
-        for panel, expr in targets:
-            for k, v in VARS.items():
-                expr = expr.replace(k, v)
-            res = query(expr)
-            total += 1
-            if res:
-                with_data += 1
-            else:
-                empty.append(f"{title.split(' / ')[-1]}: {panel}")
+
+    def coverage():
+        total, empty = 0, []
+        for title, targets in sorted(dashboards.items()):
+            for panel, expr in targets:
+                for k, v in VARS.items():
+                    expr = expr.replace(k, v)
+                total += 1
+                if not query(expr):
+                    empty.append(f"{title.split(' / ')[-1]}: {panel}")
+        return total, empty
+
+    deadline = time.time() + 240
+    while True:
+        total, empty = coverage()
+        # Panels for what this example doesn't run (replication, the KMS, the
+        # console's sign-ins) have nothing to show.
+        if total - len(empty) >= total * 0.75 or time.time() > deadline:
+            break
+        time.sleep(10)
     check("Grafana has the four dashboards", len(dashboards) == 4, ", ".join(sorted(dashboards)))
-    # Panels for what this example doesn't run (replication, the KMS, the
-    # console's sign-ins) have nothing to show.
-    check("the dashboards' queries return data", with_data >= total * 0.6,
-          f"{with_data} of {total} queries; empty: {'; '.join(empty[:8])}{' ...' if len(empty) > 8 else ''}")
+    check("the dashboards' queries return data", total - len(empty) >= total * 0.75,
+          f"{total - len(empty)} of {total} queries; empty: {'; '.join(sorted(set(empty)))}")
 
     # 4. A failed drive.
-    if (value("max(minio_cluster_drive_offline_total)") or 0) == 0:
-        for p in glob.glob("/drive3/*") + glob.glob("/drive3/.*"):
-            os.system(f"rm -rf '{p}'")
+    for p in glob.glob("/drive3/*") + glob.glob("/drive3/.*"):
+        os.system(f"rm -rf '{p}'")
     offline = wait(lambda: (value("max(minio_cluster_drive_offline_total)") or 0) >= 1, 180)
     check("an emptied drive shows up as offline", offline,
           f"drives online {value('max(minio_cluster_drive_online_total)'):.0f}, offline "
@@ -111,6 +119,18 @@ def main():
     started = wait(lambda: (lambda a: a if {"BucketsDriveOffline", "BucketsErasureSetDegraded"} <= set(a) else None)(alerts()), 180)
     check("the drive-offline and degraded-set alerts start", started,
           ", ".join(f"{k} {v}" for k, v in sorted((started or alerts()).items())) or "no alerts")
+
+    # 5. The empty drive is formatted back and healed.
+    back = wait(lambda: value("max(minio_cluster_drive_offline_total)") == 0 and
+                value("max(minio_cluster_drive_online_total)") == 4, 300)
+    check("Buckets formats the empty drive back into its slot", back,
+          f"drives online {value('max(minio_cluster_drive_online_total)'):.0f}, offline "
+          f"{value('max(minio_cluster_drive_offline_total)'):.0f}")
+    healed = wait(lambda: os.path.exists("/drive3/.minio.sys/format.json") and len(glob.glob("/drive3/photos/2026/10/*")) >= 40, 600, every=10)
+    check("... and heals it: its objects are back", healed,
+          f"{len(glob.glob('/drive3/photos/2026/10/*'))} of photos/2026/10's objects on the drive again")
+    resolved = wait(lambda: not {"BucketsDriveOffline", "BucketsErasureSetDegraded"} & set(alerts()), 300)
+    check("the alerts resolve", resolved, ", ".join(f"{k} {v}" for k, v in sorted(alerts().items())) or "no alerts")
     finish()
 
 
