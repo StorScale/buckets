@@ -1,0 +1,232 @@
+# promtool test rules tests/monitoring/rules_test.yaml
+# Each alert in operator/helm/buckets-operator/monitoring/rules.yaml, on
+# synthetic series: when it fires, and when it must stay quiet.
+rule_files:
+  - ../../operator/helm/buckets-operator/monitoring/rules.yaml
+evaluation_interval: 1m
+
+tests:
+  # a drive offline: quiet for the first 5 minutes, then firing; a cluster without one stays quiet
+  - interval: 1m
+    input_series:
+      - series: 'minio_cluster_drive_offline_total{namespace="data",buckets_cluster="store",scope="cluster",server="s1"}'
+        values: "0 0 1x10"
+      - series: 'minio_cluster_drive_offline_total{namespace="data",buckets_cluster="other",scope="cluster",server="s1"}'
+        values: "0x12"
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: BucketsDriveOffline
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: BucketsDriveOffline
+        exp_alerts:
+          - exp_labels: {severity: warning, namespace: data, buckets_cluster: store}
+            exp_annotations:
+              summary: "data/store: 1 drive(s) offline"
+              description: "Data stays available while each erasure set keeps its quorum, but redundancy is reduced until the drive is back or replaced."
+              runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketsdriveoffline
+
+  # a server offline, whichever server answers the cluster scrape
+  - interval: 1m
+    input_series:
+      - series: 'minio_cluster_nodes_offline_total{namespace="data",buckets_cluster="store",scope="cluster",server="s1"}'
+        values: "1x3 _x3 1x4"
+      - series: 'minio_cluster_nodes_offline_total{namespace="data",buckets_cluster="store",scope="cluster",server="s2"}'
+        values: "_x3 1x3 _x4"
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: BucketsNodeOffline
+        exp_alerts:
+          - exp_labels: {severity: critical, namespace: data, buckets_cluster: store}
+            exp_annotations:
+              summary: "data/store: 1 server(s) offline"
+              description: "Every drive on those servers is unavailable to the cluster."
+              runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketsnodeoffline
+
+  # an erasure set down to its write quorum; another set with a drive to spare stays quiet
+  - interval: 1m
+    input_series:
+      - series: 'minio_cluster_health_erasure_set_online_drives{namespace="data",buckets_cluster="store",scope="cluster",server="s1",pool="0",set="0"}'
+        values: "4 4 3x6"
+      - series: 'minio_cluster_health_erasure_set_write_quorum{namespace="data",buckets_cluster="store",scope="cluster",server="s1",pool="0",set="0"}'
+        values: "3x8"
+      - series: 'minio_cluster_health_erasure_set_online_drives{namespace="data",buckets_cluster="store",scope="cluster",server="s1",pool="0",set="1"}'
+        values: "8x8"
+      - series: 'minio_cluster_health_erasure_set_write_quorum{namespace="data",buckets_cluster="store",scope="cluster",server="s1",pool="0",set="1"}'
+        values: "5x8"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: BucketsErasureSetDegraded
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: BucketsErasureSetDegraded
+        exp_alerts:
+          - exp_labels: {severity: critical, namespace: data, buckets_cluster: store, pool: "0", set: "0"}
+            exp_annotations:
+              summary: "data/store: pool 0, set 0 is at its write quorum"
+              description: "One more drive failure in this erasure set stops writes to it."
+              runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketserasuresetdegraded
+
+  # I/O errors on one drive; a drive whose counters stay flat is quiet
+  - interval: 1m
+    input_series:
+      - series: 'minio_node_drive_errors_ioerror{namespace="data",buckets_cluster="store",scope="node",server="s1",drive="/data/d1"}'
+        values: "0 0 0 2 4 6 6 6"
+      - series: 'minio_node_drive_errors_timeout{namespace="data",buckets_cluster="store",scope="node",server="s1",drive="/data/d1"}'
+        values: "0x7"
+      - series: 'minio_node_drive_errors_ioerror{namespace="data",buckets_cluster="store",scope="node",server="s1",drive="/data/d2"}'
+        values: "5x7"
+      - series: 'minio_node_drive_errors_timeout{namespace="data",buckets_cluster="store",scope="node",server="s1",drive="/data/d2"}'
+        values: "1x7"
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: BucketsDriveErrors
+        exp_alerts:
+          - exp_labels: {severity: warning, namespace: data, buckets_cluster: store, server: s1, drive: /data/d1}
+            exp_annotations:
+              summary: "data/store: drive /data/d1 on s1 is returning I/O errors or timeouts"
+              description: "6 errors in the last 15 minutes. A drive that keeps erroring is often about to fail."
+              runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketsdriveerrors
+
+  # healing for more than 6 hours
+  - interval: 1m
+    input_series:
+      - series: 'minio_cluster_health_erasure_set_healing_drives{namespace="data",buckets_cluster="store",scope="cluster",server="s1",pool="0",set="0"}'
+        values: "1x480"
+    alert_rule_test:
+      - eval_time: 5h
+        alertname: BucketsHealingSlow
+        exp_alerts: []
+      - eval_time: 7h
+        alertname: BucketsHealingSlow
+        exp_alerts:
+          - exp_labels: {severity: info, namespace: data, buckets_cluster: store, pool: "0", set: "0"}
+            exp_annotations:
+              summary: "data/store: pool 0, set 0 has been healing for over 6 hours"
+              description: "Large drives take a long time to heal; check that healing is still making progress."
+              runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketshealingslow
+
+  # capacity: 10% left is low, 3% left is also critical
+  - interval: 1m
+    input_series:
+      - series: 'minio_cluster_capacity_usable_free_bytes{namespace="data",buckets_cluster="store",scope="cluster",server="s1"}'
+        values: "10x20 3x20"
+      - series: 'minio_cluster_capacity_usable_total_bytes{namespace="data",buckets_cluster="store",scope="cluster",server="s1"}'
+        values: "100x40"
+    alert_rule_test:
+      - eval_time: 17m
+        alertname: BucketsCapacityLow
+        exp_alerts:
+          - exp_labels: {severity: warning, namespace: data, buckets_cluster: store}
+            exp_annotations:
+              summary: "data/store: 10% of usable capacity left"
+              runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketscapacitylow
+      - eval_time: 17m
+        alertname: BucketsCapacityCritical
+        exp_alerts: []
+      - eval_time: 38m
+        alertname: BucketsCapacityCritical
+        exp_alerts:
+          - exp_labels: {severity: critical, namespace: data, buckets_cluster: store}
+            exp_annotations:
+              summary: "data/store: only 3% of usable capacity left"
+              description: "Writes fail once the drives are full."
+              runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketscapacitylow
+
+  # filling fast: 1 TB free, losing 10 GB every 10 minutes (about 6 days left); a steady cluster is quiet
+  - interval: 10m
+    input_series:
+      - series: 'minio_cluster_capacity_usable_free_bytes{namespace="data",buckets_cluster="store",scope="cluster",server="s1"}'
+        values: "1000000000000-10000000000x60"
+      - series: 'minio_cluster_capacity_usable_free_bytes{namespace="data",buckets_cluster="steady",scope="cluster",server="s1"}'
+        values: "1000000000000x60"
+    alert_rule_test:
+      - eval_time: 8h
+        alertname: BucketsCapacityFullIn7Days
+        exp_alerts:
+          - exp_labels: {severity: warning, namespace: data, buckets_cluster: store}
+            exp_annotations:
+              summary: "data/store: at the rate of the last 6 hours, usable capacity runs out within 7 days"
+              runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketscapacitylow
+
+  # 10% server errors on 10 requests/s, summed over servers; a quiet cluster with errors stays quiet
+  - interval: 1m
+    input_series:
+      - series: 'minio_s3_requests_total{namespace="data",buckets_cluster="store",scope="node",server="s1"}'
+        values: "0+300x20"
+      - series: 'minio_s3_requests_total{namespace="data",buckets_cluster="store",scope="node",server="s2"}'
+        values: "0+300x20"
+      - series: 'minio_s3_requests_5xx_errors_total{namespace="data",buckets_cluster="store",scope="node",server="s1"}'
+        values: "0+60x20"
+      - series: 'minio_s3_requests_5xx_errors_total{namespace="data",buckets_cluster="store",scope="node",server="s2"}'
+        values: "0x20"
+      - series: 'minio_s3_requests_total{namespace="data",buckets_cluster="idle",scope="node",server="s1"}'
+        values: "0+6x20"
+      - series: 'minio_s3_requests_5xx_errors_total{namespace="data",buckets_cluster="idle",scope="node",server="s1"}'
+        values: "0+6x20"
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: BucketsHighErrorRate
+        exp_alerts:
+          - exp_labels: {severity: warning, namespace: data, buckets_cluster: store}
+            exp_annotations:
+              summary: "data/store: 10% of S3 requests are failing with server errors"
+              runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketshigherrorrate
+
+  # failed sign-ins: S3 alone, and the console alone, each enough to fire
+  - interval: 1m
+    input_series:
+      - series: 'minio_s3_requests_rejected_auth_total{namespace="data",buckets_cluster="store",scope="node",server="s1"}'
+        values: "0+30x30"
+      - series: 'buckets_console_logins_failed_total{namespace="data",buckets_cluster="web",method="password",pod="store-console-1"}'
+        values: "0+30x30"
+      - series: 'minio_s3_requests_rejected_auth_total{namespace="data",buckets_cluster="calm",scope="node",server="s1"}'
+        values: "0+1x30"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: BucketsAuthFailuresSpike
+        exp_alerts:
+          - exp_labels: {severity: warning, namespace: data, buckets_cluster: store}
+            exp_annotations:
+              summary: "data/store: 500m failed sign-ins per second"
+              description: "S3 requests with bad credentials and failed console sign-ins together: a misconfigured client, or someone guessing passwords."
+              runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketsauthfailuresspike
+          - exp_labels: {severity: warning, namespace: data, buckets_cluster: web}
+            exp_annotations:
+              summary: "data/web: 500m failed sign-ins per second"
+              description: "S3 requests with bad credentials and failed console sign-ins together: a misconfigured client, or someone guessing passwords."
+              runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketsauthfailuresspike
+
+  # KMS failures counted on one server; successes alone are quiet
+  - interval: 1m
+    input_series:
+      - series: 'minio_cluster_kms_request_failure{namespace="data",buckets_cluster="store",scope="cluster",server="s1"}'
+        values: "0 0 1 2 3 4 5 6 7 8 9"
+      - series: 'minio_cluster_kms_request_failure{namespace="data",buckets_cluster="fine",scope="cluster",server="s1"}'
+        values: "0x10"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: BucketsKMSFailing
+        exp_alerts:
+          - exp_labels: {severity: critical, namespace: data, buckets_cluster: store}
+            exp_annotations:
+              summary: "data/store: requests to the KMS are failing"
+              description: "Encrypted objects cannot be read or written while the KMS is unreachable."
+              runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketskmsfailing
+
+  # a target down; targets of other jobs (no buckets_cluster) are not ours
+  - interval: 1m
+    input_series:
+      - series: 'up{namespace="data",buckets_cluster="store",pod="store-pool-0-2",scope="node"}'
+        values: "1 1 0x8"
+      - series: 'up{namespace="kube-system",pod="coredns-1"}'
+        values: "0x10"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: BucketsMetricsDown
+        exp_alerts:
+          - exp_labels: {severity: critical, namespace: data, buckets_cluster: store, pod: store-pool-0-2}
+            exp_annotations:
+              summary: "data/store: Prometheus cannot scrape store-pool-0-2"
+              description: "The server may be down, or the metrics token may be wrong; none of the other alerts can fire for it meanwhile."
+              runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketsmetricsdown
