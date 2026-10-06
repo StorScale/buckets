@@ -132,6 +132,16 @@ groups:
           description: "Encrypted objects cannot be read or written while the KMS is unreachable."
           runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketskmsfailing
 
+      - alert: BucketsKMSOffline
+        expr: max by (namespace, buckets_cluster) (minio_cluster_kms_online{scope="cluster"}) == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.namespace }}/{{ $labels.buckets_cluster }}: the KMS does not answer"
+          description: "No KES endpoint answers its status check. Encrypted objects cannot be read or written meanwhile."
+          runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketskmsfailing
+
       - alert: BucketsMetricsDown
         expr: max by (namespace, buckets_cluster, pod) (up{buckets_cluster!=""} == 0)
         for: 5m

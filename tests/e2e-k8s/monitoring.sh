@@ -104,8 +104,8 @@ names = {rule["name"] for g in r["data"]["groups"] if sys.argv[2] in g["file"] f
 print(len(names), "BucketsDriveOffline" in names)
 PY
 }
-for _ in $(seq 30); do [[ $(rules) == "12 True" ]] && break; sleep 10; done
-expect "the rules are loaded" "$(rules)" "12 True"
+for _ in $(seq 30); do [[ $(rules) == "13 True" ]] && break; sleep 10; done
+expect "the rules are loaded" "$(rules)" "13 True"
 
 echo "== traffic, so the dashboards have something to show"
 AK=$(k get secret mon-root -o jsonpath='{.data.rootUser}' | base64 -d)

@@ -34,6 +34,8 @@ struct buckets_kms {
   _Atomic unsigned rr;
   _Atomic uint64_t ok, err, fail;
   _Atomic uint64_t latency[BUCKETS_KMS_LATENCY_BUCKETS];
+  _Atomic int64_t online_checked_ns; /* buckets_kms_online's last probe (0: never) */
+  _Atomic int online;
 };
 
 const int64_t buckets_kms_latency_ms[BUCKETS_KMS_LATENCY_BUCKETS] = {10, 50, 100, 250, 500, 1000, 1500, 3000, 5000, 10000};
@@ -464,6 +466,22 @@ void buckets_kms_status_endpoints(buckets_kms *k, const char *self_host, buckets
     free(order);
   }
   buckets_buf_append_char(out, '}');
+}
+
+bool buckets_kms_online(buckets_kms *k) {
+  if (!k) return false;
+  if (k->kind == KMS_BUILTIN) return true;
+  int64_t now = mono_ns(), last = atomic_load(&k->online_checked_ns);
+  if (last && now - last < 30LL * 1000000000) return atomic_load(&k->online);
+  atomic_store(&k->online_checked_ns, now); /* one prober at a time; the others use the last answer */
+  bool up = false;
+  for (size_t i = 0; i < k->neps && !up; i++) {
+    buckets_http_result res = {0};
+    up = buckets_http_client_do(k->cli[i], "GET", "/v1/status", NULL, 0, NULL, 0, &res) && res.status == 200;
+    buckets_http_result_free(&res);
+  }
+  atomic_store(&k->online, up);
+  return up;
 }
 
 buckets_kms_err buckets_kms_version(buckets_kms *k, char *out, size_t cap) {

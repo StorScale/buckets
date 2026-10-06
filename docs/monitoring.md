@@ -209,8 +209,12 @@ A client with an old secret looks the same as someone guessing passwords.
 
 ### BucketsKMSFailing
 
-**What:** requests to the KMS are failing. Encrypted objects cannot be read or
-written meanwhile.
+Two alerts link here:
+- `BucketsKMSOffline`: no KES endpoint has answered its status check for 5
+  minutes;
+- `BucketsKMSFailing`: requests to the KMS are failing.
+
+Either way, encrypted objects cannot be read or written meanwhile.
 
 **Check:** the KMS's status on the console's Encryption page. For KES run by
 the operator, its pods and `status.kms`. For an external KES or Vault, the

@@ -330,7 +330,7 @@ static void kms_metrics(mctx *m) {
   if (!m->s->kms) return;
   buckets_kms_metrics km;
   buckets_kms_metrics_get(m->s->kms, &km);
-  ADD0(m, "minio_cluster_kms_online", 1); /* the built-in and static KMS are local */
+  ADD0(m, "minio_cluster_kms_online", buckets_kms_online(m->s->kms) ? 1 : 0); /* KES: does it answer */
   ADD0(m, "minio_cluster_kms_request_success", (double)km.ok);
   ADD0(m, "minio_cluster_kms_request_error", (double)km.err);
   ADD0(m, "minio_cluster_kms_request_failure", (double)km.fail);

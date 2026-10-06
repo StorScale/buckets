@@ -8,6 +8,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 - `spec.console.nodeSelector`, `tolerations` and `affinity`: where the console's pods run, as pools have.
+- The `BucketsKMSOffline` alert: no KES endpoint has answered for 5 minutes.
+
+### Fixed
+- `minio_cluster_kms_online` was 1 whenever a KMS was configured, even an external KES that did not answer. It now probes KES's status (at most every 30 seconds), as MinIO reports it.
 
 ## [1.5.0] - 2026-10-06
 
