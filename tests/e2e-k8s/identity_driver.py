@@ -3,7 +3,7 @@
 drives the console's Sign-in page API, and signs in at Keycloak by filling in
 its real login form.
 
-  python3 identity_driver.py oidc|teams|ldap|ldap-signin
+  python3 identity_driver.py oidc|teams|removal|removal-key|removal-expect on|off|ldap|ldap-signin
 
 Environment: CONSOLE (the console's URL), ROOT_USER, ROOT_PASSWORD, KEYCLOAK
 (its base URL), LDAP_ADDR (host:port). Prints "ok <what>" or "FAIL <what>: ..."
@@ -146,6 +146,66 @@ def oidc():
     expect("a wrong password stays at Keycloak", bad.api("GET", "/api/v1/session")[0], 401)
 
 
+# ---- people who leave Keycloak ---------------------------------------------------------------------
+STATE = "/tmp/removal.json"  # kcleaver's session and access key, between the steps
+
+
+def removal():
+    """Removal on, checked every minute: saved, the sign-in tested again (a new candidate), kcleaver looked up, applied."""
+    b = Browser()
+    expect("root signs in to the console", b.login_root(), 204)
+    settings = dict(KC_SETTINGS, removal={"enabled": True, "intervalMinutes": 1})
+    st, _ = b.api("PUT", "/api/v1/identity-config/candidate", {"settings": {"openid": settings}})
+    expect("removal settings saved", st, 200)
+    st, url, page = b.keycloak(C + "/api/v1/login/oidc?test=1", "kcuser", "kcpass123")
+    expect("the sign-in tested again", "Signed in as kcuser" in page, True)
+    st, r = b.api("POST", "/api/v1/identity-config/removal-test", {"user": "kcleaver"})
+    expect("kcleaver looked up in Keycloak, through the client's service account",
+           (st, r.get("passed"), r.get("state"), r.get("userPrincipalName")), (200, True, "active", "kcleaver"))
+    if not r.get("passed"):
+        print("     lookup:", r)
+    cfg = b.api("GET", "/api/v1/identity-config")[1]
+    st, r = b.api("POST", "/api/v1/identity-config/apply", {"candidateHash": cfg.get("candidateHash")})
+    expect("applied", (st, r.get("applied")), (200, True))
+    expect("the description says so", "people who leave removed" in (r.get("description") or ""), True)
+
+
+def removal_key():
+    """kcleaver signs in at Keycloak and makes an access key, as people do for their tools."""
+    b = Browser()
+    st, url, page = b.keycloak(C + "/api/v1/login/oidc", "kcleaver", "kcleave123")
+    expect("kcleaver signs in", b.api("GET", "/api/v1/session")[1].get("accessKey"), "kcleaver")
+    st, text = b.req("PUT", C + "/api/v1/admin/add-service-account", body={"name": "kcleaver-tool"},
+                     headers={"X-Console-Encrypt": "1", "X-Console-Decrypt": "1"})[0::2]
+    key = (json.loads(text).get("credentials") or {}).get("accessKey") if st == 200 else None
+    expect("and makes an access key", bool(key), True)
+    if not key:
+        print("     add-service-account:", st, text[:300])
+    cookies = [{"name": c.name, "value": c.value, "domain": c.domain, "path": c.path} for c in b.jar]
+    json.dump({"key": key, "cookies": cookies}, open(STATE, "w"))
+
+
+def removal_expect(want):
+    """kcleaver's access key comes to want (on|off) within the sync's minute or two; off, their session stops working too."""
+    s = json.load(open(STATE))
+    root = Browser()
+    root.login_root()
+
+    def status():
+        st, text = root.req("GET", C + "/api/v1/admin/info-service-account?accessKey=" + urllib.parse.quote(s["key"]),
+                            headers={"X-Console-Decrypt": "1"})[0::2]
+        return json.loads(text).get("accountStatus") if st == 200 else None
+    got = wait("the sync", lambda: (lambda v: v if v == want else None)(status()), secs=300) or status()
+    expect("kcleaver's access key is " + want, got, want)
+    if want == "off":
+        b = Browser()
+        for c in s["cookies"]:
+            b.jar.set_cookie(http.cookiejar.Cookie(0, c["name"], c["value"], None, False, c["domain"], bool(c["domain"]),
+                                                   c["domain"].startswith("."), c["path"], True, False, None, False, None, None, {}))
+        st, _ = b.api("GET", "/api/v1/s3/")
+        expect("and their console session no longer reaches the servers", st in (401, 403), True)
+
+
 def teams():
     root = Browser()
     expect("root signs in to the console", root.login_root(), 204)
@@ -222,5 +282,8 @@ def ldap_signin():
     expect("Keycloak sign-in still works", b2.api("GET", "/api/v1/session")[1].get("accessKey"), "kcuser")
 
 
-{"oidc": oidc, "teams": teams, "ldap": ldap, "ldap-signin": ldap_signin}[sys.argv[1]]()
+if sys.argv[1] == "removal-expect":
+    removal_expect(sys.argv[2])
+else:
+    {"oidc": oidc, "teams": teams, "removal": removal, "removal-key": removal_key, "ldap": ldap, "ldap-signin": ldap_signin}[sys.argv[1]]()
 sys.exit(1 if failed else 0)
