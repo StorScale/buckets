@@ -786,13 +786,51 @@ static void test_monitoring(void **state) {
   buckets_buf_free(&t);
 }
 
+/* spec.console's nodeSelector, tolerations and affinity, on its pods; none when unset. */
+static void test_console_scheduling(void **state) {
+  (void)state;
+  for (int with = 0; with < 2; with++) {
+    bc_spec s;
+    yyjson_doc *d = parse(with ? "{\"metadata\":{\"name\":\"store\",\"namespace\":\"data\",\"uid\":\"u\"},\"spec\":{"
+                                 "\"pools\":[{\"servers\":4,\"volumesPerServer\":1}],\"console\":{\"enabled\":true,"
+                                 "\"nodeSelector\":{\"role\":\"web\"},"
+                                 "\"tolerations\":[{\"key\":\"dedicated\",\"operator\":\"Exists\"}],"
+                                 "\"affinity\":{\"nodeAffinity\":{\"requiredDuringSchedulingIgnoredDuringExecution\":"
+                                 "{\"nodeSelectorTerms\":[{\"matchExpressions\":[{\"key\":\"kubernetes.io/hostname\","
+                                 "\"operator\":\"NotIn\",\"values\":[\"n12\"]}]}]}}}}}}"
+                               : k_console,
+                          &s, true);
+    bc_object *o;
+    size_t n = bc_desired(&s, &o);
+    yyjson_mut_val *pod = NULL;
+    for (size_t i = 0; i < n; i++) {
+      yyjson_mut_val *r = yyjson_mut_doc_get_root(o[i].doc);
+      const char *kind = yyjson_mut_get_str(yyjson_mut_obj_get(r, "kind"));
+      if (kind && strcmp(kind, "Deployment") == 0) pod = AT(r, "spec", "template", "spec");
+    }
+    assert_non_null(pod);
+    if (with) {
+      assert_string_equal(yyjson_mut_get_str(AT(pod, "nodeSelector", "role")), "web");
+      assert_string_equal(yyjson_mut_get_str(yyjson_mut_obj_get(yyjson_mut_arr_get_first(yyjson_mut_obj_get(pod, "tolerations")), "key")),
+                          "dedicated");
+      assert_non_null(AT(pod, "affinity", "nodeAffinity", "requiredDuringSchedulingIgnoredDuringExecution"));
+    } else {
+      assert_null(yyjson_mut_obj_get(pod, "nodeSelector"));
+      assert_null(yyjson_mut_obj_get(pod, "tolerations"));
+      assert_null(yyjson_mut_obj_get(pod, "affinity"));
+    }
+    bc_objects_free(o, n);
+    yyjson_doc_free(d);
+  }
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_volumes_and_topology), cmocka_unit_test(test_desired_objects), cmocka_unit_test(test_tls),
       cmocka_unit_test(test_root_secret_not_owned), cmocka_unit_test(test_invalid),
       cmocka_unit_test(test_console), cmocka_unit_test(test_console_tls), cmocka_unit_test(test_console_env),
       cmocka_unit_test(test_minio_tenant_layout), cmocka_unit_test(test_kes_spec), cmocka_unit_test(test_kes_objects), cmocka_unit_test(test_kes_log_reason), cmocka_unit_test(test_kes_adopted), cmocka_unit_test(test_identity), cmocka_unit_test(test_identity_conflicts),
-      cmocka_unit_test(test_monitoring),
+      cmocka_unit_test(test_monitoring), cmocka_unit_test(test_console_scheduling),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

@@ -215,6 +215,16 @@ spec:
                   type: object
                   description: The web console (consoled and the SPA), a Deployment of its own apart from storage.
                   properties:
+                    nodeSelector:
+                      type: object
+                      additionalProperties: {type: string}
+                      description: Nodes the console may run on, as for pools.
+                    tolerations:
+                      type: array
+                      items: {type: object, x-kubernetes-preserve-unknown-fields: true}
+                    affinity:
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
                     enabled: {type: boolean, default: false}
                     replicas: {type: integer, minimum: 1, default: 1}
                     image: {type: string, description: "Defaults to ghcr.io/storscale/buckets-console at the operator's version."}

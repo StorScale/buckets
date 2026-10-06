@@ -59,6 +59,7 @@ typedef struct {
     const char *tls_secret; /* consoled serves HTTPS with it (NULL: HTTP) */
     yyjson_val *resources, *annotations;
     yyjson_val *env; /* extra environment for consoled, e.g. its OpenID sign-in */
+    yyjson_val *node_selector, *tolerations, *affinity; /* where it runs */
   } console;
   /* spec.monitoring (monitoring.c): a ServiceMonitor for the Prometheus
    * Operator. enabled: 1 on, 0 off, -1 (unset) on when its CRDs exist. */

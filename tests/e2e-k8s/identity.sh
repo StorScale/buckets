@@ -159,7 +159,7 @@ spec:
       volumesPerServer: 1
       volumeClaimTemplate: {resources: {requests: {storage: 2Gi}}}
       ${AFF:+affinity: $AFF}
-  console: {enabled: true, image: "$REGISTRY/buckets-console:$BUCKETS_TAG"}
+  console: {enabled: true, image: "$REGISTRY/buckets-console:$BUCKETS_TAG"${AFF:+, affinity: $AFF}}
 YAML
 for _ in $(seq 120); do [[ $(k get bc idp -o jsonpath='{.status.phase} {.status.readyServersText}' 2>/dev/null) == "Ready 4/4" ]] && break; sleep 5; done
 k rollout status deploy/idp-console --timeout=300s >/dev/null
