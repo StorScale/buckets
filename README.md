@@ -19,6 +19,7 @@ Real MinIO and Buckets can serve each other's drives, clusters included.
 | [docs/migration.md](docs/migration.md) | Moving a MinIO deployment to Buckets in place, KES included, and back |
 | [docs/identity.md](docs/identity.md) | Sign-in set up from the console: Microsoft Entra ID, Okta, Keycloak, another OpenID provider, or LDAP and Active Directory |
 | [docs/encryption.md](docs/encryption.md) | Setting up the KMS in the console: KES with Vault, AWS, Azure or Google |
+| [docs/integrations/lakehouse.md](docs/integrations/lakehouse.md) | A lakehouse on Buckets: Iceberg with Nessie, Trino, Apache Ranger and Keycloak, runnable and tested |
 | [docs/performance.md](docs/performance.md) | Benchmarks against MinIO and how to run them |
 | [docs/roadmap.md](docs/roadmap.md) | What comes next, and why |
 | [CHANGELOG.md](CHANGELOG.md) | Changes by release |

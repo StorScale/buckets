@@ -12,7 +12,8 @@
 #   - tags v<version>:  <version> and latest; the images are also signed with
 #                       cosign (keyless: this workflow's GitHub identity), and the
 #                       operator's Helm chart goes to oci://ghcr.io/storscale/charts
-# Every image carries an SBOM and build provenance as attestations.
+# Every image is multi-arch (linux/amd64 and linux/arm64, each built natively)
+# and carries an SBOM and build provenance as attestations.
 #
 # Verify a release image:
 #   cosign verify ghcr.io/storscale/bucketsd:<version> \
@@ -37,17 +38,24 @@ env:
   REGISTRY: ghcr.io/storscale
 
 jobs:
+  # Each image is built natively on an amd64 and an arm64 runner and pushed by
+  # digest; "merge" then joins the two under the tags as one multi-arch image.
   image:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     permissions:
       contents: read
       packages: write   # push to ghcr.io
-      id-token: write   # cosign keyless signing
     strategy:
       fail-fast: false
       matrix:
+        name: [bucketsd, buckets-operator, buckets-console, buckets-kes]
+        arch: [amd64, arm64]
         include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
           - name: bucketsd
             dockerfile: docker/Dockerfile.bucketsd
           - name: buckets-operator
@@ -59,15 +67,69 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ matrix.name }},push-by-digest=true,name-canonical=true,push=true
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=AGPL-3.0-or-later
+          sbom: true
+          provenance: mode=max
+          cache-from: type=gha,scope=${{ matrix.name }}-${{ matrix.arch }}
+          cache-to: type=gha,scope=${{ matrix.name }}-${{ matrix.arch }},mode=max
+
+      - name: Record the digest
+        run: |
+          mkdir -p digests
+          echo "${{ steps.build.outputs.digest }}" > "digests/${{ matrix.arch }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.name }}-${{ matrix.arch }}
+          path: digests/*
+          retention-days: 1
+
+  merge:
+    needs: image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write   # push to ghcr.io
+      id-token: write   # cosign keyless signing
+    strategy:
+      fail-fast: false
+      matrix:
+        name: [bucketsd, buckets-operator, buckets-console, buckets-kes]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digest-${{ matrix.name }}-*
+          merge-multiple: true
+          path: digests
+
       - name: Tags
         id: tags
         run: |
           image="$REGISTRY/${{ matrix.name }}"
           if [[ $GITHUB_REF == refs/tags/v* ]]; then
             version=${GITHUB_REF_NAME#v}
-            echo "list=$image:$version,$image:latest" >> "$GITHUB_OUTPUT"
+            echo "list=$image:$version $image:latest" >> "$GITHUB_OUTPUT"
           else
-            echo "list=$image:${GITHUB_SHA::8},$image:${GITHUB_REF_NAME//\//-}" >> "$GITHUB_OUTPUT"
+            echo "list=$image:${GITHUB_SHA::8} $image:${GITHUB_REF_NAME//\//-}" >> "$GITHUB_OUTPUT"
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
 
@@ -79,34 +141,26 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push
-        id: build
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ${{ matrix.dockerfile }}
-          platforms: linux/amd64
-          push: true
-          tags: ${{ steps.tags.outputs.list }}
-          labels: |
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.licenses=AGPL-3.0-or-later
-          sbom: true
-          provenance: mode=max
-          cache-from: type=gha,scope=${{ matrix.name }}
-          cache-to: type=gha,scope=${{ matrix.name }},mode=max
+      - name: Join the architectures under the tags
+        id: merge
+        run: |
+          image=${{ steps.tags.outputs.image }}
+          tags=(); for t in ${{ steps.tags.outputs.list }}; do tags+=(-t "$t"); done
+          docker buildx imagetools create "${tags[@]}" "$image@$(cat digests/amd64)" "$image@$(cat digests/arm64)"
+          first=${{ steps.tags.outputs.list }}; first=${first%% *}
+          docker buildx imagetools inspect "$first"
+          echo "digest=$(docker buildx imagetools inspect "$first" --format '{{json .Manifest}}' | jq -r .digest)" >> "$GITHUB_OUTPUT"
 
       - uses: sigstore/cosign-installer@v3
         if: startsWith(github.ref, 'refs/tags/v')
 
       - name: Sign
         if: startsWith(github.ref, 'refs/tags/v')
-        run: cosign sign --yes "${{ steps.tags.outputs.image }}@${{ steps.build.outputs.digest }}"
+        run: cosign sign --yes "${{ steps.tags.outputs.image }}@${{ steps.merge.outputs.digest }}"
 
   chart:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: image
+    needs: merge
     runs-on: ubuntu-latest
     permissions:
       contents: read
