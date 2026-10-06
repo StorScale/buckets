@@ -6,6 +6,9 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- `spec.console.nodeSelector`, `tolerations` and `affinity`: where the console's pods run, as pools have.
+
 ## [1.5.0] - 2026-10-06
 
 ### Added

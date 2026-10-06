@@ -121,6 +121,9 @@ bool bc_parse(yyjson_val *obj, const char *cluster_domain, bc_spec *out, char *e
   out->console.annotations = yyjson_obj_get(ing, "annotations");
   out->console.resources = yyjson_obj_get(con, "resources");
   out->console.env = yyjson_obj_get(con, "env");
+  out->console.node_selector = yyjson_obj_get(con, "nodeSelector");
+  out->console.tolerations = yyjson_obj_get(con, "tolerations");
+  out->console.affinity = yyjson_obj_get(con, "affinity");
   out->console.s3_url = str_at(con, "s3URL");
   out->console.tls_secret = str_at(yyjson_obj_get(yyjson_obj_get(con, "tls"), "certSecret"), "name");
   yyjson_val *mon = yyjson_obj_get(spec, "monitoring");
@@ -617,6 +620,10 @@ static bc_object console_deployment(const bc_spec *s) {
   ADD_INT(d, sec, "runAsGroup", 65532);
   ADD_BOOL(d, sec, "runAsNonRoot", true);
   if (s->pull_secrets) yyjson_mut_obj_add_val(d, pod, "imagePullSecrets", yyjson_val_mut_copy(d, s->pull_secrets));
+  if (s->console.node_selector)
+    yyjson_mut_obj_add_val(d, pod, "nodeSelector", yyjson_val_mut_copy(d, s->console.node_selector));
+  if (s->console.tolerations) yyjson_mut_obj_add_val(d, pod, "tolerations", yyjson_val_mut_copy(d, s->console.tolerations));
+  if (s->console.affinity) yyjson_mut_obj_add_val(d, pod, "affinity", yyjson_val_mut_copy(d, s->console.affinity));
   mval *c = yyjson_mut_arr_add_obj(d, ADD_ARR(d, pod, "containers"));
   ADD_STR(d, c, "name", "console");
   ADD_STR(d, c, "image", s->console.image);
