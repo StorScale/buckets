@@ -4,26 +4,64 @@
   "sslRequired": "none",
   "accessTokenLifespan": 900,
   "groups": [
-    { "name": "analysts" },
-    { "name": "engineers" }
+    {
+      "name": "analysts"
+    },
+    {
+      "name": "engineers"
+    }
   ],
   "users": [
     {
-      "username": "alice", "enabled": true, "emailVerified": true,
-      "email": "alice@example.com", "firstName": "Alice", "lastName": "Analyst",
-      "credentials": [{ "type": "password", "value": "${LAKEHOUSE_USER_PASSWORD}", "temporary": false }],
-      "groups": ["/analysts"]
+      "username": "alice",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "alice@example.com",
+      "firstName": "Alice",
+      "lastName": "Analyst",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "${LAKEHOUSE_USER_PASSWORD}",
+          "temporary": false
+        }
+      ],
+      "groups": [
+        "/analysts"
+      ]
     },
     {
-      "username": "bob", "enabled": true, "emailVerified": true,
-      "email": "bob@example.com", "firstName": "Bob", "lastName": "Engineer",
-      "credentials": [{ "type": "password", "value": "${LAKEHOUSE_USER_PASSWORD}", "temporary": false }],
-      "groups": ["/engineers"]
+      "username": "bob",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "bob@example.com",
+      "firstName": "Bob",
+      "lastName": "Engineer",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "${LAKEHOUSE_USER_PASSWORD}",
+          "temporary": false
+        }
+      ],
+      "groups": [
+        "/engineers"
+      ]
     },
     {
-      "username": "carol", "enabled": true, "emailVerified": true,
-      "email": "carol@example.com", "firstName": "Carol", "lastName": "Contractor",
-      "credentials": [{ "type": "password", "value": "${LAKEHOUSE_USER_PASSWORD}", "temporary": false }],
+      "username": "carol",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "carol@example.com",
+      "firstName": "Carol",
+      "lastName": "Contractor",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "${LAKEHOUSE_USER_PASSWORD}",
+          "temporary": false
+        }
+      ],
       "groups": []
     }
   ],
@@ -35,7 +73,10 @@
       "publicClient": true,
       "directAccessGrantsEnabled": true,
       "standardFlowEnabled": true,
-      "redirectUris": ["http://localhost:*", "https://localhost:*"],
+      "redirectUris": [
+        "http://localhost:*",
+        "https://localhost:*"
+      ],
       "protocolMappers": [
         {
           "name": "groups",
@@ -51,6 +92,49 @@
         },
         {
           "name": "audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "lakehouse",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "jupyterhub",
+      "name": "JupyterHub",
+      "enabled": true,
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "${JUPYTERHUB_OAUTH_SECRET:jupyterhub-oauth-secret-change-me}",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "redirectUris": [
+        "http://jupyterhub:8000/hub/oauth_callback"
+      ],
+      "webOrigins": [
+        "http://jupyterhub:8000"
+      ],
+      "attributes": {
+        "post.logout.redirect.uris": "http://jupyterhub:8000/*"
+      },
+      "protocolMappers": [
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "config": {
+            "claim.name": "groups",
+            "full.path": "false",
+            "access.token.claim": "true",
+            "id.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "audience: lakehouse",
           "protocol": "openid-connect",
           "protocolMapper": "oidc-audience-mapper",
           "config": {

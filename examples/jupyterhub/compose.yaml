@@ -1,0 +1,108 @@
+# JupyterHub on Buckets: people sign in to JupyterHub with Keycloak, each gets
+# a notebook server in a container of their own, and their notebooks reach
+# Buckets with their own credentials (their Keycloak token, through Buckets'
+# STS). Keycloak's groups decide who may sign in, who administers the hub,
+# and what each person may read and write in Buckets.
+#
+#   docker compose up -d --wait               # build, start, and configure (setup)
+#   docker compose run --rm test              # the end-to-end checks
+#   docker compose down -v                    # stop and delete everything
+#
+# In a browser: add "127.0.0.1 keycloak jupyterhub" to /etc/hosts, then open
+# http://jupyterhub:8000. See ../../docs/integrations/jupyterhub.md. Every
+# password is in .env, for local use only. Run one example at a time.
+name: buckets-jupyterhub
+
+x-tools: &tools
+  build: ../common/tools
+  image: buckets-examples-tools
+  env_file: .env
+  environment:
+    PYTHONPATH: /common
+  volumes:
+    - ./tools:/work:ro
+    - ../common/tools:/common:ro
+
+networks:
+  default:
+    name: buckets-jupyterhub   # notebook containers join it (DockerSpawner.network_name)
+
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.8.0
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      # One issuer for everyone: tokens say http://keycloak:8080 whoever asks.
+      KC_HOSTNAME: http://keycloak:8080
+      KC_HEALTH_ENABLED: "true"
+      LAKEHOUSE_USER_PASSWORD: ${LAKEHOUSE_USER_PASSWORD}
+      JUPYTERHUB_OAUTH_SECRET: ${JUPYTERHUB_OAUTH_SECRET}
+    volumes:
+      - ../common/keycloak/lakehouse-realm.json:/opt/keycloak/data/import/lakehouse-realm.json:ro
+    ports: ["8080:8080"]
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q UP <&3"]
+      interval: 5s
+      retries: 60
+
+  buckets:
+    image: ${BUCKETS_IMAGE:-ghcr.io/storscale/bucketsd:1.4.2}
+    environment:
+      BUCKETS_ROOT_USER: ${BUCKETS_ROOT_USER}
+      BUCKETS_ROOT_PASSWORD: ${BUCKETS_ROOT_PASSWORD}
+      # People sign in with Keycloak; each of their groups names a Buckets policy.
+      MINIO_IDENTITY_OPENID_CONFIG_URL: http://keycloak:8080/realms/lakehouse/.well-known/openid-configuration
+      MINIO_IDENTITY_OPENID_CLIENT_ID: lakehouse
+      MINIO_IDENTITY_OPENID_CLAIM_NAME: groups
+    volumes:
+      - buckets-data:/data
+    ports: ["9000:9000"]
+    depends_on:
+      keycloak: {condition: service_healthy}
+
+  # Buckets' buckets and policies, and a sample dataset. Runs once, then exits.
+  setup:
+    <<: *tools
+    command: ["python", "-u", "/work/setup.py"]
+    depends_on:
+      keycloak: {condition: service_healthy}
+      buckets: {condition: service_started}
+
+  # Builds the notebook image that JupyterHub starts for each person, then exits.
+  notebook:
+    build: {context: ./images, target: notebook}
+    image: buckets-jupyterhub-notebook
+    command: ["true"]
+
+  jupyterhub:
+    build: {context: ./images, target: hub}
+    image: buckets-jupyterhub-hub
+    command: ["jupyterhub", "-f", "/etc/jupyterhub/jupyterhub_config.py"]
+    environment:
+      JUPYTERHUB_OAUTH_SECRET: ${JUPYTERHUB_OAUTH_SECRET}
+      JUPYTERHUB_CRYPT_KEY: ${JUPYTERHUB_CRYPT_KEY}
+    volumes:
+      - ./jupyterhub/jupyterhub_config.py:/etc/jupyterhub/jupyterhub_config.py:ro
+      - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
+      - jupyterhub-data:/srv/jupyterhub/data
+    ports: ["8000:8000"]
+    depends_on:
+      keycloak: {condition: service_healthy}
+      setup: {condition: service_completed_successfully}
+      notebook: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/hub/health')"]
+      interval: 5s
+      retries: 60
+
+  # The end-to-end checks: docker compose run --rm test
+  test:
+    <<: *tools
+    command: ["python", "-u", "/work/test.py"]
+    profiles: ["test"]
+
+volumes:
+  buckets-data:
+  jupyterhub-data:

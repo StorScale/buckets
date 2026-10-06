@@ -8,7 +8,7 @@ This guide puts the classic data-lake stack on Buckets:
 
 Spark and Trino work on the same tables through the one metastore. Spark writes and Trino reads; Trino writes and Spark reads.
 
-Everything runs from one Compose file in [`examples/hive-spark`](../../examples/hive-spark), and a test script checks what this guide says the stack does. CI runs it on each change to Buckets. The sign-in and governance setup is the same as in the [lakehouse guide](lakehouse.md), which uses Nessie as the catalog instead.
+Everything runs from one Compose file in [`examples/hive-spark`](../../examples/hive-spark), and a test script checks what this guide says the stack does. CI runs it on each change to Buckets. For notebooks, see [jupyterhub.md](jupyterhub.md). The sign-in and governance setup is the same as in the [lakehouse guide](lakehouse.md), which uses Nessie as the catalog instead.
 
 | Component | Version | Role |
 |---|---|---|

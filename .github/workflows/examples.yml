@@ -3,6 +3,7 @@
 #   - lakehouse:  Nessie, Trino, Apache Ranger, Keycloak (docs/integrations/lakehouse.md)
 #   - hive-spark: Hive Metastore, Spark, Trino, Apache Ranger, Keycloak
 #                 (docs/integrations/hive-spark.md)
+#   - jupyterhub: JupyterHub, Keycloak (docs/integrations/jupyterhub.md)
 name: examples
 
 on:
@@ -38,7 +39,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        example: [lakehouse, hive-spark]
+        example: [lakehouse, hive-spark, jupyterhub]
     defaults:
       run:
         working-directory: examples/${{ matrix.example }}

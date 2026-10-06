@@ -8,6 +8,6 @@ FROM python:3.12-slim
 RUN apt-get update \
  && apt-get install -y --no-install-recommends openssl curl \
  && rm -rf /var/lib/apt/lists/*
-RUN pip install --no-cache-dir trino==0.340.0 boto3==1.43.108 requests==2.34.2 pyspark-client==4.1.3
+RUN pip install --no-cache-dir trino==0.340.0 boto3==1.43.108 requests==2.34.2 pyspark-client==4.1.3 websocket-client==1.9.2
 COPY --from=mc /go/bin/mc /usr/local/bin/mc
 WORKDIR /work
