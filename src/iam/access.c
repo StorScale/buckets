@@ -12,7 +12,9 @@ const char *const buckets_access_levels[] = {"read", "write", "delete", "manage"
 
 #define ARN "arn:aws:s3:::"
 /* An object name no narrower pattern than "*" matches: access to it is access to the whole bucket. */
-#define PROBE "\x01" "buckets-access-review"
+#define PROBE \
+  "\x01"      \
+  "buckets-access-review"
 
 typedef struct {
   const char *action;
@@ -22,11 +24,15 @@ typedef struct {
 static const level_action k_read[] = {{"s3:ListBucket", false}, {"s3:GetObject", true}, {NULL, false}};
 static const level_action k_write[] = {{"s3:PutObject", true}, {NULL, false}};
 static const level_action k_delete[] = {{"s3:DeleteObject", true}, {NULL, false}};
-static const level_action k_manage[] = {
-    {"s3:PutBucketPolicy", false},         {"s3:PutLifecycleConfiguration", false}, {"s3:PutBucketVersioning", false},
-    {"s3:PutEncryptionConfiguration", false}, {"s3:PutBucketNotification", false},
-    {"s3:PutBucketObjectLockConfiguration", false}, {"s3:PutReplicationConfiguration", false},
-    {"s3:DeleteBucket", false},            {NULL, false}};
+static const level_action k_manage[] = {{"s3:PutBucketPolicy", false},
+                                        {"s3:PutLifecycleConfiguration", false},
+                                        {"s3:PutBucketVersioning", false},
+                                        {"s3:PutEncryptionConfiguration", false},
+                                        {"s3:PutBucketNotification", false},
+                                        {"s3:PutBucketObjectLockConfiguration", false},
+                                        {"s3:PutReplicationConfiguration", false},
+                                        {"s3:DeleteBucket", false},
+                                        {NULL, false}};
 static const level_action *const k_levels[] = {k_read, k_write, k_delete, k_manage};
 
 /* ---- statements, each a policy of its own ------------------------------------------------- */
@@ -132,8 +138,8 @@ typedef enum { M_NO, M_YES, M_MAYBE } match;
 
 typedef struct {
   const char *action, *bucket, *object;
-  yyjson_val *conds;  /* given condition values */
-  const char *user;   /* for ${aws:username} */
+  yyjson_val *conds; /* given condition values */
+  const char *user;  /* for ${aws:username} */
 } request;
 
 static match matches(const entry *x, const request *r) {
@@ -155,7 +161,8 @@ static match matches(const entry *x, const request *r) {
     cv[k] = (buckets_cond_value){"username", &vals[k], 1};
     k++;
   }
-  buckets_policy_args a = {.action = r->action, .bucket = r->bucket, .object = r->object, .conds = cv, .nconds = k};
+  buckets_policy_args a = {
+      .action = r->action, .bucket = r->bucket, .object = r->object, .conds = cv, .nconds = k};
   match m;
   if (!x->nck) {
     m = buckets_policy_allowed(x->stripped, &a) ? M_YES : M_NO;
@@ -166,8 +173,10 @@ static match matches(const entry *x, const request *r) {
       for (size_t j = 0; j < k && !have; j++) have = strcmp(cv[j].key, x->ckeys[c]) == 0;
       all = have;
     }
-    if (all) m = buckets_policy_allowed(x->full, &a) ? M_YES : M_NO;
-    else m = buckets_policy_allowed(x->stripped, &a) ? M_MAYBE : M_NO;
+    if (all)
+      m = buckets_policy_allowed(x->full, &a) ? M_YES : M_NO;
+    else
+      m = buckets_policy_allowed(x->stripped, &a) ? M_MAYBE : M_NO;
   }
   free(cv);
   free(vals);
@@ -187,8 +196,9 @@ static void by_add(outcome *o, const entry *x) {
   o->by[o->nby++] = x;
 }
 
-/* The servers' rule over a set of statements: an explicit Deny wins, then an Allow. Statements whose Condition
- * cannot be decided make the result conditional: an Allow never counts, a Deny could still refuse. */
+/* The servers' rule over a set of statements: an explicit Deny wins, then an Allow. Statements whose
+ * Condition cannot be decided make the result conditional: an Allow never counts, a Deny could still
+ * refuse. */
 static outcome decide(const entry *const *xs, size_t n, const request *r) {
   outcome o = {D_NONE, NULL, 0};
   bool deny = false, allow = false, maybe_deny = false, maybe_allow = false;
@@ -198,11 +208,15 @@ static outcome decide(const entry *const *xs, size_t n, const request *r) {
     if (ms[i] == M_YES) (xs[i]->deny ? &deny : &allow)[0] = true;
     if (ms[i] == M_MAYBE) (xs[i]->deny ? &maybe_deny : &maybe_allow)[0] = true;
   }
-  o.d = deny ? D_DENIED : allow ? (maybe_deny ? D_CONDITIONAL : D_ALLOWED) : maybe_allow ? D_CONDITIONAL : D_NONE;
+  o.d = deny          ? D_DENIED
+        : allow       ? (maybe_deny ? D_CONDITIONAL : D_ALLOWED)
+        : maybe_allow ? D_CONDITIONAL
+                      : D_NONE;
   for (size_t i = 0; i < n; i++) {
     if (ms[i] == M_NO) continue;
-    bool show = o.d == D_DENIED ? (xs[i]->deny && ms[i] == M_YES) : o.d == D_ALLOWED ? (!xs[i]->deny && ms[i] == M_YES)
-                                                                                     : o.d == D_CONDITIONAL;
+    bool show = o.d == D_DENIED    ? (xs[i]->deny && ms[i] == M_YES)
+                : o.d == D_ALLOWED ? (!xs[i]->deny && ms[i] == M_YES)
+                                   : o.d == D_CONDITIONAL;
     if (show) by_add(&o, xs[i]);
   }
   free(ms);
@@ -219,9 +233,9 @@ static void outcome_free(outcome *o) {
 
 typedef struct {
   yyjson_val *facts;
-  entries ident;           /* every named policy's statements */
-  entries bucket;          /* the bucket policy's */
-  entries *keys;           /* each key principal's own policy (by index in principals; may be empty) */
+  entries ident;  /* every named policy's statements */
+  entries bucket; /* the bucket policy's */
+  entries *keys;  /* each key principal's own policy (by index in principals; may be empty) */
   size_t nprincipals;
 } model;
 
@@ -231,8 +245,25 @@ static yyjson_val *find_principal(const model *m, const char *kind, const char *
   size_t i, max;
   yyjson_val *p;
   yyjson_arr_foreach(principals(m), i, max, p) {
-    const char *k = yyjson_get_str(yyjson_obj_get(p, "kind")), *nm = yyjson_get_str(yyjson_obj_get(p, "name"));
+    const char *k = yyjson_get_str(yyjson_obj_get(p, "kind")),
+               *nm = yyjson_get_str(yyjson_obj_get(p, "name"));
     if (k && nm && strcmp(k, kind) == 0 && strcmp(nm, name) == 0) return p;
+  }
+  return NULL;
+}
+
+/* A key's owner: a user, LDAP user, OpenID user (by name or id) or the root user. */
+static yyjson_val *find_owner(const model *m, const char *owner) {
+  if (!owner) return NULL;
+  static const char *const kinds[] = {"user", "ldap-user", "openid-user", "root"};
+  size_t i, max;
+  yyjson_val *p;
+  yyjson_arr_foreach(principals(m), i, max, p) {
+    const char *k = yyjson_get_str(yyjson_obj_get(p, "kind"));
+    const char *n = yyjson_get_str(yyjson_obj_get(p, "name")), *id = yyjson_get_str(yyjson_obj_get(p, "id"));
+    bool kind_ok = false;
+    for (size_t j = 0; k && j < BUCKETS_ARRAY_LEN(kinds); j++) kind_ok = kind_ok || strcmp(k, kinds[j]) == 0;
+    if (kind_ok && ((n && strcmp(n, owner) == 0) || (id && strcmp(id, owner) == 0))) return p;
   }
   return NULL;
 }
@@ -241,7 +272,8 @@ static void model_init(model *m, yyjson_val *facts, const char *bucket) {
   *m = (model){.facts = facts};
   size_t i, max;
   yyjson_val *k, *v;
-  yyjson_obj_foreach(yyjson_obj_get(facts, "policies"), i, max, k, v) add_policy(&m->ident, yyjson_get_str(k), v, NULL);
+  yyjson_obj_foreach(yyjson_obj_get(facts, "policies"), i, max, k, v)
+      add_policy(&m->ident, yyjson_get_str(k), v, NULL);
   yyjson_val *bp = yyjson_obj_get(facts, "bucketPolicy");
   if (bucket && yyjson_is_obj(bp)) add_policy(&m->bucket, NULL, bp, bucket);
   m->nprincipals = yyjson_arr_size(principals(m));
@@ -292,7 +324,8 @@ static set statements_of(const model *m, yyjson_val *p) {
     yyjson_val *gp = find_principal(m, "group", yyjson_get_str(g));
     if (!gp) gp = find_principal(m, "ldap-group", yyjson_get_str(g));
     const char *status = gp ? yyjson_get_str(yyjson_obj_get(gp, "status")) : NULL;
-    if (gp && !(status && strcmp(status, "disabled") == 0)) set_add_names(&s, m, yyjson_obj_get(gp, "policies"));
+    if (gp && !(status && strcmp(status, "disabled") == 0))
+      set_add_names(&s, m, yyjson_obj_get(gp, "policies"));
   }
   return s;
 }
@@ -302,7 +335,8 @@ static bool names_account(const entry *x, const char *account) {
   yyjson_val *pr = yyjson_obj_get(x->stmt, "Principal");
   if (yyjson_is_str(pr)) return strcmp(yyjson_get_str(pr), "*") == 0;
   yyjson_val *aws = yyjson_obj_get(pr, "AWS");
-  if (yyjson_is_str(aws)) return strcmp(yyjson_get_str(aws), "*") == 0 || (account && strcmp(yyjson_get_str(aws), account) == 0);
+  if (yyjson_is_str(aws))
+    return strcmp(yyjson_get_str(aws), "*") == 0 || (account && strcmp(yyjson_get_str(aws), account) == 0);
   size_t i, max;
   yyjson_val *v;
   yyjson_arr_foreach(aws, i, max, v) {
@@ -319,7 +353,8 @@ static bool names_account_exactly(const entry *x, const char *account) {
   if (yyjson_is_str(aws)) return strcmp(yyjson_get_str(aws), account) == 0;
   size_t i, max;
   yyjson_val *v;
-  yyjson_arr_foreach(aws, i, max, v) if (yyjson_is_str(v) && strcmp(yyjson_get_str(v), account) == 0) return true;
+  yyjson_arr_foreach(aws, i, max,
+                     v) if (yyjson_is_str(v) && strcmp(yyjson_get_str(v), account) == 0) return true;
   return false;
 }
 
@@ -329,7 +364,8 @@ static set bucket_statements(const model *m, const char *account, bool star_allo
   set s = {0};
   for (size_t i = 0; i < m->bucket.n; i++) {
     if (!names_account(&m->bucket.v[i], account)) continue;
-    if (!star_allows && !m->bucket.v[i].deny && !(account && names_account_exactly(&m->bucket.v[i], account))) continue;
+    if (!star_allows && !m->bucket.v[i].deny && !(account && names_account_exactly(&m->bucket.v[i], account)))
+      continue;
     s.v = buckets_xrealloc(s.v, (s.n + 1) * sizeof(*s.v));
     s.v[s.n++] = &m->bucket.v[i];
   }
@@ -345,7 +381,8 @@ static set set_join(set a, set b) {
 
 /* A principal's decision: its statements and the bucket policy's for it; a key with its own policy also needs
  * that policy to allow. Root may do everything. */
-static outcome principal_decides(const model *m, yyjson_val *p, size_t pindex, const request *r, bool star_allows) {
+static outcome principal_decides(const model *m, yyjson_val *p, size_t pindex, const request *r,
+                                 bool star_allows) {
   const char *kind = yyjson_get_str(yyjson_obj_get(p, "kind"));
   const char *name = yyjson_get_str(yyjson_obj_get(p, "name"));
   if (kind && strcmp(kind, "root") == 0) return (outcome){D_ALLOWED, NULL, 0};
@@ -353,9 +390,7 @@ static outcome principal_decides(const model *m, yyjson_val *p, size_t pindex, c
   const char *account = name;
   if (kind && strcmp(kind, "key") == 0) { /* the owner's access, narrowed by the key's own policy */
     const char *owner = yyjson_get_str(yyjson_obj_get(p, "owner"));
-    yyjson_val *op = owner ? find_principal(m, "user", owner) : NULL;
-    if (!op && owner) op = find_principal(m, "ldap-user", owner);
-    if (!op && owner) op = find_principal(m, "root", owner);
+    yyjson_val *op = find_owner(m, owner);
     if (!op) return (outcome){D_NONE, NULL, 0};
     subject = op;
     account = owner;
@@ -364,8 +399,10 @@ static outcome principal_decides(const model *m, yyjson_val *p, size_t pindex, c
   rr.user = account;
   set s = set_join(statements_of(m, subject), bucket_statements(m, account, star_allows));
   outcome o;
-  if (subject != p && strcmp(yyjson_get_str(yyjson_obj_get(subject, "kind")), "root") == 0) o = (outcome){D_ALLOWED, NULL, 0};
-  else o = decide(s.v, s.n, &rr);
+  if (subject != p && strcmp(yyjson_get_str(yyjson_obj_get(subject, "kind")), "root") == 0)
+    o = (outcome){D_ALLOWED, NULL, 0};
+  else
+    o = decide(s.v, s.n, &rr);
   free(s.v);
   if (pindex < m->nprincipals && m->keys[pindex].n && o.d != D_DENIED && o.d != D_NONE) {
     set ks = {0};
@@ -392,8 +429,10 @@ static void add_by(yyjson_mut_doc *d, yyjson_mut_val *arr, const outcome *o) {
   for (size_t i = 0; i < o->nby; i++) {
     const entry *x = o->by[i];
     yyjson_mut_val *b = yyjson_mut_arr_add_obj(d, arr);
-    if (x->policy) yyjson_mut_obj_add_strcpy(d, b, "policy", x->policy);
-    else yyjson_mut_obj_add_bool(d, b, "bucketPolicy", true);
+    if (x->policy)
+      yyjson_mut_obj_add_strcpy(d, b, "policy", x->policy);
+    else
+      yyjson_mut_obj_add_bool(d, b, "bucketPolicy", true);
     yyjson_mut_obj_add_int(d, b, "statement", x->index);
     if (x->sid && *x->sid) yyjson_mut_obj_add_strcpy(d, b, "sid", x->sid);
     yyjson_mut_obj_add_str(d, b, "effect", x->deny ? "Deny" : "Allow");
@@ -425,7 +464,8 @@ static void limits(yyjson_mut_doc *d, yyjson_mut_val *out, const model *m, yyjso
       snprintf(bpart, sizeof(bpart), "%.*s", (int)(slash - bo), bo);
       if (!buckets_wildcard_match(bpart, r->bucket)) continue;
       size_t k = 0;
-      for (const char *c = slash + 1; *c && k < sizeof(sample) - 1; c++) sample[k++] = (*c == '*' || *c == '?') ? 'x' : *c;
+      for (const char *c = slash + 1; *c && k < sizeof(sample) - 1; c++)
+        sample[k++] = (*c == '*' || *c == '?') ? 'x' : *c;
       sample[k] = '\0';
       request rs = *r;
       rs.object = sample;
@@ -462,8 +502,8 @@ static const level_action *level_of(const char *level, size_t *n_out, level_acti
 }
 
 /* One row: a principal's decisions on the level's actions; NULL when it has no access at all. */
-static yyjson_mut_val *row(yyjson_mut_doc *d, const model *m, yyjson_val *p, size_t pindex, const level_action *acts,
-                           size_t nacts, const char *bucket, bool stand_in) {
+static yyjson_mut_val *row(yyjson_mut_doc *d, const model *m, yyjson_val *p, size_t pindex,
+                           const level_action *acts, size_t nacts, const char *bucket, bool stand_in) {
   yyjson_mut_val *r = yyjson_mut_obj(d);
   yyjson_mut_val *arr = yyjson_mut_arr(d);
   size_t full = 0, some = 0, cond = 0;
@@ -471,9 +511,7 @@ static yyjson_mut_val *row(yyjson_mut_doc *d, const model *m, yyjson_val *p, siz
   bool is_key = kind && strcmp(kind, "key") == 0;
   yyjson_val *subject = p;
   if (is_key) {
-    const char *owner = yyjson_get_str(yyjson_obj_get(p, "owner"));
-    subject = owner ? find_principal(m, "user", owner) : NULL;
-    if (!subject && owner) subject = find_principal(m, "ldap-user", owner);
+    subject = find_owner(m, yyjson_get_str(yyjson_obj_get(p, "owner")));
   }
   set s = subject ? set_join(statements_of(m, subject),
                              bucket_statements(m, yyjson_get_str(yyjson_obj_get(subject, "name")), stand_in))
@@ -509,7 +547,9 @@ static yyjson_mut_val *row(yyjson_mut_doc *d, const model *m, yyjson_val *p, siz
   free(s.v);
   if (!full && !some && !cond) return NULL;
   yyjson_mut_obj_add_strcpy(d, r, "kind", kind ? kind : "");
-  yyjson_mut_obj_add_strcpy(d, r, "name", yyjson_get_str(yyjson_obj_get(p, "name")) ? yyjson_get_str(yyjson_obj_get(p, "name")) : "");
+  yyjson_mut_obj_add_strcpy(
+      d, r, "name",
+      yyjson_get_str(yyjson_obj_get(p, "name")) ? yyjson_get_str(yyjson_obj_get(p, "name")) : "");
   static const char *const copy[] = {"status", "members", "seen", "owner", "groups"};
   for (size_t i = 0; i < BUCKETS_ARRAY_LEN(copy); i++) {
     yyjson_val *v = yyjson_obj_get(p, copy[i]);
@@ -520,7 +560,8 @@ static yyjson_mut_val *row(yyjson_mut_doc *d, const model *m, yyjson_val *p, siz
   return r;
 }
 
-yyjson_mut_val *buckets_access_bucket(yyjson_mut_doc *d, yyjson_val *facts, const char *bucket, const char *level) {
+yyjson_mut_val *buckets_access_bucket(yyjson_mut_doc *d, yyjson_val *facts, const char *bucket,
+                                      const char *level) {
   level_action any[32];
   size_t nacts = 0;
   const level_action *acts = level_of(level, &nacts, any, BUCKETS_ARRAY_LEN(any));
@@ -538,6 +579,7 @@ yyjson_mut_val *buckets_access_bucket(yyjson_mut_doc *d, yyjson_val *facts, cons
   yyjson_arr_foreach(principals(&m), i, max, p) {
     const char *kind = yyjson_get_str(yyjson_obj_get(p, "kind"));
     if (kind && strcmp(kind, "key") == 0 && !m.keys[i].n) continue; /* its owner's row covers it */
+    if (kind && strcmp(kind, "openid-user") == 0) continue;         /* the role rows name them */
     yyjson_mut_val *r = row(d, &m, p, i, acts, nacts, bucket, false);
     if (r) yyjson_mut_arr_append(rows, r);
   }
@@ -586,8 +628,9 @@ yyjson_mut_val *buckets_access_bucket(yyjson_mut_doc *d, yyjson_val *facts, cons
   return out;
 }
 
-yyjson_mut_val *buckets_access_check(yyjson_mut_doc *d, yyjson_val *facts, yyjson_val *who, const char *action,
-                                     const char *bucket, const char *object, yyjson_val *conds) {
+yyjson_mut_val *buckets_access_check(yyjson_mut_doc *d, yyjson_val *facts, yyjson_val *who,
+                                     const char *action, const char *bucket, const char *object,
+                                     yyjson_val *conds) {
   model m;
   model_init(&m, facts, bucket);
   const char *kind = yyjson_get_str(yyjson_obj_get(who, "kind"));
@@ -609,13 +652,17 @@ yyjson_mut_val *buckets_access_check(yyjson_mut_doc *d, yyjson_val *facts, yyjso
     size_t i, max, at = (size_t)-1;
     yyjson_val *p, *found = NULL;
     yyjson_arr_foreach(principals(&m), i, max, p) {
-      const char *k = yyjson_get_str(yyjson_obj_get(p, "kind")), *n = yyjson_get_str(yyjson_obj_get(p, "name"));
+      const char *k = yyjson_get_str(yyjson_obj_get(p, "kind")),
+                 *n = yyjson_get_str(yyjson_obj_get(p, "name"));
       if (kind && name && k && n && strcmp(k, kind) == 0 && strcmp(n, name) == 0) found = p, at = i;
     }
     const char *status = found ? yyjson_get_str(yyjson_obj_get(found, "status")) : NULL;
-    if (status && strcmp(status, "disabled") == 0) disabled = true;
-    else if (found) o = principal_decides(&m, found, at, &r, true);
-    else known = false;
+    if (status && strcmp(status, "disabled") == 0)
+      disabled = true;
+    else if (found)
+      o = principal_decides(&m, found, at, &r, true);
+    else
+      known = false;
   }
   if (!known) {
     model_free(&m);
@@ -623,12 +670,13 @@ yyjson_mut_val *buckets_access_check(yyjson_mut_doc *d, yyjson_val *facts, yyjso
   }
   yyjson_mut_val *out = yyjson_mut_obj(d);
   yyjson_mut_obj_add_str(d, out, "decision", o.d == D_NONE ? "denied" : decision_name(o.d));
-  const char *reason = o.d == D_ALLOWED  ? (o.nby ? "Allowed by the statements below." : "The root user may do everything.")
-                       : o.d == D_DENIED ? "Denied explicitly by the statements below: a Deny wins over any Allow."
-                       : o.d == D_CONDITIONAL
-                           ? "Depends on conditions: the statements below decide it once their condition values are known."
-                       : disabled ? "Denied: the account is disabled."
-                                  : "Denied: no statement allows it.";
+  const char *reason =
+      o.d == D_ALLOWED  ? (o.nby ? "Allowed by the statements below." : "The root user may do everything.")
+      : o.d == D_DENIED ? "Denied explicitly by the statements below: a Deny wins over any Allow."
+      : o.d == D_CONDITIONAL
+          ? "Depends on conditions: the statements below decide it once their condition values are known."
+      : disabled ? "Denied: the account is disabled."
+                 : "Denied: no statement allows it.";
   yyjson_mut_obj_add_str(d, out, "reason", reason);
   add_by(d, yyjson_mut_obj_add_arr(d, out, "by"), &o);
   outcome_free(&o);

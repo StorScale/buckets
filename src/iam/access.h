@@ -11,13 +11,16 @@
  *
  * Facts, as JSON:
  *   {"policies":     {"<name>": <policy document>, ...},
- *    "principals":   [{"kind": "root" | "user" | "group" | "ldap-user" | "ldap-group" | "openid-role" | "key",
+ *    "principals":   [{"kind": "root" | "user" | "group" | "ldap-user" | "ldap-group" | "openid-role" |
+ *                              "openid-user" | "key",
  *                      "name",
- *                      "policies": [names],          attached (an openid-role: [its own name])
+ *                      "id",                         an openid-user's: what its keys name as their owner
+ *                      "policies": [names],          attached (an openid-role: [its own name]; an openid-user:
+ *                                                    the roles it was seen with)
  *                      "groups": [names],            a user's groups, whose policies it also has
  *                      "members": [names],           a group's
  *                      "status": "enabled" | "disabled",
- *                      "owner",                      a key's owner (a user's name)
+ *                      "owner",                      a key's owner (a user's name, or an openid-user's id)
  *                      "policy": <document>,         a key's own policy, narrowing its owner's (absent: the owner's)
  *                      "seen": [names]}],            an openid-role: people seen signing in with it
  *    "bucketPolicy": <bucket policy document> | null,
@@ -39,9 +42,10 @@ extern const char *const buckets_access_levels[];
  *                           "by": [{"policy" | "bucketPolicy": true, "statement": index, "sid"?, "effect"}]}]}],
  *    "missing": [...]}
  * Rows only for principals with some access; a key only when it has a policy of its own (otherwise it is its
- * owner's). Bucket-policy principals appear as kind "anyone" (Principal "*": every request, signed or not) or
- * "account". NULL on an unknown level. */
-yyjson_mut_val *buckets_access_bucket(yyjson_mut_doc *d, yyjson_val *facts, const char *bucket, const char *level);
+ * owner's); no openid-user rows (the openid-role rows name the people seen). Bucket-policy principals appear as
+ * kind "anyone" (Principal "*": every request, signed or not) or "account". NULL on an unknown level. */
+yyjson_mut_val *buckets_access_bucket(yyjson_mut_doc *d, yyjson_val *facts, const char *bucket,
+                                      const char *level);
 
 /* Whether who ({"kind", "name"} of a principal in facts, or {"kind": "openid", "roles": [...]}, or
  * {"kind": "anonymous"}) may do action on bucket (and object, "" for bucket actions), into d:
@@ -50,7 +54,8 @@ yyjson_mut_val *buckets_access_bucket(yyjson_mut_doc *d, yyjson_val *facts, cons
  * conds: optional condition values ({"SourceIp": "10.0.0.1", "SecureTransport": "true", ...}). A statement
  * with a Condition whose keys are not all given is "conditional": never counted as allowing, and, for a Deny,
  * reported as what could still refuse. NULL when who is not in facts. */
-yyjson_mut_val *buckets_access_check(yyjson_mut_doc *d, yyjson_val *facts, yyjson_val *who, const char *action,
-                                     const char *bucket, const char *object, yyjson_val *conds);
+yyjson_mut_val *buckets_access_check(yyjson_mut_doc *d, yyjson_val *facts, yyjson_val *who,
+                                     const char *action, const char *bucket, const char *object,
+                                     yyjson_val *conds);
 
 #endif
