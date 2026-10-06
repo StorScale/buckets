@@ -29,6 +29,13 @@ typedef struct {
 } bc_pool;
 
 typedef struct {
+  bool enabled;
+  yyjson_val *issuer_ref, *dns_names;
+  const char *duration;
+  char secret[160];
+} bc_cert_manager;
+
+typedef struct {
   const char *name, *ns, *uid;
   long long generation;
   const char *image, *pull_policy;
@@ -48,6 +55,10 @@ typedef struct {
   size_t npools;
   int parity, set_drive_count; /* 0: default */
   const char *tls_secret, *ca_secret;
+  /* spec.tls.certManager / spec.console.tls.certManager: the operator asks cert-manager for the certificate
+   * (Secret <name>-tls / <name>-console-tls, which tls_secret / console.tls_secret then name). issuer_ref
+   * NULL: a CA of the cluster's own (Issuers <name>-selfsigned and <name>-ca, Certificate <name>-ca). */
+  bc_cert_manager cert_manager, console_cert_manager;
   const char *service_type;
   const char *cluster_domain; /* e.g. cluster.local */
   struct {
@@ -92,6 +103,8 @@ typedef struct {
   } kes;
 } bc_spec;
 
+#define BC_CERT_MANAGER_API "/apis/cert-manager.io/v1"
+
 /* Reads and validates a BucketsCluster; strings point into the document. */
 bool bc_parse(yyjson_val *obj, const char *cluster_domain, bc_spec *out, char *err, size_t errlen);
 
@@ -114,6 +127,10 @@ typedef struct {
   char *path;           /* the object's API URL */
   yyjson_mut_doc *doc;  /* desired object, for server-side apply */
 } bc_object;
+
+/* The cert-manager objects spec.tls.certManager and spec.console.tls.certManager ask for, into o (up to 5):
+ * the cluster's own CA chain when either has no issuerRef, then each Certificate. Returns how many. */
+size_t bc_certificates(const bc_spec *s, bc_object *o);
 
 /* Monitoring (monitoring.c): Secret <name>-prometheus (accessKey,
  * secretKey: the metrics user; token: its bearer token for Prometheus), and

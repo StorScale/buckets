@@ -218,7 +218,7 @@ done:
 /* kms: status.kms as reconciled; NULL keeps what the status has. */
 static void write_status(op_ctx *o, yyjson_val *bc, const bc_spec *s, const char *phase, bool ready, const char *reason,
                          const char *message, const char *topology, yyjson_val **sts, size_t nsts, yyjson_mut_val *kms,
-                         yyjson_mut_val *idn, yyjson_mut_val *mon) {
+                         yyjson_mut_val *idn, yyjson_mut_val *mon, yyjson_mut_val *tls) {
   yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
   yyjson_mut_val *root = yyjson_mut_obj(d);
   yyjson_mut_doc_set_root(d, root);
@@ -266,6 +266,7 @@ static void write_status(op_ctx *o, yyjson_val *bc, const bc_spec *s, const char
   yyjson_val *old_idn = yyjson_obj_get(yyjson_obj_get(bc, "status"), "identity");
   if (idn) yyjson_mut_obj_add_val(d, st, "identity", yyjson_mut_val_mut_copy(d, idn));
   else if (old_idn) yyjson_mut_obj_add_val(d, st, "identity", yyjson_val_mut_copy(d, old_idn));
+  if (tls) yyjson_mut_obj_add_val(d, st, "tls", yyjson_mut_val_mut_copy(d, tls));
   yyjson_val *old_mon = yyjson_obj_get(yyjson_obj_get(bc, "status"), "monitoring");
   if (mon) yyjson_mut_obj_add_val(d, st, "monitoring", yyjson_mut_val_mut_copy(d, mon));
   else if (old_mon) yyjson_mut_obj_add_val(d, st, "monitoring", yyjson_val_mut_copy(d, old_mon));
@@ -312,20 +313,70 @@ static bool servers_exist(op_ctx *o, const bc_spec *s) {
   return any;
 }
 
+/* status.tls: each certificate cert-manager issues for the cluster, ready or not, and until when. */
+static void cert_status(op_ctx *o, const bc_spec *s, yyjson_mut_doc *d, yyjson_mut_val *out) {
+  const bc_cert_manager *cm[2] = {&s->cert_manager, s->console.enabled ? &s->console_cert_manager : NULL};
+  yyjson_mut_val *arr = yyjson_mut_obj_add_arr(d, out, "certificates");
+  bool all = true;
+  for (int i = 0; i < 2; i++) {
+    if (!cm[i] || !cm[i]->enabled) continue;
+    buckets_buf p = BUCKETS_BUF_INIT;
+    buckets_buf_appendf(&p, BC_CERT_MANAGER_API "/namespaces/%s/certificates/%s", s->ns, cm[i]->secret);
+    yyjson_doc *c = NULL;
+    kube_get(o->k, p.data, &c);
+    buckets_buf_free(&p);
+    yyjson_val *st = yyjson_obj_get(yyjson_doc_get_root(c), "status");
+    const char *ready = NULL, *msg = NULL;
+    size_t j, max;
+    yyjson_val *cond;
+    yyjson_arr_foreach(yyjson_obj_get(st, "conditions"), j, max, cond) {
+      const char *t = yyjson_get_str(yyjson_obj_get(cond, "type"));
+      if (t && strcmp(t, "Ready") == 0) {
+        ready = yyjson_get_str(yyjson_obj_get(cond, "status"));
+        msg = yyjson_get_str(yyjson_obj_get(cond, "message"));
+      }
+    }
+    yyjson_mut_val *e = yyjson_mut_arr_add_obj(d, arr);
+    yyjson_mut_obj_add_strcpy(d, e, "name", cm[i]->secret);
+    bool ok = ready && strcmp(ready, "True") == 0;
+    yyjson_mut_obj_add_bool(d, e, "ready", ok);
+    const char *after = yyjson_get_str(yyjson_obj_get(st, "notAfter"));
+    if (after) yyjson_mut_obj_add_strcpy(d, e, "notAfter", after);
+    if (msg && !ok) yyjson_mut_obj_add_strcpy(d, e, "message", msg);
+    all = all && ok;
+    yyjson_doc_free(c);
+  }
+  yyjson_mut_obj_add_str(d, out, "phase", all ? "Ready" : "Issuing");
+}
+
+static bool cert_manager_installed(op_ctx *o) {
+  yyjson_doc *api = NULL;
+  int st = kube_get(o->k, BC_CERT_MANAGER_API, &api);
+  yyjson_doc_free(api);
+  return st == 200;
+}
+
 static void reconcile_cluster(op_ctx *o, yyjson_val *bc) {
   bc_spec s;
   char err[512];
   if (!bc_parse(bc, o->cluster_domain, &s, err, sizeof(err))) {
     buckets_log_warn("%s/%s: invalid spec: %s", get_str(bc, "metadata.namespace"), get_str(bc, "metadata.name"), err);
-    write_status(o, bc, NULL, "Invalid", false, "InvalidSpec", err, NULL, NULL, 0, NULL, NULL, NULL);
+    write_status(o, bc, NULL, "Invalid", false, "InvalidSpec", err, NULL, NULL, 0, NULL, NULL, NULL, NULL);
     return;
   }
   if (!ensure_creds(o, &s, err, sizeof(err))) {
-    write_status(o, bc, &s, "Pending", false, "Credentials", err, NULL, NULL, 0, NULL, NULL, NULL);
+    write_status(o, bc, &s, "Pending", false, "Credentials", err, NULL, NULL, 0, NULL, NULL, NULL, NULL);
     return;
   }
   if (s.console.enabled && !ensure_console_secret(o, &s, err, sizeof(err))) {
-    write_status(o, bc, &s, "Pending", false, "ConsoleSecret", err, NULL, NULL, 0, NULL, NULL, NULL);
+    write_status(o, bc, &s, "Pending", false, "ConsoleSecret", err, NULL, NULL, 0, NULL, NULL, NULL, NULL);
+    return;
+  }
+  bool certs = s.cert_manager.enabled || (s.console.enabled && s.console_cert_manager.enabled);
+  if (certs && !cert_manager_installed(o)) {
+    write_status(o, bc, &s, "Error", false, "CertManagerMissing",
+                 "spec.tls.certManager needs cert-manager (cert-manager.io/v1), which is not installed", NULL, NULL, 0,
+                 NULL, NULL, NULL, NULL);
     return;
   }
   /* the KMS first: whether bucketsd uses KES is part of its pods' spec */
@@ -362,11 +413,11 @@ static void reconcile_cluster(op_ctx *o, yyjson_val *bc) {
     if (kind && strcmp(kind, "StatefulSet") == 0 && nsts < BC_MAX_POOLS) sts[nsts++] = r;
   }
   if (failed) {
-    write_status(o, bc, &s, "Error", false, "ApplyFailed", err, topo, sts, nsts, kroot, iroot, NULL);
+    write_status(o, bc, &s, "Error", false, "ApplyFailed", err, topo, sts, nsts, kroot, iroot, NULL, NULL);
   } else if (hold) {
     const char *km = yyjson_mut_get_str(yyjson_mut_obj_get(kroot, "message"));
     snprintf(err, sizeof(err), "the servers start once KES serves key %s: %s", s.kes.key_name, km ? km : "KES is starting");
-    write_status(o, bc, &s, "WaitingForKMS", false, "WaitingForKMS", err, topo, sts, nsts, kroot, iroot, NULL);
+    write_status(o, bc, &s, "WaitingForKMS", false, "WaitingForKMS", err, topo, sts, nsts, kroot, iroot, NULL, NULL);
   } else {
     size_t outdated = 0;
     int restarted = restart_pods(o, &s, topo, sts, nsts, &outdated);
@@ -383,7 +434,9 @@ static void reconcile_cluster(op_ctx *o, yyjson_val *bc) {
     /* monitoring once the servers are applied: its metrics user is made through their admin API */
     yyjson_mut_val *mroot = yyjson_mut_obj(kd);
     op_monitoring_reconcile(o, bc, &s, kd, mroot);
-    write_status(o, bc, &s, phase, !outdated && ready == servers, reason, msg, topo, sts, nsts, kroot, iroot, mroot);
+    yyjson_mut_val *troot = NULL;
+    if (certs) cert_status(o, &s, kd, troot = yyjson_mut_obj(kd));
+    write_status(o, bc, &s, phase, !outdated && ready == servers, reason, msg, topo, sts, nsts, kroot, iroot, mroot, troot);
   }
   for (size_t i = 0; i < n; i++) yyjson_doc_free(applied[i]);
   /* A disabled console (or Ingress) goes away. */
