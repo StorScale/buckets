@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-10-06
+
 ### Fixed
 - The console's Configuration page no longer lists subnet and callhome, MinIO's own license and call-home services, which do nothing for Buckets. The server still accepts their settings, for MinIO's tools.
 
