@@ -268,17 +268,18 @@ static void replace_drives(buckets_healer *h) {
     buckets_objlayer_place(L, i, &pl);
     size_t first = pl.pool_first + pl.set * pl.set_size;
     char err[256];
-    if (!buckets_format_replace(d, L->all + first, pl.set_size, err, sizeof(err))) {
+    if (!buckets_format_replace(d, L->all + first, pl.set_size, buckets_drive_health_changed_since(d), err,
+                                sizeof(err))) {
       if (!h->refused[i]) buckets_log_warn("drive %s has no format.json and was not formatted: %s", d->root, err);
       h->refused[i] = true;
       continue;
     }
     h->refused[i] = false;
-    tracker t = {0};
-    tracker_save(d, &t);
     buckets_log_info("drive %s was replaced: formatted into its slot as %s; healing it in the background", d->root,
                      d->drive_id);
-    buckets_drive_health_check(d); /* online again at once */
+    buckets_drive_health_check(d); /* online again at once, so it takes the tracker and the healed objects */
+    tracker t = {0};
+    tracker_save(d, &t);
     pthread_mutex_lock(&h->mu);
     h->drives_pending = true;
     pthread_cond_broadcast(&h->cv);

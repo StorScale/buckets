@@ -111,8 +111,8 @@ static void test_changed(void **state) {
   assert_int_equal(rename(fp, keep), 0);
   assert_int_equal(buckets_drive_health_check(d), BUCKETS_DRIVE_HEALTH_CHANGED);
   assert_false(buckets_drive_is_online(d));
-  assert_false(buckets_drive_health_refuses(d)); /* healing may format it */
-  assert_int_equal(buckets_drive_make_vol(d, "bkt2"), BUCKETS_DRIVE_OK);
+  assert_true(buckets_drive_health_refuses(d)); /* nothing lands on it before it is formatted back */
+  assert_int_equal(buckets_drive_make_vol(d, "bkt2"), BUCKETS_DRIVE_ERR_OFFLINE);
   uint64_t total, free_b;
   assert_int_equal(buckets_drive_disk_info(d, &total, &free_b), BUCKETS_DRIVE_ERR_OFFLINE); /* peers see it offline */
   char why[256];

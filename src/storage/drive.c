@@ -944,7 +944,7 @@ buckets_drive_err buckets_drive_list_dir(buckets_drive *d, const char *vol, cons
 }
 
 buckets_drive_err buckets_drive_disk_info(buckets_drive *d, uint64_t *total, uint64_t *free_bytes) {
-  if (!d->remote && buckets_drive_health_state(d) != BUCKETS_DRIVE_HEALTH_OK) return BUCKETS_DRIVE_ERR_OFFLINE;
+  if (buckets_drive_health_refuses(d)) return BUCKETS_DRIVE_ERR_OFFLINE; /* storage/health.c */
   struct timespec t0, t1;
   buckets_drive_stats_begin(d);
   clock_gettime(CLOCK_MONOTONIC, &t0);

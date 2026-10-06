@@ -6,6 +6,9 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- An emptied drive was marked offline but kept taking writes. New objects landed on it, so it never counted as an empty replacement, and the 1.6.0 auto-format and heal never ran. A drive in any offline state now refuses calls. Calls also check, at most once a second, that the drive's `format.json` is still there, so an emptied drive stops taking writes within about a second. What did land in that second is newer than the moment the drive was found empty: it is cleared, and the drive is formatted and healed. Data from before that moment still keeps a drive from being formatted over.
+
 ## [1.6.0] - 2026-10-06
 
 ### Added

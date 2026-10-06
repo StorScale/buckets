@@ -4,9 +4,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <dirent.h>
+#include <ftw.h>
+#include <pthread.h>
 #include <errno.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <yyjson.h>
 
 #include "core/log.h"
@@ -279,41 +282,61 @@ bool buckets_format_negotiate(buckets_drive **drives, size_t n, size_t set_size,
 
 /* ---- a drive replaced while the server runs ------------------------------------------------ */
 
-/* Whether dir holds nothing but the allowed names (missing counts as empty). */
-static bool only(const char *dir, const char *const *allowed) {
-  DIR *dp = opendir(dir);
-  if (!dp) return errno == ENOENT;
-  bool ok = true;
-  struct dirent *e;
-  while (ok && (e = readdir(dp))) {
-    if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
-    bool fine = false;
-    for (const char *const *a = allowed; *a && !fine; a++) fine = strcmp(e->d_name, *a) == 0;
-    ok = fine;
-  }
-  closedir(dp);
-  return ok;
+/* What nftw walks with (one walk at a time). */
+static pthread_mutex_t g_walk_mu = PTHREAD_MUTEX_INITIALIZER;
+static const char *g_root;
+static long long g_cutoff_ms;
+static bool g_old;
+
+static bool in_lost_found(const char *path) {
+  size_t n = strlen(g_root);
+  return strncmp(path + n, "/lost+found", 11) == 0 && (path[n + 11] == '\0' || path[n + 11] == '/');
 }
 
-bool buckets_format_replace(buckets_drive *d, buckets_drive *const *set, size_t n, char *err, size_t errlen) {
+static int find_old(const char *path, const struct stat *st, int type, struct FTW *f) {
+  (void)type;
+  if (f->level == 0 || in_lost_found(path)) return 0;
+#ifdef __APPLE__
+  long long mt = (long long)st->st_mtimespec.tv_sec * 1000 + st->st_mtimespec.tv_nsec / 1000000;
+#else
+  long long mt = (long long)st->st_mtim.tv_sec * 1000 + st->st_mtim.tv_nsec / 1000000;
+#endif
+  if (mt < g_cutoff_ms) {
+    g_old = true;
+    return 1; /* stop: there is real data */
+  }
+  return 0;
+}
+
+static int clear(const char *path, const struct stat *st, int type, struct FTW *f) {
+  (void)st, (void)type;
+  if (f->level == 0 || in_lost_found(path)) return 0;
+  remove(path);
+  return 0;
+}
+
+bool buckets_format_replace(buckets_drive *d, buckets_drive *const *set, size_t n, long long changed_since,
+                            char *err, size_t errlen) {
   struct stat st;
   if (stat(d->root, &st) != 0 || !S_ISDIR(st.st_mode)) {
     snprintf(err, errlen, "its directory is missing (the drive is not mounted?)");
     return false;
   }
-  static const char *const root_ok[] = {BUCKETS_META_BUCKET, "lost+found", NULL};
   static const char *const meta_ok[] = {"tmp", "buckets", "multipart", "config", NULL};
-  static const char *const none[] = {NULL};
   char meta[4096], sub[4200];
   snprintf(meta, sizeof(meta), "%s/" BUCKETS_META_BUCKET, d->root);
-  bool empty = only(d->root, root_ok) && only(meta, meta_ok);
-  for (size_t i = 0; empty && meta_ok[i]; i++) {
-    if (strcmp(meta_ok[i], "tmp") == 0) continue; /* scratch: anything there is disposable */
-    snprintf(sub, sizeof(sub), "%s/%s", meta, meta_ok[i]);
-    empty = only(sub, none);
-  }
-  if (!empty) {
-    snprintf(err, errlen, "it holds data, so it is left alone (heal or wipe it by hand)");
+  /* nothing older than the moment it was found emptied (with some slack for clocks and the detection) */
+  pthread_mutex_lock(&g_walk_mu);
+  g_root = d->root;
+  g_cutoff_ms = changed_since ? changed_since - 5000 : 0;
+  g_old = false;
+  if (changed_since) nftw(d->root, find_old, 32, FTW_PHYS);
+  else g_old = true;
+  bool old = g_old;
+  if (!old) nftw(d->root, clear, 32, FTW_PHYS | FTW_DEPTH); /* what a moment's writes left */
+  pthread_mutex_unlock(&g_walk_mu);
+  if (old) {
+    snprintf(err, errlen, "it holds data from before it lost its format.json, so it is left alone (heal or wipe it by hand)");
     return false;
   }
   /* the deployment's format, from another drive of the set */
@@ -344,9 +367,17 @@ bool buckets_format_replace(buckets_drive *d, buckets_drive *const *set, size_t 
     mkdir(meta, 0755);
     mkdir(sub, 0755);
   }
-  bool ok = json && buckets_drive_write_all(d, BUCKETS_META_BUCKET, FORMAT_PATH, json, len) == BUCKETS_DRIVE_OK;
+  /* written directly: the drive refuses calls until a check finds this format.json */
+  char tmp[4300], dst[4300];
+  snprintf(tmp, sizeof(tmp), "%s/tmp/.format-%s.json", meta, d->drive_id);
+  snprintf(dst, sizeof(dst), "%s/" FORMAT_PATH, meta);
+  FILE *f = json ? fopen(tmp, "w") : NULL;
+  bool ok = f && fwrite(json, 1, len, f) == len;
+  if (f) ok = (fflush(f) == 0 && fsync(fileno(f)) == 0) && ok, fclose(f);
+  ok = ok && rename(tmp, dst) == 0;
+  if (!ok) unlink(tmp);
   free(json);
-  if (!ok) snprintf(err, errlen, "format.json could not be written");
+  if (!ok) snprintf(err, errlen, "format.json could not be written: %s", strerror(errno));
   else d->freshly_formatted = true;
   return ok;
 }
