@@ -8,8 +8,10 @@
 #include <string.h>
 
 #include "identity.h"
+#include "crypto/jwt.h"
 #include "kms.h"
 #include "manifests.h"
+#include "monitoring.h"
 
 static const char *k_cluster =
     "{\"apiVersion\":\"buckets.io/v1alpha1\",\"kind\":\"BucketsCluster\","
@@ -676,12 +678,97 @@ static void test_identity_conflicts(void **state) {
   yyjson_doc_free(d);
 }
 
+/* spec.monitoring, the headless Service's label, the ServiceMonitor, and the token bucketsd accepts. */
+static void test_monitoring(void **state) {
+  (void)state;
+  bc_spec s;
+  yyjson_doc *d = parse(k_cluster, &s, true);
+  assert_int_equal(s.monitoring.enabled, -1); /* unset: on when the Prometheus Operator is there */
+  assert_string_equal(s.monitoring.interval, "30s");
+  bc_object *o;
+  size_t n = bc_desired(&s, &o);
+  int headless = 0;
+  for (size_t i = 0; i < n; i++) {
+    yyjson_mut_val *r = yyjson_mut_doc_get_root(o[i].doc);
+    const char *kind = yyjson_mut_get_str(yyjson_mut_obj_get(r, "kind"));
+    const char *svc = yyjson_mut_get_str(AT(r, "metadata", "labels", "buckets.io/service"));
+    if (kind && strcmp(kind, "Service") == 0 && svc) {
+      assert_string_equal(svc, "headless");
+      assert_string_equal(yyjson_mut_get_str(AT(r, "metadata", "name")), "store-hl");
+      headless++;
+    }
+  }
+  assert_int_equal(headless, 1);
+  bc_objects_free(o, n);
+
+  bc_object sm = bc_service_monitor(&s, "ca.crt");
+  assert_string_equal(sm.path, "/apis/monitoring.coreos.com/v1/namespaces/data/servicemonitors/store");
+  yyjson_mut_val *r = yyjson_mut_doc_get_root(sm.doc);
+  assert_string_equal(yyjson_mut_get_str(AT(r, "spec", "selector", "matchLabels", "buckets.io/service")), "headless");
+  assert_string_equal(yyjson_mut_get_str(yyjson_mut_arr_get_first(AT(r, "spec", "namespaceSelector", "matchNames"))), "data");
+  yyjson_mut_val *eps = AT(r, "spec", "endpoints");
+  assert_int_equal(yyjson_mut_arr_size(eps), 3);
+  static const char *const scopes[] = {"node", "cluster", "bucket"};
+  for (size_t i = 0; i < 3; i++) {
+    yyjson_mut_val *ep = yyjson_mut_arr_get(eps, i);
+    char want[64];
+    snprintf(want, sizeof(want), "/minio/v2/metrics/%s", scopes[i]);
+    assert_string_equal(yyjson_mut_get_str(yyjson_mut_obj_get(ep, "path")), want);
+    assert_string_equal(yyjson_mut_get_str(yyjson_mut_obj_get(ep, "scheme")), "http");
+    assert_string_equal(yyjson_mut_get_str(AT(ep, "authorization", "credentials", "name")), "store-prometheus");
+    assert_null(yyjson_mut_obj_get(ep, "tlsConfig"));
+    yyjson_mut_val *rl = yyjson_mut_obj_get(ep, "relabelings");
+    assert_string_equal(yyjson_mut_get_str(yyjson_mut_obj_get(yyjson_mut_arr_get(rl, 0), "replacement")), "store");
+    assert_string_equal(yyjson_mut_get_str(yyjson_mut_obj_get(yyjson_mut_arr_get(rl, 1), "targetLabel")), "scope");
+    assert_string_equal(yyjson_mut_get_str(yyjson_mut_obj_get(yyjson_mut_arr_get(rl, 1), "replacement")), scopes[i]);
+  }
+  free(sm.path);
+  yyjson_mut_doc_free(sm.doc);
+  yyjson_doc_free(d);
+
+  /* TLS: the CA Secret's key and the Service's name; labels and interval from the spec; off */
+  d = parse("{\"metadata\":{\"name\":\"sec\",\"namespace\":\"ns\",\"uid\":\"u\"},"
+            "\"spec\":{\"tls\":{\"certSecret\":{\"name\":\"sec-tls\"}},"
+            "\"monitoring\":{\"interval\":\"1m\",\"labels\":{\"release\":\"prom\"}},"
+            "\"pools\":[{\"servers\":2,\"volumesPerServer\":2}]}}",
+            &s, true);
+  sm = bc_service_monitor(&s, "tls.crt");
+  r = yyjson_mut_doc_get_root(sm.doc);
+  assert_string_equal(yyjson_mut_get_str(AT(r, "metadata", "labels", "release")), "prom");
+  yyjson_mut_val *ep = yyjson_mut_arr_get_first(AT(r, "spec", "endpoints"));
+  assert_string_equal(yyjson_mut_get_str(yyjson_mut_obj_get(ep, "interval")), "1m");
+  assert_string_equal(yyjson_mut_get_str(yyjson_mut_obj_get(ep, "port")), "https-s3");
+  assert_string_equal(yyjson_mut_get_str(AT(ep, "tlsConfig", "ca", "secret", "name")), "sec-tls");
+  assert_string_equal(yyjson_mut_get_str(AT(ep, "tlsConfig", "ca", "secret", "key")), "tls.crt");
+  assert_string_equal(yyjson_mut_get_str(AT(ep, "tlsConfig", "serverName")), "sec.ns.svc");
+  free(sm.path);
+  yyjson_mut_doc_free(sm.doc);
+  yyjson_doc_free(d);
+  d = parse("{\"metadata\":{\"name\":\"off\",\"namespace\":\"ns\",\"uid\":\"u\"},"
+            "\"spec\":{\"monitoring\":{\"enabled\":false},\"pools\":[{\"servers\":4,\"volumesPerServer\":1}]}}",
+            &s, true);
+  assert_int_equal(s.monitoring.enabled, 0);
+  yyjson_doc_free(d);
+
+  /* the token: bucketsd's verifier takes it, with the user as subject and prometheus as issuer */
+  buckets_buf t = BUCKETS_BUF_INIT;
+  op_prometheus_token("store-prometheus", "s3cr3t-key", 1700000000, &t);
+  yyjson_doc *claims = buckets_jwt_verify(t.data, "s3cr3t-key", 1700000000 + 50LL * 365 * 86400);
+  assert_non_null(claims);
+  assert_string_equal(yyjson_get_str(yyjson_obj_get(yyjson_doc_get_root(claims), "sub")), "store-prometheus");
+  assert_string_equal(yyjson_get_str(yyjson_obj_get(yyjson_doc_get_root(claims), "iss")), "prometheus");
+  yyjson_doc_free(claims);
+  assert_null(buckets_jwt_verify(t.data, "another-key", 1700000000));
+  buckets_buf_free(&t);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_volumes_and_topology), cmocka_unit_test(test_desired_objects), cmocka_unit_test(test_tls),
       cmocka_unit_test(test_root_secret_not_owned), cmocka_unit_test(test_invalid),
       cmocka_unit_test(test_console), cmocka_unit_test(test_console_tls), cmocka_unit_test(test_console_env),
       cmocka_unit_test(test_minio_tenant_layout), cmocka_unit_test(test_kes_spec), cmocka_unit_test(test_kes_objects), cmocka_unit_test(test_kes_log_reason), cmocka_unit_test(test_kes_adopted), cmocka_unit_test(test_identity), cmocka_unit_test(test_identity_conflicts),
+      cmocka_unit_test(test_monitoring),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

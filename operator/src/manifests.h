@@ -60,6 +60,13 @@ typedef struct {
     yyjson_val *resources, *annotations;
     yyjson_val *env; /* extra environment for consoled, e.g. its OpenID sign-in */
   } console;
+  /* spec.monitoring (monitoring.c): a ServiceMonitor for the Prometheus
+   * Operator. enabled: 1 on, 0 off, -1 (unset) on when its CRDs exist. */
+  struct {
+    int enabled;
+    const char *interval; /* "30s" */
+    yyjson_val *labels;   /* extra ServiceMonitor labels */
+  } monitoring;
   /* The identity settings the operator applied (identity.c), not from the
    * spec: ldap_hash is set while LDAP sign-in is configured, and is on the
    * servers' pod template, so changing LDAP (read at startup) restarts them. */
@@ -106,6 +113,17 @@ typedef struct {
   char *path;           /* the object's API URL */
   yyjson_mut_doc *doc;  /* desired object, for server-side apply */
 } bc_object;
+
+/* Monitoring (monitoring.c): Secret <name>-prometheus (accessKey,
+ * secretKey: the metrics user; token: its bearer token for Prometheus), and
+ * the ServiceMonitor <name>, which scrapes the v2 node, cluster and bucket
+ * metrics on every server through the headless Service, labelling every
+ * series buckets_cluster=<name> and scope=node|cluster|bucket. */
+void bc_prometheus_secret_name(const bc_spec *s, char *out, size_t cap);
+yyjson_mut_doc *bc_prometheus_secret(const bc_spec *s, const char *ak, const char *sk, const char *token);
+/* ca_key: the key of the CA Secret's (ca.crt, or tls.crt for a self-signed certificate) */
+bc_object bc_service_monitor(const bc_spec *s, const char *ca_key);
+#define BC_MONITORING_API "/apis/monitoring.coreos.com/v1"
 
 /* Services, one StatefulSet and one PodDisruptionBudget per pool, then the
  * console's Service, Deployment and Ingress when it is enabled, in apply

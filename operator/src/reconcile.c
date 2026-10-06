@@ -12,7 +12,9 @@
 #include "core/uuid.h"
 #include "iam.h"
 #include "identity.h"
+#include "monitoring.h"
 #include "kms.h"
+#include "monitoring.h"
 #include "manifests.h"
 
 #define GROUP_PATH "/apis/buckets.io/v1alpha1"
@@ -216,7 +218,7 @@ done:
 /* kms: status.kms as reconciled; NULL keeps what the status has. */
 static void write_status(op_ctx *o, yyjson_val *bc, const bc_spec *s, const char *phase, bool ready, const char *reason,
                          const char *message, const char *topology, yyjson_val **sts, size_t nsts, yyjson_mut_val *kms,
-                         yyjson_mut_val *idn) {
+                         yyjson_mut_val *idn, yyjson_mut_val *mon) {
   yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
   yyjson_mut_val *root = yyjson_mut_obj(d);
   yyjson_mut_doc_set_root(d, root);
@@ -264,6 +266,9 @@ static void write_status(op_ctx *o, yyjson_val *bc, const bc_spec *s, const char
   yyjson_val *old_idn = yyjson_obj_get(yyjson_obj_get(bc, "status"), "identity");
   if (idn) yyjson_mut_obj_add_val(d, st, "identity", yyjson_mut_val_mut_copy(d, idn));
   else if (old_idn) yyjson_mut_obj_add_val(d, st, "identity", yyjson_val_mut_copy(d, old_idn));
+  yyjson_val *old_mon = yyjson_obj_get(yyjson_obj_get(bc, "status"), "monitoring");
+  if (mon) yyjson_mut_obj_add_val(d, st, "monitoring", yyjson_mut_val_mut_copy(d, mon));
+  else if (old_mon) yyjson_mut_obj_add_val(d, st, "monitoring", yyjson_val_mut_copy(d, old_mon));
   /* Ready condition; its transition time only moves when the status flips. */
   const char *want = ready ? "True" : "False";
   char when[32];
@@ -312,15 +317,15 @@ static void reconcile_cluster(op_ctx *o, yyjson_val *bc) {
   char err[512];
   if (!bc_parse(bc, o->cluster_domain, &s, err, sizeof(err))) {
     buckets_log_warn("%s/%s: invalid spec: %s", get_str(bc, "metadata.namespace"), get_str(bc, "metadata.name"), err);
-    write_status(o, bc, NULL, "Invalid", false, "InvalidSpec", err, NULL, NULL, 0, NULL, NULL);
+    write_status(o, bc, NULL, "Invalid", false, "InvalidSpec", err, NULL, NULL, 0, NULL, NULL, NULL);
     return;
   }
   if (!ensure_creds(o, &s, err, sizeof(err))) {
-    write_status(o, bc, &s, "Pending", false, "Credentials", err, NULL, NULL, 0, NULL, NULL);
+    write_status(o, bc, &s, "Pending", false, "Credentials", err, NULL, NULL, 0, NULL, NULL, NULL);
     return;
   }
   if (s.console.enabled && !ensure_console_secret(o, &s, err, sizeof(err))) {
-    write_status(o, bc, &s, "Pending", false, "ConsoleSecret", err, NULL, NULL, 0, NULL, NULL);
+    write_status(o, bc, &s, "Pending", false, "ConsoleSecret", err, NULL, NULL, 0, NULL, NULL, NULL);
     return;
   }
   /* the KMS first: whether bucketsd uses KES is part of its pods' spec */
@@ -357,11 +362,11 @@ static void reconcile_cluster(op_ctx *o, yyjson_val *bc) {
     if (kind && strcmp(kind, "StatefulSet") == 0 && nsts < BC_MAX_POOLS) sts[nsts++] = r;
   }
   if (failed) {
-    write_status(o, bc, &s, "Error", false, "ApplyFailed", err, topo, sts, nsts, kroot, iroot);
+    write_status(o, bc, &s, "Error", false, "ApplyFailed", err, topo, sts, nsts, kroot, iroot, NULL);
   } else if (hold) {
     const char *km = yyjson_mut_get_str(yyjson_mut_obj_get(kroot, "message"));
     snprintf(err, sizeof(err), "the servers start once KES serves key %s: %s", s.kes.key_name, km ? km : "KES is starting");
-    write_status(o, bc, &s, "WaitingForKMS", false, "WaitingForKMS", err, topo, sts, nsts, kroot, iroot);
+    write_status(o, bc, &s, "WaitingForKMS", false, "WaitingForKMS", err, topo, sts, nsts, kroot, iroot, NULL);
   } else {
     size_t outdated = 0;
     int restarted = restart_pods(o, &s, topo, sts, nsts, &outdated);
@@ -375,7 +380,10 @@ static void reconcile_cluster(op_ctx *o, yyjson_val *bc) {
     char msg[128];
     snprintf(msg, sizeof(msg), "%lld of %lld servers ready", ready, servers);
     const char *reason = outdated ? "Updating" : ready == servers ? "AllServersReady" : "ServersNotReady";
-    write_status(o, bc, &s, phase, !outdated && ready == servers, reason, msg, topo, sts, nsts, kroot, iroot);
+    /* monitoring once the servers are applied: its metrics user is made through their admin API */
+    yyjson_mut_val *mroot = yyjson_mut_obj(kd);
+    op_monitoring_reconcile(o, bc, &s, kd, mroot);
+    write_status(o, bc, &s, phase, !outdated && ready == servers, reason, msg, topo, sts, nsts, kroot, iroot, mroot);
   }
   for (size_t i = 0; i < n; i++) yyjson_doc_free(applied[i]);
   /* A disabled console (or Ingress) goes away. */

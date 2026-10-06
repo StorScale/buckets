@@ -168,6 +168,20 @@ spec:
                   type: string
                   enum: [ClusterIP, NodePort, LoadBalancer]
                   default: ClusterIP
+                monitoring:
+                  type: object
+                  description: "A ServiceMonitor for the Prometheus Operator, with a metrics user and its bearer token (Secret <name>-prometheus). See docs/monitoring.md."
+                  properties:
+                    enabled:
+                      type: boolean
+                      description: Unset, on when the Prometheus Operator's CRDs are installed; false, off.
+                    interval:
+                      type: string
+                      description: How often Prometheus scrapes (default 30s).
+                    labels:
+                      type: object
+                      additionalProperties: {type: string}
+                      description: Extra ServiceMonitor labels, for a Prometheus that selects them by label.
                 kms:
                   type: object
                   description: The cluster's key management service, for SSE-S3 and SSE-KMS.
@@ -260,6 +274,10 @@ spec:
                 kms:
                   type: object
                   description: The KES server, and the latest trial of new key store settings (test).
+                  x-kubernetes-preserve-unknown-fields: true
+                monitoring:
+                  type: object
+                  description: "The ServiceMonitor: phase (Ready, Disabled, NotInstalled, Error) and message."
                   x-kubernetes-preserve-unknown-fields: true
                 identity:
                   type: object
