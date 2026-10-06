@@ -157,7 +157,7 @@ echo "== the operator and a cluster with its console ($REGISTRY, $BUCKETS_TAG)"
 kc apply --server-side --force-conflicts -f "$ROOT/operator/deploy/crds/" >/dev/null
 helm ${KUBECONTEXT:+--kube-context $KUBECONTEXT} -n "$NS" install idp-operator "$ROOT/operator/helm/buckets-operator" \
   --set image.repository="$REGISTRY/buckets-operator" --set image.tag="$BUCKETS_TAG" --set watchNamespace="$NS" \
-  --set replicaCount=1 ${AFF:+--set-json affinity="$AFF"} --wait --timeout 5m >/dev/null
+  --set replicaCount=1 ${AFF:+--set-json affinity="$AFF"} --skip-crds --wait --timeout 5m >/dev/null
 k apply -f - >/dev/null <<YAML
 apiVersion: buckets.io/v1alpha1
 kind: BucketsCluster

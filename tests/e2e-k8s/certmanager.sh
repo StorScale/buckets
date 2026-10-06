@@ -43,7 +43,7 @@ kc apply --server-side --force-conflicts -f "$ROOT/operator/deploy/crds/" >/dev/
 helm ${KUBECONTEXT:+--kube-context $KUBECONTEXT} -n "$NS" install certs-operator "$ROOT/operator/helm/buckets-operator" \
   --set image.repository="$REGISTRY/buckets-operator" --set image.tag="$BUCKETS_TAG" --set watchNamespace="$NS" \
   --set replicaCount=1 --set monitoring.rules.enabled=false --set monitoring.dashboards.enabled=false \
-  ${AFF:+--set-json affinity="$AFF"} --wait --timeout 5m >/dev/null
+  ${AFF:+--set-json affinity="$AFF"} --skip-crds --wait --timeout 5m >/dev/null
 
 cluster() { # name tls-yaml
   k apply -f - >/dev/null <<YAML
