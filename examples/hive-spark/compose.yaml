@@ -43,7 +43,7 @@ services:
 
 
   buckets:
-    image: ${BUCKETS_IMAGE:-ghcr.io/storscale/bucketsd:1.8.0}
+    image: ${BUCKETS_IMAGE:-ghcr.io/storscale/bucketsd:1.9.0}
     environment:
       BUCKETS_ROOT_USER: ${BUCKETS_ROOT_USER}
       BUCKETS_ROOT_PASSWORD: ${BUCKETS_ROOT_PASSWORD}

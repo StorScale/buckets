@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-10-06
+
 ### Added
 - People who leave Entra ID lose their Buckets access ([docs/identity.md](docs/identity.md#people-who-leave), [the design](docs/design/identity-sync.md)). Every hour, one server asks Microsoft Graph about each person holding credentials.
   - Someone deleted or disabled loses their temporary credentials and console sessions at once.

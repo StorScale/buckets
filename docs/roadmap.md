@@ -10,10 +10,10 @@ The order below leads with what builds on work that already exists (MinIO on-dis
 
 A successor can't depend on what it replaces. MinIO no longer publishes its images or binaries, so Buckets now ships its own key server (`buckets-kes`) in place of MinIO's KES, and keeps mirrors of MinIO's last images only for adoption and rollback.
 
-**Where things stand (2026-10-06):** Buckets 1.8.0 is released, and the main repository is https://github.com/StorScale/buckets. Phases 0 and 3 are done. Every item of Phase 1 is done too.
+**Where things stand (2026-10-06):** Buckets 1.9.0 is released, and the main repository is https://github.com/StorScale/buckets. Phases 0 and 3 are done. Every item of Phase 1 is done too.
 
 - **Left in Phase 1:** its gate, the round trip in CI. The job (`adopt-roundtrip`) is built and waits for access to the cluster it runs on.
-- **Left in Phase 2:** SCIM. Done so far: guided sign-in setup (1.2.0) for Entra ID, Okta, Keycloak, other OpenID providers and LDAP, per-team roles (1.3.0) and the access review (1.4.0).
+- **Left in Phase 2:** removing people who leave Okta and Keycloak, and SCIM. Done so far: guided sign-in setup (1.2.0) for Entra ID, Okta, Keycloak, other OpenID providers and LDAP, per-team roles (1.3.0), the access review (1.4.0), and removing people who leave Entra ID (1.9.0).
 - **Phase 3 is done (1.5.0 to 1.8.0):** monitoring and drive health, runtime drive replacement, console scheduling, cert-manager, and buckets, replication and site replication as resources.
 
 ## Priorities at a glance
@@ -63,7 +63,7 @@ Identity-provider sign-in with role-based access should be a feature people choo
 
 - [x] **Guided setup in the console** for Entra ID, Okta and Keycloak, replacing hand-written `MINIO_IDENTITY_OPENID_*` settings, with LDAP and Active Directory as well (Identity → Sign-in; see [identity.md](identity.md)). Each provider's steps are shown with the redirect URI to copy; a test sign-in (or LDAP lookup) checks the settings as the servers will before anything changes; the operator applies them to the servers (OpenID at once, LDAP with a rolling restart) and the console. `tests/e2e-k8s/identity.sh` passes on the shared cluster against a real Keycloak and OpenLDAP.
 - [x] **Per-bucket and per-team roles** (1.3.0; Identity → Teams, see [identity.md](identity.md#teams) and [the design](design/teams.md)). A team is a name and its buckets, named or by prefix; each level becomes a `team-<name>-ro`, `-rw` or `-admin` policy, with the matching step for each identity provider. Teams are stored only as those policies, so they survive the MinIO round trip, which `tests/e2e-k8s/adopt-minio.sh` checks.
-- **Automatic provisioning and removal (SCIM).** People who leave lose access and their access keys without manual cleanup.
+- **Automatic provisioning and removal.** People who leave lose access and their access keys without manual cleanup. Done for Entra ID (1.9.0; [identity.md](identity.md#people-who-leave), [the design](design/identity-sync.md)): every hour the servers ask Microsoft Graph about each person holding credentials, revoke the temporary credentials of anyone deleted or disabled, and turn their access keys off, then delete them after 30 days. Provisioning needs nothing new with OpenID: access comes from roles at sign-in. Next: Okta and Keycloak behind the same sync, then SCIM for providers that push.
 - [x] **An access review page** (1.4.0; Identity → Access review, see [identity.md](identity.md#access-review) and [the design](design/access-review.md)). Lists every route to a bucket, with its limits and the statements behind it, exports it as CSV, and answers whether a given principal would be allowed an action, using the servers' policy evaluator.
 - [x] **Local-users policy** (1.4.0). The default stays (no local users while identity-provider sign-in is on), and the access review lists any local users that remain.
 
@@ -115,6 +115,7 @@ The roadmap builds on what exists: MinIO's exact on-disk format, 220 of 222 MinI
 
 | Date | Change | What it gives |
 | --- | --- | --- |
+| 2026-10-06 | 1.9.0: people who leave Entra ID lose their access | Microsoft Graph asked hourly; temporary credentials revoked, access keys off then deleted after 30 days; a lookup test before Apply, two alerts, a safety limit |
 | 2026-10-06 | 1.8.0: buckets, replication and site replication as resources | `Bucket` applies and keeps versioning, object lock, quota, encryption, lifecycle and replication. `BucketsSiteReplication` and [gitops.md](gitops.md) cover the rest. A swapped drive under write load is formatted back |
 | 2026-10-06 | 1.7.0: cert-manager built in | `spec.tls.certManager` for the servers and the console. Drives marked offline take no more writes |
 | 2026-10-06 | 1.6.0: drives replaced while running | An empty disk is formatted into its slot and healed. Console scheduling fields, `BucketsKMSOffline` |
