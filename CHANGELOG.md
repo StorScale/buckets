@@ -6,6 +6,9 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- `BucketsCapacityFullIn7Days` could fire during a rolling restart. While a server is down, the other servers leave its drives out of the free space for a few minutes. The rule read those dips as a trend toward full: after the 1.9.0 rollout on the dev cluster it predicted -2 GB free in a week, when 20.7 GB was free and steady. With servers slow to rejoin, an hour of dips made it fire. The rule now fits the trend to the most free space in each half hour, so restarts don't count, and a real decline still fires half an hour later. The rule tests cover both cases.
+
 ## [1.9.0] - 2026-10-06
 
 ### Added
