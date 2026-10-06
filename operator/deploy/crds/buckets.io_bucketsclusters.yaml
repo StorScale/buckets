@@ -136,6 +136,12 @@ spec:
                         duration:
                           type: string
                           description: "The certificate's lifetime, e.g. 2160h (default: the issuer's)."
+                        privateKey:
+                          type: object
+                          description: "The key's kind (default: ECDSA P-256 from the cluster's own CA, else the issuer's default, RSA 2048). Some issuers sign only RSA (Vault PKI roles, for one)."
+                          properties:
+                            algorithm: {type: string, enum: [RSA, ECDSA, Ed25519]}
+                            size: {type: integer}
                 configuration:
                   type: object
                   description: >-
@@ -279,6 +285,12 @@ spec:
                               type: array
                               items: {type: string}
                             duration: {type: string}
+                            privateKey:
+                              type: object
+                              description: "The key's kind (default: ECDSA P-256 from the cluster's own CA, else the issuer's default, RSA 2048). Some issuers sign only RSA (Vault PKI roles, for one)."
+                              properties:
+                                algorithm: {type: string, enum: [RSA, ECDSA, Ed25519]}
+                                size: {type: integer}
                     resources:
                       type: object
                       x-kubernetes-preserve-unknown-fields: true

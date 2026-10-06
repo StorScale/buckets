@@ -860,6 +860,7 @@ static void test_cert_manager(void **state) {
   assert_string_equal(yyjson_mut_get_str(AT(leaf, "spec", "secretName")), "store-tls");
   assert_string_equal(yyjson_mut_get_str(AT(leaf, "spec", "issuerRef", "name")), "store-ca");
   assert_string_equal(yyjson_mut_get_str(AT(leaf, "spec", "issuerRef", "kind")), "Issuer");
+  assert_string_equal(yyjson_mut_get_str(AT(leaf, "spec", "privateKey", "algorithm")), "ECDSA"); /* our own CA */
   char *names = yyjson_mut_val_write(AT(leaf, "spec", "dnsNames"), 0, NULL);
   assert_string_equal(names, "[\"store.data.svc\",\"store\",\"store.data\",\"store.data.svc.cluster.local\","
                              "\"*.store-hl.data.svc.cluster.local\",\"*.store-hl.data.svc\",\"s3.example.com\"]");
@@ -886,6 +887,8 @@ static void test_cert_manager(void **state) {
   leaf = find_kind(o, n, "Certificate", "store-tls", NULL);
   assert_string_equal(yyjson_mut_get_str(AT(leaf, "spec", "issuerRef", "kind")), "ClusterIssuer");
   assert_string_equal(yyjson_mut_get_str(AT(leaf, "spec", "duration")), "2160h");
+  assert_null(AT(leaf, "spec", "privateKey", "algorithm")); /* the issuer's default: it may sign only RSA */
+  assert_string_equal(yyjson_mut_get_str(AT(leaf, "spec", "privateKey", "rotationPolicy")), "Always");
   yyjson_mut_val *con = find_kind(o, n, "Certificate", "store-console-tls", NULL);
   assert_non_null(con);
   assert_string_equal(yyjson_mut_get_str(AT(con, "spec", "commonName")), "console.example.com");

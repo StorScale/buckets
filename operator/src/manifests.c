@@ -62,6 +62,7 @@ static bool cert_manager_spec(yyjson_val *cm, const char *cert_secret, const cha
     return false;
   }
   out->dns_names = yyjson_obj_get(cm, "dnsNames");
+  out->private_key = yyjson_obj_get(cm, "privateKey");
   out->duration = yyjson_get_str(yyjson_obj_get(cm, "duration"));
   snprintf(out->secret, sizeof(out->secret), "%s-%s", name, suffix);
   return true;
@@ -1323,7 +1324,7 @@ static void issuer_ref(mdoc *d, mval *spec, yyjson_val *ref, const char *own) {
 
 static bc_object certificate(const bc_spec *s, const char *name, const char *secret, const char *common,
                              const char *const *dns, size_t ndns, yyjson_val *extra, yyjson_val *ref,
-                             const char *duration, bool ca) {
+                             const char *duration, yyjson_val *key, bool ca) {
   mdoc *d = yyjson_mut_doc_new(NULL);
   mval *root = object(d, "cert-manager.io/v1", "Certificate", s, name, NULL);
   mval *spec = ADD_OBJ(d, root, "spec");
@@ -1345,9 +1346,17 @@ static bc_object certificate(const bc_spec *s, const char *name, const char *sec
     yyjson_mut_arr_add_str(d, u, "key encipherment");
     if (duration) ADD_STR(d, spec, "duration", duration);
   }
+  /* the key: as asked; ECDSA P-256 from the cluster's own CA; else the issuer's default (cert-manager's RSA
+   * 2048), as an issuer may sign only some kinds (Vault's PKI roles, for one) */
   mval *pk = ADD_OBJ(d, spec, "privateKey");
-  ADD_STR(d, pk, "algorithm", "ECDSA");
-  ADD_INT(d, pk, "size", 256);
+  const char *alg = yyjson_get_str(yyjson_obj_get(key, "algorithm"));
+  if (alg) {
+    ADD_STR(d, pk, "algorithm", alg);
+    if (yyjson_is_int(yyjson_obj_get(key, "size"))) ADD_INT(d, pk, "size", yyjson_get_int(yyjson_obj_get(key, "size")));
+  } else if (ca || !ref) {
+    ADD_STR(d, pk, "algorithm", "ECDSA");
+    ADD_INT(d, pk, "size", 256);
+  }
   ADD_STR(d, pk, "rotationPolicy", "Always");
   /* the CA is signed by the self-signed issuer; certificates by the given issuer, else by the cluster's CA */
   char own[160];
@@ -1375,7 +1384,7 @@ size_t bc_certificates(const bc_spec *s, bc_object *o) {
     snprintf(b, sizeof(b), "%s-ca", s->name);
     snprintf(c, sizeof(c), "%s Buckets CA", s->name);
     o[k++] = issuer(s, a, NULL);
-    o[k++] = certificate(s, b, b, c, NULL, 0, NULL, NULL, NULL, true);
+    o[k++] = certificate(s, b, b, c, NULL, 0, NULL, NULL, NULL, NULL, true);
     o[k++] = issuer(s, b, b);
   }
   if (cm[0]->enabled) {
@@ -1388,7 +1397,7 @@ size_t bc_certificates(const bc_spec *s, bc_object *o) {
     snprintf(d5, sizeof(d5), "*.%s-hl.%s.svc", s->name, s->ns);
     const char *dns[] = {d0, d1, d2, d3, d4, d5};
     o[k++] = certificate(s, cm[0]->secret, cm[0]->secret, d0, dns, 6, cm[0]->dns_names, cm[0]->issuer_ref,
-                         cm[0]->duration, false);
+                         cm[0]->duration, cm[0]->private_key, false);
   }
   if (s->console.enabled && cm[1]->enabled) {
     char d0[300], d1[300], d2[300], d3[300], d4[300];
@@ -1399,7 +1408,8 @@ size_t bc_certificates(const bc_spec *s, bc_object *o) {
     snprintf(d4, sizeof(d4), "%s", s->console.ingress_host ? s->console.ingress_host : d0);
     const char *dns[] = {d0, d1, d2, d3, d4};
     o[k++] = certificate(s, cm[1]->secret, cm[1]->secret, s->console.ingress_host ? s->console.ingress_host : d0, dns,
-                         s->console.ingress_host ? 5 : 4, cm[1]->dns_names, cm[1]->issuer_ref, cm[1]->duration, false);
+                         s->console.ingress_host ? 5 : 4, cm[1]->dns_names, cm[1]->issuer_ref, cm[1]->duration,
+                         cm[1]->private_key, false);
   }
   return k;
 }

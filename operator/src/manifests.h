@@ -31,6 +31,7 @@ typedef struct {
 typedef struct {
   bool enabled;
   yyjson_val *issuer_ref, *dns_names;
+  yyjson_val *private_key; /* {algorithm, size}; unset: ECDSA P-256 from the cluster's own CA, else the issuer's default */
   const char *duration;
   char secret[160];
 } bc_cert_manager;
