@@ -147,7 +147,7 @@ jobs:
           image=${{ steps.tags.outputs.image }}
           tags=(); for t in ${{ steps.tags.outputs.list }}; do tags+=(-t "$t"); done
           docker buildx imagetools create "${tags[@]}" "$image@$(cat digests/amd64)" "$image@$(cat digests/arm64)"
-          first=${{ steps.tags.outputs.list }}; first=${first%% *}
+          first="${{ steps.tags.outputs.list }}"; first=${first%% *}
           docker buildx imagetools inspect "$first"
           echo "digest=$(docker buildx imagetools inspect "$first" --format '{{json .Manifest}}' | jq -r .digest)" >> "$GITHUB_OUTPUT"
 
