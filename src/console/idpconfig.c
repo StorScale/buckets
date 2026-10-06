@@ -474,6 +474,8 @@ static void handle_removal_test(buckets_console_idp *m, yyjson_val *body, bucket
   const char *login = getenv("BUCKETS_OPENID_SYNC_LOGIN_URL"), *graph = getenv("BUCKETS_OPENID_SYNC_GRAPH_URL");
   snprintf(st.login_url, sizeof(st.login_url), "%s", login && *login ? login : "https://login.microsoftonline.com");
   snprintf(st.graph_url, sizeof(st.graph_url), "%s", graph && *graph ? graph : "https://graph.microsoft.com");
+  const char *okta = getenv("BUCKETS_OPENID_SYNC_URL");
+  if (strcmp(rm.provider, "okta") == 0 && okta && *okta) snprintf(st.url, sizeof(st.url), "%s", okta);
   buckets_idsync_client *client = buckets_idsync_client_new(&st);
   memset(st.client_secret, 0, sizeof(st.client_secret));
   memset(st.api_token, 0, sizeof(st.api_token));

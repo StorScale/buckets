@@ -441,7 +441,7 @@ test.describe("KMS and sign-in setup", () => {
       cluster: { spec: { kms?: { kes?: { keyName?: string } } } };
       secrets: Record<
         string,
-        Record<string, { settings?: { vault?: { approle?: { secret?: string; id?: string } } }; vault?: { approle?: { secret?: string; id?: string } }; openid?: { clientSecret?: string; removal?: { enabled: boolean; deleteAfterDays?: number; maxPerSync?: number } } }>
+        Record<string, { settings?: { vault?: { approle?: { secret?: string; id?: string } } }; vault?: { approle?: { secret?: string; id?: string } }; openid?: { clientSecret?: string; removal?: { enabled: boolean; deleteAfterDays?: number; maxPerSync?: number; intervalMinutes?: number; apiToken?: string } } }>
       >;
     };
 
@@ -551,7 +551,7 @@ test.describe("KMS and sign-in setup", () => {
     await expect(page.getByTestId("signin-apply")).toBeDisabled();
   });
 
-  test("sign-in: people who leave, for Entra ID, with a lookup required before apply", async ({ page }) => {
+  test("sign-in: people who leave, for Entra ID, Okta and Keycloak, with a lookup required before apply", async ({ page }) => {
     test.skip(!!process.env.CONSOLE_URL, "needs the mock Kubernetes API of the local setup");
     await login(page);
     await page.goto("/identity/sign-in");
@@ -569,14 +569,27 @@ test.describe("KMS and sign-in setup", () => {
     await expect(page.getByTestId("removal-test")).toBeDisabled(); // saved first
     await page.getByTestId("signin-save").click();
     await expect(page.getByTestId("signin-save")).toHaveText("Saved");
-    await expect(page.getByTestId("apply-card")).toContainText("Look up a person in Microsoft Graph");
+    await expect(page.getByTestId("apply-card")).toContainText("Look up a person (People who leave");
     await expect(page.getByTestId("signin-apply")).toBeDisabled();
     await page.getByTestId("removal-test-user").fill("alice@example.com");
     await expect(page.getByTestId("removal-test")).toBeEnabled();
     const st = await kubeState(page);
     expect(st.secrets["store-identity-candidate"]["settings.json"].openid?.removal).toEqual({ enabled: true, deleteAfterDays: 14 });
-    // other providers have no such section yet
+    // Okta: the section asks for an API token, and Save waits for one
     await page.getByTestId("oidc-provider-okta").click();
+    await page.getByTestId("removal-on").check();
+    await expect(page.getByTestId("removal")).toContainText("Security → API → Tokens");
+    await page.getByTestId("oidc-domain").fill("example.okta.com");
+    await page.getByTestId("oidc-client-id").fill("app-2");
+    await page.getByTestId("oidc-client-secret").fill("s3cr3t");
+    await expect(page.getByTestId("signin-missing")).toContainText("an Okta API token");
+    await page.getByTestId("removal-api-token").fill("00token");
+    await expect(page.getByTestId("signin-missing")).toHaveCount(0);
+    // Keycloak: the service account's role; another OpenID provider has no such section
+    await page.getByTestId("oidc-provider-keycloak").click();
+    await page.getByTestId("removal-on").check();
+    await expect(page.getByTestId("removal")).toContainText("realm-management: view-users");
+    await page.getByTestId("oidc-provider-generic").click();
     await expect(page.getByTestId("removal")).toHaveCount(0);
   });
 

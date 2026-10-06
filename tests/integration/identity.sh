@@ -62,11 +62,35 @@ class H(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         f = urllib.parse.parse_qs(self.rfile.read(int(self.headers.get("Content-Length", 0))).decode())
         app, secret = f.get("client_id", [""])[0], f.get("client_secret", [""])[0]
+        if self.path == "/realms/corp/protocol/openid-connect/token":      # Keycloak's service account
+            if secret != "kc-secret":
+                return self.reply(401, {"error": "unauthorized_client", "error_description": "Invalid client or Invalid client credentials"})
+            return self.reply(200, {"access_token": "kc-ok" if app == "buckets" else "kc-noview", "expires_in": 300})
         if self.path != "/t-1/oauth2/v2.0/token" or secret != "sync-secret" or app not in ("sync-app", "noperm-app"):
             return self.reply(401, {"error": "invalid_client", "error_description": "AADSTS7000215: Invalid client secret provided."})
         self.reply(200, {"access_token": "tok-" + app, "expires_in": 3599})
     def do_GET(self):
         u = urllib.parse.urlparse(self.path)
+        auth = self.headers.get("Authorization", "")
+        if u.path.startswith("/admin/realms/corp/users"):                  # Keycloak's admin API
+            if auth == "Bearer kc-noview":
+                return self.reply(403, {"error": "HTTP 403 Forbidden"})
+            if auth != "Bearer kc-ok":
+                return self.reply(401, {"error": "HTTP 401 Unauthorized"})
+            if u.path == "/admin/realms/corp/users":
+                q = urllib.parse.parse_qs(u.query)
+                if q.get("username") == ["alice"]:
+                    return self.reply(200, [{"id": "kc-alice", "username": "alice", "firstName": "Alice", "lastName": "Smith", "enabled": True}])
+                return self.reply(200, [])
+            return self.reply(404, {"error": "User not found"})
+        if u.path.startswith("/api/v1/users/"):                              # Okta's users API
+            if auth != "SSWS okta-ok":
+                return self.reply(401, {"errorCode": "E0000011", "errorSummary": "Invalid token provided"})
+            who = urllib.parse.unquote(u.path[len("/api/v1/users/"):])
+            if who in ("bob@example.com", "00ubob"):
+                return self.reply(200, {"id": "00ubob", "status": "SUSPENDED",
+                                        "profile": {"login": "bob@example.com", "firstName": "Bob", "lastName": "Jones"}})
+            return self.reply(404, {"errorCode": "E0000007", "errorSummary": "Not found: Resource not found: %s (User)" % who})
         if self.headers.get("Authorization") == "Bearer tok-noperm-app":
             return self.reply(403, {"error": {"code": "Authorization_RequestDenied", "message": "Insufficient privileges to complete the operation."}})
         who = urllib.parse.unquote(u.path[len("/v1.0/users/"):])
@@ -101,6 +125,7 @@ env CONSOLE_MINIO_SERVER="$EP" CONSOLE_PBKDF_PASSPHRASE=it CONSOLE_PBKDF_SALT=it
   BUCKETS_KUBE_API="https://127.0.0.1:$KPORT" BUCKETS_KUBE_CA="$WORK/kube-ca.pem" BUCKETS_KUBE_TOKEN=kubemock-token \
   BUCKETS_CONSOLE_CLUSTER=store BUCKETS_CONSOLE_NAMESPACE=data BUCKETS_CONSOLE_IDENTITY_FILE="$IDFILE" \
   BUCKETS_OPENID_SYNC_LOGIN_URL="http://127.0.0.1:$GPORT" BUCKETS_OPENID_SYNC_GRAPH_URL="http://127.0.0.1:$GPORT" \
+  BUCKETS_OPENID_SYNC_URL="http://127.0.0.1:$GPORT" \
   "$CBIN" --address "127.0.0.1:$CPORT" 2>"$WORK/clog" &
 PIDS+=($!)
 for _ in $(seq 100); do curl -s -o /dev/null "$C/healthz" && break; sleep 0.1; done
@@ -227,9 +252,27 @@ api -X PUT -d '{"settings":{"openid":'"${ENTRA/sync-secret/wrong}"'}}' "$C/api/v
 check "a wrong secret: Microsoft's reason" \
   "$(api -d '{"user":"alice@example.com"}' "$C/api/v1/identity-config/removal-test" | jq_ 'd["passed"], "AADSTS7000215" in d["error"]')" "False True"
 check "the secret never shown" "$(api "$C/api/v1/identity-config" | grep -c 'wrong\|sync-secret' || true)" 0
-api -X PUT -d '{"settings":{"openid":{"provider":"keycloak","url":"https://kc","realm":"r","clientId":"a","clientSecret":"b","removal":{"enabled":true}}}}' \
+KC='{"provider":"keycloak","url":"http://127.0.0.1:'$GPORT'/","realm":"corp","clientId":"buckets","clientSecret":"kc-secret","removal":{"enabled":true}}'
+api -X PUT -d '{"settings":{"openid":'"$KC"'}}' "$C/api/v1/identity-config/candidate" >/dev/null
+check "Keycloak: a user name found by search" \
+  "$(api -d '{"user":"alice"}' "$C/api/v1/identity-config/removal-test" | jq_ 'd["passed"], d["state"], d["displayName"], d["id"]')" "True active Alice Smith kc-alice"
+api -X PUT -d '{"settings":{"openid":'"${KC/\"buckets\"/\"noview\"}"'}}' "$C/api/v1/identity-config/candidate" >/dev/null
+check "Keycloak: a client without view-users is told so" \
+  "$(api -d '{"user":"alice"}' "$C/api/v1/identity-config/removal-test" | jq_ 'd["passed"], "view-users" in d["error"]')" "False True"
+OKTA='{"provider":"okta","domain":"example.okta.com","clientId":"a","clientSecret":"b","removal":{"enabled":true,"apiToken":"okta-ok"}}'
+api -X PUT -d '{"settings":{"openid":'"$OKTA"'}}' "$C/api/v1/identity-config/candidate" >/dev/null
+check "Okta: a login looked up, a suspended person shown as such" \
+  "$(api -d '{"user":"bob@example.com"}' "$C/api/v1/identity-config/removal-test" | jq_ 'd["passed"], d["state"], d["displayName"], d["id"]')" "True disabled Bob Jones 00ubob"
+check "Okta: the token never shown, and kept" "$(api "$C/api/v1/identity-config" | jq_ '"okta-ok" in json.dumps(d), "openid.removal.apiToken" in d["candidate"]["secretsSet"]')" "False True"
+api -X PUT -d '{"settings":{"openid":'"${OKTA/okta-ok/}"'}}' "$C/api/v1/identity-config/candidate" >/dev/null
+check "Okta: a saved token survives an edit that leaves it empty" \
+  "$(api -d '{"user":"bob@example.com"}' "$C/api/v1/identity-config/removal-test" | jq_ 'd["passed"]')" True
+api -X PUT -d '{"settings":{"openid":'"${OKTA/okta-ok/wrong}"'}}' "$C/api/v1/identity-config/candidate" >/dev/null
+check "Okta: a wrong token is told so" \
+  "$(api -d '{"user":"bob@example.com"}' "$C/api/v1/identity-config/removal-test" | jq_ 'd["passed"], "Read-only Administrator" in d["error"]')" "False True"
+api -X PUT -d '{"settings":{"openid":{"provider":"generic","configUrl":"https://x","clientId":"a","clientSecret":"b","removal":{"enabled":true}}}}' \
   "$C/api/v1/identity-config/candidate" >"$WORK/kc.json"
-check "Keycloak: not yet" "$(jq_ '"Entra ID for now" in d["message"]' <"$WORK/kc.json")" True
+check "another OpenID provider: not offered" "$(jq_ '"Entra ID, Okta and Keycloak" in d["message"]' <"$WORK/kc.json")" True
 check "removal off: no lookup" "$(api -X PUT -d '{"settings":{"openid":'"${ENTRA/true/false}"'}}' "$C/api/v1/identity-config/candidate" >/dev/null;
   api -d '{"user":"alice@example.com"}' "$C/api/v1/identity-config/removal-test" | jq_ 'd["code"]')" NoCandidate
 

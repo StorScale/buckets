@@ -429,7 +429,7 @@ export type OidcSettings = {
   rolePolicy?: string;
   claimUserinfo?: boolean;
   // people who leave lose their access (Entra ID for now; docs/design/identity-sync.md)
-  removal?: { enabled: boolean; deleteAfterDays?: number; maxPerSync?: number };
+  removal?: { enabled: boolean; deleteAfterDays?: number; maxPerSync?: number; intervalMinutes?: number; apiToken?: string };
 };
 export type LdapSettings = {
   preset: "ad" | "openldap" | "custom";
