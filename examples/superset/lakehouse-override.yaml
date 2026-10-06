@@ -1,4 +1,4 @@
-# Changes to the included lakehouse stack (../lakehouse/compose.yaml) for this
+# Changes to the included lakehouse stack (../lakehouse/stack.yaml) for this
 # example. Compose resolves the paths here from the lakehouse directory, as it
 # does for the file this overrides.
 services:

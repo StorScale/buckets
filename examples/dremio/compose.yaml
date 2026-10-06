@@ -16,7 +16,7 @@
 name: buckets-dremio
 
 include:
-  - path: ../lakehouse/compose.yaml
+  - path: ../lakehouse/stack.yaml
     env_file: [../lakehouse/.env, .env]
 
 x-tools: &tools

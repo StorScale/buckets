@@ -41,7 +41,7 @@ There are two layers of access control, and the setup only works if they agree:
 
 ## Run it
 
-You need Docker with Compose v2, and about 8 GB of memory for Docker.
+You need Docker with Compose 2.24 or later, and about 8 GB of memory for Docker.
 
 ```bash
 cd examples/lakehouse

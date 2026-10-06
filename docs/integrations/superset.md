@@ -42,7 +42,7 @@ flowchart LR
 
 ## Run it
 
-You need Docker with Compose v2, and about 6 GB of memory for Docker.
+You need Docker with Compose 2.24 or later, and about 6 GB of memory for Docker.
 
 ```bash
 cd examples/superset

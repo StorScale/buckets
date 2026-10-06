@@ -16,7 +16,7 @@
 name: buckets-superset
 
 include:
-  - path: [../lakehouse/compose.yaml, lakehouse-override.yaml]
+  - path: [../lakehouse/stack.yaml, lakehouse-override.yaml]
     env_file: [../lakehouse/.env, .env]
 
 x-superset: &superset

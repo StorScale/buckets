@@ -37,7 +37,7 @@ flowchart LR
 
 ## Run it
 
-You need Docker with Compose v2, and about 8 GB of memory for Docker (Dremio alone takes up to 5 GB).
+You need Docker with Compose 2.24 or later, and about 8 GB of memory for Docker (Dremio alone takes up to 5 GB).
 
 ```bash
 cd examples/dremio

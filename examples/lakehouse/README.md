@@ -12,7 +12,8 @@ The guide, [docs/integrations/lakehouse.md](../../docs/integrations/lakehouse.md
 
 | Path | What it is |
 |---|---|
-| `compose.yaml` | The stack |
+| `compose.yaml` | The example: the stack, and its checks |
+| `stack.yaml` | The stack itself, which the Superset and Dremio examples include too |
 | `.env` | Every password and key: local test values only |
 | `trino/catalog/iceberg.properties` | Trino's Iceberg catalog: Nessie and Buckets |
 | `tools/setup.py` | Configures Buckets (buckets, policies, service accounts) and Ranger (users, groups, the Trino service, policies) |
