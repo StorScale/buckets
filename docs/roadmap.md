@@ -1,6 +1,6 @@
 # Buckets Roadmap
 
-As of 2026-10-04 · Russell Myers
+As of 2026-10-06 · Russell Myers
 
 ## Summary
 
@@ -10,10 +10,11 @@ The order below leads with what builds on work that already exists (MinIO on-dis
 
 A successor can't depend on what it replaces. MinIO no longer publishes its images or binaries, so Buckets now ships its own key server (`buckets-kes`) in place of MinIO's KES, and keeps mirrors of MinIO's last images only for adoption and rollback.
 
-**Where things stand (2026-10-04):** Phase 0 is done, and so is every item of Phase 1: adoption (KES included), rollback, encryption, signed release artifacts, the migration guide and the compatibility promise. Buckets 1.0.0, 1.1.0 and 1.1.1 are released, and the main repository is https://github.com/StorScale/buckets.
+**Where things stand (2026-10-06):** Buckets 1.8.0 is released, and the main repository is https://github.com/StorScale/buckets. Phases 0 and 3 are done. Every item of Phase 1 is done too.
 
 - **Left in Phase 1:** its gate, the round trip in CI. The job (`adopt-roundtrip`) is built and waits for access to the cluster it runs on.
-- **In Phase 2:** guided sign-in setup in the console is done (1.2.0): Entra ID, Okta, Keycloak, other OpenID providers, and LDAP. So are per-team roles (1.3.0) and the access review (1.4.0). Next is SCIM.
+- **Left in Phase 2:** SCIM. Done so far: guided sign-in setup (1.2.0) for Entra ID, Okta, Keycloak, other OpenID providers and LDAP, per-team roles (1.3.0) and the access review (1.4.0).
+- **Phase 3 is done (1.5.0 to 1.8.0):** monitoring and drive health, runtime drive replacement, console scheduling, cert-manager, and buckets, replication and site replication as resources.
 
 ## Priorities at a glance
 
@@ -68,7 +69,7 @@ Identity-provider sign-in with role-based access should be a feature people choo
 
 Done when: a new admin connects Entra ID from the console without editing environment variables, and an auditor can list everyone with access to a bucket.
 
-## Phase 3: Kubernetes-native operations
+## Phase 3: Kubernetes-native operations (done)
 
 Everything about a Buckets cluster should be declared in Kubernetes and watched by default. The operator already handles pool expansion, drive replacement, rolling upgrades, TLS and console TLS; this phase fills the gaps found while deploying to the dev cluster.
 
@@ -114,6 +115,13 @@ The roadmap builds on what exists: MinIO's exact on-disk format, 220 of 222 MinI
 
 | Date | Change | What it gives |
 | --- | --- | --- |
+| 2026-10-06 | 1.8.0: buckets, replication and site replication as resources | `Bucket` applies and keeps versioning, object lock, quota, encryption, lifecycle and replication. `BucketsSiteReplication` and [gitops.md](gitops.md) cover the rest. A swapped drive under write load is formatted back |
+| 2026-10-06 | 1.7.0: cert-manager built in | `spec.tls.certManager` for the servers and the console. Drives marked offline take no more writes |
+| 2026-10-06 | 1.6.0: drives replaced while running | An empty disk is formatted into its slot and healed. Console scheduling fields, `BucketsKMSOffline` |
+| 2026-10-06 | 1.5.0: monitoring shipped with the operator | A metrics user and ServiceMonitors per cluster, 12 alert rules and four dashboards. Failing, hung and emptied drives taken offline |
+| 2026-10-06 | 1.4.2: multi-arch images | linux/arm64 as well as linux/amd64 under each tag |
+| 2026-10-06 | 1.4.0: access review | Every route to a bucket and the statements behind it, CSV export, and "would this principal be allowed?" |
+| 2026-10-04 | 1.3.0: per-team roles | Teams of buckets with `ro`, `rw` and `admin` policies, and the step to take in each identity provider |
 | 2026-10-04 | 1.2.0: sign-in set up from the console | Entra ID, Okta, Keycloak, other OpenID providers and LDAP, each tested before it applies; real Keycloak and OpenLDAP on the shared cluster |
 | 2026-10-04 | Compatibility promise | What every 1.x release keeps compatible, across releases and with MinIO, and the test behind each promise |
 | 2026-10-04 | 1.1.1: faster reads in clusters | Reads no longer check the bucket on every drive in turn, and read locks are released in the background; 64 KiB GETs from about 2,000 to 3,850 op/s on the shared cluster (MinIO: 2,800) |
