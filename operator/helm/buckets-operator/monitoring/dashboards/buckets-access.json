@@ -96,7 +96,7 @@
    "targets": [
     {
      "refId": "A",
-     "expr": "sum(rate(minio_s3_requests_rejected_auth_total{namespace=\"$namespace\", buckets_cluster=\"$cluster\", scope=\"node\"}[5m]))",
+     "expr": "sum(rate(minio_s3_requests_rejected_auth_total{namespace=\"$namespace\", buckets_cluster=\"$cluster\", scope=\"node\"}[5m])) or vector(0)",
      "legendFormat": "bad credentials",
      "datasource": {
       "type": "prometheus",
@@ -105,7 +105,7 @@
     },
     {
      "refId": "B",
-     "expr": "sum(rate(minio_s3_requests_rejected_timestamp_total{namespace=\"$namespace\", buckets_cluster=\"$cluster\", scope=\"node\"}[5m]))",
+     "expr": "sum(rate(minio_s3_requests_rejected_timestamp_total{namespace=\"$namespace\", buckets_cluster=\"$cluster\", scope=\"node\"}[5m])) or vector(0)",
      "legendFormat": "clock skew",
      "datasource": {
       "type": "prometheus",
@@ -114,7 +114,7 @@
     },
     {
      "refId": "C",
-     "expr": "sum(rate(minio_s3_requests_rejected_invalid_total{namespace=\"$namespace\", buckets_cluster=\"$cluster\", scope=\"node\"}[5m]))",
+     "expr": "sum(rate(minio_s3_requests_rejected_invalid_total{namespace=\"$namespace\", buckets_cluster=\"$cluster\", scope=\"node\"}[5m])) or vector(0)",
      "legendFormat": "invalid",
      "datasource": {
       "type": "prometheus",

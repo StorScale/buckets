@@ -125,8 +125,8 @@ def overview():
     b.row("Traffic")
     b.series("S3 requests", [
         (f"sum(rate({q('node', 'minio_s3_requests_total')}[5m]))", "requests"),
-        (f"sum(rate({q('node', 'minio_s3_requests_4xx_errors_total')}[5m]))", "4xx"),
-        (f"sum(rate({q('node', 'minio_s3_requests_5xx_errors_total')}[5m]))", "5xx"),
+        (f"sum(rate({q('node', 'minio_s3_requests_4xx_errors_total')}[5m])) or vector(0)", "4xx"),
+        (f"sum(rate({q('node', 'minio_s3_requests_5xx_errors_total')}[5m])) or vector(0)", "5xx"),  # absent until one fails
     ], unit="reqps")
     b.series("Time to first byte", [
         (f"histogram_quantile(0.5, sum by (le) (rate({q('node', 'minio_s3_requests_ttfb_seconds_distribution')}[5m])))", "p50"),
@@ -200,9 +200,9 @@ def access():
     b = Board("buckets-access", "Buckets / Access and services", "Sign-ins, rejected requests and the KMS.")
     b.row("Sign-ins")
     b.series("Rejected S3 requests (bad credentials)", [
-        (f"sum(rate({q('node', 'minio_s3_requests_rejected_auth_total')}[5m]))", "bad credentials"),
-        (f"sum(rate({q('node', 'minio_s3_requests_rejected_timestamp_total')}[5m]))", "clock skew"),
-        (f"sum(rate({q('node', 'minio_s3_requests_rejected_invalid_total')}[5m]))", "invalid"),
+        (f"sum(rate({q('node', 'minio_s3_requests_rejected_auth_total')}[5m])) or vector(0)", "bad credentials"),
+        (f"sum(rate({q('node', 'minio_s3_requests_rejected_timestamp_total')}[5m])) or vector(0)", "clock skew"),
+        (f"sum(rate({q('node', 'minio_s3_requests_rejected_invalid_total')}[5m])) or vector(0)", "invalid"),
     ], unit="reqps")
     b.series("Failed console sign-ins", [
         (f'sum by (method) (rate(buckets_console_logins_failed_total{{{SEL}}}[5m]))', "{{method}}")], unit="reqps")

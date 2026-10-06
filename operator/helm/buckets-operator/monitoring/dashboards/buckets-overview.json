@@ -782,7 +782,7 @@
     },
     {
      "refId": "B",
-     "expr": "sum(rate(minio_s3_requests_4xx_errors_total{namespace=\"$namespace\", buckets_cluster=\"$cluster\", scope=\"node\"}[5m]))",
+     "expr": "sum(rate(minio_s3_requests_4xx_errors_total{namespace=\"$namespace\", buckets_cluster=\"$cluster\", scope=\"node\"}[5m])) or vector(0)",
      "legendFormat": "4xx",
      "datasource": {
       "type": "prometheus",
@@ -791,7 +791,7 @@
     },
     {
      "refId": "C",
-     "expr": "sum(rate(minio_s3_requests_5xx_errors_total{namespace=\"$namespace\", buckets_cluster=\"$cluster\", scope=\"node\"}[5m]))",
+     "expr": "sum(rate(minio_s3_requests_5xx_errors_total{namespace=\"$namespace\", buckets_cluster=\"$cluster\", scope=\"node\"}[5m])) or vector(0)",
      "legendFormat": "5xx",
      "datasource": {
       "type": "prometheus",
