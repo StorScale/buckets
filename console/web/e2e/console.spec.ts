@@ -327,7 +327,7 @@ test.describe("identity", () => {
     const row = page.getByTestId(`review-row-${user}`);
     await expect(row).toContainText("local user");
     await expect(row).toContainText(`team-${t}-rw`);
-    await expect(page.getByTestId("review-row-the root user")).toBeVisible();
+    await expect(page.getByTestId(`review-row-${ROOT_USER}`)).toContainText("root user");
     // the CSV an auditor files
     const [dl] = await Promise.all([page.waitForEvent("download"), page.getByTestId("review-csv").click()]);
     const csv = await (await dl.createReadStream()).toArray().then((c) => Buffer.concat(c).toString());

@@ -13,6 +13,7 @@ timeout-*
 /.conformance/
 /.deps/
 /*.log
+__pycache__/
 
 # warp result files
 warp-*.json.zst

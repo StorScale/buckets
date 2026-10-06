@@ -131,7 +131,7 @@ OTK=$(sed -n 's:.*<SessionToken>\(.*\)</SessionToken>.*:\1:p' <<<"$STS")
 echo "== who can read finance-reports"
 REV=$(api "$C/api/v1/access/bucket/finance-reports?level=read")
 row() { jq_ "[r for r in d['rows'] if r['name'] == '$1'] and [(r['kind'], r['access']) for r in d['rows'] if r['name'] == '$1'][0]" <<<"$REV"; }
-check "root" "$(row 'the root user')" "('root', 'full')"
+check "root, by its name" "$(row rootadmin)" "('root', 'full')"
 check "alice, through the team" "$(row alice)" "('user', 'full')"
 check "bob, through his group: reports only" "$(jq_ "[a.get('limits') for r in d['rows'] if r['name'] == 'bob' for a in r['actions'] if a['action'] == 's3:GetObject'][0]" <<<"$REV")" "['reports/*']"
 check "the group, with its member" "$(jq_ "[(r['kind'], r['members']) for r in d['rows'] if r['name'] == 'auditors'][0]" <<<"$REV")" "('group', ['bob'])"

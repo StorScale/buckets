@@ -132,6 +132,13 @@ static void gather(facts *f, const buckets_console_access_session *sess, const c
     const char *st = yyjson_get_str(yyjson_obj_get(v, "status"));
     yyjson_mut_obj_add_strcpy(f->d, p, "status", st ? st : "enabled");
   }
+  /* the root user's name: the one the users-only key listing names that is not a local user */
+  yyjson_doc *everyone = users ? get(&c, "list-access-keys-bulk", "all=true&listType=users-only", true) : NULL;
+  yyjson_obj_foreach(yyjson_doc_get_root(everyone), i, max, k, v) {
+    if (!yyjson_obj_get(yyjson_doc_get_root(users), yyjson_get_str(k)))
+      yyjson_mut_obj_put(root, yyjson_mut_str(f->d, "name"), yyjson_mut_strcpy(f->d, yyjson_get_str(k)));
+  }
+  yyjson_doc_free(everyone);
   yyjson_doc *groups = get(&c, "groups", NULL, false);
   if (!groups) missing(f, "groups");
   yyjson_val *g;
