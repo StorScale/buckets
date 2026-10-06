@@ -6,6 +6,9 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- `bucketsd` built with the undefined-behaviour sanitizer aborted on `/minio/metrics/v3/cluster/health` (and the other v3 paths that report tiering) when no storage tier was configured: the tiering statistics were copied from a null pointer. Release builds were not affected.
+
 ## [1.4.2] - 2026-10-06
 
 ### Added

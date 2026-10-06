@@ -92,7 +92,7 @@ static void record_request(const char *tier, bool ok, double secs) {
 size_t buckets_tiering_request_stats(buckets_tier_request_stats **out) {
   pthread_mutex_lock(&g_stats_mu);
   *out = buckets_xcalloc(g_nstats + 1, sizeof(**out));
-  memcpy(*out, g_stats, g_nstats * sizeof(**out));
+  if (g_nstats) memcpy(*out, g_stats, g_nstats * sizeof(**out)); /* g_stats is NULL until a tier is used */
   size_t n = g_nstats;
   pthread_mutex_unlock(&g_stats_mu);
   return n;
