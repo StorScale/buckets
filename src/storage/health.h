@@ -11,9 +11,10 @@
  * format.json (its "this" must still be the drive's ID), then writes, reads
  * back and removes a 4 KiB probe file in .minio.sys/tmp. A failure makes the
  * drive faulty; a format.json that is gone or names another drive makes it
- * changed; a check still running after the timeout makes it hung. Faulty and
- * hung drives refuse every call at once (no request waits on a dead disk);
- * a changed one only reports itself offline, so healing can format it.
+ * changed; a check still running after the timeout makes it hung. A drive in
+ * any of these states refuses every call at once: no request waits on a dead
+ * disk, and nothing lands on an emptied one before it is formatted back
+ * (storage/format.c writes its format.json directly).
  *
  * BUCKETS_DRIVE_CHECK_INTERVAL (seconds, default 15) and
  * BUCKETS_DRIVE_CHECK_TIMEOUT (seconds, default 30) tune it; an interval of
@@ -43,8 +44,11 @@ void buckets_drive_health_describe(buckets_drive *d, char *out, size_t cap);
  * naming another drive. */
 bool buckets_drive_health_unformatted(buckets_drive *d);
 
-/* Whether calls on a local drive must fail at once (faulty or hung). */
+/* Whether calls on a local drive must fail at once: any state but OK. It also looks whether format.json is
+ * still there, at most once a second, so an emptied drive stops taking calls within about a second. */
 bool buckets_drive_health_refuses(buckets_drive *d);
+/* When the drive was found changed (wall-clock ms), 0 when it is not. */
+long long buckets_drive_health_changed_since(buckets_drive *d);
 
 /* Points each local drive among copies at the drive among drives with the same root, so both share its
  * checks (bucketsd serves its drives to peers through objects of their own). */

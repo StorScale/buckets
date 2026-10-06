@@ -9,6 +9,7 @@
 #include <string.h>
 #include <strings.h>
 #include <time.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <yyjson.h>
@@ -22,6 +23,12 @@
 static long long now_ms(void) {
   struct timespec t;
   clock_gettime(CLOCK_MONOTONIC, &t);
+  return (long long)t.tv_sec * 1000 + t.tv_nsec / 1000000;
+}
+
+static long long wall_ms(void) {
+  struct timespec t;
+  clock_gettime(CLOCK_REALTIME, &t);
   return (long long)t.tv_sec * 1000 + t.tv_nsec / 1000000;
 }
 
@@ -110,6 +117,8 @@ buckets_drive_health buckets_drive_health_check(buckets_drive *d) {
   long long took = now_ms() - started;
   if (!e && took > timeout_ms()) h = BUCKETS_DRIVE_HEALTH_FAULTY, e = ETIMEDOUT; /* answered, but too slowly */
   buckets_drive_health was = (buckets_drive_health)atomic_exchange(&d->health, (int)h);
+  if (h == BUCKETS_DRIVE_HEALTH_CHANGED && was != h) atomic_store(&d->changed_since_ms, wall_ms());
+  if (h != BUCKETS_DRIVE_HEALTH_CHANGED) atomic_store(&d->changed_since_ms, 0);
   atomic_store(&d->health_errno, e);
   atomic_store(&d->check_started_ms, 0);
   atomic_store(&d->checking, false);
@@ -169,9 +178,35 @@ bool buckets_drive_health_unformatted(buckets_drive *d) {
 
 long buckets_drive_health_interval(void) { return env_seconds("BUCKETS_DRIVE_CHECK_INTERVAL", 15); }
 
+/* MinIO's per-call disk ID check: at most once a second, whether format.json is still there. Gone, the drive is
+ * changed at once, so the calls in flight stop landing on an emptied disk. */
+static void quick_identity(buckets_drive *d) {
+  if (!d || d->remote || !*d->drive_id || atomic_load(&d->checking)) return;
+  long long now = now_ms(), last = atomic_load(&d->identity_checked_ms);
+  if (now - last < 1000 || !atomic_compare_exchange_strong(&d->identity_checked_ms, &last, now)) return;
+  char path[4096];
+  snprintf(path, sizeof(path), "%s/" BUCKETS_META_BUCKET "/format.json", d->root);
+  struct stat st;
+  if (stat(path, &st) == 0 || errno != ENOENT) return;
+  int ok = BUCKETS_DRIVE_HEALTH_OK;
+  if (atomic_compare_exchange_strong(&d->health, &ok, BUCKETS_DRIVE_HEALTH_CHANGED)) {
+    atomic_store(&d->health_errno, ENOENT);
+    atomic_store(&d->changed_since_ms, wall_ms());
+    buckets_log_warn("drive %s is offline: changed: format.json is gone (an empty or replaced drive)", d->root);
+  }
+}
+
 bool buckets_drive_health_refuses(buckets_drive *d) {
-  buckets_drive_health h = buckets_drive_health_state(d);
-  return h == BUCKETS_DRIVE_HEALTH_FAULTY || h == BUCKETS_DRIVE_HEALTH_HUNG;
+  /* every offline state: a changed drive taking writes would fill an emptied disk with new objects, which
+   * then could no longer be told from data and formatted as a replacement */
+  if (d && d->health_of) d = d->health_of;
+  quick_identity(d);
+  return buckets_drive_health_state(d) != BUCKETS_DRIVE_HEALTH_OK;
+}
+
+long long buckets_drive_health_changed_since(buckets_drive *d) {
+  if (d && d->health_of) d = d->health_of;
+  return d ? atomic_load(&d->changed_since_ms) : 0;
 }
 
 /* ---- the checkers -------------------------------------------------------------------------- */

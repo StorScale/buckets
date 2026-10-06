@@ -142,9 +142,11 @@ every erasure set keeps its quorum, but redundancy is reduced.
   StatefulSet makes a new volume, and the server formats and heals it when it
   starts.
 
-A drive that still holds data but lost its `format.json` is never formatted
-over: the log says so once. Restore its `format.json`, or wipe it to have it
-treated as a new disk.
+A drive found without its `format.json` refuses reads and writes within
+about a second, so nothing lands on an emptied disk before it is formatted
+back. One that still holds data from before it lost its `format.json` is
+never formatted over: the log says so once. Restore its `format.json`, or
+wipe it to have it treated as a new disk.
 
 ### BucketsNodeOffline
 
