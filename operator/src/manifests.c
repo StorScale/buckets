@@ -410,6 +410,7 @@ static bc_object statefulset(const bc_spec *s, size_t pi, const char *volumes, c
   mval *tann = ADD_OBJ(d, tmeta, "annotations");
   ADD_STR(d, tann, "buckets.io/topology", topology);
   if (s->identity.ldap_hash[0]) ADD_STR(d, tann, "buckets.io/identity-ldap", s->identity.ldap_hash);
+  if (s->identity.sync_hash[0]) ADD_STR(d, tann, "buckets.io/identity-sync", s->identity.sync_hash);
   mval *pod = ADD_OBJ(d, tmpl, "spec");
   mval *sec = ADD_OBJ(d, pod, "securityContext");
   ADD_INT(d, sec, "runAsUser", s->run_as_user);
@@ -465,6 +466,18 @@ static bc_object statefulset(const bc_spec *s, size_t pi, const char *volumes, c
     char n[16];
     snprintf(n, sizeof(n), "%d", s->set_drive_count);
     env_value(d, env, "BUCKETS_ERASURE_SET_DRIVE_COUNT", n);
+  }
+  if (s->identity.sync_hash[0]) { /* people who leave the provider lose their access (iam/idsync.h) */
+    char sn[160], n[24];
+    bc_identity_sync_secret_name(s, sn, sizeof(sn));
+    env_value(d, env, "BUCKETS_OPENID_SYNC_PROVIDER", "entra");
+    env_value(d, env, "BUCKETS_OPENID_SYNC_TENANT_ID", s->identity.sync_tenant);
+    env_value(d, env, "BUCKETS_OPENID_SYNC_CLIENT_ID", s->identity.sync_client_id);
+    env_secret(d, env, "BUCKETS_OPENID_SYNC_CLIENT_SECRET", sn, "clientSecret");
+    snprintf(n, sizeof(n), "%ld", s->identity.sync_days);
+    env_value(d, env, "BUCKETS_OPENID_REMOVE_AFTER", n);
+    snprintf(n, sizeof(n), "%ld", s->identity.sync_max);
+    env_value(d, env, "BUCKETS_OPENID_REMOVE_MAX", n);
   }
   if (s->kes.active) {
     char ep[512], idn[128];
@@ -904,6 +917,9 @@ void bc_identity_candidate_secret_name(const bc_spec *s, char *out, size_t cap) 
 void bc_identity_console_secret_name(const bc_spec *s, char *out, size_t cap) {
   snprintf(out, cap, "%s-identity-console", s->name);
 }
+void bc_identity_sync_secret_name(const bc_spec *s, char *out, size_t cap) {
+  snprintf(out, cap, "%s-identity-sync", s->name);
+}
 void bc_kms_candidate_secret_name(const bc_spec *s, char *out, size_t cap) {
   snprintf(out, cap, "%s-kms-candidate", s->name);
 }
@@ -1126,6 +1142,16 @@ yyjson_mut_doc *bc_kms_empty_secret(const bc_spec *s, const char *name) {
   mval *root = object(d, "v1", "Secret", s, name, NULL);
   yyjson_mut_obj_remove_key(yyjson_mut_obj_get(root, "metadata"), "ownerReferences");
   ADD_STR(d, root, "type", "Opaque");
+  return d;
+}
+
+yyjson_mut_doc *bc_identity_sync_secret(const bc_spec *s, const char *client_secret) {
+  mdoc *d = yyjson_mut_doc_new(NULL);
+  char name[160];
+  bc_identity_sync_secret_name(s, name, sizeof(name));
+  mval *root = object(d, "v1", "Secret", s, name, NULL);
+  ADD_STR(d, root, "type", "Opaque");
+  yyjson_mut_obj_add_strcpy(d, ADD_OBJ(d, root, "stringData"), "clientSecret", client_secret);
   return d;
 }
 

@@ -20,7 +20,7 @@ static const char *str_at(yyjson_val *o, const char *k) { return yyjson_get_str(
 
 static bool identity_var(const char *n, bool console) {
   static const char *const server[] = {"MINIO_IDENTITY_OPENID", "MINIO_IDENTITY_LDAP", "BUCKETS_IDENTITY_OPENID",
-                                       "BUCKETS_IDENTITY_LDAP", NULL};
+                                       "BUCKETS_IDENTITY_LDAP", "BUCKETS_OPENID_SYNC_", "BUCKETS_OPENID_REMOVE_", NULL};
   /* consoled also reads MINIO_IDENTITY_OPENID_* when its own are unset */
   static const char *const cons[] = {"BUCKETS_CONSOLE_OIDC_", "CONSOLE_LDAP_ENABLED", "BUCKETS_CONSOLE_LDAP",
                                      "MINIO_IDENTITY_OPENID", NULL};
@@ -81,6 +81,42 @@ static void ldap_hash_of(const char *config, yyjson_val *settings, char out[17])
   if (!l) return;
   const char *eol = strchr(l, '\n');
   hash16(l, eol ? (size_t)(eol - l) : strlen(l), out);
+}
+
+/* The identity sync's settings, when removal is on: on the servers' pod template (s->identity), the client
+ * secret in Secret <name>-identity-sync, written when it changes (prev: the last syncHash). The servers
+ * follow the settings in force; a change restarts them, as LDAP's does. False and why when the Secret
+ * cannot be written. */
+static bool sync_settings(op_ctx *o, bc_spec *s, yyjson_val *settings, const char *prev, char *err, size_t errlen) {
+  buckets_idp_removal rm;
+  if (!buckets_idp_removal_of(settings, &rm)) return true;
+  buckets_buf b = BUCKETS_BUF_INIT;
+  buckets_buf_appendf(&b, "%s|%s|%s|%ld|%ld", rm.tenant, rm.client_id, rm.client_secret, rm.delete_after_days,
+                      rm.max_per_sync);
+  char hash[17];
+  hash16(b.data, b.len, hash);
+  memset(b.data, 0, b.len);
+  buckets_buf_free(&b);
+  if (!prev || strcmp(prev, hash) != 0) {
+    yyjson_mut_doc *sec = bc_identity_sync_secret(s, rm.client_secret);
+    char name[160];
+    bc_identity_sync_secret_name(s, name, sizeof(name));
+    buckets_buf path = BUCKETS_BUF_INIT;
+    buckets_buf_appendf(&path, "/api/v1/namespaces/%s/secrets/%s", s->ns, name);
+    yyjson_doc *resp = NULL;
+    int st = kube_apply(o->k, path.data, sec, &resp);
+    if (st / 100 != 2) snprintf(err, errlen, "Secret %s cannot be written (%d): %s", name, st, kube_error_message(resp));
+    yyjson_doc_free(resp);
+    yyjson_mut_doc_free(sec);
+    buckets_buf_free(&path);
+    if (st / 100 != 2) return false;
+  }
+  snprintf(s->identity.sync_hash, sizeof(s->identity.sync_hash), "%s", hash);
+  snprintf(s->identity.sync_tenant, sizeof(s->identity.sync_tenant), "%s", rm.tenant);
+  snprintf(s->identity.sync_client_id, sizeof(s->identity.sync_client_id), "%s", rm.client_id);
+  s->identity.sync_days = rm.delete_after_days;
+  s->identity.sync_max = rm.max_per_sync;
+  return true;
 }
 
 static void status(yyjson_mut_doc *d, yyjson_mut_val *idn, const char *phase, const char *message, const char *desc,
@@ -199,6 +235,11 @@ void op_identity_reconcile(op_ctx *o, yyjson_val *bc, bc_spec *s, yyjson_mut_doc
   char hash[17], ldap[17];
   hash16(raw, strlen(raw), hash);
   ldap_hash_of(config.data, settings, ldap);
+  if (!sync_settings(o, s, settings, str_at(prev, "syncHash"), err, sizeof(err))) {
+    status(d, idn, "Error", err, desc, prev_hash, prev_ldap);
+    buckets_buf_free(&config);
+    goto done;
+  }
   if (prev_hash && strcmp(prev_hash, hash) == 0 && prev_phase && strcmp(prev_phase, "Ready") == 0) {
     status(d, idn, "Ready", NULL, desc, hash, ldap);
     snprintf(s->identity.ldap_hash, sizeof(s->identity.ldap_hash), "%s", ldap);
@@ -217,6 +258,7 @@ void op_identity_reconcile(op_ctx *o, yyjson_val *bc, bc_spec *s, yyjson_mut_doc
   }
   if (config.data) memset(config.data, 0, config.len);
   buckets_buf_free(&config);
+  if (s->identity.sync_hash[0]) yyjson_mut_obj_add_strcpy(d, idn, "syncHash", s->identity.sync_hash);
 done:
   yyjson_doc_free(sd);
   if (raw) memset(raw, 0, strlen(raw));

@@ -184,6 +184,15 @@ static bool check_openid(yyjson_val *s, char *err, size_t errlen) {
     return fail(err, errlen, "Enter the application's client secret: the console signs people in as a confidential client.");
   const char *rp = str(s, "openid.rolePolicy");
   if (!*rp && has_space(claim_of(s, p))) return fail(err, errlen, "The claim name cannot contain spaces.");
+  if (flag(s, "openid.removal.enabled")) {
+    if (strcmp(p->name, "entra") != 0)
+      return fail(err, errlen, "Removing people who leave works with Microsoft Entra ID for now.");
+    yyjson_val *days = at(s, "openid.removal.deleteAfterDays"), *max = at(s, "openid.removal.maxPerSync");
+    if (days && (!yyjson_is_int(days) || yyjson_get_sint(days) < 1 || yyjson_get_sint(days) > 3650))
+      return fail(err, errlen, "Delete the access keys of people who left after 1 to 3650 days.");
+    if (max && (!yyjson_is_int(max) || yyjson_get_sint(max) < 1 || yyjson_get_sint(max) > 100000))
+      return fail(err, errlen, "The most people removed in one sync is a number from 1.");
+  }
   const char *ru = str(s, "openid.redirectUri");
   if (*ru) {
     size_t n = strlen(ru), m = strlen("/oauth_callback");
@@ -373,6 +382,19 @@ void buckets_idp_settings_keep_secrets(yyjson_mut_doc *d, yyjson_mut_val *settin
   yyjson_mut_obj_remove_key(settings, "secretsSet");
 }
 
+bool buckets_idp_removal_of(yyjson_val *s, buckets_idp_removal *out) {
+  memset(out, 0, sizeof(*out));
+  const provider_def *p = provider_of(s);
+  if (!has(s, "openid") || !p || strcmp(p->name, "entra") != 0 || !flag(s, "openid.removal.enabled")) return false;
+  out->tenant = str(s, "openid.tenantId");
+  out->client_id = str(s, "openid.clientId");
+  out->client_secret = str(s, "openid.clientSecret");
+  yyjson_val *days = at(s, "openid.removal.deleteAfterDays"), *max = at(s, "openid.removal.maxPerSync");
+  out->delete_after_days = yyjson_is_int(days) ? (long)yyjson_get_sint(days) : 30;
+  out->max_per_sync = yyjson_is_int(max) ? (long)yyjson_get_sint(max) : 10;
+  return true;
+}
+
 void buckets_idp_settings_describe(yyjson_val *s, char *out, size_t cap) {
   char a[512] = "", b[512] = "";
   const provider_def *p = provider_of(s);
@@ -382,6 +404,11 @@ void buckets_idp_settings_describe(yyjson_val *s, char *out, size_t cap) {
     else if (strcmp(p->name, "keycloak") == 0)
       snprintf(a, sizeof(a), "Keycloak realm %s at %s", str(s, "openid.realm"), str(s, "openid.url"));
     else snprintf(a, sizeof(a), "OpenID provider %s", str(s, "openid.configUrl"));
+  }
+  buckets_idp_removal rm;
+  if (*a && buckets_idp_removal_of(s, &rm)) {
+    size_t n = strlen(a);
+    snprintf(a + n, sizeof(a) - n, ", people who leave removed (keys deleted after %ld days)", rm.delete_after_days);
   }
   if (has(s, "ldap")) snprintf(b, sizeof(b), "%s at %s", ldap_preset_of(s)->label, str(s, "ldap.serverAddr"));
   if (*a && *b) snprintf(out, cap, "%s; %s", a, b);

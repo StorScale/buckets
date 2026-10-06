@@ -166,6 +166,45 @@ static void test_describe(void **state) {
   yyjson_doc_free(d);
 }
 
+/* openid.removal: Entra only, the sync's settings from the sign-in app's, not in bucketsd's configuration */
+static void test_removal(void **state) {
+  (void)state;
+  const char *entra = "{\"openid\":{\"provider\":\"entra\",\"tenantId\":\"t-1\",\"clientId\":\"app-1\","
+                      "\"clientSecret\":\"s3cret\",\"removal\":{\"enabled\":true,\"deleteAfterDays\":14}}}";
+  yyjson_doc *d = J(entra);
+  char err[256] = "", out[512];
+  assert_true(buckets_idp_check(yyjson_doc_get_root(d), err, sizeof(err)));
+  buckets_idp_removal rm;
+  assert_true(buckets_idp_removal_of(yyjson_doc_get_root(d), &rm));
+  assert_string_equal(rm.tenant, "t-1");
+  assert_string_equal(rm.client_id, "app-1");
+  assert_string_equal(rm.client_secret, "s3cret");
+  assert_int_equal(rm.delete_after_days, 14);
+  assert_int_equal(rm.max_per_sync, 10);
+  buckets_idp_settings_describe(yyjson_doc_get_root(d), out, sizeof(out));
+  assert_string_equal(out, "Microsoft Entra ID (tenant t-1), people who leave removed (keys deleted after 14 days)");
+  yyjson_doc_free(d);
+  char *c = server(entra);
+  assert_non_null(c);
+  assert_null(strstr(c, "removal"));
+  assert_null(strstr(c, "14"));
+  free(c);
+
+  d = J("{\"openid\":{\"provider\":\"entra\",\"tenantId\":\"t-1\",\"clientId\":\"a\",\"clientSecret\":\"b\","
+        "\"removal\":{\"enabled\":false}}}");
+  assert_false(buckets_idp_removal_of(yyjson_doc_get_root(d), &rm));
+  yyjson_doc_free(d);
+  expect_error("{\"openid\":{\"provider\":\"keycloak\",\"url\":\"https://kc\",\"realm\":\"r\",\"clientId\":\"a\","
+               "\"clientSecret\":\"b\",\"removal\":{\"enabled\":true}}}",
+               "Entra ID for now");
+  expect_error("{\"openid\":{\"provider\":\"entra\",\"tenantId\":\"t\",\"clientId\":\"a\",\"clientSecret\":\"b\","
+               "\"removal\":{\"enabled\":true,\"deleteAfterDays\":0}}}",
+               "1 to 3650 days");
+  expect_error("{\"openid\":{\"provider\":\"entra\",\"tenantId\":\"t\",\"clientId\":\"a\",\"clientSecret\":\"b\","
+               "\"removal\":{\"enabled\":true,\"maxPerSync\":\"ten\"}}}",
+               "most people removed");
+}
+
 /* bucketsd's own parser reads every line back as written: values with spaces
  * and commas (Active Directory DNs), filters with = inside, the secret. */
 static void test_server_config_parses(void **state) {
@@ -208,7 +247,7 @@ int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_entra),        cmocka_unit_test(test_okta_keycloak_generic), cmocka_unit_test(test_ldap),
       cmocka_unit_test(test_errors),       cmocka_unit_test(test_console_view),         cmocka_unit_test(test_secrets),
-      cmocka_unit_test(test_describe),     cmocka_unit_test(test_server_config_parses),
+      cmocka_unit_test(test_describe),     cmocka_unit_test(test_server_config_parses), cmocka_unit_test(test_removal),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }
