@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Hive Metastore: its database is Postgres, its warehouse is in Buckets. -->
+<configuration>
+  <property>
+    <!-- Tables' files: s3a://warehouse/hive/<db>.db/<table>. Metastore 4 records
+         plain tables as external ones, so this is where Spark's and Trino's
+         tables go; it's also where the Iceberg REST catalog puts Iceberg tables.
+         (Listed under both names: the REST catalog reads the hive.* one.) -->
+    <name>metastore.warehouse.external.dir</name>
+    <value>s3a://warehouse/hive</value>
+  </property>
+  <property>
+    <name>hive.metastore.warehouse.external.dir</name>
+    <value>s3a://warehouse/hive</value>
+  </property>
+  <property>
+    <!-- Managed (transactional) tables only. It must not contain the external
+         directory: the metastore refuses external tables inside it. -->
+    <name>metastore.warehouse.dir</name>
+    <value>s3a://warehouse/managed</value>
+  </property>
+  <property>
+    <name>javax.jdo.option.ConnectionDriverName</name>
+    <value>org.postgresql.Driver</value>
+  </property>
+  <property>
+    <name>javax.jdo.option.ConnectionURL</name>
+    <value>jdbc:postgresql://hms-db:5432/metastore</value>
+  </property>
+  <property>
+    <name>javax.jdo.option.ConnectionUserName</name>
+    <value>hive</value>
+  </property>
+  <property>
+    <name>javax.jdo.option.ConnectionPassword</name>
+    <value>${env.HMS_DB_PASSWORD}</value>
+  </property>
+  <property>
+    <!-- the Iceberg REST catalog, at http://hive-metastore:9001/iceberg -->
+    <name>metastore.catalog.servlet.port</name>
+    <value>9001</value>
+  </property>
+  <property>
+    <name>metastore.catalog.servlet.auth</name>
+    <value>none</value>
+  </property>
+  <property>
+    <name>metastore.event.db.notification.api.auth</name>
+    <value>false</value>
+  </property>
+</configuration>

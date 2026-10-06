@@ -1,13 +1,15 @@
-# A lakehouse on Buckets: Iceberg tables in Buckets, Nessie as the catalog,
-# Trino as the query engine, Apache Ranger deciding who may query what, and
-# Keycloak as the one identity provider for Trino, Ranger and Buckets.
+# Hive Metastore and Spark on Buckets: Spark and Trino share one catalog, the
+# Hive Metastore (Postgres behind it), for Hive tables and Iceberg tables in
+# Buckets. Trino is governed by Apache Ranger; Keycloak is the one identity
+# provider for Trino, Ranger and Buckets, as in ../lakehouse.
 #
 #   docker compose up -d --wait               # start, and configure (setup)
 #   docker compose run --rm test              # the end-to-end checks
 #   docker compose down -v                    # stop and delete everything
 #
-# See README.md. Every password is in .env, and is for local use only.
-name: buckets-lakehouse
+# See ../../docs/integrations/hive-spark.md. Every password is in .env, and is
+# for local use only. Run one example at a time: they use the same ports.
+name: buckets-hive-spark
 
 x-tools: &tools
   build: ../common/tools
@@ -39,6 +41,7 @@ services:
       interval: 5s
       retries: 60
 
+
   buckets:
     image: ${BUCKETS_IMAGE:-ghcr.io/storscale/bucketsd:1.4.2}
     environment:
@@ -54,25 +57,68 @@ services:
     depends_on:
       keycloak: {condition: service_healthy}
 
-  nessie:
-    image: ghcr.io/projectnessie/nessie:0.108.8
+
+  hms-db:
+    image: postgres:18-bookworm
     environment:
-      # the catalog's commits, kept on a volume
-      - nessie.version.store.type=ROCKSDB
-      - nessie.version.store.persist.rocks.database-path=/home/nessie/catalog
-      - nessie.catalog.default-warehouse=warehouse
-      - nessie.catalog.warehouses.warehouse.location=s3://warehouse/
-      - nessie.catalog.service.s3.default-options.endpoint=http://buckets:9000/
-      - nessie.catalog.service.s3.default-options.region=us-east-1
-      - nessie.catalog.service.s3.default-options.path-style-access=true
-      - nessie.catalog.service.s3.default-options.access-key=urn:nessie-secret:quarkus:nessie.catalog.secrets.access-key
-      - nessie.catalog.secrets.access-key.name=${NESSIE_S3_ACCESS_KEY}
-      - nessie.catalog.secrets.access-key.secret=${NESSIE_S3_SECRET_KEY}
+      POSTGRES_DB: metastore
+      POSTGRES_USER: hive
+      POSTGRES_PASSWORD: ${HMS_DB_PASSWORD}
     volumes:
-      - nessie-data:/home/nessie
-    ports: ["19120:19120"]
+      - hms-db:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hive -d metastore"]
+      interval: 5s
+      retries: 60
+
+  hive-metastore:
+    build: {context: ./images, target: metastore}
+    image: buckets-hive-spark-metastore
+    environment:
+      SERVICE_NAME: metastore
+      DB_DRIVER: postgres
+      HIVE_CUSTOM_CONF_DIR: /hive-conf
+      HMS_DB_PASSWORD: ${HMS_DB_PASSWORD}
+      AWS_ACCESS_KEY_ID: ${HMS_S3_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${HMS_S3_SECRET_KEY}
+      AWS_REGION: us-east-1
+    volumes:
+      - ./hive:/hive-conf:ro
+    ports: ["9083:9083"]
     depends_on:
+      hms-db: {condition: service_healthy}
       setup: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9083"]
+      interval: 5s
+      start_period: 60s
+      retries: 60
+
+  # A Spark Connect server: clients (pyspark-client, or spark-submit with
+  # --remote) send it DataFrame and SQL work. It reaches Buckets as spark-svc.
+  spark:
+    build: {context: ./images, target: spark}
+    image: buckets-hive-spark-spark
+    command: ["/opt/spark/sbin/start-connect-server.sh"]
+    environment:
+      SPARK_NO_DAEMONIZE: "true"
+      # The Hive client's jars are resolved into user.home (the ivy volume).
+      SPARK_SUBMIT_OPTS: -Duser.home=/ivy
+      AWS_ACCESS_KEY_ID: ${SPARK_S3_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${SPARK_S3_SECRET_KEY}
+      AWS_REGION: us-east-1
+    volumes:
+      - ./spark/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
+      - spark-ivy:/ivy
+    ports: ["15002:15002"]
+    mem_limit: 2g
+    depends_on:
+      hive-metastore: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/15002"]
+      interval: 5s
+      start_period: 30s
+      retries: 120
 
   ranger-db:
     image: apache/ranger-db:2.9.0
@@ -87,10 +133,12 @@ services:
       interval: 5s
       retries: 60
 
+
   ranger-solr:
     image: apache/ranger-solr:2.9.0
     command: ["solr-precreate", "ranger_audits", "/opt/solr/server/solr/configsets/ranger_audits/"]
     ports: ["8983:8983"]
+
 
   ranger-admin:
     image: apache/ranger:2.9.0
@@ -112,13 +160,12 @@ services:
       start_period: 120s
       retries: 60
 
-  # Trino's self-signed certificate (Trino accepts tokens only over HTTPS).
+
   tls:
     <<: *tools
     command: ["sh", "-c", "test -s /tls/trino.pem || (openssl req -x509 -newkey rsa:2048 -nodes -days 365 -subj /CN=trino -addext subjectAltName=DNS:trino,DNS:localhost -keyout /tls/key.pem -out /tls/cert.pem && cat /tls/key.pem /tls/cert.pem > /tls/trino.pem && chmod 644 /tls/*.pem)"]
 
-  # Buckets buckets, policies and service accounts; Ranger's users, groups,
-  # Trino service and policies. Runs once, then exits.
+
   setup:
     <<: *tools
     command: ["python", "-u", "/work/setup.py"]
@@ -126,6 +173,7 @@ services:
       keycloak: {condition: service_healthy}
       buckets: {condition: service_started}
       ranger-admin: {condition: service_healthy}
+
 
   trino:
     image: trinodb/trino:483
@@ -146,20 +194,22 @@ services:
     depends_on:
       tls: {condition: service_completed_successfully}
       setup: {condition: service_completed_successfully}
-      nessie: {condition: service_started}
+      hive-metastore: {condition: service_healthy}
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8080/v1/info | grep -q '\"starting\":false'"]
       interval: 5s
       retries: 60
 
-  # The end-to-end checks: docker compose run --rm test
+
   test:
     <<: *tools
     command: ["python", "-u", "/work/test.py"]
     profiles: ["test"]
 
+
 volumes:
   buckets-data:
-  nessie-data:
+  hms-db:
+  spark-ivy:
   ranger-db:
   tls:
