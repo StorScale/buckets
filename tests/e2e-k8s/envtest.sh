@@ -448,6 +448,11 @@ k -n tenant patch bsr everywhere --type merge -p '{"spec":{"sites":[{"cluster":"
 until_true '[[ $(jp bsr/everywhere {.status.phase}) == Error ]]' || true
 expect "an incomplete site refused" "$(jp bsr/everywhere '{.status.message}')" "site 2: an endpoint needs a name and credsSecret"
 k -n tenant delete bsr everywhere >/dev/null
+# the examples are valid against the CRDs
+for f in bucket.yaml site-replication.yaml; do
+  expect "example $f" "$(k -n tenant apply --dry-run=server -f "$ROOT/operator/examples/$f" 2>&1 | grep -c 'created\|configured')" 1
+done
+expect "the GitOps example" "$(k -n tenant apply --dry-run=server -k "$ROOT/operator/examples/gitops" 2>&1 | grep -c 'created\|configured\|unchanged')" 7
 
 echo "== monitoring: a metrics user, its token and a ServiceMonitor, once the Prometheus Operator is there"
 until_true '[[ $(jp bc/store {.status.monitoring.phase}) == NotInstalled ]]' || true

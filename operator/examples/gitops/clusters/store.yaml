@@ -1,0 +1,16 @@
+apiVersion: buckets.io/v1alpha1
+kind: BucketsCluster
+metadata:
+  name: store
+spec:
+  pools:
+    - servers: 4
+      volumesPerServer: 4
+      volumeClaimTemplate: {resources: {requests: {storage: 1Ti}}}
+  tls:
+    # One issuer for both clusters: each server trusts its certificate's ca.crt, so store trusts
+    # dr's certificate when it replicates into it. (certManager: {} gives each cluster a CA of its own.)
+    certManager: {issuerRef: {name: company-ca, kind: ClusterIssuer}}
+  console: {enabled: true}
+  kms:
+    kes: {keyName: buckets-default}   # where KES keeps keys: Secret store-kms (docs/encryption.md)

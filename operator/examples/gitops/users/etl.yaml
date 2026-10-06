@@ -1,0 +1,11 @@
+# The pipeline's account. Its Secret (accessKey, secretKey) is not in Git:
+# create it from your secret store, e.g. with External Secrets or Sealed Secrets.
+apiVersion: buckets.io/v1alpha1
+kind: BucketsUser
+metadata:
+  name: etl
+spec:
+  cluster: store
+  credsSecret: {name: etl-creds}
+  policies: [reports-rw]
+  groups: [pipelines]

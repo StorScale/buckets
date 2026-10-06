@@ -1,0 +1,12 @@
+apiVersion: buckets.io/v1alpha1
+kind: BucketsPolicy
+metadata:
+  name: reports-ro
+spec:
+  cluster: store
+  policy:
+    Version: "2012-10-17"
+    Statement:
+      - Effect: Allow
+        Action: ["s3:ListBucket", "s3:GetBucketLocation", "s3:GetObject"]
+        Resource: ["arn:aws:s3:::reports", "arn:aws:s3:::reports/*"]

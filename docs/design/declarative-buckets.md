@@ -1,6 +1,6 @@
 # Design: buckets, replication and site replication as resources
 
-Status: agreed, being built. Roadmap: Phase 3, "More resources as CRDs".
+Status: built. Roadmap: Phase 3, "More resources as CRDs".
 Phase 3 is done when "a cluster, its buckets, policies and replication are
 created from one Git repository".
 
@@ -123,5 +123,5 @@ one, as `bucketsd` asks.
    correction.
 2. ✅ `Bucket.replication`.
 3. ✅ `BucketsSiteReplication`.
-4. The exportable-manifests layout (docs and an example repository tree),
+4. ✅ The exportable-manifests layout (docs and an example repository tree),
    which then covers all of it.

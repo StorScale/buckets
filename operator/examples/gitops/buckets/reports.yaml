@@ -1,0 +1,15 @@
+apiVersion: buckets.io/v1alpha1
+kind: Bucket
+metadata:
+  name: reports
+spec:
+  cluster: store
+  versioning: true
+  objectLock: {mode: GOVERNANCE, days: 30}
+  quota: 500Gi
+  encryption: {sse: S3}         # with the cluster's KMS (clusters/store.yaml)
+  lifecycle:
+    - {id: old-versions, noncurrentExpireDays: 90}
+    - {id: uploads, abortIncompleteUploadDays: 7}
+  replication:
+    target: {cluster: dr}
