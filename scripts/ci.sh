@@ -80,6 +80,7 @@ run tests/integration/encrypt-existing.sh build-ci-asan/src/bucketsd
 run tests/integration/console.sh build-ci-asan/src/bucketsd build-ci-asan/src/consoled
 run tests/integration/teams.sh build-ci-asan/src/bucketsd build-ci-asan/src/consoled
 run tests/integration/access.sh build-ci-asan/src/bucketsd build-ci-asan/src/consoled
+run tests/integration/console-metrics.sh build-ci-asan/src/bucketsd build-ci-asan/src/consoled
 # Monitoring: the dashboards are what tools/dashboards/gen.py writes; every metric the alert rules and
 # dashboards use is exported; with PROMTOOL, the queries parse and the rules' unit tests pass.
 run python3 tools/dashboards/gen.py >/dev/null
