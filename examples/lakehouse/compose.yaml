@@ -6,160 +6,25 @@
 #   docker compose run --rm test              # the end-to-end checks
 #   docker compose down -v                    # stop and delete everything
 #
-# See README.md. Every password is in .env, and is for local use only.
+# The stack is in stack.yaml (other examples include it too); this file adds
+# the lakehouse's checks. See README.md. Every password is in .env, and is for
+# local use only.
 name: buckets-lakehouse
 
-x-tools: &tools
-  build: ../common/tools
-  image: buckets-examples-tools
-  env_file: .env
-  environment:
-    PYTHONPATH: /common
-  volumes:
-    - ./tools:/work:ro
-    - ../common/tools:/common:ro
-    - tls:/tls
+include:
+  - stack.yaml
 
 services:
-  keycloak:
-    image: quay.io/keycloak/keycloak:26.8.0
-    command: ["start-dev", "--import-realm"]
-    environment:
-      KC_BOOTSTRAP_ADMIN_USERNAME: admin
-      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
-      # One issuer for everyone: tokens say http://keycloak:8080 whoever asks.
-      KC_HOSTNAME: http://keycloak:8080
-      KC_HEALTH_ENABLED: "true"
-      LAKEHOUSE_USER_PASSWORD: ${LAKEHOUSE_USER_PASSWORD}
-    volumes:
-      - ../common/keycloak/lakehouse-realm.json:/opt/keycloak/data/import/lakehouse-realm.json:ro
-    ports: ["8080:8080"]
-    healthcheck:
-      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q UP <&3"]
-      interval: 5s
-      retries: 60
-
-  buckets:
-    image: ${BUCKETS_IMAGE:-ghcr.io/storscale/bucketsd:1.5.0}
-    environment:
-      BUCKETS_ROOT_USER: ${BUCKETS_ROOT_USER}
-      BUCKETS_ROOT_PASSWORD: ${BUCKETS_ROOT_PASSWORD}
-      # People sign in with Keycloak; each of their groups names a Buckets policy.
-      MINIO_IDENTITY_OPENID_CONFIG_URL: http://keycloak:8080/realms/lakehouse/.well-known/openid-configuration
-      MINIO_IDENTITY_OPENID_CLIENT_ID: lakehouse
-      MINIO_IDENTITY_OPENID_CLAIM_NAME: groups
-    volumes:
-      - buckets-data:/data
-    ports: ["9000:9000"]
-    depends_on:
-      keycloak: {condition: service_healthy}
-
-  nessie:
-    image: ghcr.io/projectnessie/nessie:0.108.8
-    environment:
-      # the catalog's commits, kept on a volume
-      - nessie.version.store.type=ROCKSDB
-      - nessie.version.store.persist.rocks.database-path=/home/nessie/catalog
-      - nessie.catalog.default-warehouse=warehouse
-      - nessie.catalog.warehouses.warehouse.location=s3://warehouse/
-      - nessie.catalog.service.s3.default-options.endpoint=http://buckets:9000/
-      - nessie.catalog.service.s3.default-options.region=us-east-1
-      - nessie.catalog.service.s3.default-options.path-style-access=true
-      - nessie.catalog.service.s3.default-options.access-key=urn:nessie-secret:quarkus:nessie.catalog.secrets.access-key
-      - nessie.catalog.secrets.access-key.name=${NESSIE_S3_ACCESS_KEY}
-      - nessie.catalog.secrets.access-key.secret=${NESSIE_S3_SECRET_KEY}
-    volumes:
-      - nessie-data:/home/nessie
-    ports: ["19120:19120"]
-    depends_on:
-      setup: {condition: service_completed_successfully}
-
-  ranger-db:
-    image: apache/ranger-db:2.9.0
-    environment:
-      POSTGRES_PASSWORD: ${RANGER_PASSWORD}
-      RANGER_DB_USER: rangeradmin
-      RANGER_DB_PASSWORD: ${RANGER_PASSWORD}
-    volumes:
-      - ranger-db:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d ranger"]
-      interval: 5s
-      retries: 60
-
-  ranger-solr:
-    image: apache/ranger-solr:2.9.0
-    command: ["solr-precreate", "ranger_audits", "/opt/solr/server/solr/configsets/ranger_audits/"]
-    ports: ["8983:8983"]
-
-  ranger-admin:
-    image: apache/ranger:2.9.0
-    environment:
-      RANGER_DB_TYPE: postgres
-      POSTGRES_PASSWORD: ${RANGER_PASSWORD}
-      RANGER_DB_USER: rangeradmin
-      RANGER_DB_PASSWORD: ${RANGER_PASSWORD}
-    volumes:
-      - ../common/ranger/create-ranger-services.py:/home/ranger/scripts/create-ranger-services.py:ro
-    ports: ["6080:6080"]
-    depends_on:
-      ranger-db: {condition: service_healthy}
-      ranger-solr: {condition: service_started}
-    healthcheck:
-      # unauthenticated, so it never counts toward Ranger's sign-in lockout
-      test: ["CMD-SHELL", "curl -sf http://localhost:6080/login.jsp >/dev/null"]
-      interval: 10s
-      start_period: 120s
-      retries: 60
-
-  # Trino's self-signed certificate (Trino accepts tokens only over HTTPS).
-  tls:
-    <<: *tools
-    command: ["sh", "-c", "test -s /tls/trino.pem || (openssl req -x509 -newkey rsa:2048 -nodes -days 365 -subj /CN=trino -addext subjectAltName=DNS:trino,DNS:localhost -keyout /tls/key.pem -out /tls/cert.pem && cat /tls/key.pem /tls/cert.pem > /tls/trino.pem && chmod 644 /tls/*.pem)"]
-
-  # Buckets buckets, policies and service accounts; Ranger's users, groups,
-  # Trino service and policies. Runs once, then exits.
-  setup:
-    <<: *tools
-    command: ["python", "-u", "/work/setup.py"]
-    depends_on:
-      keycloak: {condition: service_healthy}
-      buckets: {condition: service_started}
-      ranger-admin: {condition: service_healthy}
-
-  trino:
-    image: trinodb/trino:483
-    environment:
-      TRINO_S3_ACCESS_KEY: ${TRINO_S3_ACCESS_KEY}
-      TRINO_S3_SECRET_KEY: ${TRINO_S3_SECRET_KEY}
-      TRINO_SHARED_SECRET: ${TRINO_SHARED_SECRET}
-      RANGER_PLUGIN_PASSWORD: ${RANGER_PLUGIN_PASSWORD}
-    volumes:
-      - ../common/trino/config.properties:/etc/trino/config.properties:ro
-      - ../common/trino/access-control.properties:/etc/trino/access-control.properties:ro
-      - ../common/trino/ranger-trino-security.xml:/etc/trino/ranger-trino-security.xml:ro
-      - ../common/trino/ranger-trino-audit.xml:/etc/trino/ranger-trino-audit.xml:ro
-      - ./trino/catalog:/etc/trino/catalog:ro
-      - tls:/etc/trino/tls:ro
-    ports: ["8443:8443"]
-    mem_limit: 3g
-    depends_on:
-      tls: {condition: service_completed_successfully}
-      setup: {condition: service_completed_successfully}
-      nessie: {condition: service_started}
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8080/v1/info | grep -q '\"starting\":false'"]
-      interval: 5s
-      retries: 60
-
   # The end-to-end checks: docker compose run --rm test
   test:
-    <<: *tools
+    build: ../common/tools
+    image: buckets-examples-tools
+    env_file: .env
+    environment:
+      PYTHONPATH: /common
+    volumes:
+      - ./tools:/work:ro
+      - ../common/tools:/common:ro
+      - tls:/tls
     command: ["python", "-u", "/work/test.py"]
     profiles: ["test"]
-
-volumes:
-  buckets-data:
-  nessie-data:
-  ranger-db:
-  tls:

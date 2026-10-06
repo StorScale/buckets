@@ -48,7 +48,7 @@ Nobody's notebook holds a key that outlives their session. A change to someone's
 
 ## Run it
 
-You need Docker with Compose v2, and about 2 GB of memory for Docker.
+You need Docker with Compose 2.24 or later, and about 2 GB of memory for Docker.
 
 ```bash
 cd examples/jupyterhub

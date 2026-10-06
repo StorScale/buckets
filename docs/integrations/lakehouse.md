@@ -7,7 +7,7 @@ This guide builds a small data platform on Buckets:
 - **Apache Ranger** decides who may query what, down to rows and columns.
 - **Keycloak** is the identity provider for all of them, so a person's groups mean the same thing in Trino, Ranger and Buckets.
 
-Everything runs from one Compose file in [`examples/lakehouse`](../../examples/lakehouse), and a test script checks what this guide says the stack does. CI runs it on each change to Buckets. For notebooks, see [jupyterhub.md](jupyterhub.md). For Hive Metastore and Spark, see [hive-spark.md](hive-spark.md).
+Everything runs from one Compose file in [`examples/lakehouse`](../../examples/lakehouse), and a test script checks what this guide says the stack does. CI runs it on each change to Buckets. For notebooks, see [jupyterhub.md](jupyterhub.md); for dashboards, [superset.md](superset.md); for Dremio, [dremio.md](dremio.md). For Hive Metastore and Spark, see [hive-spark.md](hive-spark.md).
 
 | Component | Version | Role |
 |---|---|---|
@@ -41,7 +41,7 @@ There are two layers of access control, and the setup only works if they agree:
 
 ## Run it
 
-You need Docker with Compose v2, and about 8 GB of memory for Docker.
+You need Docker with Compose 2.24 or later, and about 8 GB of memory for Docker.
 
 ```bash
 cd examples/lakehouse

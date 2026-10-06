@@ -1,0 +1,67 @@
+# Dremio on the lakehouse: Dremio queries the lakehouse's Iceberg tables
+# through the same Nessie catalog Trino uses, including earlier Nessie commits,
+# and queries raw Parquet files in Buckets. Its Buckets account may only read,
+# so Buckets refuses anything Dremio tries to write.
+#
+# This includes the whole lakehouse stack (../lakehouse: Buckets, Nessie,
+# Trino, Ranger, Keycloak) unchanged.
+#
+#   docker compose up -d --wait               # start, and configure
+#   docker compose run --rm test              # the end-to-end checks
+#   docker compose down -v                    # stop and delete everything
+#
+# Dremio's UI is at http://localhost:9047 (admin, DREMIO_ADMIN_PASSWORD). See
+# ../../docs/integrations/dremio.md. Every password is in .env and
+# ../lakehouse/.env, for local use only. Run one example at a time.
+name: buckets-dremio
+
+include:
+  - path: ../lakehouse/stack.yaml
+    env_file: [../lakehouse/.env, .env]
+
+x-tools: &tools
+  build: ../common/tools
+  image: buckets-examples-tools
+  env_file: [../lakehouse/.env, .env]
+  environment:
+    PYTHONPATH: /common
+  volumes:
+    - ./tools:/work:ro
+    - ../common/tools:/common:ro
+    - tls:/tls
+
+services:
+  dremio:
+    image: dremio/dremio-oss:26.0.5
+    environment:
+      DREMIO_MAX_HEAP_MEMORY_SIZE_MB: "2048"
+      DREMIO_MAX_DIRECT_MEMORY_SIZE_MB: "2048"
+    volumes:
+      - dremio-data:/opt/dremio/data
+    ports: ["9047:9047"]
+    mem_limit: 5g
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9047/apiv2/server_status"]
+      interval: 5s
+      start_period: 60s
+      retries: 60
+
+  # Dremio's administrator and sources; Buckets' account for Dremio; the data.
+  dremio-setup:
+    <<: *tools
+    command: ["python", "-u", "/work/dremio_setup.py"]
+    depends_on:
+      setup: {condition: service_completed_successfully}
+      trino: {condition: service_healthy}
+      dremio: {condition: service_healthy}
+
+  # The end-to-end checks: docker compose run --rm test
+  test:
+    <<: *tools
+    command: ["python", "-u", "/work/test.py"]
+    profiles: ["test"]
+    depends_on:
+      dremio-setup: {condition: service_completed_successfully}
+
+volumes:
+  dremio-data:

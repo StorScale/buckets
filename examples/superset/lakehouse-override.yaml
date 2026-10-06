@@ -1,0 +1,29 @@
+# Changes to the included lakehouse stack (../lakehouse/stack.yaml) for this
+# example. Compose resolves the paths here from the lakehouse directory, as it
+# does for the file this overrides.
+services:
+  keycloak:
+    environment:
+      SUPERSET_OAUTH_SECRET: ${SUPERSET_OAUTH_SECRET}
+
+  # Trino also accepts passwords, for service accounts: here, Superset's.
+  trino:
+    volumes:
+      - ../superset/trino/config.properties:/etc/trino/config.properties:ro
+      - ../superset/trino/password-authenticator.properties:/etc/trino/password-authenticator.properties:ro
+      - trino-auth:/etc/trino/auth:ro
+    depends_on:
+      trino-passwords: {condition: service_completed_successfully}
+
+  # Trino's password file (bcrypt), from SUPERSET_TRINO_PASSWORD.
+  trino-passwords:
+    build: ../common/tools
+    image: buckets-examples-tools
+    environment:
+      SUPERSET_TRINO_PASSWORD: ${SUPERSET_TRINO_PASSWORD}
+    command: ["sh", "-c", "htpasswd -B -C 10 -b -c /auth/password.db superset \"$$SUPERSET_TRINO_PASSWORD\" && chmod 644 /auth/password.db"]
+    volumes:
+      - trino-auth:/auth
+
+volumes:
+  trino-auth:

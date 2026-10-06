@@ -4,6 +4,8 @@
 #   - hive-spark: Hive Metastore, Spark, Trino, Apache Ranger, Keycloak
 #                 (docs/integrations/hive-spark.md)
 #   - jupyterhub: JupyterHub, Keycloak (docs/integrations/jupyterhub.md)
+#   - superset:   Apache Superset on the lakehouse (docs/integrations/superset.md)
+#   - dremio:     Dremio on the lakehouse (docs/integrations/dremio.md)
 name: examples
 
 on:
@@ -39,7 +41,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        example: [lakehouse, hive-spark, jupyterhub]
+        example: [lakehouse, hive-spark, jupyterhub, superset, dremio]
     defaults:
       run:
         working-directory: examples/${{ matrix.example }}
