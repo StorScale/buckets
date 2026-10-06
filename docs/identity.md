@@ -135,6 +135,18 @@ Changing `spec.env` restarts the servers one at a time, so S3 stays available. E
 
 The console's login page then shows **Sign in with Entra ID**. The root credentials (`<name>-root` Secret) still sign in with access keys, as a fallback.
 
+## Access review
+
+**Identity → Access review** answers who can reach a bucket, and why. It is also one click from every bucket: **Access** on the Buckets page, or **Who has access** in a bucket's settings.
+
+- **Who can reach a bucket.** Pick a bucket and what to check: read, write, delete, manage settings, or any of these. The page lists every route to that access: local users and groups (with their members), LDAP users and groups, OpenID roles, access keys with a policy of their own, the bucket policy (including "everyone, signed in or not"), and the root user. Each row shows whether the access is full, limited to some objects (`only reports/*`) or depends on conditions, and the policy statements that grant it. **Export CSV** saves the list, one line per principal and action, with the time of the review.
+- **Would this be allowed?** Pick a user, group, LDAP DN, access key, a set of OpenID roles or "anyone, without signing in", an action, a bucket and an object. The answer is Allowed or Denied, with the statements that decided it: the Allow that grants it, or the Deny that wins over it. A statement with a condition (a source IP, TLS, object tags) decides the answer only when you give its value; otherwise the answer is "depends on conditions".
+- **Local users while sign-in uses a provider.** When OpenID or LDAP sign-in is on, the page lists the local users that remain, with their policies and access keys, so the ones nobody needs can be disabled or deleted on the Users page.
+
+The review uses the servers' own policy evaluator, so its answers are the servers' answers. It reads the policies, users, groups and access keys as the person signed in; anything that account may not read is named on the page, as the answer could leave out access that comes through it.
+
+Buckets cannot list everyone your identity provider gives a role. An OpenID role's row says "anyone with the role", followed by the people Buckets has seen signing in with it; check the role's assignments in the provider (in Entra: Enterprise applications → the app → Users and groups).
+
 ## The Users page and access keys
 
 - **Users** lists the provider's people that Buckets knows of: everyone signed in now, and anyone holding access keys, with their name, sign-in name and roles. People who have never signed in do not appear.

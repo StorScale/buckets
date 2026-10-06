@@ -28,6 +28,7 @@
 #include "s3/sign.h"
 #include "console/idpconfig.h"
 #include "console/teams.h"
+#include "console/access.h"
 #include "console/kmsconfig.h"
 #include "iam/idpsettings.h"
 
@@ -628,6 +629,19 @@ static int admin_call(void *ud, const char *method, const char *api, const char 
   } else {
     buckets_buf_append(out, res.body.data ? res.body.data : "", res.body.len);
   }
+  buckets_http_result_free(&res);
+  return st;
+}
+
+/* An S3 GET as the signed-in person, for the access review (a bucket's policy). */
+static int s3_get(void *ud, const char *path, const char *query, buckets_buf *out) {
+  admin_ctx *a = ud;
+  buckets_sigv4_creds cr = {.access_key = a->s->access_key, .secret_key = a->s->secret_key,
+                            .session_token = a->s->session_token, .region = a->c->cfg.region};
+  buckets_http_result res;
+  if (!upstream_call(a->c, &cr, "GET", path, query, NULL, 0, NULL, 0, &res)) return 0;
+  buckets_buf_append(out, res.body.data ? res.body.data : "", res.body.len);
+  int st = res.status;
   buckets_http_result_free(&res);
   return st;
 }
@@ -1448,6 +1462,13 @@ void buckets_console_handle(const buckets_http_request *req, buckets_http_respon
     admin_ctx a = {c, &s};
     buckets_console_teams_session sess = {admin_call, &a};
     buckets_console_teams_handle(req, sub, &sess, resp);
+  } else if (buckets_str_has_prefix(path, "/api/v1/access/")) {
+    /* the access review: admin calls as the signed-in person; facts it may not read are reported missing */
+    char sub[512];
+    snprintf(sub, sizeof(sub), "%.*s", (int)(path.n - 14), path.p + 14);
+    admin_ctx a = {c, &s};
+    buckets_console_access_session sess = {admin_call, s3_get, &a};
+    buckets_console_access_handle(req, sub, &sess, resp);
   } else if (buckets_str_has_prefix(path, "/api/v1/kms/")) { /* the KMS API: keys, status */
     char up[4096];
     snprintf(up, sizeof(up), "/minio/kms/v1/%.*s", (int)(path.n - 12), path.p + 12);

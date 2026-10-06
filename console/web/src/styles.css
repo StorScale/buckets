@@ -244,3 +244,9 @@ details.guide[open] > summary { margin-bottom: 8px; }
 .inline-form { border-top: 1px solid var(--line); padding-top: 8px; }
 .inline-form .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .inline-form .row input { flex: 1 1 220px; min-width: 0; }
+
+/* Access review */
+.row-form { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: flex-end; }
+.row-form label { flex: 1 1 160px; min-width: 0; }
+.row-form > button { margin-bottom: 12px; }
+tr.clickable { cursor: pointer; }

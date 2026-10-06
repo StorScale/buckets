@@ -42,6 +42,9 @@ export default function Buckets() {
                   <Link to={`/buckets/${encodeURIComponent(b.name)}/settings`} className="button">
                     Settings
                   </Link>
+                  <Link to={`/identity/access-review?bucket=${encodeURIComponent(b.name)}`} className="button" data-testid={`access-${b.name}`}>
+                    Access
+                  </Link>
                   <ConfirmButton
                     label="Delete"
                     confirm={`Delete ${b.name}?`}

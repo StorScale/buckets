@@ -6,6 +6,9 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- Access review (Identity → Access review, and **Access** on each bucket): who can reach a bucket at a level (read, write, delete, manage settings, any), through which users, groups, LDAP entities, OpenID roles, access keys and bucket-policy statements, with limits and conditions, exported as CSV; whether a given principal would be allowed an action, with the statements that decide it; and the local users left while a provider handles sign-in. Answers come from the servers' policy evaluator. See [identity.md](docs/identity.md#access-review).
+
 ## [1.3.0] - 2026-10-04
 
 ### Added

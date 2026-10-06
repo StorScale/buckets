@@ -165,6 +165,17 @@ def teams():
     expect("writes the team's bucket", st, 200)
     expect("not another bucket", b.req("GET", C + "/api/v1/s3/hr-payroll/")[0], 403)
     expect("nor creates buckets (rw)", b.req("PUT", C + "/api/v1/s3/finance-q1")[0], 403)
+    # the access review: the role, and kcteam seen with it
+    st, rv = root.api("GET", "/api/v1/access/bucket/finance-reports?level=write")
+    role = [r for r in rv.get("rows", []) if r.get("kind") == "openid-role" and r.get("name") == "team-finance-rw"]
+    seen = role[0].get("seen", []) if role else []
+    expect("the review names the Keycloak role, and kcteam seen with it",
+           (st, len(seen) == 1 and any(n in seen[0] for n in ("kcteam", "KC Team"))), (200, True))
+    if role and len(seen) != 1:
+        print("     seen:", seen)
+    st, ck = root.api("POST", "/api/v1/access/check", {"who": {"kind": "openid", "roles": ["team-finance-rw"]},
+                                                      "action": "s3:PutObject", "bucket": "hr-payroll", "object": "x"})
+    expect("the check agrees: not another bucket", ck.get("decision"), "denied")
     st, r = root.api("DELETE", "/api/v1/teams/finance")
     expect("the team deleted", st, 204)
     expect("kcteam loses the bucket at once", b.req("GET", C + "/api/v1/s3/finance-reports/")[0], 403)

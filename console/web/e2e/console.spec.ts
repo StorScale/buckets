@@ -305,6 +305,52 @@ test.describe("identity", () => {
     await expect(row).toHaveCount(0);
   });
 
+  test("access review: who reaches a bucket, the CSV, and a check", async ({ page }) => {
+    const t = unique("ar");
+    const user = `u-${t}`;
+    await login(page);
+    const h = { "X-Console-Request": "1" };
+    expect((await page.request.put(`/api/v1/s3/${t}-data`, { headers: h })).status()).toBe(200);
+    expect((await page.request.put(`/api/v1/s3/${t}-other`, { headers: h })).status()).toBe(200);
+    await page.request.put(`/api/v1/admin/add-user?accessKey=${user}`, {
+      headers: { ...h, "X-Console-Encrypt": "1" },
+      data: JSON.stringify({ secretKey: "membersecret", status: "enabled" }),
+    });
+    const team = { name: t, buckets: [`${t}-data`], prefixes: [], levels: ["rw"] };
+    expect((await page.request.put(`/api/v1/teams/${t}`, { headers: { ...h, "Content-Type": "application/json" }, data: { team } })).status()).toBe(200);
+    expect((await page.request.post(`/api/v1/teams/${t}/members`, { headers: { ...h, "Content-Type": "application/json" }, data: { level: "rw", user } })).status()).toBe(204);
+
+    // from the bucket list straight to its review
+    await page.getByRole("link", { name: "Buckets", exact: true }).click();
+    await page.getByTestId(`access-${t}-data`).click();
+    await expect(page.getByTestId("review-bucket")).toHaveValue(`${t}-data`);
+    const row = page.getByTestId(`review-row-${user}`);
+    await expect(row).toContainText("local user");
+    await expect(row).toContainText(`team-${t}-rw`);
+    await expect(page.getByTestId("review-row-the root user")).toBeVisible();
+    // the CSV an auditor files
+    const [dl] = await Promise.all([page.waitForEvent("download"), page.getByTestId("review-csv").click()]);
+    const csv = await (await dl.createReadStream()).toArray().then((c) => Buffer.concat(c).toString());
+    expect(csv.split("\n")[0]).toBe("bucket,level,principal,kind,status,action,decision,limits,granted by,reviewed at");
+    expect(csv).toContain(`${t}-data,read,${user},local user,enabled,s3:GetObject,allowed,,team-${t}-rw`);
+
+    // would this be allowed?
+    await page.getByTestId("check-kind").selectOption("user");
+    await page.getByTestId("check-name").selectOption(user);
+    await page.getByTestId("check-action").fill("s3:PutObject");
+    await page.getByTestId("check-bucket").selectOption(`${t}-data`);
+    await page.getByTestId("check-object").fill("a.txt");
+    await page.getByTestId("check-submit").click();
+    await expect(page.getByTestId("check-result")).toContainText("Allowed");
+    await expect(page.getByTestId("check-result")).toContainText(`team-${t}-rw`);
+    await page.getByTestId("check-bucket").selectOption(`${t}-other`);
+    await page.getByTestId("check-submit").click();
+    await expect(page.getByTestId("check-result")).toContainText("Denied");
+    await expect(page.getByTestId("check-result")).toContainText("No statement allows it");
+
+    await page.request.delete(`/api/v1/teams/${t}`, { headers: h });
+  });
+
   test("access keys show their secret once", async ({ page }) => {
     await login(page);
     await page.getByRole("link", { name: "Access Keys" }).click();

@@ -143,6 +143,9 @@ export default function BucketSettings() {
         <h1>
           <Link to="/buckets">Buckets</Link> / <Link to={`/buckets/${encodeURIComponent(bucket)}/browse/`}>{bucket}</Link> / Settings
         </h1>
+        <Link to={`/identity/access-review?bucket=${encodeURIComponent(bucket)}`} className="button" data-testid="who-has-access">
+          Who has access
+        </Link>
       </div>
       <ErrorBanner error={error} onClose={() => setError(undefined)} />
       <Notice text={notice} />
