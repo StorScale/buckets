@@ -122,7 +122,7 @@ spec:
         seccompProfile: {type: RuntimeDefault}
       containers:
         - name: operator
-          image: ghcr.io/storscale/buckets-operator:1.5.0
+          image: ghcr.io/storscale/buckets-operator:1.6.0
           imagePullPolicy: IfNotPresent
           env:
             - name: POD_NAME
@@ -132,7 +132,7 @@ spec:
             # - name: BUCKETS_OPERATOR_NAMESPACE   # watch a single namespace
             #   value: my-namespace
             # - name: BUCKETS_KES_IMAGE            # the KES image clusters run by default
-            #   value: registry.example.com/buckets/buckets-kes:1.5.0
+            #   value: registry.example.com/buckets/buckets-kes:1.6.0
           resources:
             requests: {cpu: 50m, memory: 32Mi}
             limits: {memory: 128Mi}

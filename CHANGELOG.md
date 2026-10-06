@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-10-06
+
 ### Added
 - Drives replaced while the server runs: an empty disk under a drive's mount point is formatted into the old drive's slot within one check and healed in the background, as MinIO does. A drive that still holds data but lost its `format.json` is left alone, and the log says why once.
 - `spec.console.nodeSelector`, `tolerations` and `affinity`: where the console's pods run, as pools have.

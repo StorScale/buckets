@@ -10,7 +10,7 @@ Everything runs from one Compose file in [`examples/jupyterhub`](../../examples/
 
 | Component | Version | Role |
 |---|---|---|
-| Buckets | 1.5.0 | Storage; temporary credentials from a Keycloak token (STS) |
+| Buckets | 1.6.0 | Storage; temporary credentials from a Keycloak token (STS) |
 | JupyterHub | 6.0.1 | Sign-in, one notebook server per person |
 | OAuthenticator | 17.4.0 | JupyterHub's Keycloak (OpenID Connect) sign-in |
 | DockerSpawner | 14.0.0 | Starts each person's notebook server in its own container |

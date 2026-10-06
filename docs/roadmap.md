@@ -75,7 +75,7 @@ Everything about a Buckets cluster should be declared in Kubernetes and watched 
 - **More resources as CRDs.** `BucketsUser`, `BucketsPolicy` and `Bucket` exist; add bucket replication, site replication, lifecycle rules and quotas, so a whole setup lives in Git.
 - [x] **Monitoring shipped with the operator** (1.5.0; [monitoring.md](monitoring.md), [the design](design/monitoring.md)). The operator gives each cluster a least-privilege metrics user and ServiceMonitors; the chart ships 12 alert rules with runbooks and four Grafana dashboards. `bucketsd` now takes failing, hung and emptied drives offline, and `tests/e2e-k8s/monitoring.sh` checks on the shared cluster that a drive made to fail raises `BucketsDriveOffline`.
 - **cert-manager by default.** The operator requests certificates itself; today they are created by hand.
-- **Console scheduling fields.** Add `nodeSelector`, `affinity` and `tolerations` to `spec.console`, as pools have. The dev cluster needed a manual patch to keep the console off two nodes.
+- [x] **Console scheduling fields** (1.6.0). `spec.console` takes `nodeSelector`, `affinity` and `tolerations`, as pools do.
 - **Exportable manifests.** A documented layout for keeping a cluster's resources in a repo, so a cluster can be recreated from Git.
 
 Done when: a cluster, its buckets, policies and replication are created from one Git repository, and a failing drive raises an alert without anyone looking.
