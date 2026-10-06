@@ -2,8 +2,8 @@ apiVersion: v2
 name: buckets-operator
 description: "Runs Buckets, the drop-in MinIO replacement written in C, on Kubernetes (BucketsCluster, BucketsUser, BucketsPolicy and Bucket resources), and adopts MinIO Tenants in place."
 type: application
-version: 1.4.2
-appVersion: "1.4.2"
+version: 1.5.0
+appVersion: "1.5.0"
 annotations:
   licenses: AGPL-3.0-or-later
   artifacthub.io/license: AGPL-3.0-or-later

@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-10-06
+
 ### Added
 - `examples/jupyterhub` and [docs/integrations/jupyterhub.md](docs/integrations/jupyterhub.md): JupyterHub 6 on Buckets, with Keycloak sign-in through OAuthenticator. Keycloak's groups decide who may sign in and who administers the hub. Each person's notebook (DockerSpawner) reaches Buckets as that person: `buckets_lake` exchanges their Keycloak token, kept and refreshed by the hub, through STS for temporary credentials. Everyone gets a private `home/${jwt:preferred_username}/` prefix, and groups decide access to shared datasets. `docker compose run --rm test` checks 10 claims, signing people in through Keycloak's login form and running code in their notebooks. The shared realm gains the `jupyterhub` client.
 - The operator's Helm chart carries Artifact Hub metadata: links to https://storscale.io and the migration guide, the source, keywords, an icon, the license, and its operator capability level.

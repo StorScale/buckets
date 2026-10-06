@@ -73,7 +73,7 @@ Done when: a new admin connects Entra ID from the console without editing enviro
 Everything about a Buckets cluster should be declared in Kubernetes and watched by default. The operator already handles pool expansion, drive replacement, rolling upgrades, TLS and console TLS; this phase fills the gaps found while deploying to the dev cluster.
 
 - **More resources as CRDs.** `BucketsUser`, `BucketsPolicy` and `Bucket` exist; add bucket replication, site replication, lifecycle rules and quotas, so a whole setup lives in Git.
-- **Monitoring shipped with the operator.** Prometheus scrape configuration, Grafana dashboards and alert rules for drive health, healing backlog, capacity and failed sign-ins.
+- [x] **Monitoring shipped with the operator** (1.5.0; [monitoring.md](monitoring.md), [the design](design/monitoring.md)). The operator gives each cluster a least-privilege metrics user and ServiceMonitors; the chart ships 12 alert rules with runbooks and four Grafana dashboards. `bucketsd` now takes failing, hung and emptied drives offline, and `tests/e2e-k8s/monitoring.sh` checks on the shared cluster that a drive made to fail raises `BucketsDriveOffline`.
 - **cert-manager by default.** The operator requests certificates itself; today they are created by hand.
 - **Console scheduling fields.** Add `nodeSelector`, `affinity` and `tolerations` to `spec.console`, as pools have. The dev cluster needed a manual patch to keep the console off two nodes.
 - **Exportable manifests.** A documented layout for keeping a cluster's resources in a repo, so a cluster can be recreated from Git.

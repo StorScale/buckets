@@ -41,7 +41,7 @@ spec:
                 image:
                   type: string
                   description: bucketsd container image.
-                  default: ghcr.io/storscale/bucketsd:1.4.2
+                  default: ghcr.io/storscale/bucketsd:1.5.0
                 imagePullPolicy:
                   type: string
                   enum: [Always, IfNotPresent, Never]
