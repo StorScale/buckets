@@ -1,0 +1,9 @@
+apiVersion: buckets.io/v1alpha1
+kind: Bucket
+metadata:
+  name: raw
+spec:
+  cluster: store
+  versioning: false
+  lifecycle:
+    - {id: landing, prefix: landing/, expireDays: 14}

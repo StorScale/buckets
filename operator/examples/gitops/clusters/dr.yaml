@@ -1,0 +1,12 @@
+# The disaster-recovery copy: buckets/reports.yaml replicates into it.
+apiVersion: buckets.io/v1alpha1
+kind: BucketsCluster
+metadata:
+  name: dr
+spec:
+  pools:
+    - servers: 4
+      volumesPerServer: 2
+      volumeClaimTemplate: {resources: {requests: {storage: 2Ti}}}
+  tls:
+    certManager: {issuerRef: {name: company-ca, kind: ClusterIssuer}}   # the same issuer as store

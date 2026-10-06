@@ -1,0 +1,14 @@
+# A whole Buckets setup from one repository (docs/gitops.md): the clusters,
+# their buckets and settings, policies, users and replication.
+#   kubectl apply -k . -n storage      # or point Argo CD or Flux at this directory
+# Secrets stay out of Git: the users' credentials come from your secret store.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - clusters/store.yaml
+  - clusters/dr.yaml
+  - policies/reports-rw.yaml
+  - policies/reports-ro.yaml
+  - users/etl.yaml
+  - buckets/reports.yaml
+  - buckets/raw.yaml

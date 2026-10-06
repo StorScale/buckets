@@ -7,13 +7,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "core/buf.h"
 #include "core/log.h"
 #include "crypto/base64.h"
 #include "crypto/hex.h"
+#include "crypto/md5.h"
 #include "crypto/sha256.h"
+#include "bucketspec.h"
+#include "core/timefmt.h"
 #include "manifests.h"
 #include "s3client.h"
 
@@ -39,10 +43,13 @@ static const char *get_str(yyjson_val *o, const char *path) {
 typedef struct {
   s3c *c;
   char *ca_file;
+  char *root_sk;
 } conn;
 
 static void conn_free(conn *cn) {
   s3c_free(cn->c);
+  if (cn->root_sk) memset(cn->root_sk, 0, strlen(cn->root_sk));
+  free(cn->root_sk);
   if (cn->ca_file) unlink(cn->ca_file);
   free(cn->ca_file);
 }
@@ -118,16 +125,22 @@ static yyjson_doc *get_secret(op_ctx *o, const char *ns, const char *name) {
   return d;
 }
 
-/* Connects to a BucketsCluster as root. err explains a failure. */
-static bool cluster_connect(op_ctx *o, yyjson_val *bc, conn *cn, char *err, size_t errlen) {
-  memset(cn, 0, sizeof(*cn));
-  bc_spec s;
-  if (!bc_parse(bc, o->cluster_domain, &s, err, errlen)) return false;
+/* Where a cluster's S3 API is: its Service, or the endpoint annotation (tests). */
+static void cluster_url(yyjson_val *bc, const bc_spec *s, char *url, size_t cap) {
+  const char *override = yyjson_get_str(
+      yyjson_obj_get(yyjson_obj_get(yyjson_obj_get(bc, "metadata"), "annotations"), ENDPOINT_ANNOTATION));
+  if (override) snprintf(url, cap, "%s", override);
+  else snprintf(url, cap, "%s://%s.%s.svc.%s:%d", s->tls_secret ? "https" : "http", s->name, s->ns, s->cluster_domain,
+                BC_S3_PORT);
+}
+
+/* A cluster's root credentials, from its Secret (or its config.env). */
+static bool cluster_creds(op_ctx *o, const bc_spec *s, char **out_ak, char **out_sk, char *err, size_t errlen) {
   char secret_name[128];
-  bc_creds_secret_name(&s, secret_name, sizeof(secret_name));
-  yyjson_doc *sd = get_secret(o, s.ns, secret_name);
+  bc_creds_secret_name(s, secret_name, sizeof(secret_name));
+  yyjson_doc *sd = get_secret(o, s->ns, secret_name);
   char *ak = NULL, *sk = NULL;
-  if (sd && s.config_secret) {
+  if (sd && s->config_secret) {
     char *env = secret_value(yyjson_doc_get_root(sd), "config.env");
     if (env) config_env_creds(env, &ak, &sk);
     free(env);
@@ -142,6 +155,43 @@ static bool cluster_connect(op_ctx *o, yyjson_val *bc, conn *cn, char *err, size
     free(sk);
     return false;
   }
+  *out_ak = ak;
+  *out_sk = sk;
+  return true;
+}
+
+bool op_cluster_peer(op_ctx *o, yyjson_val *bc, char *url, size_t cap, char **ak, char **sk, char *err,
+                     size_t errlen) {
+  bc_spec s;
+  if (!bc_parse(bc, o->cluster_domain, &s, err, errlen) || !cluster_creds(o, &s, ak, sk, err, errlen)) return false;
+  cluster_url(bc, &s, url, cap);
+  return true;
+}
+
+static yyjson_val *find_cluster(yyjson_val *clusters, const char *ns, const char *name);
+
+bool op_secret_pair(op_ctx *o, const char *ns, const char *secret, const char *k1, const char *k2, char **v1, char **v2) {
+  yyjson_doc *sd = secret ? get_secret(o, ns, secret) : NULL;
+  *v1 = sd ? secret_value(yyjson_doc_get_root(sd), k1) : NULL;
+  *v2 = sd ? secret_value(yyjson_doc_get_root(sd), k2) : NULL;
+  yyjson_doc_free(sd);
+  if (*v1 && *v2) return true;
+  free(*v1);
+  free(*v2);
+  *v1 = *v2 = NULL;
+  return false;
+}
+
+yyjson_val *op_find_cluster(yyjson_val *clusters, const char *ns, const char *name) {
+  return find_cluster(clusters, ns, name);
+}
+
+/* Connects to a BucketsCluster as root. err explains a failure. */
+static bool cluster_connect(op_ctx *o, yyjson_val *bc, conn *cn, char *err, size_t errlen) {
+  memset(cn, 0, sizeof(*cn));
+  bc_spec s;
+  char *ak = NULL, *sk = NULL;
+  if (!bc_parse(bc, o->cluster_domain, &s, err, errlen) || !cluster_creds(o, &s, &ak, &sk, err, errlen)) return false;
   /* The CA for a TLS cluster: its CA Secret, else the TLS Secret's ca.crt. */
   if (s.tls_secret) {
     yyjson_doc *cad = get_secret(o, s.ns, s.ca_secret ? s.ca_secret : s.tls_secret);
@@ -160,15 +210,11 @@ static bool cluster_connect(op_ctx *o, yyjson_val *bc, conn *cn, char *err, size
       free(ca);
     }
   }
-  const char *override = yyjson_get_str(
-      yyjson_obj_get(yyjson_obj_get(yyjson_obj_get(bc, "metadata"), "annotations"), ENDPOINT_ANNOTATION));
   char url[512];
-  if (override) snprintf(url, sizeof(url), "%s", override);
-  else snprintf(url, sizeof(url), "%s://%s.%s.svc.%s:%d", s.tls_secret ? "https" : "http", s.name, s.ns,
-                s.cluster_domain, BC_S3_PORT);
+  cluster_url(bc, &s, url, sizeof(url));
   cn->c = s3c_new(url, cn->ca_file, ak, sk, err, errlen);
+  cn->root_sk = sk;
   free(ak);
-  free(sk);
   if (!cn->c) conn_free(cn);
   return cn->c != NULL;
 }
@@ -238,9 +284,10 @@ static bool has_finalizer(yyjson_val *obj) {
 }
 
 typedef struct {
-  const char *phase, *message, *hash, *access_key;
+  const char *phase, *message, *hash, *access_key, *checked_at;
   const char *const *groups;
   size_t ngroups;
+  yyjson_mut_val *drift; /* copied */
 } status_fields;
 
 static void write_status(op_ctx *o, yyjson_val *obj, const char *plural, const char *kind, const status_fields *f) {
@@ -253,6 +300,8 @@ static void write_status(op_ctx *o, yyjson_val *obj, const char *plural, const c
                          yyjson_get_sint(yyjson_obj_get(yyjson_obj_get(obj, "metadata"), "generation")));
   if (f->hash) yyjson_mut_obj_add_strcpy(d, st, "appliedHash", f->hash);
   if (f->access_key) yyjson_mut_obj_add_strcpy(d, st, "accessKey", f->access_key);
+  if (f->checked_at) yyjson_mut_obj_add_strcpy(d, st, "checkedAt", f->checked_at);
+  if (f->drift) yyjson_mut_obj_add_val(d, st, "drift", yyjson_mut_val_mut_copy(d, f->drift));
   if (f->groups) {
     yyjson_mut_val *g = yyjson_mut_obj_add_arr(d, st, "groups");
     for (size_t i = 0; i < f->ngroups; i++) yyjson_mut_arr_add_strcpy(d, g, f->groups[i]);
@@ -283,7 +332,8 @@ static void call_error(const char *what, int status, const buckets_buf *body, ch
 
 /* ---- BucketsPolicy -------------------------------------------------------------------- */
 
-static void reconcile_policy(op_ctx *o, yyjson_val *obj, conn *cn) {
+static void reconcile_policy(op_ctx *o, yyjson_val *obj, conn *cn, yyjson_val *clusters) {
+  (void)clusters;
   const char *name = get_str(obj, "metadata.name");
   bool deleting = get_str(obj, "metadata.deletionTimestamp") != NULL;
   buckets_buf body = BUCKETS_BUF_INIT;
@@ -345,7 +395,8 @@ static void set_membership(conn *cn, const char *group, const char *user, bool r
   yyjson_mut_doc_free(d);
 }
 
-static void reconcile_user(op_ctx *o, yyjson_val *obj, conn *cn) {
+static void reconcile_user(op_ctx *o, yyjson_val *obj, conn *cn, yyjson_val *clusters) {
+  (void)clusters;
   const char *ns = get_str(obj, "metadata.namespace");
   bool deleting = get_str(obj, "metadata.deletionTimestamp") != NULL;
   const char *status_ak = get_str(obj, "status.accessKey");
@@ -468,31 +519,400 @@ static void reconcile_user(op_ctx *o, yyjson_val *obj, conn *cn) {
 
 /* ---- Bucket ---------------------------------------------------------------------------------- */
 
-static void reconcile_bucket(op_ctx *o, yyjson_val *obj, conn *cn) {
-  if (get_str(obj, "metadata.deletionTimestamp")) return; /* the data stays: deleting buckets is left to people */
-  const char *phase = get_str(obj, "status.phase");
-  if (phase && strcmp(phase, "Ready") == 0) return;
-  yyjson_val *spec = yyjson_obj_get(obj, "spec");
-  const char *name = get_str(spec, "name");
-  if (!name) name = get_str(obj, "metadata.name");
+static yyjson_val *find_cluster(yyjson_val *clusters, const char *ns, const char *name);
+
+long long op_drift_interval_ms(void) {
+  const char *v = getenv("BUCKETS_OPERATOR_DRIFT_MS");
+  long long ms = v && *v ? atoll(v) : 0;
+  return ms > 0 ? ms : 600000;
+}
+
+/* Whether a Bucket needs a visit: its settings changed, it is not Ready, or its last check is old. */
+static bool bucket_due(yyjson_val *obj) {
+  if (get_str(obj, "metadata.deletionTimestamp")) return false; /* the data stays: deleting buckets is left to people */
+  const char *phase = get_str(obj, "status.phase"), *applied = get_str(obj, "status.appliedHash"),
+             *checked = get_str(obj, "status.checkedAt");
+  char hash[17];
+  bspec_hash(yyjson_obj_get(obj, "spec"), hash);
+  long long sec;
+  long nsec;
+  if (!phase || strcmp(phase, "Ready") != 0 || !applied || strcmp(applied, hash) != 0 || !checked ||
+      !buckets_time_parse_rfc3339(checked, &sec, &nsec))
+    return true;
+  return ((long long)time(NULL) - sec) * 1000 >= op_drift_interval_ms();
+}
+
+/* One setting: what it should say (want NULL: removed), read back and put right when it differs. */
+typedef struct {
+  const char *field, *query; /* "versioning", "?versioning" */
+  const char *const *tags;
+  const char *missing; /* the error code a GET gives when the bucket has none */
+} bucket_setting;
+
+typedef struct {
+  conn *cn;
+  const char *path;
+  bool known; /* the settings were applied before: a difference is drift */
+  yyjson_mut_doc *d;
+  yyjson_mut_val *drift; /* [{field, correctedAt}] */
+  char *msg;
+  size_t msgcap;
+} bucket_pass;
+
+static void note_drift(bucket_pass *bp, const char *field) {
+  if (!bp->known) return;
+  char now[32];
+  buckets_time_iso8601(time(NULL), now);
+  size_t i, max;
+  yyjson_mut_val *e;
+  yyjson_mut_arr_foreach(bp->drift, i, max, e) {
+    if (strcmp(yyjson_mut_get_str(yyjson_mut_obj_get(e, "field")), field) == 0) {
+      yyjson_mut_obj_put(e, yyjson_mut_str(bp->d, "correctedAt"), yyjson_mut_strcpy(bp->d, now));
+      return;
+    }
+  }
+  e = yyjson_mut_arr_add_obj(bp->d, bp->drift);
+  yyjson_mut_obj_add_strcpy(bp->d, e, "field", field);
+  yyjson_mut_obj_add_strcpy(bp->d, e, "correctedAt", now);
+  buckets_log_info("bucket %s: %s was changed outside the Bucket resource; put back", bp->path + 1, field);
+}
+
+/* "PUT the document unless the bucket already says the same"; false and bp->msg on a failure. */
+static bool apply_setting(bucket_pass *bp, const bucket_setting *s, const buckets_buf *want) {
+  buckets_buf body = BUCKETS_BUF_INIT, have = BUCKETS_BUF_INIT, need = BUCKETS_BUF_INIT;
+  char what[96], code[64];
+  bool ok = false;
+  int st = s3c_request(bp->cn->c, "GET", bp->path, s->query, NULL, NULL, 0, &body);
+  s3c_error_code(&body, code, sizeof(code));
+  if (st == 200) bspec_xml_sig(body.data, body.len, s->tags, &have);
+  else if (!*s->missing || strcmp(code, s->missing) != 0) {
+    snprintf(what, sizeof(what), "reading %s", s->field);
+    call_error(what, st, &body, bp->msg, bp->msgcap);
+    goto out;
+  }
+  if (want) bspec_xml_sig(want->data, want->len, s->tags, &need);
+  /* versioning never turned on reads as nothing, which is what Suspended asks for */
+  bool same = (have.len == need.len && (!have.len || memcmp(have.data, need.data, have.len) == 0)) ||
+              (strcmp(s->field, "versioning") == 0 && !have.len && need.len && strstr(need.data, "Suspended"));
+  if (same) {
+    ok = true;
+    goto out;
+  }
+  if (want) { /* Content-MD5: S3 asks for it with lifecycle rules */
+    uint8_t md5[16];
+    char md5b64[32];
+    buckets_md5(want->data, want->len, md5);
+    buckets_base64_encode(md5, sizeof(md5), md5b64);
+    buckets_http_kv hdr = {"content-md5", md5b64};
+    st = s3c_request_h(bp->cn->c, "PUT", bp->path, s->query, "application/xml", &hdr, 1, want->data, want->len, &body);
+  } else st = s3c_request(bp->cn->c, "DELETE", bp->path, s->query, NULL, NULL, 0, &body);
+  if (st / 100 != 2) {
+    snprintf(what, sizeof(what), "setting %s", s->field);
+    call_error(what, st, &body, bp->msg, bp->msgcap);
+    goto out;
+  }
+  note_drift(bp, s->field);
+  ok = true;
+out:
+  buckets_buf_free(&body);
+  buckets_buf_free(&have);
+  buckets_buf_free(&need);
+  return ok;
+}
+
+static bool apply_quota(bucket_pass *bp, const char *name, const char *quota) {
+  uint64_t want = 0, have = 0;
+  bspec_size(quota, &want);
+  char q[320], code[64];
+  buckets_buf body = BUCKETS_BUF_INIT, b = BUCKETS_BUF_INIT;
+  snprintf(q, sizeof(q), "bucket=%s", name);
+  int st = s3c_admin(bp->cn->c, "GET", "get-bucket-quota", q, NULL, 0, false, false, &body);
+  s3c_error_code(&body, code, sizeof(code));
+  bool ok = false;
+  if (st == 200) {
+    yyjson_doc *d = yyjson_read(body.data, body.len, 0);
+    have = yyjson_get_uint(yyjson_obj_get(yyjson_doc_get_root(d), "quota"));
+    yyjson_doc_free(d);
+  } else if (strcmp(code, "XMinioAdminNoSuchQuotaConfiguration") != 0) {
+    call_error("reading the quota", st, &body, bp->msg, bp->msgcap);
+    goto out;
+  }
+  if (have == want) {
+    ok = true;
+    goto out;
+  }
+  bspec_quota_json(want, &b);
+  st = s3c_admin(bp->cn->c, "PUT", "set-bucket-quota", q, b.data, b.len, false, false, &body);
+  if (st != 200) {
+    call_error("setting the quota", st, &body, bp->msg, bp->msgcap);
+    goto out;
+  }
+  note_drift(bp, "quota");
+  ok = true;
+out:
+  buckets_buf_free(&body);
+  buckets_buf_free(&b);
+  return ok;
+}
+
+static const bucket_setting k_versioning = {"versioning", "versioning", bspec_versioning_tags, ""};
+static const bucket_setting k_object_lock = {"objectLock", "object-lock", bspec_object_lock_tags,
+                                             "ObjectLockConfigurationNotFoundError"};
+static const bucket_setting k_encryption = {"encryption", "encryption", bspec_encryption_tags,
+                                            "ServerSideEncryptionConfigurationNotFoundError"};
+static const bucket_setting k_replication = {"replication", "replication", bspec_replication_tags,
+                                             "ReplicationConfigurationNotFoundError"};
+static const bucket_setting k_lifecycle = {"lifecycle", "lifecycle", bspec_lifecycle_tags, "NoSuchLifecycleConfiguration"};
+
+/* The replication user on a target cluster: its policy (that bucket only), the user, the policy given to it. */
+static bool ensure_replication_user(conn *t, const char *ak, const char *sk, const char *bucket, char *msg, size_t cap) {
+  buckets_buf body = BUCKETS_BUF_INIT, pol = BUCKETS_BUF_INIT, q = BUCKETS_BUF_INIT;
+  bool ok = false;
+  char pq[96];
+  snprintf(pq, sizeof(pq), "name=%s", ak);
+  bspec_replication_policy(bucket, &pol);
+  int st = s3c_admin(t->c, "PUT", "add-canned-policy", pq, pol.data, pol.len, false, false, &body);
+  if (st / 100 != 2) {
+    call_error("making the target's replication policy", st, &body, msg, cap);
+    goto out;
+  }
+  yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
+  yyjson_mut_val *root = yyjson_mut_obj(d);
+  yyjson_mut_doc_set_root(d, root);
+  yyjson_mut_obj_add_str(d, root, "secretKey", sk);
+  yyjson_mut_obj_add_str(d, root, "status", "enabled");
+  size_t n;
+  char *json = yyjson_mut_write(d, 0, &n);
+  yyjson_mut_doc_free(d);
+  buckets_buf_appendf(&q, "accessKey=%s", ak);
+  st = s3c_admin(t->c, "PUT", "add-user", q.data, json, n, true, false, &body);
+  if (json) memset(json, 0, n);
+  free(json);
+  if (st != 200) {
+    call_error("making the target's replication user", st, &body, msg, cap);
+    goto out;
+  }
+  buckets_buf_reset(&q);
+  buckets_buf_appendf(&q, "policyName=%s&userOrGroup=%s&isGroup=false", ak, ak);
+  st = s3c_admin(t->c, "PUT", "set-user-or-group-policy", q.data, NULL, 0, false, false, &body);
+  if (st != 200) {
+    call_error("giving the replication user its policy", st, &body, msg, cap);
+    goto out;
+  }
+  ok = true;
+out:
+  buckets_buf_free(&body);
+  buckets_buf_free(&pol);
+  buckets_buf_free(&q);
+  return ok;
+}
+
+/* The target bucket on a cluster the operator manages: made (with object lock when the source has it) and
+ * versioned. */
+static bool ensure_target_bucket(conn *t, const char *bucket, bool lock, char *msg, size_t cap) {
   buckets_buf path = BUCKETS_BUF_INIT, body = BUCKETS_BUF_INIT;
   buckets_buf_append_c(&path, "/");
-  buckets_url_encode(&path, name, false);
-  int st = s3c_request(cn->c, "PUT", path.data, NULL, NULL, NULL, 0, &body);
-  char code[64], msg[512];
+  buckets_url_encode(&path, bucket, false);
+  buckets_http_kv lock_hdr = {"x-amz-bucket-object-lock-enabled", "true"};
+  int st = s3c_request_h(t->c, "PUT", path.data, NULL, NULL, &lock_hdr, lock ? 1 : 0, NULL, 0, &body);
+  char code[64];
   s3c_error_code(&body, code, sizeof(code));
-  if (st == 200 || strcmp(code, "BucketAlreadyOwnedByYou") == 0) {
-    bool extras = yyjson_get_bool(yyjson_obj_get(spec, "versioning")) ||
-                  yyjson_get_bool(yyjson_obj_get(spec, "objectLock")) || get_str(spec, "quota");
-    snprintf(msg, sizeof(msg), "bucket %s exists%s", name,
-             extras ? "; versioning, object lock and quota are not applied yet" : "");
-    write_status(o, obj, "buckets", "Bucket", &(status_fields){.phase = "Ready", .message = msg});
-  } else {
-    call_error("creating the bucket", st, &body, msg, sizeof(msg));
-    write_status(o, obj, "buckets", "Bucket", &(status_fields){.phase = "Error", .message = msg});
+  bool ok = st == 200 || strcmp(code, "BucketAlreadyOwnedByYou") == 0;
+  if (!ok) call_error("making the target bucket", st, &body, msg, cap);
+  if (ok) {
+    buckets_buf x = BUCKETS_BUF_INIT;
+    bspec_versioning_xml(true, &x);
+    st = s3c_request(t->c, "PUT", path.data, "versioning", "application/xml", x.data, x.len, &body);
+    buckets_buf_free(&x);
+    ok = st == 200;
+    if (!ok) call_error("versioning the target bucket", st, &body, msg, cap);
   }
   buckets_buf_free(&path);
   buckets_buf_free(&body);
+  return ok;
+}
+
+/* set-remote-target with a target's description (arn: updating that one). */
+static int put_target(conn *cn, const char *query, const char *bucket, const char *host, bool secure, const char *ak,
+                      const char *sk, const char *tbucket, const char *arn, buckets_buf *out) {
+  yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
+  yyjson_mut_val *t = yyjson_mut_obj(d);
+  yyjson_mut_doc_set_root(d, t);
+  yyjson_mut_obj_add_strcpy(d, t, "sourcebucket", bucket);
+  yyjson_mut_obj_add_strcpy(d, t, "endpoint", host);
+  yyjson_mut_val *cr = yyjson_mut_obj_add_obj(d, t, "credentials");
+  yyjson_mut_obj_add_strcpy(d, cr, "accessKey", ak);
+  yyjson_mut_obj_add_strcpy(d, cr, "secretKey", sk);
+  yyjson_mut_obj_add_strcpy(d, t, "targetbucket", tbucket);
+  yyjson_mut_obj_add_bool(d, t, "secure", secure);
+  yyjson_mut_obj_add_str(d, t, "type", "replication");
+  yyjson_mut_obj_add_str(d, t, "api", "s3v4");
+  yyjson_mut_obj_add_str(d, t, "path", "auto");
+  if (arn) yyjson_mut_obj_add_strcpy(d, t, "arn", arn);
+  size_t n;
+  char *json = yyjson_mut_write(d, 0, &n);
+  yyjson_mut_doc_free(d);
+  int st = s3c_admin(cn->c, "PUT", "set-remote-target", query, json, n, true, false, out);
+  if (json) memset(json, 0, n);
+  free(json);
+  return st;
+}
+
+/* Registers the target on the source (set-remote-target hands back the ARN of an identical one) and writes
+ * the replication configuration. */
+static bool apply_replication(op_ctx *o, bucket_pass *bp, yyjson_val *obj, const char *name, bool lock,
+                              yyjson_val *clusters) {
+  yyjson_val *repl = yyjson_obj_get(yyjson_obj_get(obj, "spec"), "replication");
+  if (bspec_empty(repl)) return apply_setting(bp, &k_replication, NULL);
+  yyjson_val *target = yyjson_obj_get(repl, "target");
+  const char *ns = get_str(obj, "metadata.namespace"), *tcluster = get_str(target, "cluster");
+  char url[512], tbucket[256], *ak = NULL, *sk = NULL;
+  bool ok = false;
+  if (tcluster) {
+    yyjson_val *tbc = find_cluster(clusters, ns, tcluster);
+    bc_spec ts;
+    conn tc = {0};
+    if (!tbc) {
+      snprintf(bp->msg, bp->msgcap, "replication target: BucketsCluster %s not found in namespace %s", tcluster, ns);
+      return false;
+    }
+    if (!bc_parse(tbc, o->cluster_domain, &ts, bp->msg, bp->msgcap) ||
+        !cluster_connect(o, tbc, &tc, bp->msg, bp->msgcap))
+      return false;
+    snprintf(tbucket, sizeof(tbucket), "%s", name);
+    cluster_url(tbc, &ts, url, sizeof(url));
+    ak = buckets_xcalloc(21, 1), sk = buckets_xcalloc(41, 1);
+    bspec_replication_user(ns, get_str(obj, "spec.cluster"), name, tcluster, tbucket, tc.root_sk, ak, sk);
+    ok = ensure_target_bucket(&tc, tbucket, lock, bp->msg, bp->msgcap) &&
+         ensure_replication_user(&tc, ak, sk, tbucket, bp->msg, bp->msgcap);
+    conn_free(&tc);
+    if (!ok) goto out;
+  } else {
+    const char *secret = get_str(target, "credsSecret.name");
+    yyjson_doc *sd = get_secret(o, ns, secret);
+    ak = sd ? secret_value(yyjson_doc_get_root(sd), "accessKey") : NULL;
+    sk = sd ? secret_value(yyjson_doc_get_root(sd), "secretKey") : NULL;
+    yyjson_doc_free(sd);
+    if (!ak || !sk) {
+      snprintf(bp->msg, bp->msgcap, "replication target: Secret %s needs accessKey and secretKey", secret);
+      goto out;
+    }
+    snprintf(url, sizeof(url), "%s", get_str(target, "endpoint"));
+    snprintf(tbucket, sizeof(tbucket), "%s", get_str(target, "bucket"));
+  }
+  bool secure = strncmp(url, "https://", 8) == 0;
+  char host[400];
+  snprintf(host, sizeof(host), "%s", url + (secure ? 8 : 7));
+  host[strcspn(host, "/")] = '\0';
+
+  buckets_buf q = BUCKETS_BUF_INIT, body = BUCKETS_BUF_INIT, x = BUCKETS_BUF_INIT;
+  buckets_buf_append_c(&q, "bucket=");
+  buckets_url_encode(&q, name, false);
+  int st = put_target(bp->cn, q.data, name, host, secure, ak, sk, tbucket, NULL, &body);
+  yyjson_doc *ad = st == 200 ? yyjson_read(body.data, body.len, 0) : NULL;
+  const char *arn = yyjson_get_str(yyjson_doc_get_root(ad));
+  if (arn) {
+    /* An identical target (same access key) comes back as it was stored: its secret key is refreshed, which
+     * carries a rotated target root key over. */
+    buckets_buf_append_c(&q, "&update=true&creds=true");
+    st = put_target(bp->cn, q.data, name, host, secure, ak, sk, tbucket, arn, &body);
+    if (st != 200) arn = NULL;
+  }
+  if (!arn) {
+    call_error("registering the replication target", st, &body, bp->msg, bp->msgcap);
+  } else {
+    bspec_replication_xml(repl, arn, &x);
+    ok = apply_setting(bp, &k_replication, &x);
+  }
+  yyjson_doc_free(ad);
+  buckets_buf_free(&q);
+  buckets_buf_free(&body);
+  buckets_buf_free(&x);
+out:
+  if (sk) memset(sk, 0, strlen(sk));
+  free(ak);
+  free(sk);
+  return ok;
+}
+
+static void reconcile_bucket(op_ctx *o, yyjson_val *obj, conn *cn, yyjson_val *clusters) {
+  yyjson_val *spec = yyjson_obj_get(obj, "spec");
+  const char *name = get_str(spec, "name");
+  if (!name) name = get_str(obj, "metadata.name");
+  char hash[17], msg[512] = "", now[32];
+  bspec_hash(spec, hash);
+  buckets_time_iso8601(time(NULL), now);
+  const char *applied = get_str(obj, "status.appliedHash");
+  yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
+  bucket_pass bp = {.cn = cn, .known = applied && strcmp(applied, hash) == 0, .d = d, .msg = msg, .msgcap = sizeof(msg)};
+  /* the corrections seen before, kept */
+  bp.drift = yyjson_val_mut_copy(d, yyjson_obj_get(yyjson_obj_get(obj, "status"), "drift"));
+  if (!yyjson_mut_is_arr(bp.drift)) bp.drift = yyjson_mut_arr(d);
+  buckets_buf path = BUCKETS_BUF_INIT, body = BUCKETS_BUF_INIT, doc = BUCKETS_BUF_INIT;
+  buckets_buf_append_c(&path, "/");
+  buckets_url_encode(&path, name, false);
+  bp.path = path.data;
+  yyjson_val *lock = yyjson_obj_get(spec, "objectLock");
+  bool want_lock = yyjson_is_obj(lock) || yyjson_get_bool(lock);
+  bool ok = false;
+  int st;
+  char code[64];
+  if (!bspec_check(spec, msg, sizeof(msg))) goto out;
+
+  /* made, with object lock when declared (S3 allows it only then) */
+  buckets_http_kv lock_hdr = {"x-amz-bucket-object-lock-enabled", "true"};
+  st = s3c_request_h(cn->c, "PUT", path.data, NULL, NULL, &lock_hdr, want_lock ? 1 : 0, NULL, 0, &body);
+  s3c_error_code(&body, code, sizeof(code));
+  if (st != 200 && strcmp(code, "BucketAlreadyOwnedByYou") != 0) {
+    call_error("creating the bucket", st, &body, msg, sizeof(msg));
+    goto out;
+  }
+  if (want_lock) {
+    st = s3c_request(cn->c, "GET", path.data, "object-lock", NULL, NULL, 0, &body);
+    s3c_error_code(&body, code, sizeof(code));
+    if (st != 200) {
+      if (strcmp(code, "ObjectLockConfigurationNotFoundError") == 0)
+        snprintf(msg, sizeof(msg), "bucket %s was made without object lock, and S3 turns it on only when a bucket is made",
+                 name);
+      else call_error("reading object lock", st, &body, msg, sizeof(msg));
+      goto out;
+    }
+  }
+  yyjson_val *v;
+  if ((v = yyjson_obj_get(spec, "versioning")) && yyjson_is_bool(v)) {
+    buckets_buf_reset(&doc);
+    bspec_versioning_xml(yyjson_get_bool(v), &doc);
+    if (!apply_setting(&bp, &k_versioning, &doc)) goto out;
+  }
+  if (want_lock) {
+    buckets_buf_reset(&doc);
+    bspec_object_lock_xml(lock, &doc);
+    if (!apply_setting(&bp, &k_object_lock, &doc)) goto out;
+  }
+  if ((v = yyjson_obj_get(spec, "quota")) && !apply_quota(&bp, name, yyjson_get_str(v))) goto out;
+  if ((v = yyjson_obj_get(spec, "encryption"))) {
+    buckets_buf_reset(&doc);
+    if (!apply_setting(&bp, &k_encryption, bspec_encryption_xml(v, &doc) ? &doc : NULL)) goto out;
+  }
+  if ((v = yyjson_obj_get(spec, "lifecycle"))) {
+    buckets_buf_reset(&doc);
+    if (!apply_setting(&bp, &k_lifecycle, bspec_lifecycle_xml(v, &doc) ? &doc : NULL)) goto out;
+  }
+  if (yyjson_obj_get(spec, "replication") && !apply_replication(o, &bp, obj, name, want_lock, clusters)) goto out;
+  snprintf(msg, sizeof(msg), "bucket %s matches its spec", name);
+  ok = true;
+
+out:
+  write_status(o, obj, "buckets", "Bucket",
+               &(status_fields){.phase = ok ? "Ready" : "Error",
+                                .message = msg,
+                                .hash = ok ? hash : applied,
+                                .checked_at = ok ? now : NULL,
+                                .drift = yyjson_mut_arr_size(bp.drift) ? bp.drift : NULL});
+  yyjson_mut_doc_free(d);
+  buckets_buf_free(&path);
+  buckets_buf_free(&body);
+  buckets_buf_free(&doc);
 }
 
 /* ---- the pass --------------------------------------------------------------------------------- */
@@ -507,9 +927,12 @@ static yyjson_val *find_cluster(yyjson_val *clusters, const char *ns, const char
   return NULL;
 }
 
-typedef void (*reconcile_fn)(op_ctx *o, yyjson_val *obj, conn *cn);
+typedef void (*reconcile_fn)(op_ctx *o, yyjson_val *obj, conn *cn, yyjson_val *clusters);
+typedef bool (*due_fn)(yyjson_val *obj);
 
-static void reconcile_kind(op_ctx *o, yyjson_val *clusters, const char *plural, const char *kind, reconcile_fn fn) {
+/* due, when given, says whether an item needs the cluster this pass. */
+static void reconcile_kind(op_ctx *o, yyjson_val *clusters, const char *plural, const char *kind, reconcile_fn fn,
+                           due_fn due) {
   buckets_buf path = BUCKETS_BUF_INIT;
   if (o->namespace) buckets_buf_appendf(&path, GROUP_PATH "/namespaces/%s/%s", o->namespace, plural);
   else buckets_buf_appendf(&path, GROUP_PATH "/%s", plural);
@@ -531,13 +954,14 @@ static void reconcile_kind(op_ctx *o, yyjson_val *clusters, const char *plural, 
         write_status(o, it, plural, kind, &(status_fields){.phase = "Pending", .message = msg});
         continue;
       }
+      if (due && !due(it)) continue;
       conn cn;
       char err[512];
       if (!cluster_connect(o, bc, &cn, err, sizeof(err))) {
         write_status(o, it, plural, kind, &(status_fields){.phase = "Pending", .message = err});
         continue;
       }
-      fn(o, it, &cn);
+      fn(o, it, &cn, clusters);
       conn_free(&cn);
     }
   }
@@ -547,7 +971,7 @@ static void reconcile_kind(op_ctx *o, yyjson_val *clusters, const char *plural, 
 
 void op_reconcile_iam(op_ctx *o, yyjson_val *clusters) {
   /* Policies first: users refer to them. */
-  reconcile_kind(o, clusters, "bucketspolicies", "BucketsPolicy", reconcile_policy);
-  reconcile_kind(o, clusters, "bucketsusers", "BucketsUser", reconcile_user);
-  reconcile_kind(o, clusters, "buckets", "Bucket", reconcile_bucket);
+  reconcile_kind(o, clusters, "bucketspolicies", "BucketsPolicy", reconcile_policy, NULL);
+  reconcile_kind(o, clusters, "bucketsusers", "BucketsUser", reconcile_user, NULL);
+  reconcile_kind(o, clusters, "buckets", "Bucket", reconcile_bucket, bucket_due);
 }

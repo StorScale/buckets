@@ -18,4 +18,13 @@ op_admin *op_cluster_admin(op_ctx *o, yyjson_val *bc, char *err, size_t errlen);
 struct s3c *op_admin_client(op_admin *a);
 void op_cluster_admin_free(op_admin *a);
 
+/* Where a BucketsCluster's S3 API is, and its root credentials (freed by the caller). */
+bool op_cluster_peer(op_ctx *o, yyjson_val *bc, char *url, size_t cap, char **ak, char **sk, char *err, size_t errlen);
+/* A Secret's two keys, decoded (freed by the caller); false unless both are there. */
+bool op_secret_pair(op_ctx *o, const char *ns, const char *secret, const char *k1, const char *k2, char **v1, char **v2);
+/* How often applied resources are read back and put right (BUCKETS_OPERATOR_DRIFT_MS, 10 minutes). */
+long long op_drift_interval_ms(void);
+/* The BucketsCluster ns/name among clusters, or NULL. */
+yyjson_val *op_find_cluster(yyjson_val *clusters, const char *ns, const char *name);
+
 #endif

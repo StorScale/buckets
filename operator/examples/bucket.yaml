@@ -1,0 +1,31 @@
+# A bucket and its settings, kept as declared. The operator applies them when
+# the spec changes and reads them back every 10 minutes, putting back anything
+# changed by hand (status.drift says what and when). A field left out is not
+# managed; deleting the Bucket leaves the bucket and its data.
+#   kubectl get buckets      # Phase and when it was last checked
+apiVersion: buckets.io/v1alpha1
+kind: Bucket
+metadata:
+  name: reports
+spec:
+  cluster: store
+  # name: reports-2026          # the S3 name, when it differs from metadata.name
+  versioning: true              # false: suspended
+  objectLock: {mode: GOVERNANCE, days: 30}   # or true; only when the bucket is made
+  quota: 100Gi                  # a hard quota; "" removes it
+  encryption: {sse: S3}         # or {kmsKey: reports-key}; {} removes it
+  lifecycle:                    # [] removes the rules
+    - id: tmp
+      prefix: tmp/
+      expireDays: 7
+      abortIncompleteUploadDays: 2
+    - id: old-versions
+      noncurrentExpireDays: 30
+      expireDeleteMarkers: true
+  replication:                  # needs versioning: true; {} removes it
+    target: {cluster: dr}       # another BucketsCluster in this namespace: the operator makes the
+                                # target bucket and a user that may only replicate into it
+    # target: {endpoint: https://s3.dr.example.com, bucket: reports, credsSecret: {name: dr-creds}}
+    deletes: true               # these three default to true
+    deleteMarkers: true
+    existingObjects: true

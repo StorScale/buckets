@@ -61,7 +61,7 @@ k apply -f "$ROOT/operator/deploy/operator.yaml" >/dev/null # RBAC (the Deployme
 k create ns tenant >/dev/null
 
 start_operator() { # name
-  POD_NAME=$1 POD_NAMESPACE=buckets-system BUCKETS_OPERATOR_RESYNC_MS=500 BUCKETS_KUBE_API="https://127.0.0.1:$APORT" \
+  POD_NAME=$1 POD_NAMESPACE=buckets-system BUCKETS_OPERATOR_RESYNC_MS=500 BUCKETS_OPERATOR_DRIFT_MS=2000 BUCKETS_KUBE_API="https://127.0.0.1:$APORT" \
     BUCKETS_KUBE_TOKEN=operator-token BUCKETS_KUBE_CA="$WORK/certs/apiserver.crt" "$OP" 2>>"$WORK/$1.log" &
   PIDS+=($!)
   eval "OP_$1=$!"
@@ -174,7 +174,8 @@ BPORT=${BPORT:-17900}
 rootu=$(k -n tenant get secret store-root -o jsonpath='{.data.rootUser}' | base64 -d)
 rootp=$(k -n tenant get secret store-root -o jsonpath='{.data.rootPassword}' | base64 -d)
 mkdir -p "$WORK/bk/d1" "$WORK/bk/d2" "$WORK/bk/d3" "$WORK/bk/d4"
-BUCKETS_ROOT_USER=$rootu BUCKETS_ROOT_PASSWORD=$rootp "$BUCKETSD" server --address "127.0.0.1:$BPORT" \
+MINIO_KMS_SECRET_KEY="envtest-key:$(openssl rand -base64 32)" \
+  BUCKETS_ROOT_USER=$rootu BUCKETS_ROOT_PASSWORD=$rootp "$BUCKETSD" server --address "127.0.0.1:$BPORT" \
   "$WORK/bk/d{1...4}" 2>>"$WORK/bucketsd.log" &
 PIDS+=($!)
 until_true 'curl -sf http://127.0.0.1:$BPORT/minio/health/ready'
@@ -234,6 +235,224 @@ spec: {cluster: store, credsSecret: {name: bob-creds}}
 YAML
 until_true '[[ $(jp bucketsuser/bob {.status.phase}) == Pending ]]' || true
 expect "missing Secret is reported" "$(jp bucketsuser/bob '{.status.phase}')" Pending
+
+echo "== a Bucket's settings are applied, changed and kept"
+root() { curl -s --aws-sigv4 "aws:amz:us-east-1:s3" --user "$rootu:$rootp" "$@"; }
+xml() { sed -n "s:.*<$2>\([^<]*\)</$2>.*:\1:p" <<<"$1" | head -1; }
+k apply -f - >/dev/null <<YAML
+apiVersion: buckets.io/v1alpha1
+kind: Bucket
+metadata: {name: reports, namespace: tenant}
+spec:
+  cluster: store
+  versioning: true
+  objectLock: {mode: GOVERNANCE, days: 30}
+  quota: 1Gi
+  encryption: {kmsKey: envtest-key}
+  lifecycle:
+    - {id: tmp, prefix: tmp/, expireDays: 7, abortIncompleteUploadDays: 2}
+    - {id: markers, noncurrentExpireDays: 30, expireDeleteMarkers: true}
+YAML
+until_true '[[ $(jp bucket/reports {.status.phase}) == Ready ]]' || true
+expect "Bucket with settings ready" "$(jp bucket/reports '{.status.phase}')" Ready
+expect "message" "$(jp bucket/reports '{.status.message}')" "bucket reports matches its spec"
+B="http://127.0.0.1:$BPORT/reports"
+expect "versioning on" "$(xml "$(root "$B?versioning")" Status)" Enabled
+lock=$(root "$B?object-lock")
+expect "made with object lock" "$(xml "$lock" ObjectLockEnabled)" Enabled
+expect "default retention" "$(xml "$lock" Mode)/$(xml "$lock" Days)" GOVERNANCE/30
+expect "quota" "$(root "http://127.0.0.1:$BPORT/minio/admin/v3/get-bucket-quota?bucket=reports" | jq -r .quota)" 1073741824
+expect "default encryption" "$(xml "$(root "$B?encryption")" KMSMasterKeyID)" envtest-key
+lc=$(root "$B?lifecycle")
+expect "lifecycle rules" "$(grep -o '<ID>[^<]*</ID>' <<<"$lc" | tr -d '\n')" "<ID>tmp</ID><ID>markers</ID>"
+expect "expiry" "$(xml "$lc" Days)" 7
+expect "checked at" "$([[ -n $(jp bucket/reports '{.status.checkedAt}') ]] && echo set)" set
+
+k -n tenant patch bucket reports --type merge -p \
+  '{"spec":{"objectLock":{"mode":"GOVERNANCE","days":60},"quota":"","encryption":{"kmsKey":null,"sse":"S3"},"lifecycle":[]}}' >/dev/null
+until_true '[[ $(xml "$(root "$B?object-lock")" Days) == 60 ]]' || true
+until_true '[[ $(jp bucket/reports {.status.phase}) == Ready && $(jp bucket/reports {.status.appliedHash}) != "" ]]' || true
+sleep 1
+expect "retention changed" "$(xml "$(root "$B?object-lock")" Days)" 60
+expect "quota removed" "$(root "http://127.0.0.1:$BPORT/minio/admin/v3/get-bucket-quota?bucket=reports" | jq -r '.quota // 0')" 0
+expect "encryption now SSE-S3" "$(xml "$(root "$B?encryption")" SSEAlgorithm)" AES256
+expect "lifecycle: [] removes the rules" "$(xml "$(root "$B?lifecycle")" Code)" NoSuchLifecycleConfiguration
+expect "no drift from spec changes" "$(jp bucket/reports '{.status.drift}')" ""
+
+# changed by hand: put back by the next check
+Q="http://127.0.0.1:$BPORT/minio/admin/v3/get-bucket-quota?bucket=reports"
+expect "a quota set by hand" "$(root -X PUT --data '{"quota":5000,"quotatype":"hard"}' -o /dev/null -w '%{http_code}' \
+  "http://127.0.0.1:$BPORT/minio/admin/v3/set-bucket-quota?bucket=reports")/$(root "$Q" | jq -r .quota)" 200/5000
+root -X DELETE "$B?encryption" >/dev/null
+until_true '[[ $(jp bucket/reports "{.status.drift[1].field}") != "" ]]' || true
+expect "quota put back" "$(root "$Q" | jq -r '.quota // 0')" 0
+expect "encryption put back" "$(xml "$(root "$B?encryption")" SSEAlgorithm)" AES256
+expect "drift reported" "$(jp bucket/reports '{.status.drift[*].field}' | tr ' ' '\n' | sort | tr '\n' ' ')" "encryption quota "
+k -n tenant patch bucket reports --type merge -p '{"spec":{"encryption":{"sse":null}}}' >/dev/null
+until_true '[[ $(xml "$(root "$B?encryption")" Code) == ServerSideEncryptionConfigurationNotFoundError ]]' || true
+expect "encryption: {} removes it" "$(xml "$(root "$B?encryption")" Code)" ServerSideEncryptionConfigurationNotFoundError
+
+# a bucket that already exists, without lock
+root -X PUT "http://127.0.0.1:$BPORT/plain" >/dev/null
+k apply -f - >/dev/null <<YAML
+apiVersion: buckets.io/v1alpha1
+kind: Bucket
+metadata: {name: plain, namespace: tenant}
+spec: {cluster: store, objectLock: true}
+YAML
+until_true '[[ $(jp bucket/plain {.status.phase}) == Error ]]' || true
+expect "object lock on an existing bucket refused" "$(jp bucket/plain '{.status.message}' | grep -c 'only when a bucket is made')" 1
+k -n tenant patch bucket plain --type merge -p '{"spec":{"objectLock":null,"versioning":false,"lifecycle":[{"id":"x"}]}}' >/dev/null
+until_true '[[ $(jp bucket/plain {.status.message}) == *"does nothing"* ]]' || true
+expect "invalid settings reported" "$(jp bucket/plain '{.status.message}')" "lifecycle rule x does nothing: give it expireDays or another action"
+k -n tenant patch bucket plain --type json -p '[{"op":"remove","path":"/spec/lifecycle"}]' >/dev/null
+until_true '[[ $(jp bucket/plain {.status.phase}) == Ready ]]' || true
+expect "versioning false on a never-versioned bucket" "$(jp bucket/plain '{.status.phase}')/$(xml "$(root "http://127.0.0.1:$BPORT/plain?versioning")" Status)" Ready/
+k -n tenant delete bucket reports plain >/dev/null
+expect "deleting a Bucket leaves the bucket" "$(curl -s -o /dev/null -w '%{http_code}' --aws-sigv4 "aws:amz:us-east-1:s3" --user "$rootu:$rootp" -I "$B")" 200
+
+echo "== Bucket replication to another BucketsCluster"
+# a second cluster, dr, stood in for by a second bucketsd with dr's root credentials
+k apply -f - >/dev/null <<YAML
+apiVersion: buckets.io/v1alpha1
+kind: BucketsCluster
+metadata: {name: dr, namespace: tenant}
+spec:
+  image: bucketsd:test
+  pools: [{servers: 4, volumesPerServer: 1, volumeClaimTemplate: {resources: {requests: {storage: 1Gi}}}}]
+YAML
+until_true 'k -n tenant get secret dr-root'
+DPORT=$((BPORT + 1))
+dru=$(k -n tenant get secret dr-root -o jsonpath='{.data.rootUser}' | base64 -d)
+drp=$(k -n tenant get secret dr-root -o jsonpath='{.data.rootPassword}' | base64 -d)
+mkdir -p "$WORK/dr/d1" "$WORK/dr/d2" "$WORK/dr/d3" "$WORK/dr/d4"
+start_dr() {
+  BUCKETS_ROOT_USER=$dru BUCKETS_ROOT_PASSWORD=$drp "$BUCKETSD" server --address "127.0.0.1:$DPORT" \
+    "$WORK/dr/d{1...4}" 2>>"$WORK/bucketsd-dr.log" &
+  PIDS+=($!)
+  DRPID=$!
+}
+start_dr
+until_true 'curl -sf http://127.0.0.1:$DPORT/minio/health/ready'
+k -n tenant annotate bc dr buckets.io/endpoint="http://127.0.0.1:$DPORT" >/dev/null
+dr() { curl -s --aws-sigv4 "aws:amz:us-east-1:s3" --user "$dru:$drp" "$@"; }
+k apply -f - >/dev/null <<YAML
+apiVersion: buckets.io/v1alpha1
+kind: Bucket
+metadata: {name: events, namespace: tenant}
+spec:
+  cluster: store
+  versioning: true
+  replication: {target: {cluster: dr}, deletes: false}
+YAML
+until_true '[[ $(jp bucket/events {.status.phase}) == Ready ]]' || true
+expect "replicated Bucket ready" "$(jp bucket/events '{.status.phase}')" Ready
+[[ $(jp bucket/events '{.status.phase}') == Ready ]] || jp bucket/events '{.status.message}'
+expect "target bucket made and versioned" "$(xml "$(dr "http://127.0.0.1:$DPORT/events?versioning")" Status)" Enabled
+rc=$(root "http://127.0.0.1:$BPORT/events?replication")
+expect "replication configured" "$(xml "$rc" ID)" buckets-operator
+expect "deletes: false" "$(grep -o '<DeleteReplication><Status>[A-Za-z]*' <<<"$rc" | sed 's/.*>//')" Disabled
+root -X PUT --data "carried across" "http://127.0.0.1:$BPORT/events/one.txt" >/dev/null
+until_true '[[ $(dr "http://127.0.0.1:$DPORT/events/one.txt") == "carried across" ]]' || true
+expect "an object carried across" "$(dr "http://127.0.0.1:$DPORT/events/one.txt")" "carried across"
+pol=$(dr "http://127.0.0.1:$DPORT/minio/admin/v3/list-canned-policies" | jq -r 'keys[]' | grep -c '^bkrepl' || true)
+expect "a replication policy on the target" "$pol" 1
+sleep 3 # a check or two later
+expect "no drift when nothing changed" "$(jp bucket/events '{.status.drift}')" ""
+# the target's root key rotated: the replication user's key follows it, on the target and the source
+kill "$DRPID"; wait "$DRPID" 2>/dev/null || true
+drp=rotated-$(openssl rand -hex 12)
+k -n tenant patch secret dr-root --type merge -p "{\"stringData\":{\"rootPassword\":\"$drp\"}}" >/dev/null
+start_dr
+until_true 'curl -sf http://127.0.0.1:$DPORT/minio/health/ready'
+restarted=$(date -u +%Y-%m-%dT%H:%M:%S)
+# a check that ended Ready after the restart (checkedAt is to the second)
+until_true '[[ $(jp bucket/events {.status.phase}) == Ready && $(jp bucket/events {.status.checkedAt}) > "$restarted" ]]' || true
+# and the source's health check sees the target again (until then bucketsd queues objects for a later retry)
+until_true '[[ $(root "http://127.0.0.1:$BPORT/minio/admin/v3/list-remote-targets?bucket=events" | jq -r ".[0].isOnline") == true ]]' || true
+root -X PUT --data "after rotation" "http://127.0.0.1:$BPORT/events/two.txt" >/dev/null
+until_true '[[ $(dr "http://127.0.0.1:$DPORT/events/two.txt") == "after rotation" ]]' || true
+expect "replication survives a target root key rotation" "$(dr "http://127.0.0.1:$DPORT/events/two.txt")" "after rotation"
+# changed by hand: put back
+root -X DELETE "http://127.0.0.1:$BPORT/events?replication" >/dev/null
+until_true '[[ $(xml "$(root "http://127.0.0.1:$BPORT/events?replication")" ID) == buckets-operator ]]' || true
+expect "replication put back" "$(xml "$(root "http://127.0.0.1:$BPORT/events?replication")" ID)" buckets-operator
+expect "and named as drift" "$(jp bucket/events '{.status.drift[*].field}')" replication
+k -n tenant patch bucket events --type json -p '[{"op":"replace","path":"/spec/replication","value":{}}]' >/dev/null
+until_true '[[ $(xml "$(root "http://127.0.0.1:$BPORT/events?replication")" Code) == ReplicationConfigurationNotFoundError ]]' || true
+expect "replication: {} removes it" "$(xml "$(root "http://127.0.0.1:$BPORT/events?replication")" Code)" ReplicationConfigurationNotFoundError
+k -n tenant patch bucket events --type merge -p '{"spec":{"replication":{"target":{"cluster":"nowhere"}}}}' >/dev/null
+until_true '[[ $(jp bucket/events {.status.phase}) == Error ]]' || true
+expect "a missing target cluster reported" "$(jp bucket/events '{.status.message}')" "replication target: BucketsCluster nowhere not found in namespace tenant"
+k -n tenant delete bucket events >/dev/null
+
+echo "== BucketsSiteReplication: sites added, removed, stopped"
+# east and west are BucketsClusters, branch another site; fresh servers, as only one site may hold buckets
+site_server() { # name port user password
+  mkdir -p "$WORK/$1/d1" "$WORK/$1/d2" "$WORK/$1/d3" "$WORK/$1/d4"
+  BUCKETS_ROOT_USER=$3 BUCKETS_ROOT_PASSWORD=$4 "$BUCKETSD" server --address "127.0.0.1:$2" \
+    "$WORK/$1/d{1...4}" 2>>"$WORK/bucketsd-$1.log" &
+  PIDS+=($!)
+  until_true "curl -sf http://127.0.0.1:$2/minio/health/ready"
+}
+EPORT2=$((BPORT + 2)) WPORT=$((BPORT + 3)) RPORT=$((BPORT + 4))
+for c in east west; do
+  k apply -f - >/dev/null <<YAML
+apiVersion: buckets.io/v1alpha1
+kind: BucketsCluster
+metadata: {name: $c, namespace: tenant}
+spec:
+  image: bucketsd:test
+  pools: [{servers: 4, volumesPerServer: 1, volumeClaimTemplate: {resources: {requests: {storage: 1Gi}}}}]
+YAML
+done
+until_true 'k -n tenant get secret east-root && k -n tenant get secret west-root'
+eu=$(jp secret/east-root '{.data.rootUser}' | base64 -d); ep=$(jp secret/east-root '{.data.rootPassword}' | base64 -d)
+wu=$(jp secret/west-root '{.data.rootUser}' | base64 -d); wp=$(jp secret/west-root '{.data.rootPassword}' | base64 -d)
+site_server east "$EPORT2" "$eu" "$ep"
+site_server west "$WPORT" "$wu" "$wp"
+site_server branch "$RPORT" branchroot branchsecret123
+k -n tenant annotate bc east buckets.io/endpoint="http://127.0.0.1:$EPORT2" >/dev/null
+k -n tenant annotate bc west buckets.io/endpoint="http://127.0.0.1:$WPORT" >/dev/null
+k -n tenant create secret generic branch-root --from-literal=accessKey=branchroot --from-literal=secretKey=branchsecret123 >/dev/null
+as() { local u=$1 p=$2; shift 2; curl -s --aws-sigv4 "aws:amz:us-east-1:s3" --user "$u:$p" "$@"; }
+info() { as "$1" "$2" "http://127.0.0.1:$3/minio/admin/v3/site-replication/info"; }
+as "$eu" "$ep" -X PUT "http://127.0.0.1:$EPORT2/shared" >/dev/null # east has the data
+k apply -f - >/dev/null <<YAML
+apiVersion: buckets.io/v1alpha1
+kind: BucketsSiteReplication
+metadata: {name: everywhere, namespace: tenant}
+spec:
+  sites: [{cluster: west}, {cluster: east}]
+YAML
+until_true '[[ $(jp bucketssitereplication/everywhere {.status.phase}) == Ready ]]' || true
+expect "two sites replicate" "$(jp bucketssitereplication/everywhere '{.status.message}')" "2 sites replicate: west, east"
+expect "set up through the site with the data" "$(info "$wu" "$wp" "$WPORT" | jq -r '[.sites[].name] | sort | join(" ")')" "east west"
+until_true '[[ $(as "$wu" "$wp" -o /dev/null -w "%{http_code}" -I "http://127.0.0.1:$WPORT/shared") == 200 ]]' || true
+expect "east's bucket on west" "$(as "$wu" "$wp" -o /dev/null -w '%{http_code}' -I "http://127.0.0.1:$WPORT/shared")" 200
+k -n tenant patch bsr everywhere --type merge -p \
+  '{"spec":{"sites":[{"cluster":"west"},{"cluster":"east"},{"name":"branch","endpoint":"http://127.0.0.1:'"$RPORT"'","credsSecret":{"name":"branch-root"}}]}}' >/dev/null
+until_true '[[ $(info branchroot branchsecret123 "$RPORT" | jq -r ".sites | length") == 3 ]]' || true
+expect "a third site added" "$(info branchroot branchsecret123 "$RPORT" | jq -r '[.sites[].name] | sort | join(" ")')" "branch east west"
+until_true '[[ $(as branchroot branchsecret123 -o /dev/null -w "%{http_code}" -I "http://127.0.0.1:$RPORT/shared") == 200 ]]' || true
+expect "the bucket on it" "$(as branchroot branchsecret123 -o /dev/null -w '%{http_code}' -I "http://127.0.0.1:$RPORT/shared")" 200
+expect "status lists the sites" "$(jp bsr/everywhere '{.status.sites[*]}')" "west east branch"
+k -n tenant patch bsr everywhere --type merge -p '{"spec":{"sites":[{"cluster":"west"},{"cluster":"east"}]}}' >/dev/null
+until_true '[[ $(info "$eu" "$ep" "$EPORT2" | jq -r ".sites | length") == 2 ]]' || true
+expect "a site taken out is removed" "$(info "$eu" "$ep" "$EPORT2" | jq -r '[.sites[].name] | sort | join(" ")')" "east west"
+k -n tenant patch bsr everywhere --type merge -p '{"spec":{"sites":[{"cluster":"west"}]}}' >/dev/null
+until_true '[[ $(info "$wu" "$wp" "$WPORT" | jq -r .enabled) == false ]]' || true
+expect "one site left: stopped" "$(info "$wu" "$wp" "$WPORT" | jq -r .enabled)/$(jp bsr/everywhere '{.status.message}')" \
+  "false/one site: no site replication"
+k -n tenant patch bsr everywhere --type merge -p '{"spec":{"sites":[{"cluster":"west"},{"name":"x","endpoint":"http://h"}]}}' >/dev/null
+until_true '[[ $(jp bsr/everywhere {.status.phase}) == Error ]]' || true
+expect "an incomplete site refused" "$(jp bsr/everywhere '{.status.message}')" "site 2: an endpoint needs a name and credsSecret"
+k -n tenant delete bsr everywhere >/dev/null
+# the examples are valid against the CRDs
+for f in bucket.yaml site-replication.yaml; do
+  expect "example $f" "$(k -n tenant apply --dry-run=server -f "$ROOT/operator/examples/$f" 2>&1 | grep -c 'created\|configured')" 1
+done
+expect "the GitOps example" "$(k -n tenant apply --dry-run=server -k "$ROOT/operator/examples/gitops" 2>&1 | grep -c 'created\|configured\|unchanged')" 7
 
 echo "== monitoring: a metrics user, its token and a ServiceMonitor, once the Prometheus Operator is there"
 until_true '[[ $(jp bc/store {.status.monitoring.phase}) == NotInstalled ]]' || true

@@ -3,6 +3,7 @@
 #define BUCKETS_OPERATOR_S3CLIENT_H
 
 #include "core/buf.h"
+#include "net/client.h"
 
 /* A SigV4-signing client for one Buckets cluster's S3 and admin APIs, as
  * the operator uses them to apply BucketsUser, BucketsPolicy and Bucket. */
@@ -18,6 +19,10 @@ void s3c_free(s3c *c);
  * failure; the body goes to out (may be NULL). */
 int s3c_request(s3c *c, const char *method, const char *path, const char *query, const char *content_type,
                 const void *body, size_t len, buckets_buf *out);
+
+/* The same with extra headers, signed too; their names lowercase. */
+int s3c_request_h(s3c *c, const char *method, const char *path, const char *query, const char *content_type,
+                  const buckets_http_kv *extra, size_t nextra, const void *body, size_t len, buckets_buf *out);
 
 /* An admin API call (/minio/admin/v3/<api>): with encrypt, the body is
  * madmin-encrypted with the secret key, and so is decrypt for the reply. */

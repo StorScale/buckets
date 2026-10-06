@@ -20,6 +20,7 @@ Real MinIO and Buckets can serve each other's drives, clusters included.
 | [docs/compatibility.md](docs/compatibility.md) | What every 1.x release keeps compatible, across releases and with MinIO, and the test behind each promise |
 | [docs/migration.md](docs/migration.md) | Moving a MinIO deployment to Buckets in place, KES included, and back |
 | [docs/identity.md](docs/identity.md) | Sign-in set up from the console: Microsoft Entra ID, Okta, Keycloak, another OpenID provider, or LDAP and Active Directory |
+| [docs/gitops.md](docs/gitops.md) | A whole setup in Git: clusters, buckets and their settings, policies, users, replication; with Argo CD or Flux |
 | [docs/encryption.md](docs/encryption.md) | Setting up the KMS in the console: KES with Vault, AWS, Azure or Google |
 | [docs/integrations/lakehouse.md](docs/integrations/lakehouse.md) | A lakehouse on Buckets: Iceberg with Nessie, Trino, Apache Ranger and Keycloak, runnable and tested |
 | [docs/integrations/hive-spark.md](docs/integrations/hive-spark.md) | Hive Metastore and Spark on Buckets, with Trino, Apache Ranger and Keycloak, runnable and tested |

@@ -7,6 +7,7 @@
 #include <time.h>
 #include <yyjson.h>
 
+#include "core/common.h"
 #include "core/query.h"
 #include "core/timefmt.h"
 #include "crypto/hex.h"
@@ -65,8 +66,12 @@ void s3c_free(s3c *c) {
   free(c);
 }
 
-int s3c_request(s3c *c, const char *method, const char *path, const char *query, const char *content_type,
-                const void *body, size_t len, buckets_buf *out) {
+static int kv_name_cmp(const void *a, const void *b) {
+  return strcmp(((const buckets_http_kv *)a)->name, ((const buckets_http_kv *)b)->name);
+}
+
+int s3c_request_h(s3c *c, const char *method, const char *path, const char *query, const char *content_type,
+                  const buckets_http_kv *extra, size_t nextra, const void *body, size_t len, buckets_buf *out) {
   time_t now = time(NULL);
   char amz[BUCKETS_TIME_AMZ_LEN + 1];
   buckets_time_amz(now, amz);
@@ -81,9 +86,21 @@ int s3c_request(s3c *c, const char *method, const char *path, const char *query,
   if (query && *query) buckets_query_parse(buckets_str_c(query), &q);
   buckets_sigv4_canonical_query(&q, false, &cq);
   buckets_query_free(&q);
-  buckets_buf_appendf(&creq, "%s\n%s\n%s\nhost:%s\nx-amz-content-sha256:%s\nx-amz-date:%s\n\n"
-                             "host;x-amz-content-sha256;x-amz-date\n%s",
-                      method, curi.data ? curi.data : "/", cq.data ? cq.data : "", c->host, payload, amz, payload);
+  /* the signed headers, sorted: host, x-amz-content-sha256, x-amz-date and the extra ones (lowercase names) */
+  buckets_http_kv *sh = buckets_xcalloc(3 + nextra, sizeof(*sh));
+  sh[0] = (buckets_http_kv){"host", c->host};
+  sh[1] = (buckets_http_kv){"x-amz-content-sha256", payload};
+  sh[2] = (buckets_http_kv){"x-amz-date", amz};
+  for (size_t i = 0; i < nextra; i++) sh[3 + i] = extra[i];
+  qsort(sh, 3 + nextra, sizeof(*sh), kv_name_cmp);
+  buckets_buf names = BUCKETS_BUF_INIT;
+  buckets_buf_appendf(&creq, "%s\n%s\n%s\n", method, curi.data ? curi.data : "/", cq.data ? cq.data : "");
+  for (size_t i = 0; i < 3 + nextra; i++) {
+    buckets_buf_appendf(&creq, "%s:%s\n", sh[i].name, sh[i].value);
+    buckets_buf_appendf(&names, "%s%s", i ? ";" : "", sh[i].name);
+  }
+  buckets_buf_appendf(&creq, "\n%s\n%s", names.data, payload);
+  free(sh);
   char date8[9];
   memcpy(date8, amz, 8);
   date8[8] = '\0';
@@ -99,16 +116,20 @@ int s3c_request(s3c *c, const char *method, const char *path, const char *query,
   buckets_hmac_sha256(key, 32, sts, strlen(sts), mac);
   char sig[65];
   buckets_hex_encode(mac, 32, sig);
-  char auth[512];
-  snprintf(auth, sizeof(auth),
-           "AWS4-HMAC-SHA256 Credential=%s/%s, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=%s", c->ak,
-           scope, sig);
+  char auth[1024];
+  snprintf(auth, sizeof(auth), "AWS4-HMAC-SHA256 Credential=%s/%s, SignedHeaders=%s, Signature=%s", c->ak, scope,
+           names.data, sig);
+  buckets_buf_free(&names);
 
   buckets_buf target = BUCKETS_BUF_INIT;
   buckets_buf_append_c(&target, path);
   if (query && *query) buckets_buf_appendf(&target, "?%s", query);
-  buckets_http_kv h[4] = {{"Authorization", auth}, {"X-Amz-Date", amz}, {"X-Amz-Content-Sha256", payload}};
+  buckets_http_kv *h = buckets_xcalloc(4 + nextra, sizeof(*h));
+  h[0] = (buckets_http_kv){"Authorization", auth};
+  h[1] = (buckets_http_kv){"X-Amz-Date", amz};
+  h[2] = (buckets_http_kv){"X-Amz-Content-Sha256", payload};
   size_t nh = 3;
+  for (size_t i = 0; i < nextra; i++) h[nh++] = extra[i];
   if (content_type) h[nh++] = (buckets_http_kv){"Content-Type", content_type};
   buckets_http_result r;
   int status = 0;
@@ -120,11 +141,17 @@ int s3c_request(s3c *c, const char *method, const char *path, const char *query,
     }
     buckets_http_result_free(&r);
   }
+  free(h);
   buckets_buf_free(&target);
   buckets_buf_free(&curi);
   buckets_buf_free(&cq);
   buckets_buf_free(&creq);
   return status;
+}
+
+int s3c_request(s3c *c, const char *method, const char *path, const char *query, const char *content_type,
+                const void *body, size_t len, buckets_buf *out) {
+  return s3c_request_h(c, method, path, query, content_type, NULL, 0, body, len, out);
 }
 
 int s3c_admin(s3c *c, const char *method, const char *api, const char *query, const void *body, size_t len,

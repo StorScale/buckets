@@ -1,0 +1,16 @@
+# Site replication: buckets, their settings and data, IAM policies, users
+# and groups kept the same on every site. The operator sets it up through the
+# first site (or the one site that already has buckets: only one may), adds
+# sites added to the list and removes sites taken out. A list of one site
+# stops the replication; deleting this resource leaves it running.
+#   kubectl get bsr
+apiVersion: buckets.io/v1alpha1
+kind: BucketsSiteReplication
+metadata:
+  name: everywhere
+spec:
+  sites:
+    - cluster: store            # BucketsClusters in this namespace
+    - cluster: dr
+    # another site: its S3 URL, reachable from every site, and its root credentials
+    # - {name: branch, endpoint: https://s3.branch.example.com, credsSecret: {name: branch-root}}

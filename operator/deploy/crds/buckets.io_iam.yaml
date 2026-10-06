@@ -87,9 +87,57 @@ spec:
               properties:
                 cluster: {type: string}
                 name: {type: string, description: S3 bucket name (defaults to metadata.name)}
-                versioning: {type: boolean}
-                objectLock: {type: boolean}
-                quota: {type: string, description: e.g. 100Gi}
+                versioning: {type: boolean, description: "true: Enabled; false: Suspended"}
+                objectLock:
+                  description: >-
+                    true, or {mode: GOVERNANCE|COMPLIANCE, days|years} for a default retention.
+                    Turned on only when the bucket is made.
+                  x-kubernetes-preserve-unknown-fields: true
+                quota: {type: string, nullable: true, description: 'A hard quota, e.g. 100Gi; "" or null: none'}
+                encryption:
+                  type: object
+                  description: 'Default encryption: {kmsKey: <key>} or {sse: S3}; {} removes it'
+                  properties:
+                    kmsKey: {type: string}
+                    sse: {type: string, enum: [S3]}
+                lifecycle:
+                  type: array
+                  description: Lifecycle rules; [] removes them, leaving the field out leaves them alone
+                  items:
+                    type: object
+                    required: [id]
+                    properties:
+                      id: {type: string}
+                      prefix: {type: string}
+                      expireDays: {type: integer, minimum: 1}
+                      noncurrentExpireDays: {type: integer, minimum: 1}
+                      abortIncompleteUploadDays: {type: integer, minimum: 1}
+                      expireDeleteMarkers: {type: boolean}
+                replication:
+                  type: object
+                  description: >-
+                    Replicates every object to a target bucket (needs versioning: true); {} removes it.
+                    With TLS, the source cluster must trust the target's CA (the same issuer, or tls.caSecret).
+                  properties:
+                    target:
+                      type: object
+                      description: '{cluster: <a BucketsCluster in this namespace>} or {endpoint, bucket, credsSecret}'
+                      properties:
+                        cluster: {type: string}
+                        endpoint: {type: string, description: e.g. https://s3.dr.example.com}
+                        bucket: {type: string}
+                        credsSecret:
+                          type: object
+                          description: A Secret with accessKey and secretKey
+                          properties:
+                            name: {type: string}
+                    deletes: {type: boolean, description: Replicate deletes of versions (default true)}
+                    deleteMarkers: {type: boolean, description: Replicate delete markers (default true)}
+                    existingObjects: {type: boolean, description: Replicate objects already there (default true)}
             status:
               type: object
               x-kubernetes-preserve-unknown-fields: true
+      additionalPrinterColumns:
+        - {name: Bucket, type: string, jsonPath: .spec.name}
+        - {name: Phase, type: string, jsonPath: .status.phase}
+        - {name: Checked, type: date, jsonPath: .status.checkedAt}

@@ -18,7 +18,7 @@ metadata:
   name: buckets-operator
 rules:
   - apiGroups: [buckets.io]
-    resources: [buckets]
+    resources: [buckets, bucketssitereplications]
     verbs: [get, list, watch]
   - apiGroups: [buckets.io] # patch: granted to each cluster's console, for its KMS settings
     resources: [bucketsclusters]
@@ -27,7 +27,7 @@ rules:
     resources: [bucketsusers, bucketspolicies]
     verbs: [get, list, watch, patch]
   - apiGroups: [buckets.io]
-    resources: [bucketsclusters/status, bucketsusers/status, bucketspolicies/status, buckets/status]
+    resources: [bucketsclusters/status, bucketsusers/status, bucketspolicies/status, buckets/status, bucketssitereplications/status]
     verbs: [get, patch, update]
   - apiGroups: [apps]
     resources: [statefulsets]
