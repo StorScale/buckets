@@ -1,0 +1,127 @@
+# Monitoring Buckets: Prometheus scraping a four-drive Buckets server with the
+# Helm chart's alert rules, Grafana with its four dashboards, and a little
+# traffic so the dashboards have something to show.
+#
+#   docker compose up -d --wait               # start, and configure (setup)
+#   docker compose run --rm test              # the end-to-end checks, a drive failure included
+#   docker compose run --rm screenshots       # the dashboards, as PNGs in ./screenshots
+#   docker compose down -v                    # stop and delete everything
+#
+# Grafana: http://localhost:3000 (admin, GRAFANA_ADMIN_PASSWORD). Prometheus:
+# http://localhost:9090. See ../../docs/monitoring.md. Every password is in
+# .env, for local use only. Run one example at a time.
+name: buckets-monitoring
+
+x-tools: &tools
+  build: ../common/tools
+  image: buckets-examples-tools
+  env_file: .env
+  environment:
+    PYTHONPATH: /common
+  volumes:
+    - ./tools:/work:ro
+    - ../common/tools:/common:ro
+    - prometheus-token:/token
+
+services:
+  # The four drives' volumes, owned by the user bucketsd runs as (nonroot).
+  drives:
+    image: buckets-examples-tools
+    build: ../common/tools
+    command: ["chown", "65532:65532", "/data1", "/data2", "/data3", "/data4"]
+    volumes:
+      - drive1:/data1
+      - drive2:/data2
+      - drive3:/data3
+      - drive4:/data4
+
+  # One server, four drives: one erasure set (EC 2+2).
+  buckets:
+    image: ${BUCKETS_IMAGE:-ghcr.io/storscale/bucketsd:1.6.0}
+    command: ["server", "--address", ":9000", "/data1", "/data2", "/data3", "/data4"]
+    environment:
+      BUCKETS_ROOT_USER: ${BUCKETS_ROOT_USER}
+      BUCKETS_ROOT_PASSWORD: ${BUCKETS_ROOT_PASSWORD}
+    volumes:
+      - drive1:/data1
+      - drive2:/data2
+      - drive3:/data3
+      - drive4:/data4
+    ports: ["${BUCKETS_PORT:-9000}:9000"]
+    depends_on:
+      drives: {condition: service_completed_successfully}
+
+  # The metrics user and its token; buckets with data. Runs once, then exits.
+  setup:
+    <<: *tools
+    command: ["python", "-u", "/work/setup.py"]
+    depends_on:
+      buckets: {condition: service_started}
+
+  prometheus:
+    image: prom/prometheus:v3.13.4
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../../operator/helm/buckets-operator/monitoring/rules.yaml:/etc/prometheus/rules.yaml:ro
+      - prometheus-token:/etc/prometheus/token:ro
+    ports: ["9090:9090"]
+    depends_on:
+      setup: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/ready"]
+      interval: 5s
+      retries: 60
+
+  grafana:
+    image: grafana/grafana:13.0.10
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      GF_USERS_DEFAULT_THEME: dark
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../../operator/helm/buckets-operator/monitoring/dashboards:/var/lib/grafana/dashboards/buckets:ro
+    ports: ["3000:3000"]
+    depends_on:
+      prometheus: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 5s
+      retries: 60
+
+  # S3 traffic: uploads, downloads, listings, deletes, misses and bad credentials.
+  traffic:
+    <<: *tools
+    command: ["python", "-u", "/work/traffic.py"]
+    depends_on:
+      setup: {condition: service_completed_successfully}
+
+  # The end-to-end checks: docker compose run --rm test
+  test:
+    <<: *tools
+    command: ["python", "-u", "/work/test.py"]
+    profiles: ["test"]
+    volumes:
+      - ./tools:/work:ro
+      - ../common/tools:/common:ro
+      - ../../operator/helm/buckets-operator/monitoring/dashboards:/dashboards:ro
+      - drive3:/drive3
+
+  # The dashboards as PNGs, with headless Chromium: docker compose run --rm screenshots
+  screenshots:
+    image: mcr.microsoft.com/playwright/python:v1.63.0-noble
+    command: ["sh", "-c", "pip install -q playwright==1.63.0 requests && python /work/screenshots.py"]
+    env_file: .env
+    volumes:
+      - ./tools:/work:ro
+      - ${SCREENSHOTS_DIR:-./screenshots}:/screenshots
+    profiles: ["screenshots"]
+
+volumes:
+  drive1:
+  drive2:
+  drive3:
+  drive4:
+  prometheus-token:

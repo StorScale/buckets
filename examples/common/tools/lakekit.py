@@ -305,14 +305,19 @@ def code(fn):
         return e.response["Error"]["Code"]
 
 
-def audited_denials(user, timeout=90):
-    """How many of `user`'s requests Ranger's audit log (Solr) has as denied.
-    The plugin sends audits in batches, so this waits for them."""
+def audited(user, allowed, timeout=90):
+    """How many of `user`'s requests Ranger's audit log (Solr) has, allowed or
+    denied. The plugin sends audits in batches, so this waits for them."""
     deadline = time.time() + timeout
     while True:
         r = requests.get("http://ranger-solr:8983/solr/ranger_audits/select",
-                         params={"q": f"reqUser:{user} AND result:0", "rows": 0}, timeout=10)
+                         params={"q": f"reqUser:{user} AND result:{1 if allowed else 0}", "rows": 0}, timeout=10)
         hits = r.json()["response"]["numFound"] if r.ok else 0
         if hits or time.time() > deadline:
             return hits
         time.sleep(5)
+
+
+def audited_denials(user, timeout=90):
+    """How many of `user`'s requests Ranger's audit log has as denied."""
+    return audited(user, allowed=False, timeout=timeout)

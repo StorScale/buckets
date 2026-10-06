@@ -64,13 +64,20 @@ class Board:
         })
 
     def table(self, title, targets, w=24, h=8, description=""):
+        """targets: (expr, column name[, unit]). Instant queries, merged on their labels. Grafana names
+        each query's value column "Value #<refId>" in a table, so they're renamed to the column names."""
+        targets = [(t[0], t[1], t[2] if len(t) > 2 else None) for t in targets]
         self.panels.append({
             "type": "table", "title": title, "description": description, "id": self.id + 1, "datasource": DS,
             "gridPos": self._place(w, h),
             "targets": [{"refId": chr(65 + i), "expr": e, "legendFormat": l, "datasource": DS, "instant": True,
-                         "format": "table"} for i, (e, l) in enumerate(targets)],
-            "transformations": [{"id": "merge"}, {"id": "organize", "options": {"excludeByName": {"Time": True}}}],
-            "fieldConfig": {"defaults": {}, "overrides": []},
+                         "format": "table"} for i, (e, l, _) in enumerate(targets)],
+            "transformations": [{"id": "merge"}, {"id": "organize", "options": {
+                "excludeByName": {"Time": True},
+                "renameByName": {f"Value #{chr(65 + i)}": l for i, (_, l, _) in enumerate(targets)}}}],
+            "fieldConfig": {"defaults": {}, "overrides": [
+                {"matcher": {"id": "byName", "options": l}, "properties": [{"id": "unit", "value": u}]}
+                for _, l, u in targets if u]},
             "options": {"showHeader": True},
         })
 
@@ -152,11 +159,11 @@ def drives():
                                  "pool {{pool}} set {{set}}")])
     b.row("Drives")
     b.table("Drives", [
-        (f"max by (server, drive) ({q('node', 'minio_node_drive_used_bytes')})", "used"),
-        (f"max by (server, drive) ({q('node', 'minio_node_drive_free_bytes')})", "free"),
-        (f"max by (server, drive) ({q('node', 'minio_node_drive_total_bytes')})", "total"),
-        (f"sum by (server, drive) (increase({q('node', 'minio_node_drive_errors_ioerror')}[1h]))", "I/O errors (1h)"),
-        (f"sum by (server, drive) (increase({q('node', 'minio_node_drive_errors_timeout')}[1h]))", "timeouts (1h)"),
+        (f"max by (server, drive) ({q('node', 'minio_node_drive_used_bytes')})", "used", "bytes"),
+        (f"max by (server, drive) ({q('node', 'minio_node_drive_free_bytes')})", "free", "bytes"),
+        (f"max by (server, drive) ({q('node', 'minio_node_drive_total_bytes')})", "total", "bytes"),
+        (f"sum by (server, drive) (increase({q('node', 'minio_node_drive_errors_ioerror')}[1h]))", "I/O errors (1h)", "short"),
+        (f"sum by (server, drive) (increase({q('node', 'minio_node_drive_errors_timeout')}[1h]))", "timeouts (1h)", "short"),
     ])
     b.series("Drive space used", [
         (f"max by (server, drive) ({q('node', 'minio_node_drive_used_bytes')}) / max by (server, drive) ({q('node', 'minio_node_drive_total_bytes')})",
@@ -179,10 +186,10 @@ def buckets():
     b = Board("buckets-buckets", "Buckets / Buckets", "Usage, object counts, quotas and replication per bucket.")
     b.row("Usage")
     b.table("Buckets", [
-        (f"max by (bucket) ({q('bucket', 'minio_bucket_usage_total_bytes')})", "size"),
-        (f"max by (bucket) ({q('bucket', 'minio_bucket_usage_object_total')})", "objects"),
-        (f"max by (bucket) ({q('bucket', 'minio_bucket_usage_version_total')})", "versions"),
-        (f"max by (bucket) ({q('bucket', 'minio_bucket_quota_total_bytes')})", "quota"),
+        (f"max by (bucket) ({q('bucket', 'minio_bucket_usage_total_bytes')})", "size", "bytes"),
+        (f"max by (bucket) ({q('bucket', 'minio_bucket_usage_object_total')})", "objects", "short"),
+        (f"max by (bucket) ({q('bucket', 'minio_bucket_usage_version_total')})", "versions", "short"),
+        (f"max by (bucket) ({q('bucket', 'minio_bucket_quota_total_bytes')})", "quota", "bytes"),
     ])
     b.series("Size", [(f"max by (bucket) ({q('bucket', 'minio_bucket_usage_total_bytes')})", "{{bucket}}")], unit="bytes", stack=True)
     b.series("Objects", [(f"max by (bucket) ({q('bucket', 'minio_bucket_usage_object_total')})", "{{bucket}}")], unit="short", stack=True)
