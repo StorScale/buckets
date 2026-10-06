@@ -22,6 +22,8 @@ k() { kubectl $CTXARG -n "$NS" "$@"; }
 kc() { kubectl $CTXARG "$@"; }
 cleanup() {
   if [[ -n ${KEEP:-} ]]; then echo "kept namespace $NS"; return; fi
+  # users and policies first, while the operator is there to release their finalizers
+  k delete bucketsusers,bucketspolicies --all --wait=true --timeout=120s >/dev/null 2>&1 || true
   helm ${KUBECONTEXT:+--kube-context $KUBECONTEXT} -n "$NS" uninstall decl-operator >/dev/null 2>&1 || true
   kc delete namespace "$NS" --wait=true >/dev/null 2>&1 || true
 }
