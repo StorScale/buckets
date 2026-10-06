@@ -10,6 +10,7 @@ add_library(buckets_operator STATIC
   src/identity.c
   src/monitoring.c
   src/bucketspec.c
+  src/sitereplication.c
 )
 target_include_directories(buckets_operator PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(buckets_operator PUBLIC buckets)

@@ -82,15 +82,18 @@ spec:
   sites:
     - cluster: store
     - cluster: dr
-    - name: branch, endpoint: https://s3.branch.example.com, credsSecret: {name: branch-root}
+    - {name: branch, endpoint: https://s3.branch.example.com, credsSecret: {name: branch-root}}
 ```
 
 The operator adds the sites through the first site's admin API
 (`site-replication add`, with each site's root credentials, as `mc admin
 replicate add` does). A site added to the list later is added; a site removed
-is removed. The status reports the replication's own health (`site-replication
-status`). Deleting the resource leaves the replication in place, so a GitOps
-mistake can't tear it down; to stop it, empty the list.
+is removed. The status lists the sites. Deleting the resource leaves the
+replication in place, so a GitOps mistake can't tear it down. To stop it,
+leave one site in the list: the operator removes the replication through it.
+(An empty list would leave no site to talk to.) When the first site is empty
+and another holds buckets, the operator sets the replication up through that
+one, as `bucketsd` asks.
 
 ## Code
 
@@ -119,6 +122,6 @@ mistake can't tear it down; to stop it, empty the list.
 1. ✅ `Bucket`: versioning, object lock, quota, encryption, lifecycle, with drift
    correction.
 2. ✅ `Bucket.replication`.
-3. `BucketsSiteReplication`.
+3. ✅ `BucketsSiteReplication`.
 4. The exportable-manifests layout (docs and an example repository tree),
    which then covers all of it.

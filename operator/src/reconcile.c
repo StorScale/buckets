@@ -11,6 +11,7 @@
 #include "core/timefmt.h"
 #include "core/uuid.h"
 #include "iam.h"
+#include "sitereplication.h"
 #include "identity.h"
 #include "monitoring.h"
 #include "kms.h"
@@ -468,6 +469,7 @@ void op_reconcile_all(op_ctx *o) {
       reconcile_cluster(o, bc);
     }
     op_reconcile_iam(o, yyjson_obj_get(yyjson_doc_get_root(doc), "items"));
+    op_reconcile_site_replication(o, yyjson_obj_get(yyjson_doc_get_root(doc), "items"));
   }
   yyjson_doc_free(doc);
   buckets_buf_free(&path);

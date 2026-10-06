@@ -365,7 +365,11 @@ drp=rotated-$(openssl rand -hex 12)
 k -n tenant patch secret dr-root --type merge -p "{\"stringData\":{\"rootPassword\":\"$drp\"}}" >/dev/null
 start_dr
 until_true 'curl -sf http://127.0.0.1:$DPORT/minio/health/ready'
-sleep 3 # the next check
+restarted=$(date -u +%Y-%m-%dT%H:%M:%S)
+# a check that ended Ready after the restart (checkedAt is to the second)
+until_true '[[ $(jp bucket/events {.status.phase}) == Ready && $(jp bucket/events {.status.checkedAt}) > "$restarted" ]]' || true
+# and the source's health check sees the target again (until then bucketsd queues objects for a later retry)
+until_true '[[ $(root "http://127.0.0.1:$BPORT/minio/admin/v3/list-remote-targets?bucket=events" | jq -r ".[0].isOnline") == true ]]' || true
 root -X PUT --data "after rotation" "http://127.0.0.1:$BPORT/events/two.txt" >/dev/null
 until_true '[[ $(dr "http://127.0.0.1:$DPORT/events/two.txt") == "after rotation" ]]' || true
 expect "replication survives a target root key rotation" "$(dr "http://127.0.0.1:$DPORT/events/two.txt")" "after rotation"
@@ -381,6 +385,69 @@ k -n tenant patch bucket events --type merge -p '{"spec":{"replication":{"target
 until_true '[[ $(jp bucket/events {.status.phase}) == Error ]]' || true
 expect "a missing target cluster reported" "$(jp bucket/events '{.status.message}')" "replication target: BucketsCluster nowhere not found in namespace tenant"
 k -n tenant delete bucket events >/dev/null
+
+echo "== BucketsSiteReplication: sites added, removed, stopped"
+# east and west are BucketsClusters, branch another site; fresh servers, as only one site may hold buckets
+site_server() { # name port user password
+  mkdir -p "$WORK/$1/d1" "$WORK/$1/d2" "$WORK/$1/d3" "$WORK/$1/d4"
+  BUCKETS_ROOT_USER=$3 BUCKETS_ROOT_PASSWORD=$4 "$BUCKETSD" server --address "127.0.0.1:$2" \
+    "$WORK/$1/d{1...4}" 2>>"$WORK/bucketsd-$1.log" &
+  PIDS+=($!)
+  until_true "curl -sf http://127.0.0.1:$2/minio/health/ready"
+}
+EPORT2=$((BPORT + 2)) WPORT=$((BPORT + 3)) RPORT=$((BPORT + 4))
+for c in east west; do
+  k apply -f - >/dev/null <<YAML
+apiVersion: buckets.io/v1alpha1
+kind: BucketsCluster
+metadata: {name: $c, namespace: tenant}
+spec:
+  image: bucketsd:test
+  pools: [{servers: 4, volumesPerServer: 1, volumeClaimTemplate: {resources: {requests: {storage: 1Gi}}}}]
+YAML
+done
+until_true 'k -n tenant get secret east-root && k -n tenant get secret west-root'
+eu=$(jp secret/east-root '{.data.rootUser}' | base64 -d); ep=$(jp secret/east-root '{.data.rootPassword}' | base64 -d)
+wu=$(jp secret/west-root '{.data.rootUser}' | base64 -d); wp=$(jp secret/west-root '{.data.rootPassword}' | base64 -d)
+site_server east "$EPORT2" "$eu" "$ep"
+site_server west "$WPORT" "$wu" "$wp"
+site_server branch "$RPORT" branchroot branchsecret123
+k -n tenant annotate bc east buckets.io/endpoint="http://127.0.0.1:$EPORT2" >/dev/null
+k -n tenant annotate bc west buckets.io/endpoint="http://127.0.0.1:$WPORT" >/dev/null
+k -n tenant create secret generic branch-root --from-literal=accessKey=branchroot --from-literal=secretKey=branchsecret123 >/dev/null
+as() { local u=$1 p=$2; shift 2; curl -s --aws-sigv4 "aws:amz:us-east-1:s3" --user "$u:$p" "$@"; }
+info() { as "$1" "$2" "http://127.0.0.1:$3/minio/admin/v3/site-replication/info"; }
+as "$eu" "$ep" -X PUT "http://127.0.0.1:$EPORT2/shared" >/dev/null # east has the data
+k apply -f - >/dev/null <<YAML
+apiVersion: buckets.io/v1alpha1
+kind: BucketsSiteReplication
+metadata: {name: everywhere, namespace: tenant}
+spec:
+  sites: [{cluster: west}, {cluster: east}]
+YAML
+until_true '[[ $(jp bucketssitereplication/everywhere {.status.phase}) == Ready ]]' || true
+expect "two sites replicate" "$(jp bucketssitereplication/everywhere '{.status.message}')" "2 sites replicate: west, east"
+expect "set up through the site with the data" "$(info "$wu" "$wp" "$WPORT" | jq -r '[.sites[].name] | sort | join(" ")')" "east west"
+until_true '[[ $(as "$wu" "$wp" -o /dev/null -w "%{http_code}" -I "http://127.0.0.1:$WPORT/shared") == 200 ]]' || true
+expect "east's bucket on west" "$(as "$wu" "$wp" -o /dev/null -w '%{http_code}' -I "http://127.0.0.1:$WPORT/shared")" 200
+k -n tenant patch bsr everywhere --type merge -p \
+  '{"spec":{"sites":[{"cluster":"west"},{"cluster":"east"},{"name":"branch","endpoint":"http://127.0.0.1:'"$RPORT"'","credsSecret":{"name":"branch-root"}}]}}' >/dev/null
+until_true '[[ $(info branchroot branchsecret123 "$RPORT" | jq -r ".sites | length") == 3 ]]' || true
+expect "a third site added" "$(info branchroot branchsecret123 "$RPORT" | jq -r '[.sites[].name] | sort | join(" ")')" "branch east west"
+until_true '[[ $(as branchroot branchsecret123 -o /dev/null -w "%{http_code}" -I "http://127.0.0.1:$RPORT/shared") == 200 ]]' || true
+expect "the bucket on it" "$(as branchroot branchsecret123 -o /dev/null -w '%{http_code}' -I "http://127.0.0.1:$RPORT/shared")" 200
+expect "status lists the sites" "$(jp bsr/everywhere '{.status.sites[*]}')" "west east branch"
+k -n tenant patch bsr everywhere --type merge -p '{"spec":{"sites":[{"cluster":"west"},{"cluster":"east"}]}}' >/dev/null
+until_true '[[ $(info "$eu" "$ep" "$EPORT2" | jq -r ".sites | length") == 2 ]]' || true
+expect "a site taken out is removed" "$(info "$eu" "$ep" "$EPORT2" | jq -r '[.sites[].name] | sort | join(" ")')" "east west"
+k -n tenant patch bsr everywhere --type merge -p '{"spec":{"sites":[{"cluster":"west"}]}}' >/dev/null
+until_true '[[ $(info "$wu" "$wp" "$WPORT" | jq -r .enabled) == false ]]' || true
+expect "one site left: stopped" "$(info "$wu" "$wp" "$WPORT" | jq -r .enabled)/$(jp bsr/everywhere '{.status.message}')" \
+  "false/one site: no site replication"
+k -n tenant patch bsr everywhere --type merge -p '{"spec":{"sites":[{"cluster":"west"},{"name":"x","endpoint":"http://h"}]}}' >/dev/null
+until_true '[[ $(jp bsr/everywhere {.status.phase}) == Error ]]' || true
+expect "an incomplete site refused" "$(jp bsr/everywhere '{.status.message}')" "site 2: an endpoint needs a name and credsSecret"
+k -n tenant delete bsr everywhere >/dev/null
 
 echo "== monitoring: a metrics user, its token and a ServiceMonitor, once the Prometheus Operator is there"
 until_true '[[ $(jp bc/store {.status.monitoring.phase}) == NotInstalled ]]' || true

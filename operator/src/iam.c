@@ -134,16 +134,13 @@ static void cluster_url(yyjson_val *bc, const bc_spec *s, char *url, size_t cap)
                 BC_S3_PORT);
 }
 
-/* Connects to a BucketsCluster as root. err explains a failure. */
-static bool cluster_connect(op_ctx *o, yyjson_val *bc, conn *cn, char *err, size_t errlen) {
-  memset(cn, 0, sizeof(*cn));
-  bc_spec s;
-  if (!bc_parse(bc, o->cluster_domain, &s, err, errlen)) return false;
+/* A cluster's root credentials, from its Secret (or its config.env). */
+static bool cluster_creds(op_ctx *o, const bc_spec *s, char **out_ak, char **out_sk, char *err, size_t errlen) {
   char secret_name[128];
-  bc_creds_secret_name(&s, secret_name, sizeof(secret_name));
-  yyjson_doc *sd = get_secret(o, s.ns, secret_name);
+  bc_creds_secret_name(s, secret_name, sizeof(secret_name));
+  yyjson_doc *sd = get_secret(o, s->ns, secret_name);
   char *ak = NULL, *sk = NULL;
-  if (sd && s.config_secret) {
+  if (sd && s->config_secret) {
     char *env = secret_value(yyjson_doc_get_root(sd), "config.env");
     if (env) config_env_creds(env, &ak, &sk);
     free(env);
@@ -158,6 +155,43 @@ static bool cluster_connect(op_ctx *o, yyjson_val *bc, conn *cn, char *err, size
     free(sk);
     return false;
   }
+  *out_ak = ak;
+  *out_sk = sk;
+  return true;
+}
+
+bool op_cluster_peer(op_ctx *o, yyjson_val *bc, char *url, size_t cap, char **ak, char **sk, char *err,
+                     size_t errlen) {
+  bc_spec s;
+  if (!bc_parse(bc, o->cluster_domain, &s, err, errlen) || !cluster_creds(o, &s, ak, sk, err, errlen)) return false;
+  cluster_url(bc, &s, url, cap);
+  return true;
+}
+
+static yyjson_val *find_cluster(yyjson_val *clusters, const char *ns, const char *name);
+
+bool op_secret_pair(op_ctx *o, const char *ns, const char *secret, const char *k1, const char *k2, char **v1, char **v2) {
+  yyjson_doc *sd = secret ? get_secret(o, ns, secret) : NULL;
+  *v1 = sd ? secret_value(yyjson_doc_get_root(sd), k1) : NULL;
+  *v2 = sd ? secret_value(yyjson_doc_get_root(sd), k2) : NULL;
+  yyjson_doc_free(sd);
+  if (*v1 && *v2) return true;
+  free(*v1);
+  free(*v2);
+  *v1 = *v2 = NULL;
+  return false;
+}
+
+yyjson_val *op_find_cluster(yyjson_val *clusters, const char *ns, const char *name) {
+  return find_cluster(clusters, ns, name);
+}
+
+/* Connects to a BucketsCluster as root. err explains a failure. */
+static bool cluster_connect(op_ctx *o, yyjson_val *bc, conn *cn, char *err, size_t errlen) {
+  memset(cn, 0, sizeof(*cn));
+  bc_spec s;
+  char *ak = NULL, *sk = NULL;
+  if (!bc_parse(bc, o->cluster_domain, &s, err, errlen) || !cluster_creds(o, &s, &ak, &sk, err, errlen)) return false;
   /* The CA for a TLS cluster: its CA Secret, else the TLS Secret's ca.crt. */
   if (s.tls_secret) {
     yyjson_doc *cad = get_secret(o, s.ns, s.ca_secret ? s.ca_secret : s.tls_secret);
@@ -487,8 +521,7 @@ static void reconcile_user(op_ctx *o, yyjson_val *obj, conn *cn, yyjson_val *clu
 
 static yyjson_val *find_cluster(yyjson_val *clusters, const char *ns, const char *name);
 
-/* How often an applied Bucket is read back and put right (BUCKETS_OPERATOR_DRIFT_MS, 10 minutes). */
-static long long drift_interval_ms(void) {
+long long op_drift_interval_ms(void) {
   const char *v = getenv("BUCKETS_OPERATOR_DRIFT_MS");
   long long ms = v && *v ? atoll(v) : 0;
   return ms > 0 ? ms : 600000;
@@ -506,7 +539,7 @@ static bool bucket_due(yyjson_val *obj) {
   if (!phase || strcmp(phase, "Ready") != 0 || !applied || strcmp(applied, hash) != 0 || !checked ||
       !buckets_time_parse_rfc3339(checked, &sec, &nsec))
     return true;
-  return ((long long)time(NULL) - sec) * 1000 >= drift_interval_ms();
+  return ((long long)time(NULL) - sec) * 1000 >= op_drift_interval_ms();
 }
 
 /* One setting: what it should say (want NULL: removed), read back and put right when it differs. */
