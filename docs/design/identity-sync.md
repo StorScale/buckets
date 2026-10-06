@@ -1,6 +1,6 @@
 # Design: removing people who leave (SCIM and identity sync)
 
-Status: proposed, for review. Roadmap: Phase 2, "Automatic provisioning and
+Status: agreed, being built. Roadmap: Phase 2, "Automatic provisioning and
 removal (SCIM)". It is Phase 2's last item: "People who leave lose access and
 their access keys without manual cleanup."
 
@@ -126,18 +126,40 @@ manifest.
   A person signs in, makes an access key and is disabled in Keycloak, and the
   key stops working after one sync.
 
-## Open questions for review
+## Decisions
 
-1. **Identity sync first, SCIM later?** Or is an internet-reachable console
-   with SCIM a requirement now, for example for a compliance checklist that
-   names SCIM?
-2. **The grace period:** disable at once and delete after 30 days, or delete at
-   once as the LDAP sync does today? If 30 days, should the LDAP sync change
-   to match?
-3. **Entra first?** It's the production provider and sign-in there is proven.
-   Okta and Keycloak would follow behind the same interface, with Keycloak
-   used for the cluster test.
-4. **Keeping roles current (step 4):** include it now, or only removal first?
+1. **Identity sync first; SCIM later**, as an option acting through the same
+   removal code.
+2. **Disable at once, delete after 30 days** (`BUCKETS_OPENID_REMOVE_AFTER`,
+   in days). The LDAP sync keeps deleting at once, as MinIO's does: changing
+   it would surprise people moving from MinIO.
+3. **Entra first.** Okta and Keycloak come later behind the same interface.
+4. **Removal first.** Keeping roles current comes in a later step.
+
+## How it is built (step 1)
+
+- **Settings are environment variables on the servers.** They are not a
+  configuration subsystem, since MinIO would not know one after a rollback.
+  The operator sets them from the identity settings, with the secret from a
+  Secret it writes, and restarts the servers when they change, as it does for
+  LDAP:
+  - `BUCKETS_OPENID_SYNC_PROVIDER=entra`
+  - `BUCKETS_OPENID_SYNC_TENANT_ID`, `BUCKETS_OPENID_SYNC_CLIENT_ID` and
+    `BUCKETS_OPENID_SYNC_CLIENT_SECRET`
+  - `BUCKETS_OPENID_SYNC_INTERVAL` (seconds, default 3600)
+  - `BUCKETS_OPENID_REMOVE_AFTER` (days, default 30)
+  - `BUCKETS_OPENID_REMOVE_MAX` (people per sync, default 10)
+- **Who counts as an Entra person:** a credential whose `tid` claim is the
+  tenant, identified by its `oid` claim.
+- **One server syncs:** the one leading pool 0, set 0, as the scanner does.
+- **What the sync disabled is remembered** in
+  `.minio.sys/buckets/identity-sync.json`: each key, its owner and when it was
+  disabled. A key comes back on if its owner comes back within the grace
+  period. A key its owner had turned off themselves is never turned on.
+- **The safety limit** holds new removals when more than
+  `BUCKETS_OPENID_REMOVE_MAX` people would go in one sync. Raising the limit
+  lets them through; a confirmation in the console comes with the console
+  step.
 
 ## Order
 

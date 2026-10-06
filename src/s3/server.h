@@ -51,8 +51,11 @@ typedef struct buckets_s3_server {
   pthread_mutex_t bg_mu;
   pthread_cond_t bg_cv;
   bool bg_stop;
-  pthread_t iam_thread, ldap_thread;
-  bool iam_thread_started, ldap_thread_started;
+  pthread_t iam_thread, ldap_thread, idsync_thread;
+  bool iam_thread_started, ldap_thread_started, idsync_thread_started;
+  /* identity sync (iam/idsync.h): runs, failed runs, and what it did, for metrics */
+  _Atomic unsigned long long idsync_runs, idsync_failures, idsync_held, idsync_revoked, idsync_disabled,
+      idsync_enabled, idsync_deleted;
   char host_id[65];   /* x-amz-id-2 */
   struct buckets_notifier *notifier; /* event notification targets and listeners */
   struct buckets_logger *logger;     /* audit and server log targets */

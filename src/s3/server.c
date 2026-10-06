@@ -30,6 +30,8 @@
 #include "config/sys.h"
 #include "iam/openid.h"
 #include "iam/ldapidp.h"
+#include "object/sysconfig.h"
+#include "iam/idsync.h"
 #include "iam/plugins.h"
 #include "bucket/metadata.h"
 #include "bucket/metasys.h"
@@ -278,6 +280,181 @@ static void *ldap_sync_main(void *arg) {
   const char *env = getenv("BUCKETS_LDAP_SYNC_INTERVAL");
   int interval = env && atoi(env) > 0 ? atoi(env) : 3600; /* MinIO: once an hour */
   while (bg_sleep(s, interval * 1000L)) ldap_sync(s);
+  return NULL;
+}
+
+/* ---- identity sync (iam/idsync.h): people who left the OpenID provider ------------------------ */
+
+#define IDSYNC_PATH "buckets/identity-sync.json"
+
+/* The provider's ID for a credential's owner, when the credential is from this provider's tenant. */
+static const char *idsync_person(const buckets_idsync_settings *st, const buckets_iam_ident *c) {
+  const char *tid = buckets_iam_ident_claim(c, "tid"), *oid = buckets_iam_ident_claim(c, "oid");
+  return tid && oid && *oid && strcmp(tid, st->tenant) == 0 ? oid : NULL;
+}
+
+static buckets_idsync_state state_of_person(const buckets_idsync_answers *a, const char *person) {
+  for (size_t i = 0; i < a->n; i++)
+    if (strcmp(a->people[i], person) == 0) return a->states[i];
+  return BUCKETS_IDSYNC_UNKNOWN;
+}
+
+static void idsync_run(buckets_s3_server *s, const buckets_idsync_settings *st, buckets_idsync_entra *entra) {
+  buckets_objlayer *L = atomic_load(&s->layer);
+  if (!L || !buckets_iam_ready(s->iam) || !buckets_objlayer_set_is_led_here(L, 0, 0)) return; /* one server syncs */
+  s->idsync_runs++;
+  /* the provider's people with credentials */
+  buckets_iam_ident **all = NULL;
+  size_t nall = 0;
+  for (int t = 0; t < 2; t++) {
+    buckets_iam_ident **l;
+    size_t n;
+    buckets_iam_list_derived(s->iam, NULL, t ? BUCKETS_IAM_SVC : BUCKETS_IAM_STS, &l, &n);
+    all = buckets_xrealloc(all, (nall + n + 1) * sizeof(*all));
+    memcpy(all + nall, l, n * sizeof(*l));
+    nall += n;
+    free(l);
+  }
+  buckets_idsync_cred *creds = buckets_xcalloc(nall + 1, sizeof(*creds));
+  size_t nc = 0;
+  const char **people = buckets_xcalloc(nall + 1, sizeof(char *));
+  size_t np = 0;
+  for (size_t i = 0; i < nall; i++) {
+    const char *person = idsync_person(st, all[i]);
+    if (!person || (all[i]->type == BUCKETS_IAM_STS && buckets_iam_ident_is_expired(all[i]))) continue;
+    creds[nc++] = (buckets_idsync_cred){all[i]->access_key, person, all[i]->type == BUCKETS_IAM_STS,
+                                        strcmp(all[i]->status, "off") != 0};
+    bool seen = false;
+    for (size_t k = 0; k < np && !seen; k++) seen = strcmp(people[k], person) == 0;
+    if (!seen) people[np++] = person;
+  }
+  /* what the sync turned off before */
+  buckets_buf hb = BUCKETS_BUF_INIT;
+  buckets_idsync_held *held = NULL;
+  size_t nheld = 0;
+  buckets_obj_err re = buckets_sysconfig_read(L, IDSYNC_PATH, &hb, NULL);
+  bool state_ok = true; /* without what it turned off before, it does nothing: it would lose track of keys */
+  if (re && re != BUCKETS_OBJ_ERR_NO_SUCH_KEY) {
+    buckets_log_warn("identity sync: reading what it turned off: %s; nothing done", buckets_obj_strerror(re));
+    state_ok = false;
+  } else if (!buckets_idsync_held_parse(hb.data, hb.len, &held, &nheld)) {
+    buckets_log_warn("identity sync: %s does not parse; nothing done", IDSYNC_PATH);
+    state_ok = false;
+  }
+  buckets_buf_free(&hb);
+  /* ask about each person, and about each one the sync turned keys off for */
+  for (size_t k = 0; k < nheld; k++) {
+    bool seen = false;
+    for (size_t j = 0; j < np && !seen; j++) seen = strcmp(people[j], held[k].person) == 0;
+    if (!seen) {
+      people = buckets_xrealloc(people, (np + 1) * sizeof(char *));
+      people[np++] = held[k].person;
+    }
+  }
+  buckets_idsync_state *states = buckets_xcalloc(np + 1, sizeof(*states));
+  size_t unknown = 0;
+  char err[512] = "";
+  for (size_t k = 0; k < np && state_ok; k++) {
+    states[k] = buckets_idsync_entra_lookup(entra, people[k], err, sizeof(err));
+    if (states[k] == BUCKETS_IDSYNC_UNKNOWN && unknown++ == 0) buckets_log_warn("identity sync: %s", err);
+  }
+  bool failed = !state_ok || unknown;
+  if (state_ok) { /* what is known is acted on; a failed lookup only skips its person */
+    buckets_idsync_plan plan;
+    buckets_idsync_answers ans = {people, states, np};
+    buckets_idsync_plan_make(creds, nc, &ans, held, nheld, (long long)time(NULL), st->remove_after_s, st->remove_max,
+                             &plan);
+    if (plan.held) {
+      s->idsync_held++;
+      buckets_log_warn("identity sync: %zu people left the provider at once, more than BUCKETS_OPENID_REMOVE_MAX (%ld);"
+                       " none removed. Raise the limit if this is right.",
+                       plan.people_leaving, st->remove_max);
+    }
+    bool changed = false;
+    for (size_t a = 0; a < plan.n; a++) {
+      const buckets_idsync_action *x = &plan.actions[a];
+      buckets_iam_err e = BUCKETS_IAM_OK;
+      switch (x->kind) {
+      case BUCKETS_IDSYNC_REVOKE: {
+        char *one[] = {(char *)x->access_key};
+        buckets_iam_delete_users(s->iam, one, 1);
+        s->idsync_revoked++;
+        break;
+      }
+      case BUCKETS_IDSYNC_DISABLE:
+      case BUCKETS_IDSYNC_ENABLE: {
+        bool on = x->kind == BUCKETS_IDSYNC_ENABLE;
+        e = buckets_iam_update_svc(s->iam, x->access_key, &(buckets_iam_svc_update){.status = on ? "on" : "off"}, err,
+                                   sizeof(err));
+        if (e != BUCKETS_IAM_OK) break;
+        if (on) {
+          s->idsync_enabled++;
+        } else {
+          held = buckets_xrealloc(held, (nheld + 1) * sizeof(*held));
+          held[nheld++] = (buckets_idsync_held){buckets_xstrdup(x->access_key), buckets_xstrdup(x->person),
+                                                (long long)time(NULL)};
+          s->idsync_disabled++;
+        }
+        break;
+      }
+      case BUCKETS_IDSYNC_DELETE:
+        e = buckets_iam_delete_svc(s->iam, x->access_key);
+        if (e == BUCKETS_IAM_OK) s->idsync_deleted++;
+        break;
+      default: break;
+      }
+      if (e != BUCKETS_IAM_OK) {
+        buckets_log_warn("identity sync: %s access key %s: %s", buckets_idsync_action_name(x->kind), x->access_key,
+                         buckets_iam_strerror(e));
+        continue;
+      }
+      buckets_log_info("identity sync: %s %s %s (owner %s in the provider)", buckets_idsync_action_name(x->kind),
+                       x->kind == BUCKETS_IDSYNC_REVOKE ? "temporary credentials" : "access key", x->access_key,
+                       buckets_idsync_state_name(state_of_person(&ans, x->person)));
+      if (x->kind == BUCKETS_IDSYNC_ENABLE || x->kind == BUCKETS_IDSYNC_DELETE || x->kind == BUCKETS_IDSYNC_FORGET) {
+        for (size_t k = 0; k < nheld; k++) {
+          if (strcmp(held[k].access_key, x->access_key) != 0) continue;
+          free(held[k].access_key);
+          free(held[k].person);
+          held[k] = held[--nheld];
+          break;
+        }
+      }
+      changed |= x->kind != BUCKETS_IDSYNC_REVOKE;
+    }
+    if (changed) {
+      buckets_buf out = BUCKETS_BUF_INIT;
+      buckets_idsync_held_json(held, nheld, &out);
+      buckets_obj_err we = buckets_sysconfig_write(L, IDSYNC_PATH, out.data, out.len);
+      if (we) buckets_log_warn("identity sync: saving what it turned off: %s", buckets_obj_strerror(we));
+      buckets_buf_free(&out);
+    }
+    buckets_idsync_plan_free(&plan);
+  }
+  if (failed) s->idsync_failures++;
+  free(states);
+  free(people);
+  free(creds);
+  buckets_idsync_held_free(held, nheld);
+  for (size_t i = 0; i < nall; i++) buckets_iam_ident_release(all[i]);
+  free(all);
+}
+
+static void *idsync_main(void *arg) {
+  buckets_s3_server *s = arg;
+  buckets_idsync_settings st;
+  char err[512];
+  if (!buckets_idsync_settings_from_env(&st, err, sizeof(err))) {
+    buckets_log_warn("identity sync: off: %s", err);
+    return NULL;
+  }
+  if (!*st.provider) return NULL;
+  buckets_idsync_entra *entra = buckets_idsync_entra_new(&st);
+  memset(st.client_secret, 0, sizeof(st.client_secret));
+  buckets_log_info("identity sync: asking Entra tenant %s about people with credentials every %lds", st.tenant,
+                   st.interval_s);
+  while (bg_sleep(s, st.interval_s * 1000L)) idsync_run(s, &st, entra);
+  buckets_idsync_entra_free(entra);
   return NULL;
 }
 
@@ -549,6 +726,7 @@ static void *iam_start_main(void *arg) {
   int interval = env ? atoi(env) : 600;
   buckets_iam_start_refresh(s->iam, interval > 0 ? interval : 600);
   if (buckets_iam_ldap_mode(s->iam)) s->ldap_thread_started = pthread_create(&s->ldap_thread, NULL, ldap_sync_main, s) == 0;
+  s->idsync_thread_started = pthread_create(&s->idsync_thread, NULL, idsync_main, s) == 0;
   return NULL;
 }
 
@@ -927,6 +1105,8 @@ void buckets_s3_server_stop(buckets_s3_server *s) {
   s->iam_thread_started = false;
   if (s->ldap_thread_started) pthread_join(s->ldap_thread, NULL);
   s->ldap_thread_started = false;
+  if (s->idsync_thread_started) pthread_join(s->idsync_thread, NULL);
+  s->idsync_thread_started = false;
   if (s->metrics_thread_started) pthread_join(s->metrics_thread, NULL);
   s->metrics_thread_started = false;
   buckets_sr_stop(s->sr);
