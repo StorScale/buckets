@@ -7,13 +7,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "core/buf.h"
 #include "core/log.h"
 #include "crypto/base64.h"
 #include "crypto/hex.h"
+#include "crypto/md5.h"
 #include "crypto/sha256.h"
+#include "bucketspec.h"
+#include "core/timefmt.h"
 #include "manifests.h"
 #include "s3client.h"
 
@@ -238,9 +242,10 @@ static bool has_finalizer(yyjson_val *obj) {
 }
 
 typedef struct {
-  const char *phase, *message, *hash, *access_key;
+  const char *phase, *message, *hash, *access_key, *checked_at;
   const char *const *groups;
   size_t ngroups;
+  yyjson_mut_val *drift; /* copied */
 } status_fields;
 
 static void write_status(op_ctx *o, yyjson_val *obj, const char *plural, const char *kind, const status_fields *f) {
@@ -253,6 +258,8 @@ static void write_status(op_ctx *o, yyjson_val *obj, const char *plural, const c
                          yyjson_get_sint(yyjson_obj_get(yyjson_obj_get(obj, "metadata"), "generation")));
   if (f->hash) yyjson_mut_obj_add_strcpy(d, st, "appliedHash", f->hash);
   if (f->access_key) yyjson_mut_obj_add_strcpy(d, st, "accessKey", f->access_key);
+  if (f->checked_at) yyjson_mut_obj_add_strcpy(d, st, "checkedAt", f->checked_at);
+  if (f->drift) yyjson_mut_obj_add_val(d, st, "drift", yyjson_mut_val_mut_copy(d, f->drift));
   if (f->groups) {
     yyjson_mut_val *g = yyjson_mut_obj_add_arr(d, st, "groups");
     for (size_t i = 0; i < f->ngroups; i++) yyjson_mut_arr_add_strcpy(d, g, f->groups[i]);
@@ -468,31 +475,225 @@ static void reconcile_user(op_ctx *o, yyjson_val *obj, conn *cn) {
 
 /* ---- Bucket ---------------------------------------------------------------------------------- */
 
+/* How often an applied Bucket is read back and put right (BUCKETS_OPERATOR_DRIFT_MS, 10 minutes). */
+static long long drift_interval_ms(void) {
+  const char *v = getenv("BUCKETS_OPERATOR_DRIFT_MS");
+  long long ms = v && *v ? atoll(v) : 0;
+  return ms > 0 ? ms : 600000;
+}
+
+/* Whether a Bucket needs a visit: its settings changed, it is not Ready, or its last check is old. */
+static bool bucket_due(yyjson_val *obj) {
+  if (get_str(obj, "metadata.deletionTimestamp")) return false; /* the data stays: deleting buckets is left to people */
+  const char *phase = get_str(obj, "status.phase"), *applied = get_str(obj, "status.appliedHash"),
+             *checked = get_str(obj, "status.checkedAt");
+  char hash[17];
+  bspec_hash(yyjson_obj_get(obj, "spec"), hash);
+  long long sec;
+  long nsec;
+  if (!phase || strcmp(phase, "Ready") != 0 || !applied || strcmp(applied, hash) != 0 || !checked ||
+      !buckets_time_parse_rfc3339(checked, &sec, &nsec))
+    return true;
+  return ((long long)time(NULL) - sec) * 1000 >= drift_interval_ms();
+}
+
+/* One setting: what it should say (want NULL: removed), read back and put right when it differs. */
+typedef struct {
+  const char *field, *query; /* "versioning", "?versioning" */
+  const char *const *tags;
+  const char *missing; /* the error code a GET gives when the bucket has none */
+} bucket_setting;
+
+typedef struct {
+  conn *cn;
+  const char *path;
+  bool known; /* the settings were applied before: a difference is drift */
+  yyjson_mut_doc *d;
+  yyjson_mut_val *drift; /* [{field, correctedAt}] */
+  char *msg;
+  size_t msgcap;
+} bucket_pass;
+
+static void note_drift(bucket_pass *bp, const char *field) {
+  if (!bp->known) return;
+  char now[32];
+  buckets_time_iso8601(time(NULL), now);
+  size_t i, max;
+  yyjson_mut_val *e;
+  yyjson_mut_arr_foreach(bp->drift, i, max, e) {
+    if (strcmp(yyjson_mut_get_str(yyjson_mut_obj_get(e, "field")), field) == 0) {
+      yyjson_mut_obj_put(e, yyjson_mut_str(bp->d, "correctedAt"), yyjson_mut_strcpy(bp->d, now));
+      return;
+    }
+  }
+  e = yyjson_mut_arr_add_obj(bp->d, bp->drift);
+  yyjson_mut_obj_add_strcpy(bp->d, e, "field", field);
+  yyjson_mut_obj_add_strcpy(bp->d, e, "correctedAt", now);
+  buckets_log_info("bucket %s: %s was changed outside the Bucket resource; put back", bp->path + 1, field);
+}
+
+/* "PUT the document unless the bucket already says the same"; false and bp->msg on a failure. */
+static bool apply_setting(bucket_pass *bp, const bucket_setting *s, const buckets_buf *want) {
+  buckets_buf body = BUCKETS_BUF_INIT, have = BUCKETS_BUF_INIT, need = BUCKETS_BUF_INIT;
+  char what[96], code[64];
+  bool ok = false;
+  int st = s3c_request(bp->cn->c, "GET", bp->path, s->query, NULL, NULL, 0, &body);
+  s3c_error_code(&body, code, sizeof(code));
+  if (st == 200) bspec_xml_sig(body.data, body.len, s->tags, &have);
+  else if (!*s->missing || strcmp(code, s->missing) != 0) {
+    snprintf(what, sizeof(what), "reading %s", s->field);
+    call_error(what, st, &body, bp->msg, bp->msgcap);
+    goto out;
+  }
+  if (want) bspec_xml_sig(want->data, want->len, s->tags, &need);
+  /* versioning never turned on reads as nothing, which is what Suspended asks for */
+  bool same = (have.len == need.len && (!have.len || memcmp(have.data, need.data, have.len) == 0)) ||
+              (strcmp(s->field, "versioning") == 0 && !have.len && need.len && strstr(need.data, "Suspended"));
+  if (same) {
+    ok = true;
+    goto out;
+  }
+  if (want) { /* Content-MD5: S3 asks for it with lifecycle rules */
+    uint8_t md5[16];
+    char md5b64[32];
+    buckets_md5(want->data, want->len, md5);
+    buckets_base64_encode(md5, sizeof(md5), md5b64);
+    buckets_http_kv hdr = {"content-md5", md5b64};
+    st = s3c_request_h(bp->cn->c, "PUT", bp->path, s->query, "application/xml", &hdr, 1, want->data, want->len, &body);
+  } else st = s3c_request(bp->cn->c, "DELETE", bp->path, s->query, NULL, NULL, 0, &body);
+  if (st / 100 != 2) {
+    snprintf(what, sizeof(what), "setting %s", s->field);
+    call_error(what, st, &body, bp->msg, bp->msgcap);
+    goto out;
+  }
+  note_drift(bp, s->field);
+  ok = true;
+out:
+  buckets_buf_free(&body);
+  buckets_buf_free(&have);
+  buckets_buf_free(&need);
+  return ok;
+}
+
+static bool apply_quota(bucket_pass *bp, const char *name, const char *quota) {
+  uint64_t want = 0, have = 0;
+  bspec_size(quota, &want);
+  char q[320], code[64];
+  buckets_buf body = BUCKETS_BUF_INIT, b = BUCKETS_BUF_INIT;
+  snprintf(q, sizeof(q), "bucket=%s", name);
+  int st = s3c_admin(bp->cn->c, "GET", "get-bucket-quota", q, NULL, 0, false, false, &body);
+  s3c_error_code(&body, code, sizeof(code));
+  bool ok = false;
+  if (st == 200) {
+    yyjson_doc *d = yyjson_read(body.data, body.len, 0);
+    have = yyjson_get_uint(yyjson_obj_get(yyjson_doc_get_root(d), "quota"));
+    yyjson_doc_free(d);
+  } else if (strcmp(code, "XMinioAdminNoSuchQuotaConfiguration") != 0) {
+    call_error("reading the quota", st, &body, bp->msg, bp->msgcap);
+    goto out;
+  }
+  if (have == want) {
+    ok = true;
+    goto out;
+  }
+  bspec_quota_json(want, &b);
+  st = s3c_admin(bp->cn->c, "PUT", "set-bucket-quota", q, b.data, b.len, false, false, &body);
+  if (st != 200) {
+    call_error("setting the quota", st, &body, bp->msg, bp->msgcap);
+    goto out;
+  }
+  note_drift(bp, "quota");
+  ok = true;
+out:
+  buckets_buf_free(&body);
+  buckets_buf_free(&b);
+  return ok;
+}
+
+static const bucket_setting k_versioning = {"versioning", "versioning", bspec_versioning_tags, ""};
+static const bucket_setting k_object_lock = {"objectLock", "object-lock", bspec_object_lock_tags,
+                                             "ObjectLockConfigurationNotFoundError"};
+static const bucket_setting k_encryption = {"encryption", "encryption", bspec_encryption_tags,
+                                            "ServerSideEncryptionConfigurationNotFoundError"};
+static const bucket_setting k_lifecycle = {"lifecycle", "lifecycle", bspec_lifecycle_tags, "NoSuchLifecycleConfiguration"};
+
 static void reconcile_bucket(op_ctx *o, yyjson_val *obj, conn *cn) {
-  if (get_str(obj, "metadata.deletionTimestamp")) return; /* the data stays: deleting buckets is left to people */
-  const char *phase = get_str(obj, "status.phase");
-  if (phase && strcmp(phase, "Ready") == 0) return;
   yyjson_val *spec = yyjson_obj_get(obj, "spec");
   const char *name = get_str(spec, "name");
   if (!name) name = get_str(obj, "metadata.name");
-  buckets_buf path = BUCKETS_BUF_INIT, body = BUCKETS_BUF_INIT;
+  char hash[17], msg[512] = "", now[32];
+  bspec_hash(spec, hash);
+  buckets_time_iso8601(time(NULL), now);
+  const char *applied = get_str(obj, "status.appliedHash");
+  yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
+  bucket_pass bp = {.cn = cn, .known = applied && strcmp(applied, hash) == 0, .d = d, .msg = msg, .msgcap = sizeof(msg)};
+  /* the corrections seen before, kept */
+  bp.drift = yyjson_val_mut_copy(d, yyjson_obj_get(yyjson_obj_get(obj, "status"), "drift"));
+  if (!yyjson_mut_is_arr(bp.drift)) bp.drift = yyjson_mut_arr(d);
+  buckets_buf path = BUCKETS_BUF_INIT, body = BUCKETS_BUF_INIT, doc = BUCKETS_BUF_INIT;
   buckets_buf_append_c(&path, "/");
   buckets_url_encode(&path, name, false);
-  int st = s3c_request(cn->c, "PUT", path.data, NULL, NULL, NULL, 0, &body);
-  char code[64], msg[512];
+  bp.path = path.data;
+  yyjson_val *lock = yyjson_obj_get(spec, "objectLock");
+  bool want_lock = yyjson_is_obj(lock) || yyjson_get_bool(lock);
+  bool ok = false;
+  int st;
+  char code[64];
+  if (!bspec_check(spec, msg, sizeof(msg))) goto out;
+
+  /* made, with object lock when declared (S3 allows it only then) */
+  buckets_http_kv lock_hdr = {"x-amz-bucket-object-lock-enabled", "true"};
+  st = s3c_request_h(cn->c, "PUT", path.data, NULL, NULL, &lock_hdr, want_lock ? 1 : 0, NULL, 0, &body);
   s3c_error_code(&body, code, sizeof(code));
-  if (st == 200 || strcmp(code, "BucketAlreadyOwnedByYou") == 0) {
-    bool extras = yyjson_get_bool(yyjson_obj_get(spec, "versioning")) ||
-                  yyjson_get_bool(yyjson_obj_get(spec, "objectLock")) || get_str(spec, "quota");
-    snprintf(msg, sizeof(msg), "bucket %s exists%s", name,
-             extras ? "; versioning, object lock and quota are not applied yet" : "");
-    write_status(o, obj, "buckets", "Bucket", &(status_fields){.phase = "Ready", .message = msg});
-  } else {
+  if (st != 200 && strcmp(code, "BucketAlreadyOwnedByYou") != 0) {
     call_error("creating the bucket", st, &body, msg, sizeof(msg));
-    write_status(o, obj, "buckets", "Bucket", &(status_fields){.phase = "Error", .message = msg});
+    goto out;
   }
+  if (want_lock) {
+    st = s3c_request(cn->c, "GET", path.data, "object-lock", NULL, NULL, 0, &body);
+    s3c_error_code(&body, code, sizeof(code));
+    if (st != 200) {
+      if (strcmp(code, "ObjectLockConfigurationNotFoundError") == 0)
+        snprintf(msg, sizeof(msg), "bucket %s was made without object lock, and S3 turns it on only when a bucket is made",
+                 name);
+      else call_error("reading object lock", st, &body, msg, sizeof(msg));
+      goto out;
+    }
+  }
+  yyjson_val *v;
+  if ((v = yyjson_obj_get(spec, "versioning")) && yyjson_is_bool(v)) {
+    buckets_buf_reset(&doc);
+    bspec_versioning_xml(yyjson_get_bool(v), &doc);
+    if (!apply_setting(&bp, &k_versioning, &doc)) goto out;
+  }
+  if (want_lock) {
+    buckets_buf_reset(&doc);
+    bspec_object_lock_xml(lock, &doc);
+    if (!apply_setting(&bp, &k_object_lock, &doc)) goto out;
+  }
+  if ((v = yyjson_obj_get(spec, "quota")) && !apply_quota(&bp, name, yyjson_get_str(v))) goto out;
+  if ((v = yyjson_obj_get(spec, "encryption"))) {
+    buckets_buf_reset(&doc);
+    if (!apply_setting(&bp, &k_encryption, bspec_encryption_xml(v, &doc) ? &doc : NULL)) goto out;
+  }
+  if ((v = yyjson_obj_get(spec, "lifecycle"))) {
+    buckets_buf_reset(&doc);
+    if (!apply_setting(&bp, &k_lifecycle, bspec_lifecycle_xml(v, &doc) ? &doc : NULL)) goto out;
+  }
+  snprintf(msg, sizeof(msg), "bucket %s matches its spec", name);
+  ok = true;
+
+out:
+  write_status(o, obj, "buckets", "Bucket",
+               &(status_fields){.phase = ok ? "Ready" : "Error",
+                                .message = msg,
+                                .hash = ok ? hash : applied,
+                                .checked_at = ok ? now : NULL,
+                                .drift = yyjson_mut_arr_size(bp.drift) ? bp.drift : NULL});
+  yyjson_mut_doc_free(d);
   buckets_buf_free(&path);
   buckets_buf_free(&body);
+  buckets_buf_free(&doc);
 }
 
 /* ---- the pass --------------------------------------------------------------------------------- */
@@ -508,8 +709,11 @@ static yyjson_val *find_cluster(yyjson_val *clusters, const char *ns, const char
 }
 
 typedef void (*reconcile_fn)(op_ctx *o, yyjson_val *obj, conn *cn);
+typedef bool (*due_fn)(yyjson_val *obj);
 
-static void reconcile_kind(op_ctx *o, yyjson_val *clusters, const char *plural, const char *kind, reconcile_fn fn) {
+/* due, when given, says whether an item needs the cluster this pass. */
+static void reconcile_kind(op_ctx *o, yyjson_val *clusters, const char *plural, const char *kind, reconcile_fn fn,
+                           due_fn due) {
   buckets_buf path = BUCKETS_BUF_INIT;
   if (o->namespace) buckets_buf_appendf(&path, GROUP_PATH "/namespaces/%s/%s", o->namespace, plural);
   else buckets_buf_appendf(&path, GROUP_PATH "/%s", plural);
@@ -531,6 +735,7 @@ static void reconcile_kind(op_ctx *o, yyjson_val *clusters, const char *plural, 
         write_status(o, it, plural, kind, &(status_fields){.phase = "Pending", .message = msg});
         continue;
       }
+      if (due && !due(it)) continue;
       conn cn;
       char err[512];
       if (!cluster_connect(o, bc, &cn, err, sizeof(err))) {
@@ -547,7 +752,7 @@ static void reconcile_kind(op_ctx *o, yyjson_val *clusters, const char *plural, 
 
 void op_reconcile_iam(op_ctx *o, yyjson_val *clusters) {
   /* Policies first: users refer to them. */
-  reconcile_kind(o, clusters, "bucketspolicies", "BucketsPolicy", reconcile_policy);
-  reconcile_kind(o, clusters, "bucketsusers", "BucketsUser", reconcile_user);
-  reconcile_kind(o, clusters, "buckets", "Bucket", reconcile_bucket);
+  reconcile_kind(o, clusters, "bucketspolicies", "BucketsPolicy", reconcile_policy, NULL);
+  reconcile_kind(o, clusters, "bucketsusers", "BucketsUser", reconcile_user, NULL);
+  reconcile_kind(o, clusters, "buckets", "Bucket", reconcile_bucket, bucket_due);
 }

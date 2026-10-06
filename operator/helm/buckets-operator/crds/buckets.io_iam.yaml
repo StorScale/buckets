@@ -87,9 +87,37 @@ spec:
               properties:
                 cluster: {type: string}
                 name: {type: string, description: S3 bucket name (defaults to metadata.name)}
-                versioning: {type: boolean}
-                objectLock: {type: boolean}
-                quota: {type: string, description: e.g. 100Gi}
+                versioning: {type: boolean, description: "true: Enabled; false: Suspended"}
+                objectLock:
+                  description: >-
+                    true, or {mode: GOVERNANCE|COMPLIANCE, days|years} for a default retention.
+                    Turned on only when the bucket is made.
+                  x-kubernetes-preserve-unknown-fields: true
+                quota: {type: string, nullable: true, description: 'A hard quota, e.g. 100Gi; "" or null: none'}
+                encryption:
+                  type: object
+                  nullable: true
+                  description: 'Default encryption: {kmsKey: <key>} or {sse: S3}; null removes it'
+                  properties:
+                    kmsKey: {type: string}
+                    sse: {type: string, enum: [S3]}
+                lifecycle:
+                  type: array
+                  description: Lifecycle rules; [] removes them, leaving the field out leaves them alone
+                  items:
+                    type: object
+                    required: [id]
+                    properties:
+                      id: {type: string}
+                      prefix: {type: string}
+                      expireDays: {type: integer, minimum: 1}
+                      noncurrentExpireDays: {type: integer, minimum: 1}
+                      abortIncompleteUploadDays: {type: integer, minimum: 1}
+                      expireDeleteMarkers: {type: boolean}
             status:
               type: object
               x-kubernetes-preserve-unknown-fields: true
+      additionalPrinterColumns:
+        - {name: Bucket, type: string, jsonPath: .spec.name}
+        - {name: Phase, type: string, jsonPath: .status.phase}
+        - {name: Checked, type: date, jsonPath: .status.checkedAt}

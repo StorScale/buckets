@@ -112,7 +112,7 @@ mistake can't tear it down; to stop it, empty the list.
 
 ## Order
 
-1. `Bucket`: versioning, object lock, quota, encryption, lifecycle, with drift
+1. ✅ `Bucket`: versioning, object lock, quota, encryption, lifecycle, with drift
    correction.
 2. `Bucket.replication`.
 3. `BucketsSiteReplication`.

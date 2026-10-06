@@ -61,7 +61,7 @@ k apply -f "$ROOT/operator/deploy/operator.yaml" >/dev/null # RBAC (the Deployme
 k create ns tenant >/dev/null
 
 start_operator() { # name
-  POD_NAME=$1 POD_NAMESPACE=buckets-system BUCKETS_OPERATOR_RESYNC_MS=500 BUCKETS_KUBE_API="https://127.0.0.1:$APORT" \
+  POD_NAME=$1 POD_NAMESPACE=buckets-system BUCKETS_OPERATOR_RESYNC_MS=500 BUCKETS_OPERATOR_DRIFT_MS=2000 BUCKETS_KUBE_API="https://127.0.0.1:$APORT" \
     BUCKETS_KUBE_TOKEN=operator-token BUCKETS_KUBE_CA="$WORK/certs/apiserver.crt" "$OP" 2>>"$WORK/$1.log" &
   PIDS+=($!)
   eval "OP_$1=$!"
@@ -174,7 +174,8 @@ BPORT=${BPORT:-17900}
 rootu=$(k -n tenant get secret store-root -o jsonpath='{.data.rootUser}' | base64 -d)
 rootp=$(k -n tenant get secret store-root -o jsonpath='{.data.rootPassword}' | base64 -d)
 mkdir -p "$WORK/bk/d1" "$WORK/bk/d2" "$WORK/bk/d3" "$WORK/bk/d4"
-BUCKETS_ROOT_USER=$rootu BUCKETS_ROOT_PASSWORD=$rootp "$BUCKETSD" server --address "127.0.0.1:$BPORT" \
+MINIO_KMS_SECRET_KEY="envtest-key:$(openssl rand -base64 32)" \
+  BUCKETS_ROOT_USER=$rootu BUCKETS_ROOT_PASSWORD=$rootp "$BUCKETSD" server --address "127.0.0.1:$BPORT" \
   "$WORK/bk/d{1...4}" 2>>"$WORK/bucketsd.log" &
 PIDS+=($!)
 until_true 'curl -sf http://127.0.0.1:$BPORT/minio/health/ready'
@@ -234,6 +235,78 @@ spec: {cluster: store, credsSecret: {name: bob-creds}}
 YAML
 until_true '[[ $(jp bucketsuser/bob {.status.phase}) == Pending ]]' || true
 expect "missing Secret is reported" "$(jp bucketsuser/bob '{.status.phase}')" Pending
+
+echo "== a Bucket's settings are applied, changed and kept"
+root() { curl -s --aws-sigv4 "aws:amz:us-east-1:s3" --user "$rootu:$rootp" "$@"; }
+xml() { sed -n "s:.*<$2>\([^<]*\)</$2>.*:\1:p" <<<"$1" | head -1; }
+k apply -f - >/dev/null <<YAML
+apiVersion: buckets.io/v1alpha1
+kind: Bucket
+metadata: {name: reports, namespace: tenant}
+spec:
+  cluster: store
+  versioning: true
+  objectLock: {mode: GOVERNANCE, days: 30}
+  quota: 1Gi
+  encryption: {kmsKey: envtest-key}
+  lifecycle:
+    - {id: tmp, prefix: tmp/, expireDays: 7, abortIncompleteUploadDays: 2}
+    - {id: markers, noncurrentExpireDays: 30, expireDeleteMarkers: true}
+YAML
+until_true '[[ $(jp bucket/reports {.status.phase}) == Ready ]]' || true
+expect "Bucket with settings ready" "$(jp bucket/reports '{.status.phase}')" Ready
+expect "message" "$(jp bucket/reports '{.status.message}')" "bucket reports matches its spec"
+B="http://127.0.0.1:$BPORT/reports"
+expect "versioning on" "$(xml "$(root "$B?versioning")" Status)" Enabled
+lock=$(root "$B?object-lock")
+expect "made with object lock" "$(xml "$lock" ObjectLockEnabled)" Enabled
+expect "default retention" "$(xml "$lock" Mode)/$(xml "$lock" Days)" GOVERNANCE/30
+expect "quota" "$(root "http://127.0.0.1:$BPORT/minio/admin/v3/get-bucket-quota?bucket=reports" | jq -r .quota)" 1073741824
+expect "default encryption" "$(xml "$(root "$B?encryption")" KMSMasterKeyID)" envtest-key
+lc=$(root "$B?lifecycle")
+expect "lifecycle rules" "$(grep -o '<ID>[^<]*</ID>' <<<"$lc" | tr -d '\n')" "<ID>tmp</ID><ID>markers</ID>"
+expect "expiry" "$(xml "$lc" Days)" 7
+expect "checked at" "$([[ -n $(jp bucket/reports '{.status.checkedAt}') ]] && echo set)" set
+
+k -n tenant patch bucket reports --type merge -p \
+  '{"spec":{"objectLock":{"mode":"GOVERNANCE","days":60},"quota":"","encryption":{"kmsKey":null,"sse":"S3"},"lifecycle":[]}}' >/dev/null
+until_true '[[ $(xml "$(root "$B?object-lock")" Days) == 60 ]]' || true
+until_true '[[ $(jp bucket/reports {.status.phase}) == Ready && $(jp bucket/reports {.status.appliedHash}) != "" ]]' || true
+sleep 1
+expect "retention changed" "$(xml "$(root "$B?object-lock")" Days)" 60
+expect "quota removed" "$(root "http://127.0.0.1:$BPORT/minio/admin/v3/get-bucket-quota?bucket=reports" | jq -r '.quota // 0')" 0
+expect "encryption now SSE-S3" "$(xml "$(root "$B?encryption")" SSEAlgorithm)" AES256
+expect "lifecycle: [] removes the rules" "$(xml "$(root "$B?lifecycle")" Code)" NoSuchLifecycleConfiguration
+expect "no drift from spec changes" "$(jp bucket/reports '{.status.drift}')" ""
+
+# changed by hand: put back by the next check
+Q="http://127.0.0.1:$BPORT/minio/admin/v3/get-bucket-quota?bucket=reports"
+expect "a quota set by hand" "$(root -X PUT --data '{"quota":5000,"quotatype":"hard"}' -o /dev/null -w '%{http_code}' \
+  "http://127.0.0.1:$BPORT/minio/admin/v3/set-bucket-quota?bucket=reports")/$(root "$Q" | jq -r .quota)" 200/5000
+root -X DELETE "$B?encryption" >/dev/null
+until_true '[[ $(jp bucket/reports "{.status.drift[1].field}") != "" ]]' || true
+expect "quota put back" "$(root "$Q" | jq -r '.quota // 0')" 0
+expect "encryption put back" "$(xml "$(root "$B?encryption")" SSEAlgorithm)" AES256
+expect "drift reported" "$(jp bucket/reports '{.status.drift[*].field}' | tr ' ' '\n' | sort | tr '\n' ' ')" "encryption quota "
+
+# a bucket that already exists, without lock
+root -X PUT "http://127.0.0.1:$BPORT/plain" >/dev/null
+k apply -f - >/dev/null <<YAML
+apiVersion: buckets.io/v1alpha1
+kind: Bucket
+metadata: {name: plain, namespace: tenant}
+spec: {cluster: store, objectLock: true}
+YAML
+until_true '[[ $(jp bucket/plain {.status.phase}) == Error ]]' || true
+expect "object lock on an existing bucket refused" "$(jp bucket/plain '{.status.message}' | grep -c 'only when a bucket is made')" 1
+k -n tenant patch bucket plain --type merge -p '{"spec":{"objectLock":null,"versioning":false,"lifecycle":[{"id":"x"}]}}' >/dev/null
+until_true '[[ $(jp bucket/plain {.status.message}) == *"does nothing"* ]]' || true
+expect "invalid settings reported" "$(jp bucket/plain '{.status.message}')" "lifecycle rule x does nothing: give it expireDays or another action"
+k -n tenant patch bucket plain --type json -p '[{"op":"remove","path":"/spec/lifecycle"}]' >/dev/null
+until_true '[[ $(jp bucket/plain {.status.phase}) == Ready ]]' || true
+expect "versioning false on a never-versioned bucket" "$(jp bucket/plain '{.status.phase}')/$(xml "$(root "http://127.0.0.1:$BPORT/plain?versioning")" Status)" Ready/
+k -n tenant delete bucket reports plain >/dev/null
+expect "deleting a Bucket leaves the bucket" "$(curl -s -o /dev/null -w '%{http_code}' --aws-sigv4 "aws:amz:us-east-1:s3" --user "$rootu:$rootp" -I "$B")" 200
 
 echo "== monitoring: a metrics user, its token and a ServiceMonitor, once the Prometheus Operator is there"
 until_true '[[ $(jp bc/store {.status.monitoring.phase}) == NotInstalled ]]' || true
