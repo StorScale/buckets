@@ -4,6 +4,7 @@
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -29,6 +30,94 @@ static void test_graph_state(void **state) {
   assert_int_equal(buckets_idsync_graph_state(500, NULL, 0), BUCKETS_IDSYNC_UNKNOWN);
 }
 
+static void test_keycloak_okta_state(void **state) {
+  (void)state;
+  const char *on = "{\"id\":\"u1\",\"username\":\"ann\",\"enabled\":true}",
+             *off = "{\"id\":\"u1\",\"enabled\":false}";
+  assert_int_equal(buckets_idsync_keycloak_state(200, on, strlen(on)), BUCKETS_IDSYNC_ACTIVE);
+  assert_int_equal(buckets_idsync_keycloak_state(200, off, strlen(off)), BUCKETS_IDSYNC_DISABLED);
+  const char *gone = "{\"error\":\"User not found\"}", *realm = "{\"error\":\"Realm not found.\"}";
+  assert_int_equal(buckets_idsync_keycloak_state(404, gone, strlen(gone)), BUCKETS_IDSYNC_GONE);
+  assert_int_equal(buckets_idsync_keycloak_state(404, realm, strlen(realm)),
+                   BUCKETS_IDSYNC_UNKNOWN); /* a wrong realm */
+  const char *denied = "{\"error\":\"HTTP 403 Forbidden\"}";
+  assert_int_equal(buckets_idsync_keycloak_state(403, denied, strlen(denied)), BUCKETS_IDSYNC_UNKNOWN);
+
+  static const struct {
+    const char *status;
+    buckets_idsync_state want;
+  } okta[] = {{"ACTIVE", BUCKETS_IDSYNC_ACTIVE},      {"PROVISIONED", BUCKETS_IDSYNC_ACTIVE},
+              {"LOCKED_OUT", BUCKETS_IDSYNC_ACTIVE},  {"PASSWORD_EXPIRED", BUCKETS_IDSYNC_ACTIVE},
+              {"RECOVERY", BUCKETS_IDSYNC_ACTIVE},    {"STAGED", BUCKETS_IDSYNC_ACTIVE},
+              {"SUSPENDED", BUCKETS_IDSYNC_DISABLED}, {"DEPROVISIONED", BUCKETS_IDSYNC_DISABLED}};
+  for (size_t i = 0; i < sizeof(okta) / sizeof(okta[0]); i++) {
+    char body[128];
+    snprintf(body, sizeof(body), "{\"id\":\"00u1\",\"status\":\"%s\"}", okta[i].status);
+    assert_int_equal(buckets_idsync_okta_state(200, body, strlen(body)), okta[i].want);
+  }
+  const char *ogone =
+      "{\"errorCode\":\"E0000007\",\"errorSummary\":\"Not found: Resource not found: 00u1 (User)\"}";
+  const char *other =
+      "{\"errorCode\":\"E0000007\",\"errorSummary\":\"Not found: Resource not found: x (AppInstance)\"}";
+  const char *bad = "{\"errorCode\":\"E0000011\",\"errorSummary\":\"Invalid token provided\"}";
+  assert_int_equal(buckets_idsync_okta_state(404, ogone, strlen(ogone)), BUCKETS_IDSYNC_GONE);
+  assert_int_equal(buckets_idsync_okta_state(404, other, strlen(other)), BUCKETS_IDSYNC_UNKNOWN);
+  assert_int_equal(buckets_idsync_okta_state(401, bad, strlen(bad)), BUCKETS_IDSYNC_UNKNOWN);
+}
+
+static void test_person_of(void **state) {
+  (void)state;
+  buckets_idsync_settings e = {.provider = "entra", .tenant = "t-1"};
+  assert_string_equal(buckets_idsync_person_of(&e, "t-1", "o-1", "https://login/x", "s-1"), "o-1");
+  assert_null(buckets_idsync_person_of(&e, "t-2", "o-1", NULL, NULL)); /* another tenant */
+  assert_null(buckets_idsync_person_of(&e, "t-1", NULL, NULL, "s-1"));
+  buckets_idsync_settings k = {.provider = "keycloak", .issuer = "https://kc.example.com/realms/corp"};
+  assert_string_equal(buckets_idsync_person_of(&k, NULL, NULL, "https://kc.example.com/realms/corp", "u-1"),
+                      "u-1");
+  assert_string_equal(buckets_idsync_person_of(&k, NULL, NULL, "https://kc.example.com/realms/corp/", "u-1"),
+                      "u-1");
+  assert_null(buckets_idsync_person_of(&k, NULL, NULL, "https://kc.example.com/realms/other", "u-1"));
+  assert_null(buckets_idsync_person_of(&k, NULL, NULL, "https://kc.example.com/realms/corpx", "u-1"));
+  assert_null(buckets_idsync_person_of(&k, NULL, NULL, "https://kc.example.com/realms/corp", NULL));
+  buckets_idsync_settings off = {0};
+  assert_null(buckets_idsync_person_of(&off, "t-1", "o-1", "x", "y"));
+}
+
+static void test_settings_providers(void **state) {
+  (void)state;
+  buckets_idsync_settings s;
+  char err[256] = "";
+  setenv("BUCKETS_OPENID_SYNC_PROVIDER", "keycloak", 1);
+  setenv("BUCKETS_OPENID_SYNC_URL", "https://kc.example.com/", 1);
+  setenv("BUCKETS_OPENID_SYNC_CLIENT_ID", "buckets", 1);
+  setenv("BUCKETS_OPENID_SYNC_CLIENT_SECRET", "s", 1);
+  assert_false(buckets_idsync_settings_from_env(&s, err, sizeof(err)));
+  assert_non_null(strstr(err, "REALM"));
+  setenv("BUCKETS_OPENID_SYNC_REALM", "corp", 1);
+  assert_true(buckets_idsync_settings_from_env(&s, err, sizeof(err)));
+  assert_string_equal(s.url, "https://kc.example.com");
+  assert_string_equal(s.issuer, "https://kc.example.com/realms/corp");
+  setenv("BUCKETS_OPENID_SYNC_PROVIDER", "okta", 1);
+  setenv("BUCKETS_OPENID_SYNC_URL", "https://example.okta.com", 1);
+  assert_false(buckets_idsync_settings_from_env(&s, err, sizeof(err)));
+  assert_non_null(strstr(err, "API_TOKEN"));
+  setenv("BUCKETS_OPENID_SYNC_API_TOKEN", "00abc", 1);
+  assert_false(buckets_idsync_settings_from_env(&s, err, sizeof(err)));
+  assert_non_null(
+      strstr(err, "ISSUER")); /* Okta's issuer is the authorization server's: given, not guessed */
+  setenv("BUCKETS_OPENID_SYNC_ISSUER", "https://example.okta.com/oauth2/default", 1);
+  assert_true(buckets_idsync_settings_from_env(&s, err, sizeof(err)));
+  assert_string_equal(s.api_token, "00abc");
+  setenv("BUCKETS_OPENID_SYNC_PROVIDER", "ping", 1);
+  assert_false(buckets_idsync_settings_from_env(&s, err, sizeof(err)));
+  assert_non_null(strstr(err, "entra, keycloak or okta"));
+  const char *vars[] = {"BUCKETS_OPENID_SYNC_PROVIDER",  "BUCKETS_OPENID_SYNC_URL",
+                        "BUCKETS_OPENID_SYNC_CLIENT_ID", "BUCKETS_OPENID_SYNC_CLIENT_SECRET",
+                        "BUCKETS_OPENID_SYNC_REALM",     "BUCKETS_OPENID_SYNC_API_TOKEN",
+                        "BUCKETS_OPENID_SYNC_ISSUER"};
+  for (size_t i = 0; i < sizeof(vars) / sizeof(vars[0]); i++) unsetenv(vars[i]);
+}
+
 static void test_settings(void **state) {
   (void)state;
   buckets_idsync_settings s;
@@ -36,9 +125,9 @@ static void test_settings(void **state) {
   unsetenv("BUCKETS_OPENID_SYNC_PROVIDER");
   assert_true(buckets_idsync_settings_from_env(&s, err, sizeof(err)));
   assert_string_equal(s.provider, ""); /* off */
-  setenv("BUCKETS_OPENID_SYNC_PROVIDER", "okta", 1);
+  setenv("BUCKETS_OPENID_SYNC_PROVIDER", "ping", 1);
   assert_false(buckets_idsync_settings_from_env(&s, err, sizeof(err)));
-  assert_non_null(strstr(err, "only entra"));
+  assert_non_null(strstr(err, "entra, keycloak or okta"));
   setenv("BUCKETS_OPENID_SYNC_PROVIDER", "entra", 1);
   assert_false(buckets_idsync_settings_from_env(&s, err, sizeof(err)));
   assert_non_null(strstr(err, "TENANT_ID"));
@@ -170,8 +259,10 @@ static void test_held_json(void **state) {
 
 int main(void) {
   const struct CMUnitTest tests[] = {
-      cmocka_unit_test(test_graph_state),  cmocka_unit_test(test_settings),  cmocka_unit_test(test_plan),
-      cmocka_unit_test(test_safety_limit), cmocka_unit_test(test_held_json),
+      cmocka_unit_test(test_graph_state), cmocka_unit_test(test_settings),
+      cmocka_unit_test(test_plan),        cmocka_unit_test(test_safety_limit),
+      cmocka_unit_test(test_held_json),   cmocka_unit_test(test_keycloak_okta_state),
+      cmocka_unit_test(test_person_of),   cmocka_unit_test(test_settings_providers),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

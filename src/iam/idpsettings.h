@@ -21,9 +21,11 @@
  *               "redirectUri",                       the console's /oauth_callback, if not derived
  *               "rolePolicy",                        policies for everyone signing in, instead of a claim
  *               "claimUserinfo",                     true: claims from the UserInfo endpoint too
-               "removal": {"enabled",               people who leave lose their access (entra only, for now;
-                           "deleteAfterDays",        iam/idsync.h), with the sign-in app's credentials: their
-                           "maxPerSync"}},           keys off at once, deleted after deleteAfterDays (30)
+               "removal": {"enabled",               people who leave lose their access (entra, keycloak, okta;
+                           "deleteAfterDays",        iam/idsync.h): their keys off at once, deleted after
+                           "maxPerSync",             deleteAfterDays (30). Entra and Keycloak use the sign-in
+                           "intervalMinutes",        client's credentials; Okta an API token. Checked every
+                           "apiToken"}},             intervalMinutes (60)
  *    "ldap":   {"preset": "ad" | "openldap" | "custom",
  *               "serverAddr",                        host[:port]
  *               "tls": "ldaps" | "starttls" | "plain",
@@ -58,8 +60,11 @@ bool buckets_idp_server_config(yyjson_val *settings, buckets_buf *out, char *err
 
 /* The identity sync's settings when removal is on (false when off). client_secret points into settings. */
 typedef struct {
-  const char *tenant, *client_id, *client_secret;
-  long delete_after_days, max_per_sync;
+  const char *provider; /* entra, keycloak, okta */
+  const char *tenant, *client_id, *client_secret, *api_token, *realm;
+  char url[512];    /* keycloak's base URL, https://<okta domain> */
+  char issuer[700]; /* keycloak, okta: the tokens' iss */
+  long delete_after_days, max_per_sync, interval_minutes;
 } buckets_idp_removal;
 bool buckets_idp_removal_of(yyjson_val *settings, buckets_idp_removal *out);
 

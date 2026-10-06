@@ -5,7 +5,8 @@
 #include <stdio.h>
 #include <string.h>
 
-const char *const buckets_idp_secret_fields[] = {"openid.clientSecret", "ldap.lookupBindPassword", NULL};
+const char *const buckets_idp_secret_fields[] = {"openid.clientSecret", "openid.removal.apiToken",
+                                                 "ldap.lookupBindPassword", NULL};
 
 /* settings["a.b"], or NULL */
 static yyjson_val *at(yyjson_val *o, const char *path) {
@@ -185,13 +186,18 @@ static bool check_openid(yyjson_val *s, char *err, size_t errlen) {
   const char *rp = str(s, "openid.rolePolicy");
   if (!*rp && has_space(claim_of(s, p))) return fail(err, errlen, "The claim name cannot contain spaces.");
   if (flag(s, "openid.removal.enabled")) {
-    if (strcmp(p->name, "entra") != 0)
-      return fail(err, errlen, "Removing people who leave works with Microsoft Entra ID for now.");
+    if (strcmp(p->name, "generic") == 0)
+      return fail(err, errlen, "Removing people who leave works with Entra ID, Okta and Keycloak.");
+    if (strcmp(p->name, "okta") == 0 && !*str(s, "openid.removal.apiToken"))
+      return fail(err, errlen, "Enter an Okta API token for checking who has left.");
     yyjson_val *days = at(s, "openid.removal.deleteAfterDays"), *max = at(s, "openid.removal.maxPerSync");
     if (days && (!yyjson_is_int(days) || yyjson_get_sint(days) < 1 || yyjson_get_sint(days) > 3650))
       return fail(err, errlen, "Delete the access keys of people who left after 1 to 3650 days.");
     if (max && (!yyjson_is_int(max) || yyjson_get_sint(max) < 1 || yyjson_get_sint(max) > 100000))
       return fail(err, errlen, "The most people removed in one sync is a number from 1.");
+    yyjson_val *every = at(s, "openid.removal.intervalMinutes");
+    if (every && (!yyjson_is_int(every) || yyjson_get_sint(every) < 1 || yyjson_get_sint(every) > 1440))
+      return fail(err, errlen, "Check every 1 to 1440 minutes.");
   }
   const char *ru = str(s, "openid.redirectUri");
   if (*ru) {
@@ -328,13 +334,18 @@ yyjson_mut_val *buckets_idp_console_view(yyjson_mut_doc *d, yyjson_val *s) {
 
 /* ---- secrets ------------------------------------------------------------------------ */
 
+/* The object holding a field ("openid.removal.apiToken": settings.openid.removal), and its last key. */
 static yyjson_mut_val *mut_part(yyjson_mut_val *o, const char *field, const char **leaf) {
-  const char *dot = strchr(field, '.');
-  char part[32];
-  snprintf(part, sizeof(part), "%.*s", (int)(dot - field), field);
-  *leaf = dot + 1;
-  yyjson_mut_val *p = yyjson_mut_obj_get(o, part);
-  return yyjson_mut_is_obj(p) ? p : NULL;
+  const char *last = strrchr(field, '.');
+  *leaf = last + 1;
+  for (const char *p = field; o && p < last;) {
+    const char *dot = strchr(p, '.');
+    char key[32];
+    snprintf(key, sizeof(key), "%.*s", (int)(dot - p), p);
+    o = yyjson_mut_obj_get(o, key);
+    p = dot + 1;
+  }
+  return yyjson_mut_is_obj(o) ? o : NULL;
 }
 
 yyjson_mut_val *buckets_idp_settings_redacted(yyjson_mut_doc *d, yyjson_val *settings) {
@@ -385,13 +396,33 @@ void buckets_idp_settings_keep_secrets(yyjson_mut_doc *d, yyjson_mut_val *settin
 bool buckets_idp_removal_of(yyjson_val *s, buckets_idp_removal *out) {
   memset(out, 0, sizeof(*out));
   const provider_def *p = provider_of(s);
-  if (!has(s, "openid") || !p || strcmp(p->name, "entra") != 0 || !flag(s, "openid.removal.enabled")) return false;
+  if (!has(s, "openid") || !p || strcmp(p->name, "generic") == 0 || !flag(s, "openid.removal.enabled")) return false;
+  out->provider = p->name;
   out->tenant = str(s, "openid.tenantId");
   out->client_id = str(s, "openid.clientId");
   out->client_secret = str(s, "openid.clientSecret");
+  out->api_token = str(s, "openid.removal.apiToken");
+  out->realm = str(s, "openid.realm");
+  /* the issuer the tokens carry: the discovery URL without its /.well-known part */
+  char cfg[600];
+  buckets_idp_config_url(s, cfg, sizeof(cfg));
+  char *wk = strstr(cfg, "/.well-known/");
+  if (wk) *wk = '\0';
+  if (strcmp(p->name, "keycloak") == 0) {
+    snprintf(out->url, sizeof(out->url), "%s", str(s, "openid.url"));
+    size_t n = strlen(out->url);
+    while (n && out->url[n - 1] == '/') out->url[--n] = '\0';
+  } else if (strcmp(p->name, "okta") == 0) {
+    char host[256];
+    host_only(str(s, "openid.domain"), host, sizeof(host));
+    snprintf(out->url, sizeof(out->url), "https://%s", host);
+  }
+  if (strcmp(p->name, "entra") != 0) snprintf(out->issuer, sizeof(out->issuer), "%s", cfg);
   yyjson_val *days = at(s, "openid.removal.deleteAfterDays"), *max = at(s, "openid.removal.maxPerSync");
   out->delete_after_days = yyjson_is_int(days) ? (long)yyjson_get_sint(days) : 30;
   out->max_per_sync = yyjson_is_int(max) ? (long)yyjson_get_sint(max) : 10;
+  yyjson_val *every = at(s, "openid.removal.intervalMinutes");
+  out->interval_minutes = yyjson_is_int(every) ? (long)yyjson_get_sint(every) : 60;
   return true;
 }
 

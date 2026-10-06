@@ -9,15 +9,20 @@
  * back within it, the keys come back on. LDAP has its own sync (s3/server.c).
  *
  * Settings (environment):
- *   BUCKETS_OPENID_SYNC_PROVIDER     entra (the only one yet); unset: off
- *   BUCKETS_OPENID_SYNC_TENANT_ID, _CLIENT_ID, _CLIENT_SECRET
+ *   BUCKETS_OPENID_SYNC_PROVIDER     entra, keycloak or okta; unset: off
+ *   entra:    BUCKETS_OPENID_SYNC_TENANT_ID, _CLIENT_ID, _CLIENT_SECRET (an app with Graph's User.Read.All);
+ *             people by the token's tid and oid
+ *   keycloak: BUCKETS_OPENID_SYNC_URL (Keycloak's base URL), _REALM, _CLIENT_ID, _CLIENT_SECRET (a client
+ *             whose service account has realm-management's view-users); _ISSUER (default URL/realms/REALM)
+ *   okta:     BUCKETS_OPENID_SYNC_URL (https://<domain>), _API_TOKEN (read-only), _ISSUER (the
+ *             authorization server's); Keycloak and Okta people by the token's iss and sub
  *   BUCKETS_OPENID_SYNC_INTERVAL     seconds between syncs (3600)
  *   BUCKETS_OPENID_REMOVE_AFTER      grace period: days, or a Go duration such as 10s (30 days)
  *   BUCKETS_OPENID_REMOVE_MAX        more people than this gone in one sync: none removed (10)
  *   BUCKETS_OPENID_SYNC_LOGIN_URL, _GRAPH_URL   Microsoft's endpoints (tests point them elsewhere)
  *
- * The planning is pure, so tested without a provider; the Entra client is
- * the only part that talks to one. */
+ * The planning is pure, so tested without a provider; the client is the
+ * only part that talks to one. */
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -27,7 +32,8 @@
 /* ---- settings --------------------------------------------------------------------------- */
 
 typedef struct {
-  char provider[16]; /* "entra"; "" off */
+  char provider[16]; /* "entra", "keycloak", "okta"; "" off */
+  char url[512], realm[128], issuer[700], api_token[256];
   char tenant[64], client_id[128], client_secret[256];
   char login_url[256], graph_url[256];
   long interval_s;
@@ -51,13 +57,22 @@ const char *buckets_idsync_state_name(buckets_idsync_state st);
 
 /* Microsoft Graph's reply to GET /v1.0/users/{id}?$select=id,accountEnabled. */
 buckets_idsync_state buckets_idsync_graph_state(int status, const char *body, size_t len);
+/* Keycloak's reply to GET /admin/realms/{realm}/users/{id}. */
+buckets_idsync_state buckets_idsync_keycloak_state(int status, const char *body, size_t len);
+/* Okta's reply to GET /api/v1/users/{id}: SUSPENDED and DEPROVISIONED are disabled. */
+buckets_idsync_state buckets_idsync_okta_state(int status, const char *body, size_t len);
+
+/* Whose credential this is, by its token's claims: the person's ID with this provider, or NULL when the
+ * credential is not from it. */
+const char *buckets_idsync_person_of(const buckets_idsync_settings *s, const char *tid, const char *oid,
+                                     const char *iss, const char *sub);
 
 /* ---- planning ------------------------------------------------------------------------------- */
 
 /* A credential of one of the provider's people. */
 typedef struct {
   const char *access_key;
-  const char *person; /* the provider's ID for its owner (Entra: oid) */
+  const char *person; /* the provider's ID for its owner (Entra: oid; Keycloak, Okta: sub) */
   bool sts;           /* temporary; else an access key (service account) */
   bool enabled;       /* an access key's status */
 } buckets_idsync_cred;
@@ -111,18 +126,19 @@ bool buckets_idsync_held_parse(const char *json, size_t len, buckets_idsync_held
 void buckets_idsync_held_json(const buckets_idsync_held *h, size_t n, buckets_buf *out);
 void buckets_idsync_held_free(buckets_idsync_held *h, size_t n);
 
-/* ---- Entra ------------------------------------------------------------------------------------- */
+/* ---- the provider's API ------------------------------------------------------------------------- */
 
-typedef struct buckets_idsync_entra buckets_idsync_entra;
-buckets_idsync_entra *buckets_idsync_entra_new(const buckets_idsync_settings *s);
-void buckets_idsync_entra_free(buckets_idsync_entra *e);
-/* What Graph says about a person besides their state. */
+typedef struct buckets_idsync_client buckets_idsync_client;
+buckets_idsync_client *buckets_idsync_client_new(const buckets_idsync_settings *s);
+void buckets_idsync_client_free(buckets_idsync_client *c);
+/* What Graph, Keycloak or Okta says about a person besides their state. */
 typedef struct {
   char id[64], display_name[256], upn[256];
 } buckets_idsync_person;
-/* One person by object ID (or, for the console's check, user principal name); UNKNOWN (and err) when Graph
- * could not answer. who, when not NULL, gets their ID and names. */
-buckets_idsync_state buckets_idsync_entra_lookup(buckets_idsync_entra *e, const char *oid,
-                                                 buckets_idsync_person *who, char *err, size_t errlen);
+/* One person by their ID (for the console's check also a sign-in name: Entra's user principal name, a Keycloak
+ * user name or an Okta login); UNKNOWN (and err) when the provider could not answer. who, when not NULL, gets
+ * their ID and names. */
+buckets_idsync_state buckets_idsync_client_lookup(buckets_idsync_client *c, const char *id,
+                                                  buckets_idsync_person *who, char *err, size_t errlen);
 
 #endif

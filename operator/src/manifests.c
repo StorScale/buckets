@@ -470,10 +470,22 @@ static bc_object statefulset(const bc_spec *s, size_t pi, const char *volumes, c
   if (s->identity.sync_hash[0]) { /* people who leave the provider lose their access (iam/idsync.h) */
     char sn[160], n[24];
     bc_identity_sync_secret_name(s, sn, sizeof(sn));
-    env_value(d, env, "BUCKETS_OPENID_SYNC_PROVIDER", "entra");
-    env_value(d, env, "BUCKETS_OPENID_SYNC_TENANT_ID", s->identity.sync_tenant);
-    env_value(d, env, "BUCKETS_OPENID_SYNC_CLIENT_ID", s->identity.sync_client_id);
-    env_secret(d, env, "BUCKETS_OPENID_SYNC_CLIENT_SECRET", sn, "clientSecret");
+    const char *pv = s->identity.sync_provider;
+    env_value(d, env, "BUCKETS_OPENID_SYNC_PROVIDER", pv);
+    if (strcmp(pv, "entra") == 0) env_value(d, env, "BUCKETS_OPENID_SYNC_TENANT_ID", s->identity.sync_tenant);
+    if (strcmp(pv, "okta") != 0) {
+      env_value(d, env, "BUCKETS_OPENID_SYNC_CLIENT_ID", s->identity.sync_client_id);
+      env_secret(d, env, "BUCKETS_OPENID_SYNC_CLIENT_SECRET", sn, "clientSecret");
+    } else {
+      env_secret(d, env, "BUCKETS_OPENID_SYNC_API_TOKEN", sn, "apiToken");
+    }
+    if (strcmp(pv, "entra") != 0) {
+      env_value(d, env, "BUCKETS_OPENID_SYNC_URL", s->identity.sync_url);
+      env_value(d, env, "BUCKETS_OPENID_SYNC_ISSUER", s->identity.sync_issuer);
+    }
+    if (strcmp(pv, "keycloak") == 0) env_value(d, env, "BUCKETS_OPENID_SYNC_REALM", s->identity.sync_realm);
+    snprintf(n, sizeof(n), "%ld", s->identity.sync_interval_s);
+    env_value(d, env, "BUCKETS_OPENID_SYNC_INTERVAL", n);
     snprintf(n, sizeof(n), "%ld", s->identity.sync_days);
     env_value(d, env, "BUCKETS_OPENID_REMOVE_AFTER", n);
     snprintf(n, sizeof(n), "%ld", s->identity.sync_max);
@@ -1145,13 +1157,15 @@ yyjson_mut_doc *bc_kms_empty_secret(const bc_spec *s, const char *name) {
   return d;
 }
 
-yyjson_mut_doc *bc_identity_sync_secret(const bc_spec *s, const char *client_secret) {
+yyjson_mut_doc *bc_identity_sync_secret(const bc_spec *s, const char *client_secret, const char *api_token) {
   mdoc *d = yyjson_mut_doc_new(NULL);
   char name[160];
   bc_identity_sync_secret_name(s, name, sizeof(name));
   mval *root = object(d, "v1", "Secret", s, name, NULL);
   ADD_STR(d, root, "type", "Opaque");
-  yyjson_mut_obj_add_strcpy(d, ADD_OBJ(d, root, "stringData"), "clientSecret", client_secret);
+  mval *data = ADD_OBJ(d, root, "stringData");
+  if (client_secret && *client_secret) yyjson_mut_obj_add_strcpy(d, data, "clientSecret", client_secret);
+  if (api_token && *api_token) yyjson_mut_obj_add_strcpy(d, data, "apiToken", api_token);
   return d;
 }
 

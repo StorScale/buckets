@@ -450,7 +450,7 @@ static void handle_ldap_test(buckets_console_idp *m, yyjson_val *body, const buc
 static void handle_removal_test(buckets_console_idp *m, yyjson_val *body, buckets_http_response *resp) {
   const char *user = yyjson_get_str(yyjson_obj_get(body, "user"));
   if (!user || !*user) {
-    fail(resp, 400, "InvalidRequest", "Enter a person's sign-in name (user principal name) or object ID.");
+    fail(resp, 400, "InvalidRequest", "Enter a person's sign-in name or ID.");
     return;
   }
   saved c;
@@ -462,19 +462,32 @@ static void handle_removal_test(buckets_console_idp *m, yyjson_val *body, bucket
     return;
   }
   buckets_idsync_settings st = {0};
-  snprintf(st.provider, sizeof(st.provider), "entra");
+  snprintf(st.provider, sizeof(st.provider), "%s", rm.provider);
   snprintf(st.tenant, sizeof(st.tenant), "%s", rm.tenant);
   snprintf(st.client_id, sizeof(st.client_id), "%s", rm.client_id);
   snprintf(st.client_secret, sizeof(st.client_secret), "%s", rm.client_secret);
+  snprintf(st.api_token, sizeof(st.api_token), "%s", rm.api_token);
+  snprintf(st.realm, sizeof(st.realm), "%s", rm.realm);
+  snprintf(st.url, sizeof(st.url), "%s", rm.url);
+  snprintf(st.issuer, sizeof(st.issuer), "%s", rm.issuer);
+  /* Microsoft's endpoints, unless a test points them elsewhere (as the servers' sync allows) */
   const char *login = getenv("BUCKETS_OPENID_SYNC_LOGIN_URL"), *graph = getenv("BUCKETS_OPENID_SYNC_GRAPH_URL");
   snprintf(st.login_url, sizeof(st.login_url), "%s", login && *login ? login : "https://login.microsoftonline.com");
   snprintf(st.graph_url, sizeof(st.graph_url), "%s", graph && *graph ? graph : "https://graph.microsoft.com");
-  buckets_idsync_entra *e = buckets_idsync_entra_new(&st);
+  buckets_idsync_client *client = buckets_idsync_client_new(&st);
   memset(st.client_secret, 0, sizeof(st.client_secret));
+  memset(st.api_token, 0, sizeof(st.api_token));
   buckets_idsync_person who;
   char err[1024] = "";
-  buckets_idsync_state state = buckets_idsync_entra_lookup(e, user, &who, err, sizeof(err));
-  buckets_idsync_entra_free(e);
+  buckets_idsync_state state = buckets_idsync_client_lookup(client, user, &who, err, sizeof(err));
+  buckets_idsync_client_free(client);
+  const char *need = strcmp(rm.provider, "entra") == 0
+                         ? "The app needs Microsoft Graph's User.Read.All application permission, with admin consent."
+                     : strcmp(rm.provider, "keycloak") == 0
+                         ? "The client needs Service accounts roles on, and realm-management's view-users role for its "
+                           "service account."
+                         : "The API token needs to belong to an administrator who may read users (Read-only "
+                           "Administrator is enough).";
   yyjson_mut_val *o;
   yyjson_mut_doc *d = new_obj(&o);
   bool passed = state == BUCKETS_IDSYNC_ACTIVE || state == BUCKETS_IDSYNC_DISABLED;
@@ -485,11 +498,11 @@ static void handle_removal_test(buckets_console_idp *m, yyjson_val *body, bucket
     yyjson_mut_obj_add_strcpy(d, o, "displayName", who.display_name);
     yyjson_mut_obj_add_strcpy(d, o, "userPrincipalName", who.upn);
   } else if (state == BUCKETS_IDSYNC_GONE) {
-    yyjson_mut_obj_add_str(d, o, "error", "No one by that name in the directory. The app can read it: try someone who exists.");
+    yyjson_mut_obj_add_str(d, o, "error",
+                           "No one by that name in the directory. The directory can be read: try someone who exists.");
   } else {
     char msg[1400];
-    snprintf(msg, sizeof(msg),
-             "%s. The app needs Microsoft Graph's User.Read.All application permission, with admin consent.", err);
+    snprintf(msg, sizeof(msg), "%s. %s", err, need);
     yyjson_mut_obj_add_strcpy(d, o, "error", msg);
   }
   yyjson_mut_obj_add_bool(d, o, "passed", passed);

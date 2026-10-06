@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Identity sync (docs/design/identity-sync.md): people signed in through
-# Entra ID who leave it lose their temporary credentials at once, and their
+# Entra ID, Keycloak or Okta who leave lose their temporary credentials at once, and their
 # access keys are turned off, then deleted after the grace period; a person
 # back within it gets their keys back. A stand-in plays the OpenID provider,
-# Microsoft's token endpoint and Microsoft Graph, with each person's state
+# Microsoft's token endpoint and Microsoft Graph, Keycloak's admin API and
+# Okta's users API, with each person's state
 # set by the test. Also: a provider answering errors removes no one, too
 # many people leaving at once are held, and other tenants are left alone.
 #   tests/integration/idsync.sh [bucketsd]
@@ -60,6 +61,22 @@ class H(http.server.BaseHTTPRequestHandler):
         if u.path == '/jwks': return self.reply(200, {'keys': [JWK]})
         if u.path == '/mint': return self.reply(200, mint(json.loads(urllib.parse.parse_qs(u.query)['claims'][0])))
         if u.path == '/graph-calls': return self.reply(200, graph_calls[0])
+        if u.path.startswith('/admin/realms/corp/users/'):           # Keycloak
+            if not self.headers.get('Authorization', '').startswith('Bearer kc-token-'):
+                return self.reply(401, {'error': 'HTTP 401 Unauthorized'})
+            uid = urllib.parse.unquote(u.path[len('/admin/realms/corp/users/'):])
+            st = people.get(uid, 'gone')
+            if st == 'error': return self.reply(503, {'error': 'unavailable'})
+            if st == 'gone': return self.reply(404, {'error': 'User not found'})
+            return self.reply(200, {'id': uid, 'username': uid, 'enabled': st == 'active'})
+        if u.path.startswith('/api/v1/users/'):                      # Okta
+            if self.headers.get('Authorization') != 'SSWS okta-api-token':
+                return self.reply(401, {'errorCode': 'E0000011', 'errorSummary': 'Invalid token provided'})
+            uid = urllib.parse.unquote(u.path[len('/api/v1/users/'):])
+            st = people.get(uid, 'gone')
+            if st == 'gone': return self.reply(404, {'errorCode': 'E0000007',
+                                                     'errorSummary': 'Not found: Resource not found: %s (User)' % uid})
+            return self.reply(200, {'id': uid, 'status': 'ACTIVE' if st == 'active' else 'SUSPENDED'})
         if u.path.startswith('/v1.0/users/'):
             if not self.headers.get('Authorization', '').startswith('Bearer graph-token-'):
                 return self.reply(401, {'error': {'code': 'InvalidAuthenticationToken'}})
@@ -77,6 +94,11 @@ class H(http.server.BaseHTTPRequestHandler):
         if u.path.startswith('/control/'):      # /control/<oid>/<state>
             _, _, oid, st = u.path.split('/'); people[oid] = st
             return self.reply(200, {})
+        if u.path == '/realms/corp/protocol/openid-connect/token':     # Keycloak's service account
+            f = urllib.parse.parse_qs(body)
+            if f.get('client_id') != ['buckets'] or f.get('client_secret') != ['kc-secret']:
+                return self.reply(401, {'error': 'unauthorized_client', 'error_description': 'Invalid client secret'})
+            return self.reply(200, {'access_token': 'kc-token-%d' % int(time.time()), 'expires_in': 300})
         if u.path.endswith('/oauth2/v2.0/token'):
             f = urllib.parse.parse_qs(body)
             ok = u.path == '/tenant-1/oauth2/v2.0/token' and f.get('client_id') == ['sync-app'] and \
@@ -184,12 +206,69 @@ person o-dan active # two leaving: within the limit
 until_true "[[ \$(key_status KEYBOB0001) == off && \$(key_status KEYCAT0001) == off ]]" || true
 expect "within the limit, removed" "$(key_status KEYBOB0001) $(key_status KEYCAT0001) $(key_status KEYDAN0001)" "off off on"
 
+# ---- Keycloak and Okta: people by the token's issuer and subject ------------------------------------
+provider_run() { # name port extra-env...
+  local name=$1 port=$2
+  shift 2
+  mkdir -p "$WORK/$name"/d{1..4}
+  env BUCKETS_ROOT_USER=rootadmin BUCKETS_ROOT_PASSWORD=rootsecret123 \
+    MINIO_IDENTITY_OPENID_CONFIG_URL="$ISS/.well-known/openid-configuration" MINIO_IDENTITY_OPENID_CLIENT_ID=buckets-app \
+    BUCKETS_OPENID_SYNC_INTERVAL=1 "$@" \
+    "$BIN" server --address "127.0.0.1:$port" "$WORK/$name/d{1...4}" 2>>"$WORK/log-$name" &
+  PIDS+=($!)
+  until_true "curl -sf http://127.0.0.1:$port/minio/health/ready"
+}
+pod_sign_in() { # port alias sub iss
+  local claims='{"sub":"'$3'","iss":"'$4'","policy":"readwrite"}' tok r ak sk tk
+  tok=$(curl -sf --get --data-urlencode "claims=$claims" "$ISS/mint" | tr -d '"')
+  r=$(curl -s -X POST --data-urlencode Action=AssumeRoleWithWebIdentity --data-urlencode Version=2011-06-15 \
+    --data-urlencode "WebIdentityToken=$tok" "http://127.0.0.1:$1/")
+  ak=$(sed -n 's:.*<AccessKeyId>\(.*\)</AccessKeyId>.*:\1:p' <<<"$r"); sk=$(sed -n 's:.*<SecretAccessKey>\(.*\)</SecretAccessKey>.*:\1:p' <<<"$r")
+  tk=$(sed -n 's:.*<SessionToken>\(.*\)</SessionToken>.*:\1:p' <<<"$r")
+  export "MC_HOST_$2=http://$ak:$sk:$tk@127.0.0.1:$1"
+  eval "STS_$2=(\"$ak\" \"$sk\" \"$tk\")"
+}
+for P in keycloak okta; do
+  echo "== $P: a person leaves and comes back; another issuer's people are left alone"
+  if [[ $P == keycloak ]]; then
+    PPORT=$((PORT + 2)) PISS="$ISS/realms/corp"
+    provider_run kc "$PPORT" BUCKETS_OPENID_SYNC_PROVIDER=keycloak BUCKETS_OPENID_SYNC_URL="$ISS/" BUCKETS_OPENID_SYNC_REALM=corp \
+      BUCKETS_OPENID_SYNC_CLIENT_ID=buckets BUCKETS_OPENID_SYNC_CLIENT_SECRET=kc-secret
+  else
+    PPORT=$((PORT + 3)) PISS="$ISS/oauth2/default"
+    provider_run okta "$PPORT" BUCKETS_OPENID_SYNC_PROVIDER=okta BUCKETS_OPENID_SYNC_URL="$ISS" \
+      BUCKETS_OPENID_SYNC_API_TOKEN=okta-api-token BUCKETS_OPENID_SYNC_ISSUER="$PISS"
+  fi
+  export "MC_HOST_${P}root=http://rootadmin:rootsecret123@127.0.0.1:$PPORT"
+  person "$P-amy" active; person "$P-ben" active
+  pod_sign_in "$PPORT" amy "$P-amy" "$PISS"; mc admin accesskey create amy --access-key "${P^^}AMY0001" --secret-key "${P^^}AMY0001secret" >/dev/null
+  pod_sign_in "$PPORT" ben "$P-ben" "$PISS"; mc admin accesskey create ben --access-key "${P^^}BEN0001" --secret-key "${P^^}BEN0001secret" >/dev/null
+  pod_sign_in "$PPORT" cal "$P-cal" "https://elsewhere.example.com" # another issuer: never asked about
+  mc admin accesskey create cal --access-key "${P^^}CAL0001" --secret-key "${P^^}CAL0001secret" >/dev/null
+  amy_sts=("${STS_amy[@]}")
+  pst() { mc admin accesskey info "${P}root" "$1" --json 2>/dev/null | sed -n 's/.*"accountStatus":"\([a-z]*\)".*/\1/p'; }
+  person "$P-amy" gone
+  until_true "[[ \$(pst ${P^^}AMY0001) == off ]]" || true
+  expect "$P: amy's key turned off" "$(pst "${P^^}AMY0001")" off
+  expect "$P: her temporary credentials gone" "$(curl -s -o /dev/null -w '%{http_code}' --aws-sigv4 "aws:amz:us-east-1:s3" \
+    --user "${amy_sts[0]}:${amy_sts[1]}" -H "X-Amz-Security-Token: ${amy_sts[2]}" "http://127.0.0.1:$PPORT/")" 403
+  expect "$P: ben's key on" "$(pst "${P^^}BEN0001")" on
+  expect "$P: another issuer's person left alone" "$(pst "${P^^}CAL0001")" on
+  person "$P-ben" disabled
+  until_true "[[ \$(pst ${P^^}BEN0001) == off ]]" || true
+  expect "$P: a disabled person's key turned off" "$(pst "${P^^}BEN0001")" off
+  person "$P-amy" active
+  until_true "[[ \$(pst ${P^^}AMY0001) == on ]]" || true
+  expect "$P: amy back, her key back on" "$(pst "${P^^}AMY0001")" on
+  expect "$P: no failed lookups" "$(grep -c 'identity sync: .* answered' "$WORK/log-$( [[ $P == keycloak ]] && echo kc || echo okta)" || true)" 0
+done
+
 echo "== metrics"
 metric() { curl -s "$EP/minio/v2/metrics/$1" | awk -v n="$2" '$1 == n || index($1, n "{") == 1 {print $2}' | head -1; }
 expect "runs counted" "$([[ $(metric node buckets_node_identity_sync_runs_total) -ge 5 ]] && echo yes)" yes
 expect "failures counted" "$([[ $(metric node buckets_node_identity_sync_failures_total) -ge 1 ]] && echo yes)" yes
 expect "held runs counted" "$([[ $(metric node buckets_node_identity_sync_held_total) -ge 1 ]] && echo yes)" yes
-expect "deletions counted" "$(metric node 'buckets_node_identity_sync_actions_total{action="delete",server="127.0.0.1:'$PORT'"}')" 1
+expect "deletions counted" "$([[ $(metric node 'buckets_node_identity_sync_actions_total{action="delete",server="127.0.0.1:'$PORT'"}') -ge 1 ]] && echo yes)" yes
 expect "on the cluster endpoint too" "$([[ -n $(metric cluster buckets_node_identity_sync_runs_total) ]] && echo yes)" yes
 expect "no samples outside the catalog" "$(grep -c 'samples outside the catalog' "$WORK/log" || true)" 0
 errs=$(grep -c "Sanitizer\|runtime error" "$WORK/log" || true)

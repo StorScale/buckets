@@ -88,8 +88,8 @@ typedef struct {
     /* the identity sync (iam/idsync.h), when the settings turn removal on: the servers' environment, its
      * secret in Secret <name>-identity-sync, and sync_hash on their pod template so a change restarts them */
     char sync_hash[17];
-    char sync_tenant[64], sync_client_id[128];
-    long sync_days, sync_max;
+    char sync_provider[16], sync_tenant[64], sync_client_id[128], sync_url[512], sync_realm[128], sync_issuer[700];
+    long sync_days, sync_max, sync_interval_s;
   } identity;
   /* spec.kms.kes: a KES server the operator runs for the cluster, its key
    * store settings in Secret <name>-kms (settings.json, written by the
@@ -174,9 +174,10 @@ yyjson_mut_doc *bc_console_secret(const bc_spec *s, const char *passphrase, cons
 void bc_identity_secret_name(const bc_spec *s, char *out, size_t cap);
 void bc_identity_candidate_secret_name(const bc_spec *s, char *out, size_t cap);
 void bc_identity_console_secret_name(const bc_spec *s, char *out, size_t cap);
-/* <name>-identity-sync: the identity sync's client secret (clientSecret), owned by the cluster. */
+/* <name>-identity-sync: the identity sync's client secret (clientSecret) or Okta API token (apiToken), owned by
+ * the cluster. */
 void bc_identity_sync_secret_name(const bc_spec *s, char *out, size_t cap);
-yyjson_mut_doc *bc_identity_sync_secret(const bc_spec *s, const char *client_secret);
+yyjson_mut_doc *bc_identity_sync_secret(const bc_spec *s, const char *client_secret, const char *api_token);
 /* Secret <name>-identity-console with identity.json = json, owned by the cluster. */
 yyjson_mut_doc *bc_identity_console_secret(const bc_spec *s, const char *json);
 /* Where consoled finds the console Secret's identity.json. */

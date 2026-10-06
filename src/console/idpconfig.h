@@ -14,7 +14,8 @@
  *   POST /api/v1/identity-config/ldap-test  {"username", "password"?} -> the user's DN, groups and policies
  *   POST /api/v1/identity-config/removal-test {"user"} -> {"passed", "state", "id", "displayName",
  *                                               "userPrincipalName"} or {"passed": false, "error"}: one person
- *                                               looked up in Microsoft Graph, for removing people who leave
+ *                                               looked up in Microsoft Graph, Keycloak or Okta, for removing
+ *                                               people who leave
  *   POST /api/v1/identity-config/apply      {"candidateHash"}: the candidate goes live, once tested
  *
  * The OpenID test is a sign-in in a popup: GET /api/v1/login/oidc?test=1 on

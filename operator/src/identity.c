@@ -91,14 +91,16 @@ static bool sync_settings(op_ctx *o, bc_spec *s, yyjson_val *settings, const cha
   buckets_idp_removal rm;
   if (!buckets_idp_removal_of(settings, &rm)) return true;
   buckets_buf b = BUCKETS_BUF_INIT;
-  buckets_buf_appendf(&b, "%s|%s|%s|%ld|%ld", rm.tenant, rm.client_id, rm.client_secret, rm.delete_after_days,
-                      rm.max_per_sync);
+  buckets_buf_appendf(&b, "%s|%s|%s|%s|%s|%s|%s|%s|%ld|%ld|%ld", rm.provider, rm.tenant, rm.client_id,
+                      rm.client_secret, rm.api_token, rm.url, rm.realm, rm.issuer, rm.delete_after_days,
+                      rm.max_per_sync, rm.interval_minutes);
   char hash[17];
   hash16(b.data, b.len, hash);
   memset(b.data, 0, b.len);
   buckets_buf_free(&b);
   if (!prev || strcmp(prev, hash) != 0) {
-    yyjson_mut_doc *sec = bc_identity_sync_secret(s, rm.client_secret);
+    yyjson_mut_doc *sec = bc_identity_sync_secret(s, strcmp(rm.provider, "okta") == 0 ? NULL : rm.client_secret,
+                                                  strcmp(rm.provider, "okta") == 0 ? rm.api_token : NULL);
     char name[160];
     bc_identity_sync_secret_name(s, name, sizeof(name));
     buckets_buf path = BUCKETS_BUF_INIT;
@@ -112,7 +114,12 @@ static bool sync_settings(op_ctx *o, bc_spec *s, yyjson_val *settings, const cha
     if (st / 100 != 2) return false;
   }
   snprintf(s->identity.sync_hash, sizeof(s->identity.sync_hash), "%s", hash);
+  snprintf(s->identity.sync_provider, sizeof(s->identity.sync_provider), "%s", rm.provider);
   snprintf(s->identity.sync_tenant, sizeof(s->identity.sync_tenant), "%s", rm.tenant);
+  snprintf(s->identity.sync_url, sizeof(s->identity.sync_url), "%s", rm.url);
+  snprintf(s->identity.sync_realm, sizeof(s->identity.sync_realm), "%s", rm.realm);
+  snprintf(s->identity.sync_issuer, sizeof(s->identity.sync_issuer), "%s", rm.issuer);
+  s->identity.sync_interval_s = rm.interval_minutes * 60;
   snprintf(s->identity.sync_client_id, sizeof(s->identity.sync_client_id), "%s", rm.client_id);
   s->identity.sync_days = rm.delete_after_days;
   s->identity.sync_max = rm.max_per_sync;

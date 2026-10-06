@@ -287,10 +287,10 @@ static void *ldap_sync_main(void *arg) {
 
 #define IDSYNC_PATH "buckets/identity-sync.json"
 
-/* The provider's ID for a credential's owner, when the credential is from this provider's tenant. */
+/* The provider's ID for a credential's owner, when the credential is from this provider. */
 static const char *idsync_person(const buckets_idsync_settings *st, const buckets_iam_ident *c) {
-  const char *tid = buckets_iam_ident_claim(c, "tid"), *oid = buckets_iam_ident_claim(c, "oid");
-  return tid && oid && *oid && strcmp(tid, st->tenant) == 0 ? oid : NULL;
+  return buckets_idsync_person_of(st, buckets_iam_ident_claim(c, "tid"), buckets_iam_ident_claim(c, "oid"),
+                                  buckets_iam_ident_claim(c, "iss"), buckets_iam_ident_claim(c, "sub"));
 }
 
 static buckets_idsync_state state_of_person(const buckets_idsync_answers *a, const char *person) {
@@ -299,7 +299,7 @@ static buckets_idsync_state state_of_person(const buckets_idsync_answers *a, con
   return BUCKETS_IDSYNC_UNKNOWN;
 }
 
-static void idsync_run(buckets_s3_server *s, const buckets_idsync_settings *st, buckets_idsync_entra *entra) {
+static void idsync_run(buckets_s3_server *s, const buckets_idsync_settings *st, buckets_idsync_client *client) {
   buckets_objlayer *L = atomic_load(&s->layer);
   if (!L || !buckets_iam_ready(s->iam) || !buckets_objlayer_set_is_led_here(L, 0, 0)) return; /* one server syncs */
   s->idsync_runs++;
@@ -355,7 +355,7 @@ static void idsync_run(buckets_s3_server *s, const buckets_idsync_settings *st, 
   size_t unknown = 0;
   char err[512] = "";
   for (size_t k = 0; k < np && state_ok; k++) {
-    states[k] = buckets_idsync_entra_lookup(entra, people[k], NULL, err, sizeof(err));
+    states[k] = buckets_idsync_client_lookup(client, people[k], NULL, err, sizeof(err));
     if (states[k] == BUCKETS_IDSYNC_UNKNOWN && unknown++ == 0) buckets_log_warn("identity sync: %s", err);
   }
   bool failed = !state_ok || unknown;
@@ -450,12 +450,17 @@ static void *idsync_main(void *arg) {
   }
   if (!*st.provider) return NULL;
   s->idsync_on = true;
-  buckets_idsync_entra *entra = buckets_idsync_entra_new(&st);
+  buckets_idsync_client *client = buckets_idsync_client_new(&st);
   memset(st.client_secret, 0, sizeof(st.client_secret));
-  buckets_log_info("identity sync: asking Entra tenant %s about people with credentials every %lds", st.tenant,
-                   st.interval_s);
-  while (bg_sleep(s, st.interval_s * 1000L)) idsync_run(s, &st, entra);
-  buckets_idsync_entra_free(entra);
+  memset(st.api_token, 0, sizeof(st.api_token));
+  if (strcmp(st.provider, "entra") == 0)
+    buckets_log_info("identity sync: asking Entra tenant %s about people with credentials every %lds", st.tenant,
+                     st.interval_s);
+  else
+    buckets_log_info("identity sync: asking %s (%s) about people with credentials every %lds",
+                     strcmp(st.provider, "okta") == 0 ? "Okta" : "Keycloak", st.issuer, st.interval_s);
+  while (bg_sleep(s, st.interval_s * 1000L)) idsync_run(s, &st, client);
+  buckets_idsync_client_free(client);
   return NULL;
 }
 

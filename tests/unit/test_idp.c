@@ -194,9 +194,49 @@ static void test_removal(void **state) {
         "\"removal\":{\"enabled\":false}}}");
   assert_false(buckets_idp_removal_of(yyjson_doc_get_root(d), &rm));
   yyjson_doc_free(d);
-  expect_error("{\"openid\":{\"provider\":\"keycloak\",\"url\":\"https://kc\",\"realm\":\"r\",\"clientId\":\"a\","
-               "\"clientSecret\":\"b\",\"removal\":{\"enabled\":true}}}",
-               "Entra ID for now");
+  /* Keycloak: the sign-in client's credentials, and the realm's issuer */
+  d = J("{\"openid\":{\"provider\":\"keycloak\",\"url\":\"https://kc.example.com/\",\"realm\":\"corp\",\"clientId\":\"buckets\","
+        "\"clientSecret\":\"b\",\"removal\":{\"enabled\":true,\"intervalMinutes\":5}}}");
+  assert_true(buckets_idp_check(yyjson_doc_get_root(d), err, sizeof(err)));
+  assert_true(buckets_idp_removal_of(yyjson_doc_get_root(d), &rm));
+  assert_string_equal(rm.provider, "keycloak");
+  assert_string_equal(rm.url, "https://kc.example.com");
+  assert_string_equal(rm.realm, "corp");
+  assert_string_equal(rm.issuer, "https://kc.example.com/realms/corp");
+  assert_int_equal(rm.interval_minutes, 5);
+  yyjson_doc_free(d);
+  /* Okta: an API token, and the authorization server's issuer */
+  const char *okta = "{\"openid\":{\"provider\":\"okta\",\"domain\":\"example.okta.com\",\"clientId\":\"a\",\"clientSecret\":\"b\","
+                     "\"removal\":{\"enabled\":true,\"apiToken\":\"00tok\"}}}";
+  d = J(okta);
+  assert_true(buckets_idp_check(yyjson_doc_get_root(d), err, sizeof(err)));
+  assert_true(buckets_idp_removal_of(yyjson_doc_get_root(d), &rm));
+  assert_string_equal(rm.url, "https://example.okta.com");
+  assert_string_equal(rm.issuer, "https://example.okta.com/oauth2/default");
+  assert_string_equal(rm.api_token, "00tok");
+  assert_int_equal(rm.interval_minutes, 60);
+  /* the token is a secret: never shown, kept when the form leaves it empty */
+  yyjson_mut_doc *md = yyjson_mut_doc_new(NULL);
+  yyjson_mut_val *red = buckets_idp_settings_redacted(md, yyjson_doc_get_root(d));
+  char *rj = yyjson_mut_val_write(red, 0, NULL);
+  assert_null(strstr(rj, "00tok"));
+  assert_non_null(strstr(rj, "openid.removal.apiToken"));
+  free(rj);
+  yyjson_mut_obj_put(yyjson_mut_obj_get(yyjson_mut_obj_get(red, "openid"), "removal"), yyjson_mut_str(md, "apiToken"),
+                     yyjson_mut_str(md, ""));
+  buckets_idp_settings_keep_secrets(md, red, yyjson_doc_get_root(d));
+  assert_string_equal(yyjson_mut_get_str(yyjson_mut_obj_get(yyjson_mut_obj_get(yyjson_mut_obj_get(red, "openid"), "removal"), "apiToken")), "00tok");
+  yyjson_mut_doc_free(md);
+  yyjson_doc_free(d);
+  expect_error("{\"openid\":{\"provider\":\"okta\",\"domain\":\"example.okta.com\",\"clientId\":\"a\",\"clientSecret\":\"b\","
+               "\"removal\":{\"enabled\":true}}}",
+               "Okta API token");
+  expect_error("{\"openid\":{\"provider\":\"generic\",\"configUrl\":\"https://x\",\"clientId\":\"a\",\"clientSecret\":\"b\","
+               "\"removal\":{\"enabled\":true}}}",
+               "Entra ID, Okta and Keycloak");
+  expect_error("{\"openid\":{\"provider\":\"entra\",\"tenantId\":\"t\",\"clientId\":\"a\",\"clientSecret\":\"b\","
+               "\"removal\":{\"enabled\":true,\"intervalMinutes\":0}}}",
+               "1 to 1440 minutes");
   expect_error("{\"openid\":{\"provider\":\"entra\",\"tenantId\":\"t\",\"clientId\":\"a\",\"clientSecret\":\"b\","
                "\"removal\":{\"enabled\":true,\"deleteAfterDays\":0}}}",
                "1 to 3650 days");
