@@ -8,11 +8,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 - `examples/airflow` and [docs/integrations/airflow.md](docs/integrations/airflow.md): Apache Airflow 3.3 on the lakehouse. People sign in with Keycloak (FAB auth manager), with their groups as Airflow roles (engineers Op, analysts Viewer) and anyone in neither group refused. Pipelines run as a Keycloak service account in group `pipelines`: each task gets a short-lived token for Buckets (through STS, policy `pipelines`) and Trino (Ranger's policies for the group, audited by name). Airflow stores only the client secret. 11 checks, including a run triggered through Airflow's API.
-- `examples/monitoring`: Buckets with four drives and steady traffic, Prometheus scraping it as docs/monitoring.md describes (a metrics-only user's token) with the chart's alert rules, and Grafana with the chart's four dashboards. Its test checks the scraping, the rules and the dashboards' queries, then empties a drive under load, as a swapped disk looks: the drive goes offline and the drive alerts start, then Buckets formats it back into its slot, heals it, and the alerts resolve (1.7.0's fix for writes to offline drives makes that last part work). `docker compose run --rm screenshots` captures the dashboards with headless Chromium. docs/monitoring.md gains "Try it locally".
+- `examples/monitoring`: Buckets with four drives and steady traffic, Prometheus scraping it as docs/monitoring.md describes (a metrics-only user's token) with the chart's alert rules, and Grafana with the chart's four dashboards. Its test checks the scraping, the rules and the dashboards' queries, then empties a drive under load, as a swapped disk looks, and checks that the drive goes offline and the drive alerts start. `docker compose run --rm screenshots` captures the dashboards with headless Chromium. docs/monitoring.md gains "Try it locally".
 - `lakekit.audited()`: count a user's allowed or denied requests in Ranger's audit log.
 
 ### Fixed
 - The Drives and Buckets dashboards' tables named their columns "Value #A" to "Value #E", and showed sizes as raw numbers. `tools/dashboards/gen.py` now renames each column to its label and gives it a unit, such as bytes.
+
+### Known issues
+- A drive emptied under write load (as a swapped disk looks) can stay offline. Writes that reach it in the moment before Buckets notices its `format.json` is gone make it look like a drive holding data, so it isn't formatted back into its slot. Found by `examples/monitoring` (2 of 4 swaps under load). Wiping the drive again while it's offline brings it back.
 
 ## [1.7.0] - 2026-10-06
 

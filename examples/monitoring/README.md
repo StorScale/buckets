@@ -11,7 +11,7 @@ docker compose down -v                    # stop and delete everything
 
 Grafana is at http://localhost:3000 (`admin`, `GRAFANA_ADMIN_PASSWORD` in `.env`), under **Dashboards → Buckets**. Prometheus is at http://localhost:9090, with the rules under **Alerts**.
 
-The test empties one drive under load, as a disk swapped for a new one looks. It checks that Buckets reports the drive offline and the `BucketsDriveOffline` and `BucketsErasureSetDegraded` alerts start, then that Buckets formats the empty drive back into its slot, heals it, and the alerts resolve.
+The test empties one drive under load, as a disk swapped for a new one looks, and checks that Buckets reports the drive offline and the `BucketsDriveOffline` and `BucketsErasureSetDegraded` alerts start. Buckets usually formats the empty drive back into its slot and heals it within seconds, but under write load it can lose a race and leave the drive offline. Run `docker compose down -v` to start over.
 
 `screenshots` uses headless Chromium (Playwright) and Grafana's kiosk mode. Set `SHOTS=alerts` while a drive is out for Prometheus's alerts page, `SHOTS=failure` after one for the Overview and Drives dashboards, and `SCREENSHOTS_DIR` to write somewhere other than `./screenshots`.
 
