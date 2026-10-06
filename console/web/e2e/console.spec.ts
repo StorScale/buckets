@@ -385,6 +385,8 @@ test("configuration: every subsystem listed opens without an error", async ({ pa
   await expect(page.getByTestId("config-identity_openid")).toBeVisible();
   await expect(page.getByTestId("config-policy_opa")).toHaveCount(0);
   await expect(page.getByTestId("config-region")).toHaveCount(0);
+  await expect(page.getByTestId("config-subnet")).toHaveCount(0); // MinIO's own services
+  await expect(page.getByTestId("config-callhome")).toHaveCount(0);
   const ids = await page.locator('[data-testid^="config-"]:not([data-testid="config-save"])').evaluateAll((els) => els.map((e) => e.getAttribute("data-testid")!));
   expect(ids.length).toBeGreaterThan(20);
   for (const id of ids) {

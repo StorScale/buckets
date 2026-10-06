@@ -12,12 +12,16 @@ function parseKv(text: string): Record<string, string> {
   return out;
 }
 
+// MinIO's own services (its SUBNET license and call-home): the server keeps them for MinIO's tools, but they
+// do nothing for Buckets, so the page leaves them out.
+const MINIO_ONLY = ["subnet", "callhome"];
+
 export default function Configuration() {
   const [subsys, setSubsys] = useState("api");
   // The subsystems the server documents (help without one lists them): deprecated ones it keeps
   // only for old settings, such as policy_opa and region, have no help and are not shown.
   const all = useLoad(() => configHelp(), []);
-  const subsystems = all.data?.keysHelp.map((k) => k.key) ?? [];
+  const subsystems = all.data?.keysHelp.map((k) => k.key).filter((k) => !MINIO_ONLY.includes(k)) ?? [];
   const help = useLoad(() => configHelp(subsys), [subsys]);
   const [values, setValues] = useState<Record<string, string>>({});
   const [original, setOriginal] = useState<Record<string, string>>({});
