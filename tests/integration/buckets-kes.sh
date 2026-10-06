@@ -105,6 +105,22 @@ expect "a denied path" "$(call -X POST "$U/minio/kms/v1/key/delete?key-id=protec
 expect "the admin may" "$(curl "${A[@]}" -X DELETE -o /dev/null -w '%{http_code}' "$K/v1/key/delete/protected")" 200
 expect "a deleted key" "$(curl "${A[@]}" -o /dev/null -w '%{http_code}' "$K/v1/key/describe/protected")" 404
 expect "decrypting with the wrong context" "$(curl "${A[@]}" -X PUT "$K/v1/key/decrypt/team-key" -d '{"ciphertext":"'"$(head -c 60 /dev/urandom | base64 -w0)"'"}' | grep -o 'not authentic')" "not authentic"
+echo "== minio_cluster_kms_online follows KES"
+# a metrics token for root, as mc admin prometheus generate makes it (HS512, issuer prometheus)
+TOKEN=$(python3 -c '
+import base64, hashlib, hmac, json, time
+b = lambda x: base64.urlsafe_b64encode(x).rstrip(b"=").decode()
+m = b(json.dumps({"alg": "HS512", "typ": "JWT"}).encode()) + "." + b(json.dumps({"exp": int(time.time()) + 3600, "sub": "rootadmin", "iss": "prometheus"}).encode())
+print(m + "." + b(hmac.new(b"rootsecret123", m.encode(), hashlib.sha512).digest()))')
+kms_online() { curl -s -H "Authorization: Bearer $TOKEN" "$U/minio/v2/metrics/cluster" | sed -n 's/^minio_cluster_kms_online{[^}]*} //p'; }
+expect "online while KES answers" "$(kms_online)" 1
+KESPID=${PIDS[-2]}
+kill "$KESPID"; wait "$KESPID" 2>/dev/null || true
+for _ in $(seq 45); do [[ $(kms_online) == 0 ]] && break; sleep 1; done
+expect "offline once it stops (within the 30s it is cached)" "$(kms_online)" 0
+start_kes "$KES" kes.json
+for _ in $(seq 45); do [[ $(kms_online) == 1 ]] && break; sleep 1; done
+expect "online again" "$(kms_online)" 1
 echo "== a restart: keys stay, objects read"
 stop_last; stop_last
 start_kes "$KES" kes.json

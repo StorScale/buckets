@@ -45,6 +45,9 @@ bool buckets_kms_is_builtin(const buckets_kms *k);
 /* KMS.Status's endpoints: a JSON object of endpoint -> "online"/"offline"
  * (the builtin KMS: host -> online). */
 void buckets_kms_status_endpoints(buckets_kms *k, const char *self_host, buckets_buf *out);
+/* Whether the KMS answers: the builtin always; KES when one of its endpoints' /v1/status does (probed at most
+ * every 30 seconds). */
+bool buckets_kms_online(buckets_kms *k);
 /* KMS.Version (the builtin: "v1"). */
 buckets_kms_err buckets_kms_version(buckets_kms *k, char *out, size_t cap);
 /* KMS.APIs as madmin.KMSAPI JSON (NOT_SUPPORTED for the builtin KMS). */

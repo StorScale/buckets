@@ -208,9 +208,10 @@ What changed from the design while building it:
 - **The headless Service.** The ServiceMonitor selects it by a new label,
   `buckets.io/service: headless`. The console Service gets
   `buckets.io/service: console`.
-- **`BucketsKMSOffline` became `BucketsKMSFailing`.** `minio_cluster_kms_online`
-  is 1 whenever a KMS is configured, even an unreachable external KES, so the
-  alert watches KMS request failures instead.
+- **`BucketsKMSFailing` came first.** `minio_cluster_kms_online` was 1
+  whenever a KMS was configured, even an unreachable external KES, so the
+  first alert watched KMS request failures. After 1.5.0 the metric was fixed
+  to probe KES (cached for 30 seconds), and `BucketsKMSOffline` joined it.
 - **`BucketsIAMSyncFailing` is left out.** `minio_node_iam_sync_*` exists only
   with an identity plugin, as in MinIO, so it would be silent on almost every
   cluster.

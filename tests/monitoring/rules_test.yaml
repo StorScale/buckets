@@ -230,3 +230,25 @@ tests:
               summary: "data/store: Prometheus cannot scrape store-pool-0-2"
               description: "The server may be down, or the metrics token may be wrong; none of the other alerts can fire for it meanwhile."
               runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketsmetricsdown
+
+  # the KMS not answering on any server; a cluster whose KMS answers is quiet
+  - interval: 1m
+    input_series:
+      - series: 'minio_cluster_kms_online{namespace="data",buckets_cluster="store",scope="cluster",server="s1"}'
+        values: "1 1 0x8"
+      - series: 'minio_cluster_kms_online{namespace="data",buckets_cluster="store",scope="cluster",server="s2"}'
+        values: "1 1 0x8"
+      - series: 'minio_cluster_kms_online{namespace="data",buckets_cluster="fine",scope="cluster",server="s1"}'
+        values: "1x10"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: BucketsKMSOffline
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: BucketsKMSOffline
+        exp_alerts:
+          - exp_labels: {severity: critical, namespace: data, buckets_cluster: store}
+            exp_annotations:
+              summary: "data/store: the KMS does not answer"
+              description: "No KES endpoint answers its status check. Encrypted objects cannot be read or written meanwhile."
+              runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketskmsfailing
