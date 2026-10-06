@@ -144,6 +144,36 @@
           }
         }
       ]
+    },
+    {
+      "clientId": "superset",
+      "name": "Apache Superset",
+      "enabled": true,
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "${SUPERSET_OAUTH_SECRET:superset-oauth-secret-change-me}",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "redirectUris": [
+        "http://superset:8088/oauth-authorized/keycloak"
+      ],
+      "webOrigins": [
+        "http://superset:8088"
+      ],
+      "protocolMappers": [
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "config": {
+            "claim.name": "groups",
+            "full.path": "false",
+            "access.token.claim": "true",
+            "id.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        }
+      ]
     }
   ]
 }

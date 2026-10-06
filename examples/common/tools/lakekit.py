@@ -186,6 +186,33 @@ def setup_people_and_ranger(policies):
     setup_ranger(policies)
 
 
+# --- Sample data --------------------------------------------------------------------------
+
+ORDERS = [  # (id, customer, card number, region, amount, order date)
+    (1, "Ana", "4111111111111111", "EU", 120.50, "2026-09-01"),
+    (2, "Ben", "5500000000000004", "US", 75.00, "2026-09-02"),
+    (3, "Chloe", "340000000000009", "EU", 310.25, "2026-09-03"),
+    (4, "Dev", "6011000000000004", "APAC", 42.00, "2026-09-04"),
+    (5, "Eva", "3530111333300000", "EU", 18.99, "2026-09-05"),
+    (6, "Finn", "4012888888881881", "US", 99.95, "2026-09-06"),
+]
+
+
+def load_sales_tables(user="bob", catalog="iceberg"):
+    """iceberg.sales.orders (ORDERS) and iceberg.sales.payroll, written through Trino by `user`."""
+    q = lambda statement: sql(user, statement, catalog=catalog, schema="sales")
+    sql(user, f"CREATE SCHEMA IF NOT EXISTS {catalog}.sales", catalog=catalog)
+    for t in ("orders", "payroll"):
+        q(f"DROP TABLE IF EXISTS {t}")
+    q("CREATE TABLE orders (id bigint, customer varchar, card_number varchar, region varchar, "
+      "amount decimal(10,2), order_date date)")
+    q("INSERT INTO orders VALUES " + ", ".join(f"({i}, '{c}', '{n}', '{r}', {a}, DATE '{d}')"
+                                               for i, c, n, r, a, d in ORDERS))
+    q("CREATE TABLE payroll (employee varchar, salary decimal(10,2))")
+    q("INSERT INTO payroll VALUES ('Ana', 5000.00)")
+    log(f"data: {catalog}.sales.orders ({len(ORDERS)} orders) and {catalog}.sales.payroll, written by {user}")
+
+
 # --- Checks ---------------------------------------------------------------------------
 
 failures = []

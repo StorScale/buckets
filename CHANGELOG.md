@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- `examples/superset` and [docs/integrations/superset.md](docs/integrations/superset.md): Apache Superset 6.1 on the lakehouse. People sign in with Keycloak, their groups are their Superset roles (and anyone in neither group is refused), and Superset runs every query in Trino as the person who asked. So Ranger's policies, masks and row filters, and its audit log, follow each person into SQL Lab and charts. Trino accepts a password for Superset's service account, beside Keycloak tokens for people. 8 checks.
+- `examples/dremio` and [docs/integrations/dremio.md](docs/integrations/dremio.md): Dremio 26 (open-source edition) on the lakehouse's Nessie catalog. Dremio reads the Iceberg tables Trino writes, at any Nessie commit, and raw Parquet in Buckets. Its Buckets account may only read, so Buckets refuses its writes. The guide sets out what Dremio's open-source edition does for identity and access, and what needs Enterprise. 7 checks.
+- Examples can include the lakehouse stack (Compose `include`); `lakekit.load_sales_tables()` is their shared sample data.
+
 ## [1.5.0] - 2026-10-06
 
 ### Added
