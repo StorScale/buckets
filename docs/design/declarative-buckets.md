@@ -47,8 +47,10 @@ spec:
 - **Checked again every 10 minutes.** A setting changed by hand on a declared
   field is put back; `status.drift` says which one and when.
 - **Only declared fields are touched.** Leaving `lifecycle` out leaves the
-  bucket's rules alone, while `lifecycle: []` removes them. The same goes for
-  `encryption`, `quota` and `replication`.
+  bucket's rules alone, while `lifecycle: []` removes them. Likewise
+  `quota: ""`, `encryption: {}` and `replication: {}`. Not `null`: Kubernetes
+  drops a null field from a patch or an apply, which would leave the setting
+  unmanaged rather than removed.
 - **Object lock only at creation.** S3 allows it only when the bucket is made,
   so declaring it on an existing bucket without lock is an error in the status.
   The default retention (`mode`, `days`) can change later.
@@ -61,7 +63,9 @@ declared, or the status says so.
 - **`target.cluster`:** another BucketsCluster in the same namespace. The
   operator:
   - makes a replication user on the target cluster, allowed only that
-    bucket's replication actions;
+    bucket's replication actions. Its secret key is an HMAC of its name under
+    the target's root key, so no Secret holds it and it follows a root key
+    rotation on the next check;
   - creates and versions the target bucket;
   - registers the remote target on the source with that user;
   - writes the replication configuration.
@@ -114,7 +118,7 @@ mistake can't tear it down; to stop it, empty the list.
 
 1. ✅ `Bucket`: versioning, object lock, quota, encryption, lifecycle, with drift
    correction.
-2. `Bucket.replication`.
+2. ✅ `Bucket.replication`.
 3. `BucketsSiteReplication`.
 4. The exportable-manifests layout (docs and an example repository tree),
    which then covers all of it.

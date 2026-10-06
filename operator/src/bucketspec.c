@@ -84,11 +84,11 @@ bool bspec_check(yyjson_val *spec, char *err, size_t errlen) {
       return fail(err, errlen, "quota is a size such as 100Gi or 1T (\"%s\")",
                   yyjson_get_str(v) ? yyjson_get_str(v) : "");
   }
-  if ((v = yyjson_obj_get(spec, "encryption")) && !yyjson_is_null(v)) {
+  if ((v = yyjson_obj_get(spec, "encryption")) && !yyjson_is_null(v) && !bspec_empty(v)) {
     const char *key = yyjson_get_str(yyjson_obj_get(v, "kmsKey")),
                *sse = yyjson_get_str(yyjson_obj_get(v, "sse"));
     if (!yyjson_is_obj(v) || !key == !sse)
-      return fail(err, errlen, "encryption is {kmsKey: <key>} or {sse: S3}");
+      return fail(err, errlen, "encryption is {kmsKey: <key>}, {sse: S3}, or {} for none");
     if (sse && strcmp(sse, "S3") != 0) return fail(err, errlen, "encryption.sse is S3");
   }
   if ((v = yyjson_obj_get(spec, "lifecycle")) && !yyjson_is_null(v)) {
@@ -118,6 +118,24 @@ bool bspec_check(yyjson_val *spec, char *err, size_t errlen) {
                     "rule): use two",
                     id);
     }
+  }
+  if ((v = yyjson_obj_get(spec, "replication")) && !yyjson_is_null(v) && !bspec_empty(v)) {
+    yyjson_val *t = yyjson_obj_get(v, "target");
+    const char *cl = yyjson_get_str(yyjson_obj_get(t, "cluster")),
+               *ep = yyjson_get_str(yyjson_obj_get(t, "endpoint"));
+    if (!yyjson_is_obj(v) || !yyjson_is_obj(t) || !cl == !ep)
+      return fail(
+          err, errlen,
+          "replication.target is {cluster} or {endpoint, bucket, credsSecret} ({} for no replication)");
+    if (ep) {
+      if (strncmp(ep, "http://", 7) != 0 && strncmp(ep, "https://", 8) != 0)
+        return fail(err, errlen, "replication.target.endpoint is a URL, such as https://s3.example.com");
+      if (!yyjson_get_str(yyjson_obj_get(t, "bucket")) ||
+          !yyjson_get_str(yyjson_obj_get(yyjson_obj_get(t, "credsSecret"), "name")))
+        return fail(err, errlen, "replication.target with an endpoint needs bucket and credsSecret.name");
+    }
+    if (!yyjson_get_bool(yyjson_obj_get(spec, "versioning")))
+      return fail(err, errlen, "replication needs versioning: true (and the target keeps versions too)");
   }
   return true;
 }
@@ -221,8 +239,10 @@ void bspec_quota_json(uint64_t bytes, buckets_buf *out) {
                       (unsigned long long)bytes);
 }
 
+bool bspec_empty(yyjson_val *v) { return yyjson_is_null(v) || (yyjson_is_obj(v) && !yyjson_obj_size(v)); }
+
 bool bspec_encryption_xml(yyjson_val *enc, buckets_buf *out) {
-  if (!yyjson_is_obj(enc)) return false;
+  if (!yyjson_is_obj(enc) || bspec_empty(enc)) return false;
   const char *key = yyjson_get_str(yyjson_obj_get(enc, "kmsKey"));
   buckets_buf_append_c(out, "<ServerSideEncryptionConfiguration xmlns=\"" S3NS
                             "\"><Rule><ApplyServerSideEncryptionByDefault>");
@@ -278,6 +298,7 @@ bool bspec_lifecycle_xml(yyjson_val *rules, buckets_buf *out) {
 const char *const bspec_versioning_tags[] = {"Status", NULL};
 const char *const bspec_object_lock_tags[] = {"ObjectLockEnabled", "Mode", "Days", "Years", NULL};
 const char *const bspec_encryption_tags[] = {"SSEAlgorithm", "KMSMasterKeyID", NULL};
+const char *const bspec_replication_tags[] = {"ID", "Status", "Priority", "Bucket", "Prefix", NULL};
 const char *const bspec_lifecycle_tags[] = {
     "ID", "Status", "Prefix", "Days", "ExpiredObjectDeleteMarker", "NoncurrentDays", "DaysAfterInitiation",
     NULL};
@@ -303,4 +324,64 @@ void bspec_xml_sig(const char *xml, size_t n, const char *const *tags, buckets_b
     buckets_buf_append(out, xml + v, ve - v);
     buckets_buf_append_char(out, ';');
   }
+}
+
+static const char *on(yyjson_val *repl, const char *key, bool dflt) {
+  yyjson_val *v = yyjson_obj_get(repl, key);
+  return (v ? yyjson_get_bool(v) : dflt) ? "Enabled" : "Disabled";
+}
+
+/* In the order bucketsd writes it back, so the signatures compare; with replica modifications on, as
+ * bucketsd (and MinIO) default them. */
+void bspec_replication_xml(yyjson_val *repl, const char *arn, buckets_buf *out) {
+  buckets_buf_appendf(
+      out,
+      "<ReplicationConfiguration xmlns=\"" S3NS
+      "\"><Rule><ID>buckets-operator</ID><Status>Enabled</Status>"
+      "<Priority>1</Priority><DeleteMarkerReplication><Status>%s</Status></DeleteMarkerReplication>"
+      "<DeleteReplication><Status>%s</Status></DeleteReplication><Destination><Bucket>",
+      on(repl, "deleteMarkers", true), on(repl, "deletes", true));
+  xml_text(out, arn);
+  buckets_buf_appendf(
+      out,
+      "</Bucket></Destination><SourceSelectionCriteria><ReplicaModifications><Status>Enabled</Status>"
+      "</ReplicaModifications></SourceSelectionCriteria><Filter><Prefix></Prefix></Filter>"
+      "<ExistingObjectReplication><Status>%s</Status></ExistingObjectReplication></Rule>"
+      "<Role></Role></ReplicationConfiguration>",
+      on(repl, "existingObjects", true));
+}
+
+void bspec_replication_policy(const char *bucket, buckets_buf *out) {
+  /* MinIO's documented policy for a replication target's user */
+  buckets_buf_appendf(
+      out,
+      "{\"Version\":\"2012-10-17\",\"Statement\":["
+      "{\"Effect\":\"Allow\",\"Action\":[\"s3:GetReplicationConfiguration\",\"s3:ListBucket\","
+      "\"s3:ListBucketMultipartUploads\",\"s3:GetBucketLocation\",\"s3:GetBucketVersioning\","
+      "\"s3:GetBucketObjectLockConfiguration\",\"s3:GetEncryptionConfiguration\"],"
+      "\"Resource\":[\"arn:aws:s3:::%s\"]},"
+      "{\"Effect\":\"Allow\",\"Action\":[\"s3:GetReplicationConfiguration\",\"s3:ReplicateTags\","
+      "\"s3:AbortMultipartUpload\",\"s3:GetObject\",\"s3:GetObjectVersion\",\"s3:GetObjectVersionTagging\","
+      "\"s3:PutObject\",\"s3:PutObjectRetention\",\"s3:PutBucketObjectLockConfiguration\","
+      "\"s3:PutObjectLegalHold\",\"s3:DeleteObject\",\"s3:ReplicateObject\",\"s3:ReplicateDelete\"],"
+      "\"Resource\":[\"arn:aws:s3:::%s/*\"]}]}",
+      bucket, bucket);
+}
+
+void bspec_replication_user(const char *ns, const char *cluster, const char *bucket,
+                            const char *target_cluster, const char *target_bucket, const char *target_root_sk,
+                            char ak[21], char sk[41]) {
+  buckets_buf b = BUCKETS_BUF_INIT;
+  buckets_buf_appendf(&b, "%s/%s/%s->%s/%s", ns, cluster, bucket, target_cluster, target_bucket);
+  uint8_t h[32];
+  buckets_sha256(b.data, b.len, h);
+  memcpy(ak, "bkrepl", 6);
+  buckets_hex_encode(h, 7, ak + 6);
+  ak[20] = '\0';
+  buckets_buf_reset(&b);
+  buckets_buf_appendf(&b, "buckets-replication:%s", ak);
+  buckets_hmac_sha256(target_root_sk, strlen(target_root_sk), b.data, b.len, h);
+  buckets_hex_encode(h, 20, sk);
+  sk[40] = '\0';
+  buckets_buf_free(&b);
 }

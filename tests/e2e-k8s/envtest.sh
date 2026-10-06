@@ -288,6 +288,9 @@ until_true '[[ $(jp bucket/reports "{.status.drift[1].field}") != "" ]]' || true
 expect "quota put back" "$(root "$Q" | jq -r '.quota // 0')" 0
 expect "encryption put back" "$(xml "$(root "$B?encryption")" SSEAlgorithm)" AES256
 expect "drift reported" "$(jp bucket/reports '{.status.drift[*].field}' | tr ' ' '\n' | sort | tr '\n' ' ')" "encryption quota "
+k -n tenant patch bucket reports --type merge -p '{"spec":{"encryption":{"sse":null}}}' >/dev/null
+until_true '[[ $(xml "$(root "$B?encryption")" Code) == ServerSideEncryptionConfigurationNotFoundError ]]' || true
+expect "encryption: {} removes it" "$(xml "$(root "$B?encryption")" Code)" ServerSideEncryptionConfigurationNotFoundError
 
 # a bucket that already exists, without lock
 root -X PUT "http://127.0.0.1:$BPORT/plain" >/dev/null
@@ -307,6 +310,77 @@ until_true '[[ $(jp bucket/plain {.status.phase}) == Ready ]]' || true
 expect "versioning false on a never-versioned bucket" "$(jp bucket/plain '{.status.phase}')/$(xml "$(root "http://127.0.0.1:$BPORT/plain?versioning")" Status)" Ready/
 k -n tenant delete bucket reports plain >/dev/null
 expect "deleting a Bucket leaves the bucket" "$(curl -s -o /dev/null -w '%{http_code}' --aws-sigv4 "aws:amz:us-east-1:s3" --user "$rootu:$rootp" -I "$B")" 200
+
+echo "== Bucket replication to another BucketsCluster"
+# a second cluster, dr, stood in for by a second bucketsd with dr's root credentials
+k apply -f - >/dev/null <<YAML
+apiVersion: buckets.io/v1alpha1
+kind: BucketsCluster
+metadata: {name: dr, namespace: tenant}
+spec:
+  image: bucketsd:test
+  pools: [{servers: 4, volumesPerServer: 1, volumeClaimTemplate: {resources: {requests: {storage: 1Gi}}}}]
+YAML
+until_true 'k -n tenant get secret dr-root'
+DPORT=$((BPORT + 1))
+dru=$(k -n tenant get secret dr-root -o jsonpath='{.data.rootUser}' | base64 -d)
+drp=$(k -n tenant get secret dr-root -o jsonpath='{.data.rootPassword}' | base64 -d)
+mkdir -p "$WORK/dr/d1" "$WORK/dr/d2" "$WORK/dr/d3" "$WORK/dr/d4"
+start_dr() {
+  BUCKETS_ROOT_USER=$dru BUCKETS_ROOT_PASSWORD=$drp "$BUCKETSD" server --address "127.0.0.1:$DPORT" \
+    "$WORK/dr/d{1...4}" 2>>"$WORK/bucketsd-dr.log" &
+  PIDS+=($!)
+  DRPID=$!
+}
+start_dr
+until_true 'curl -sf http://127.0.0.1:$DPORT/minio/health/ready'
+k -n tenant annotate bc dr buckets.io/endpoint="http://127.0.0.1:$DPORT" >/dev/null
+dr() { curl -s --aws-sigv4 "aws:amz:us-east-1:s3" --user "$dru:$drp" "$@"; }
+k apply -f - >/dev/null <<YAML
+apiVersion: buckets.io/v1alpha1
+kind: Bucket
+metadata: {name: events, namespace: tenant}
+spec:
+  cluster: store
+  versioning: true
+  replication: {target: {cluster: dr}, deletes: false}
+YAML
+until_true '[[ $(jp bucket/events {.status.phase}) == Ready ]]' || true
+expect "replicated Bucket ready" "$(jp bucket/events '{.status.phase}')" Ready
+[[ $(jp bucket/events '{.status.phase}') == Ready ]] || jp bucket/events '{.status.message}'
+expect "target bucket made and versioned" "$(xml "$(dr "http://127.0.0.1:$DPORT/events?versioning")" Status)" Enabled
+rc=$(root "http://127.0.0.1:$BPORT/events?replication")
+expect "replication configured" "$(xml "$rc" ID)" buckets-operator
+expect "deletes: false" "$(grep -o '<DeleteReplication><Status>[A-Za-z]*' <<<"$rc" | sed 's/.*>//')" Disabled
+root -X PUT --data "carried across" "http://127.0.0.1:$BPORT/events/one.txt" >/dev/null
+until_true '[[ $(dr "http://127.0.0.1:$DPORT/events/one.txt") == "carried across" ]]' || true
+expect "an object carried across" "$(dr "http://127.0.0.1:$DPORT/events/one.txt")" "carried across"
+pol=$(dr "http://127.0.0.1:$DPORT/minio/admin/v3/list-canned-policies" | jq -r 'keys[]' | grep -c '^bkrepl' || true)
+expect "a replication policy on the target" "$pol" 1
+sleep 3 # a check or two later
+expect "no drift when nothing changed" "$(jp bucket/events '{.status.drift}')" ""
+# the target's root key rotated: the replication user's key follows it, on the target and the source
+kill "$DRPID"; wait "$DRPID" 2>/dev/null || true
+drp=rotated-$(openssl rand -hex 12)
+k -n tenant patch secret dr-root --type merge -p "{\"stringData\":{\"rootPassword\":\"$drp\"}}" >/dev/null
+start_dr
+until_true 'curl -sf http://127.0.0.1:$DPORT/minio/health/ready'
+sleep 3 # the next check
+root -X PUT --data "after rotation" "http://127.0.0.1:$BPORT/events/two.txt" >/dev/null
+until_true '[[ $(dr "http://127.0.0.1:$DPORT/events/two.txt") == "after rotation" ]]' || true
+expect "replication survives a target root key rotation" "$(dr "http://127.0.0.1:$DPORT/events/two.txt")" "after rotation"
+# changed by hand: put back
+root -X DELETE "http://127.0.0.1:$BPORT/events?replication" >/dev/null
+until_true '[[ $(xml "$(root "http://127.0.0.1:$BPORT/events?replication")" ID) == buckets-operator ]]' || true
+expect "replication put back" "$(xml "$(root "http://127.0.0.1:$BPORT/events?replication")" ID)" buckets-operator
+expect "and named as drift" "$(jp bucket/events '{.status.drift[*].field}')" replication
+k -n tenant patch bucket events --type json -p '[{"op":"replace","path":"/spec/replication","value":{}}]' >/dev/null
+until_true '[[ $(xml "$(root "http://127.0.0.1:$BPORT/events?replication")" Code) == ReplicationConfigurationNotFoundError ]]' || true
+expect "replication: {} removes it" "$(xml "$(root "http://127.0.0.1:$BPORT/events?replication")" Code)" ReplicationConfigurationNotFoundError
+k -n tenant patch bucket events --type merge -p '{"spec":{"replication":{"target":{"cluster":"nowhere"}}}}' >/dev/null
+until_true '[[ $(jp bucket/events {.status.phase}) == Error ]]' || true
+expect "a missing target cluster reported" "$(jp bucket/events '{.status.message}')" "replication target: BucketsCluster nowhere not found in namespace tenant"
+k -n tenant delete bucket events >/dev/null
 
 echo "== monitoring: a metrics user, its token and a ServiceMonitor, once the Prometheus Operator is there"
 until_true '[[ $(jp bc/store {.status.monitoring.phase}) == NotInstalled ]]' || true

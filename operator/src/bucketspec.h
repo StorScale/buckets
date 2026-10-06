@@ -8,9 +8,12 @@
  *   versioning: true | false                 Enabled / Suspended
  *   objectLock: true | {mode: GOVERNANCE|COMPLIANCE, days | years}
  *   quota: "100Gi" | "" | null               a hard quota; empty: none
- *   encryption: {kmsKey} | {sse: "S3"} | null
+ *   encryption: {kmsKey} | {sse: "S3"} | {}    {} removes it
  *   lifecycle: [{id, prefix?, expireDays?, noncurrentExpireDays?, abortIncompleteUploadDays?,
  *                expireDeleteMarkers?}]      [] removes the rules
+ *   replication: {target: {cluster} | {endpoint, bucket, credsSecret: {name}},
+ *                 deletes?, deleteMarkers?, existingObjects?} | {}   {} removes it
+ * (Not null for removing: Kubernetes drops a null field, and a dropped field is not managed.)
  * A field left out of the spec is not managed. */
 
 #include <stdbool.h>
@@ -33,10 +36,22 @@ void bspec_versioning_xml(bool on, buckets_buf *out);
 /* Whether objectLock asks for a default retention, and its XML. */
 bool bspec_object_lock_xml(yyjson_val *lock, buckets_buf *out);
 void bspec_quota_json(uint64_t bytes, buckets_buf *out);
-/* false when encryption is null (remove it). */
+/* {} or null: a setting removed. */
+bool bspec_empty(yyjson_val *v);
+/* false when encryption is {} (remove it). */
 bool bspec_encryption_xml(yyjson_val *enc, buckets_buf *out);
 /* false when rules is empty (remove them). */
 bool bspec_lifecycle_xml(yyjson_val *rules, buckets_buf *out);
+
+/* The replication configuration sending everything to the remote target arn. */
+void bspec_replication_xml(yyjson_val *repl, const char *arn, buckets_buf *out);
+/* The policy of the user a source cluster replicates into bucket with. */
+void bspec_replication_policy(const char *bucket, buckets_buf *out);
+/* That user's access key (20 characters) for a source cluster's bucket replicating into target_bucket, and
+ * its secret key, derived from the target cluster's root secret key (41 bytes each with the NUL). */
+void bspec_replication_user(const char *ns, const char *cluster, const char *bucket,
+                            const char *target_cluster, const char *target_bucket, const char *target_root_sk,
+                            char ak[21], char sk[41]);
 
 /* What a configuration document says, for comparing what was applied with what the bucket has:
  * "Tag=value;" for each element named in tags (NULL-ended) that holds text, in document order. The
@@ -44,6 +59,7 @@ bool bspec_lifecycle_xml(yyjson_val *rules, buckets_buf *out);
  * drifted, whatever the formatting and the elements the server adds. */
 void bspec_xml_sig(const char *xml, size_t n, const char *const *tags, buckets_buf *out);
 extern const char *const bspec_versioning_tags[],
-    *const bspec_object_lock_tags[], *const bspec_encryption_tags[], *const bspec_lifecycle_tags[];
+    *const bspec_object_lock_tags[], *const bspec_encryption_tags[], *const bspec_lifecycle_tags[],
+                                                                         *const bspec_replication_tags[];
 
 #endif

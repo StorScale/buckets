@@ -13,7 +13,7 @@ spec:
   versioning: true              # false: suspended
   objectLock: {mode: GOVERNANCE, days: 30}   # or true; only when the bucket is made
   quota: 100Gi                  # a hard quota; "" removes it
-  encryption: {sse: S3}         # or {kmsKey: reports-key}; null removes it
+  encryption: {sse: S3}         # or {kmsKey: reports-key}; {} removes it
   lifecycle:                    # [] removes the rules
     - id: tmp
       prefix: tmp/
@@ -22,3 +22,10 @@ spec:
     - id: old-versions
       noncurrentExpireDays: 30
       expireDeleteMarkers: true
+  replication:                  # needs versioning: true; {} removes it
+    target: {cluster: dr}       # another BucketsCluster in this namespace: the operator makes the
+                                # target bucket and a user that may only replicate into it
+    # target: {endpoint: https://s3.dr.example.com, bucket: reports, credsSecret: {name: dr-creds}}
+    deletes: true               # these three default to true
+    deleteMarkers: true
+    existingObjects: true

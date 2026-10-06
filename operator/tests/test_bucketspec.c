@@ -42,10 +42,11 @@ static void test_check(void **state) {
   check("{\"quota\":\"lots\"}", false, "quota");
   check("{\"quota\":5}", false, "quota");
   check("{\"quota\":\"\"}", true, NULL);
-  check("{\"encryption\":{}}", false, "kmsKey");
   check("{\"encryption\":{\"kmsKey\":\"k\",\"sse\":\"S3\"}}", false, "kmsKey");
   check("{\"encryption\":{\"sse\":\"C\"}}", false, "S3");
   check("{\"encryption\":null}", true, NULL);
+  check("{\"encryption\":{}}", true, NULL);
+  check("{\"versioning\":true,\"replication\":{}}", true, NULL);
   check("{\"lifecycle\":{}}", false, "list");
   check("{\"lifecycle\":[{\"expireDays\":1}]}", false, "needs an id");
   check("{\"lifecycle\":[{\"id\":\"a\",\"expireDays\":1},{\"id\":\"a\",\"expireDays\":2}]}", false,
@@ -55,6 +56,23 @@ static void test_check(void **state) {
   check("{\"lifecycle\":[{\"id\":\"a\",\"expireDays\":1,\"expireDeleteMarkers\":true}]}", false, "use two");
   check("{\"lifecycle\":[{\"id\":\"a\",\"noncurrentExpireDays\":3,\"expireDeleteMarkers\":true}]}", true,
         NULL);
+  check("{\"versioning\":true,\"replication\":{\"target\":{\"cluster\":\"dr\"}}}", true, NULL);
+  check(
+      "{\"versioning\":true,\"replication\":{\"target\":{\"endpoint\":\"https://"
+      "s3.example.com\",\"bucket\":\"b\","
+      "\"credsSecret\":{\"name\":\"c\"}}}}",
+      true, NULL);
+  check("{\"versioning\":true,\"replication\":null}", true, NULL);
+  check("{\"replication\":{\"target\":{\"cluster\":\"dr\"}}}", false, "needs versioning");
+  check("{\"versioning\":true,\"replication\":{\"target\":{}}}", false, "replication.target is");
+  check("{\"versioning\":true,\"replication\":{\"target\":{\"cluster\":\"dr\",\"endpoint\":\"https://x\"}}}",
+        false, "replication.target is");
+  check(
+      "{\"versioning\":true,\"replication\":{\"target\":{\"endpoint\":\"s3.example.com\",\"bucket\":\"b\","
+      "\"credsSecret\":{\"name\":\"c\"}}}}",
+      false, "is a URL");
+  check("{\"versioning\":true,\"replication\":{\"target\":{\"endpoint\":\"https://x\"}}}", false,
+        "needs bucket");
 }
 
 static void test_size(void **state) {
@@ -147,7 +165,7 @@ static void test_documents(void **state) {
   buckets_buf_append_char(&b, '\0');
   assert_non_null(strstr(b.data, "<SSEAlgorithm>AES256</SSEAlgorithm></Apply"));
   yyjson_doc_free(d);
-  d = doc("null");
+  d = doc("{}");
   b.len = 0;
   assert_false(bspec_encryption_xml(yyjson_doc_get_root(d), &b));
   yyjson_doc_free(d);
@@ -178,6 +196,59 @@ static void test_documents(void **state) {
   buckets_buf_free(&b);
 }
 
+static void test_replication(void **state) {
+  (void)state;
+  yyjson_doc *d = doc("{\"target\":{\"cluster\":\"dr\"},\"deletes\":false}");
+  buckets_buf b = BUCKETS_BUF_INIT;
+  bspec_replication_xml(yyjson_doc_get_root(d), "arn:minio:replication::1:reports", &b);
+  buckets_buf_append_char(&b, '\0');
+  assert_string_equal(
+      b.data,
+      "<ReplicationConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Rule>"
+      "<ID>buckets-operator</ID><Status>Enabled</Status><Priority>1</Priority>"
+      "<DeleteMarkerReplication><Status>Enabled</Status></DeleteMarkerReplication>"
+      "<DeleteReplication><Status>Disabled</Status></DeleteReplication>"
+      "<Destination><Bucket>arn:minio:replication::1:reports</Bucket></Destination>"
+      "<SourceSelectionCriteria><ReplicaModifications><Status>Enabled</Status></ReplicaModifications>"
+      "</SourceSelectionCriteria><Filter><Prefix></Prefix></Filter>"
+      "<ExistingObjectReplication><Status>Enabled</Status></ExistingObjectReplication></Rule>"
+      "<Role></Role></ReplicationConfiguration>");
+  buckets_buf sg = BUCKETS_BUF_INIT;
+  bspec_xml_sig(b.data, b.len - 1, bspec_replication_tags, &sg);
+  buckets_buf_append_char(&sg, '\0');
+  assert_string_equal(sg.data,
+                      "ID=buckets-operator;Status=Enabled;Priority=1;Status=Enabled;Status=Disabled;"
+                      "Bucket=arn:minio:replication::1:reports;Status=Enabled;Prefix=;Status=Enabled;");
+  yyjson_doc_free(d);
+
+  b.len = 0;
+  bspec_replication_policy("reports", &b);
+  d = yyjson_read(b.data, b.len, 0);
+  assert_non_null(d); /* JSON */
+  yyjson_val *st = yyjson_obj_get(yyjson_doc_get_root(d), "Statement");
+  assert_string_equal(yyjson_get_str(yyjson_arr_get(yyjson_obj_get(yyjson_arr_get(st, 0), "Resource"), 0)),
+                      "arn:aws:s3:::reports");
+  assert_string_equal(yyjson_get_str(yyjson_arr_get(yyjson_obj_get(yyjson_arr_get(st, 1), "Resource"), 0)),
+                      "arn:aws:s3:::reports/*");
+  yyjson_doc_free(d);
+
+  char ak[21], sk[41], ak2[21], sk2[41];
+  bspec_replication_user("tenant", "store", "reports", "dr", "reports", "rootsecret", ak, sk);
+  assert_int_equal(strlen(ak), 20);
+  assert_int_equal(strlen(sk), 40);
+  assert_memory_equal(ak, "bkrepl", 6);
+  bspec_replication_user("tenant", "store", "reports", "dr", "reports", "rootsecret", ak2, sk2);
+  assert_string_equal(ak, ak2); /* stable */
+  assert_string_equal(sk, sk2);
+  bspec_replication_user("tenant", "store", "reports", "dr", "reports", "rotated", ak2, sk2);
+  assert_string_equal(ak, ak2);
+  assert_string_not_equal(sk, sk2); /* follows the target's root key */
+  bspec_replication_user("tenant", "store", "other", "dr", "other", "rootsecret", ak2, sk2);
+  assert_string_not_equal(ak, ak2);
+  buckets_buf_free(&b);
+  buckets_buf_free(&sg);
+}
+
 static void sig(const char *xml, const char *const *tags, const char *want) {
   buckets_buf b = BUCKETS_BUF_INIT;
   bspec_xml_sig(xml, strlen(xml), tags, &b);
@@ -206,7 +277,7 @@ static void test_signature(void **state) {
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_check),     cmocka_unit_test(test_size),      cmocka_unit_test(test_hash),
-      cmocka_unit_test(test_documents), cmocka_unit_test(test_signature),
+      cmocka_unit_test(test_documents), cmocka_unit_test(test_signature), cmocka_unit_test(test_replication),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }
