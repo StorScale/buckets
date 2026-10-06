@@ -200,7 +200,10 @@ code=$(status -T "$WORK/small" "$(ep 1)/clusterbucket/nope.bin")
 expect "write refused without quorum" "$([[ $code == 503 ]] && echo refused || echo "$code")" refused
 expect "refused promptly" "$(( $(date +%s) - t0 < 5 ))" 1
 expect "reads still work (EC 4+4)" "$(curl -s "${S3[@]}" "$(ep 2)/clusterbucket/big.bin" | md5of)" "$BIG"
-expect "cluster health reports it" "$(curl -s -o /dev/null -w '%{http_code}' ${CURLTLS[@]+"${CURLTLS[@]}"} "$(ep 1)/minio/health/cluster")" 503
+# peers notice the two nodes are gone within a few seconds
+health() { curl -s -o /dev/null -w '%{http_code}' ${CURLTLS[@]+"${CURLTLS[@]}"} "$(ep 1)/minio/health/cluster"; }
+until_true '[[ $(health) == 503 ]]' || true
+expect "cluster health reports it" "$(health)" 503
 start 3
 start 4
 
