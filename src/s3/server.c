@@ -449,6 +449,7 @@ static void *idsync_main(void *arg) {
     return NULL;
   }
   if (!*st.provider) return NULL;
+  s->idsync_on = true;
   buckets_idsync_entra *entra = buckets_idsync_entra_new(&st);
   memset(st.client_secret, 0, sizeof(st.client_secret));
   buckets_log_info("identity sync: asking Entra tenant %s about people with credentials every %lds", st.tenant,

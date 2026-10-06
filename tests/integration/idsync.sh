@@ -97,7 +97,7 @@ BUCKETS_ROOT_USER=rootadmin BUCKETS_ROOT_PASSWORD=rootsecret123 \
   MINIO_IDENTITY_OPENID_CONFIG_URL="$ISS/.well-known/openid-configuration" MINIO_IDENTITY_OPENID_CLIENT_ID=buckets-app \
   BUCKETS_OPENID_SYNC_PROVIDER=entra BUCKETS_OPENID_SYNC_TENANT_ID=$TENANT BUCKETS_OPENID_SYNC_CLIENT_ID=sync-app \
   BUCKETS_OPENID_SYNC_CLIENT_SECRET=sync-secret BUCKETS_OPENID_SYNC_LOGIN_URL="$ISS" BUCKETS_OPENID_SYNC_GRAPH_URL="$ISS" \
-  BUCKETS_OPENID_SYNC_INTERVAL=1 BUCKETS_OPENID_REMOVE_AFTER=8s BUCKETS_OPENID_REMOVE_MAX=2 \
+  BUCKETS_OPENID_SYNC_INTERVAL=1 BUCKETS_OPENID_REMOVE_AFTER=8s BUCKETS_OPENID_REMOVE_MAX=2 MINIO_PROMETHEUS_AUTH_TYPE=public \
   "$BIN" server --address "127.0.0.1:$PORT" "$WORK/d{1...4}" 2>>"$WORK/log" &
 PIDS+=($!)
 until_true "curl -sf $EP/minio/health/ready"
@@ -184,6 +184,14 @@ person o-dan active # two leaving: within the limit
 until_true "[[ \$(key_status KEYBOB0001) == off && \$(key_status KEYCAT0001) == off ]]" || true
 expect "within the limit, removed" "$(key_status KEYBOB0001) $(key_status KEYCAT0001) $(key_status KEYDAN0001)" "off off on"
 
+echo "== metrics"
+metric() { curl -s "$EP/minio/v2/metrics/$1" | awk -v n="$2" '$1 == n || index($1, n "{") == 1 {print $2}' | head -1; }
+expect "runs counted" "$([[ $(metric node buckets_node_identity_sync_runs_total) -ge 5 ]] && echo yes)" yes
+expect "failures counted" "$([[ $(metric node buckets_node_identity_sync_failures_total) -ge 1 ]] && echo yes)" yes
+expect "held runs counted" "$([[ $(metric node buckets_node_identity_sync_held_total) -ge 1 ]] && echo yes)" yes
+expect "deletions counted" "$(metric node 'buckets_node_identity_sync_actions_total{action="delete",server="127.0.0.1:'$PORT'"}')" 1
+expect "on the cluster endpoint too" "$([[ -n $(metric cluster buckets_node_identity_sync_runs_total) ]] && echo yes)" yes
+expect "no samples outside the catalog" "$(grep -c 'samples outside the catalog' "$WORK/log" || true)" 0
 errs=$(grep -c "Sanitizer\|runtime error" "$WORK/log" || true)
 expect "no sanitizer reports" "$errs" 0
 echo "idsync: $pass passed, $fail failed"

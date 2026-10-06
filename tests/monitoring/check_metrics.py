@@ -26,12 +26,12 @@ PROMETHEUS = {"up"}
 def catalog():
     """{metric: {v2 endpoint group, ...}}"""
     out = {}
-    for f in ("minio-catalog.tsv", "extra-catalog.tsv"):
+    for f in ("minio-catalog.tsv", "extra-catalog.tsv", "buckets-catalog.tsv"):
         for line in open(os.path.join(ROOT, "src", "metrics", f)):
             if line.startswith("#") or not line.strip():
                 continue
             col = line.rstrip("\n").split("\t")
-            if len(col) >= 3 and col[0] == "V2":
+            if len(col) >= 3 and col[0] in ("V2", "B"):
                 out.setdefault(col[2], set()).add(col[1])
     return out
 

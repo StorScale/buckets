@@ -949,7 +949,21 @@ static void healing_metrics(mctx *m) {
 }
 
 /* getIAMNodeMetrics: only when the identity plugin is configured */
+/* Identity sync (iam/idsync.h), on servers where it is set up. */
+static void idsync_metrics(mctx *m) {
+  buckets_s3_server *s = m->s;
+  if (!s->idsync_on) return;
+  ADD0(m, "buckets_node_identity_sync_runs_total", (double)s->idsync_runs);
+  ADD0(m, "buckets_node_identity_sync_failures_total", (double)s->idsync_failures);
+  ADD0(m, "buckets_node_identity_sync_held_total", (double)s->idsync_held);
+  ADD1(m, "buckets_node_identity_sync_actions_total", (double)s->idsync_revoked, "action", "revoke");
+  ADD1(m, "buckets_node_identity_sync_actions_total", (double)s->idsync_disabled, "action", "disable");
+  ADD1(m, "buckets_node_identity_sync_actions_total", (double)s->idsync_enabled, "action", "enable");
+  ADD1(m, "buckets_node_identity_sync_actions_total", (double)s->idsync_deleted, "action", "delete");
+}
+
 static void iam_node_metrics(mctx *m) {
+  idsync_metrics(m);
   buckets_plugins *pl = buckets_s3_plugins(m->s);
   bool on = buckets_idp_plugin_enabled(pl);
   buckets_idp_plugin_metrics pm;

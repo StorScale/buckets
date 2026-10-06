@@ -1,0 +1,12 @@
+# Metrics of Buckets' own, for what MinIO doesn't have: same columns as
+# src/metrics/minio-catalog.tsv. Emitted only where the feature is on, so the
+# metric-name comparison with MinIO (tests/integration/metrics-names.sh)
+# never sees them. Names start with buckets_.
+B	cluster	buckets_node_identity_sync_runs_total	counterMetric	"Identity syncs run on this server (the one leading pool 0, set 0)"
+B	node	buckets_node_identity_sync_runs_total	counterMetric	"Identity syncs run on this server (the one leading pool 0, set 0)"
+B	cluster	buckets_node_identity_sync_failures_total	counterMetric	"Identity syncs that could not learn about everyone: the provider failed, or what the sync turned off could not be read"
+B	node	buckets_node_identity_sync_failures_total	counterMetric	"Identity syncs that could not learn about everyone: the provider failed, or what the sync turned off could not be read"
+B	cluster	buckets_node_identity_sync_held_total	counterMetric	"Identity syncs that removed no one because more people left at once than BUCKETS_OPENID_REMOVE_MAX"
+B	node	buckets_node_identity_sync_held_total	counterMetric	"Identity syncs that removed no one because more people left at once than BUCKETS_OPENID_REMOVE_MAX"
+B	cluster	buckets_node_identity_sync_actions_total	counterMetric	"What identity syncs did, by action: revoke (temporary credentials), disable, enable, delete (access keys)"
+B	node	buckets_node_identity_sync_actions_total	counterMetric	"What identity syncs did, by action: revoke (temporary credentials), disable, enable, delete (access keys)"

@@ -142,6 +142,24 @@ groups:
           description: "No KES endpoint answers its status check. Encrypted objects cannot be read or written meanwhile."
           runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketskmsfailing
 
+      - alert: BucketsIdentitySyncFailing
+        expr: sum by (namespace, buckets_cluster) (increase(buckets_node_identity_sync_failures_total{scope="node"}[3h])) >= 2
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.namespace }}/{{ $labels.buckets_cluster }}: the identity sync cannot reach the provider"
+          description: "Twice in three hours the sync could not learn whether people with credentials are still in the identity provider. People who left keep their access keys until it works again."
+          runbook_url: https://github.com/StorScale/buckets/blob/main/docs/identity.md#bucketsidentitysyncfailing
+
+      - alert: BucketsIdentitySyncHeld
+        expr: sum by (namespace, buckets_cluster) (increase(buckets_node_identity_sync_held_total{scope="node"}[2h])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.namespace }}/{{ $labels.buckets_cluster }}: the identity sync held back removals"
+          description: "More people left the identity provider at once than BUCKETS_OPENID_REMOVE_MAX allows, so none were removed. Check the provider; if it is right, raise the limit."
+          runbook_url: https://github.com/StorScale/buckets/blob/main/docs/identity.md#bucketsidentitysyncheld
+
       - alert: BucketsMetricsDown
         expr: max by (namespace, buckets_cluster, pod) (up{buckets_cluster!=""} == 0)
         for: 5m
