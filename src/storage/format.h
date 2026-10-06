@@ -33,4 +33,11 @@ bool buckets_format_negotiate(buckets_drive **drives, size_t ndrives, size_t set
                               buckets_format_opts *opts, buckets_format_result *out, char *err, size_t errlen);
 void buckets_format_result_free(buckets_format_result *r);
 
+/* A local drive found empty while the server runs (a replaced disk): formats it into its slot as the
+ * deployment's other drives describe it (a set member's format.json, with "this" set to the slot's drive
+ * ID), so it can be healed. Only when its directory exists and holds nothing but .minio.sys scaffolding
+ * (and lost+found); a drive with data but no format.json, or one from another deployment, is left alone.
+ * set: the drives of d's erasure set (d among them). False and why when it was not formatted. */
+bool buckets_format_replace(buckets_drive *d, buckets_drive *const *set, size_t n, char *err, size_t errlen);
+
 #endif

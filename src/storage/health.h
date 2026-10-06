@@ -39,12 +39,19 @@ buckets_drive_health buckets_drive_health_state(buckets_drive *d);
 /* Words for a state: "ok", "faulty: <why>", ... into out. */
 void buckets_drive_health_describe(buckets_drive *d, char *out, size_t cap);
 
+/* Whether a local drive is changed because its format.json is gone (an empty or replaced drive), rather than
+ * naming another drive. */
+bool buckets_drive_health_unformatted(buckets_drive *d);
+
 /* Whether calls on a local drive must fail at once (faulty or hung). */
 bool buckets_drive_health_refuses(buckets_drive *d);
 
 /* Points each local drive among copies at the drive among drives with the same root, so both share its
  * checks (bucketsd serves its drives to peers through objects of their own). */
 void buckets_drive_health_share(buckets_drive *const *copies, size_t ncopies, buckets_drive *const *drives, size_t n);
+
+/* The checks' interval, in seconds (0: off). */
+long buckets_drive_health_interval(void);
 
 /* Starts the checker threads for the local drives among drives. */
 void buckets_drive_health_start(buckets_drive *const *drives, size_t n);

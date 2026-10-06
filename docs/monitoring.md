@@ -134,10 +134,17 @@ every erasure set keeps its quorum, but redundancy is reduced.
 - the server's log, for the drive's error;
 - on Kubernetes, the PVC and its PV, and whether the volume is attached.
 
-**Then:** bring the drive back, or replace it. On Kubernetes, delete the
-drive's PVC and then its server's pod: the StatefulSet makes a new volume,
-and Buckets heals it into the old drive's slot. Healing starts by itself once
-a drive is back.
+**Then:** bring the drive back, or replace it.
+- **A disk swapped under the same mount point:** within one check (15
+  seconds), the server formats the new, empty disk into the old one's slot
+  and heals it in the background. The log says "drive ... was replaced".
+- **On Kubernetes:** delete the drive's PVC and then its server's pod. The
+  StatefulSet makes a new volume, and the server formats and heals it when it
+  starts.
+
+A drive that still holds data but lost its `format.json` is never formatted
+over: the log says so once. Restore its `format.json`, or wipe it to have it
+treated as a new disk.
 
 ### BucketsNodeOffline
 

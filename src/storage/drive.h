@@ -43,6 +43,7 @@ typedef struct buckets_drive_s {
    * started (monotonic ms; 0: none running) */
   _Atomic int health, health_errno;
   _Atomic long long check_started_ms;
+  _Atomic bool checking; /* one check at a time */
   /* another object for the same drive whose checks this one shares (the copy served to peers points at the
    * object layer's) */
   struct buckets_drive_s *health_of;
