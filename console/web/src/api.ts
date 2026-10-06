@@ -758,3 +758,37 @@ export async function saveTeam(team: Team, overwrite = false): Promise<Team> {
 export const deleteTeam = (name: string) => call("DELETE", `/api/v1/teams/${encodeURIComponent(name)}`);
 export const teamMember = (team: string, level: TeamLevel, who: { user?: string; group?: string }, remove = false) =>
   call("POST", `/api/v1/teams/${encodeURIComponent(team)}/members`, jsonBody({ level, ...who, remove }));
+
+// ---- access review (consoled's /api/v1/access) ----
+
+export type AccessLevel = "read" | "write" | "delete" | "manage" | "any";
+export const ACCESS_LEVELS: AccessLevel[] = ["read", "write", "delete", "manage", "any"];
+export type AccessBy = { policy?: string; bucketPolicy?: boolean; statement: number; sid?: string; effect: "Allow" | "Deny"; conditions?: string[] };
+export type AccessRow = {
+  kind: string;
+  name: string;
+  status?: string;
+  members?: string[];
+  seen?: string[];
+  owner?: string;
+  groups?: string[];
+  access: "full" | "limited" | "conditional";
+  actions: { action: string; decision: "allowed" | "limited" | "conditional"; limits?: string[]; by: AccessBy[] }[];
+};
+export type AccessReview = { bucket: string; level: AccessLevel; actions: string[]; rows: AccessRow[]; missing: string[]; at: number };
+export async function accessReview(bucket: string, level: AccessLevel): Promise<AccessReview> {
+  return (await call("GET", `/api/v1/access/bucket/${encodeURIComponent(bucket)}`, { query: { level } })).json();
+}
+export type AccessWho = { kind: string; name?: string; roles?: string[] };
+export type AccessDecision = { decision: "allowed" | "denied" | "conditional"; reason: string; by: AccessBy[]; missing: string[] };
+export async function accessCheck(who: AccessWho, action: string, bucket: string, object: string, conds?: Record<string, string>): Promise<AccessDecision> {
+  return (await call("POST", "/api/v1/access/check", jsonBody({ who, action, bucket, object, conds }))).json();
+}
+export type AccessPrincipal = { kind: string; name: string; owner?: string; status?: string };
+export async function accessPrincipals(): Promise<{ principals: AccessPrincipal[]; openid: boolean; ldap: boolean; missing: string[] }> {
+  return (await call("GET", "/api/v1/access/principals")).json();
+}
+export type LocalUsersReport = { provider: string | null; users: { name: string; status: string; policies: string[]; groups: string[]; keys: number }[]; missing: string[] };
+export async function accessLocalUsers(): Promise<LocalUsersReport> {
+  return (await call("GET", "/api/v1/access/local-users")).json();
+}

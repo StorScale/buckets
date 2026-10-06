@@ -15,6 +15,7 @@ import Configuration from "./pages/Configuration";
 import Encryption from "./pages/Encryption";
 import SignInSetup from "./pages/SignIn";
 import Teams from "./pages/Teams";
+import AccessReview from "./pages/AccessReview";
 import KmsSetup from "./pages/KmsSetup";
 import Trace from "./pages/Trace";
 import Logs from "./pages/Logs";
@@ -72,6 +73,7 @@ export default function App() {
         <NavLink to="/identity/teams">Teams</NavLink>
         <NavLink to="/identity/policies">Policies</NavLink>
         <NavLink to="/identity/access-keys">Access Keys</NavLink>
+        <NavLink to="/identity/access-review">Access review</NavLink>
         <NavLink to="/identity/sign-in">Sign-in</NavLink>
         <div className="nav-group">Monitoring</div>
         <NavLink to="/monitoring/trace">Trace</NavLink>
@@ -103,6 +105,7 @@ export default function App() {
           <Route path="/identity/teams" element={<Teams />} />
           <Route path="/identity/policies" element={<Policies />} />
           <Route path="/identity/access-keys" element={<AccessKeys />} />
+          <Route path="/identity/access-review" element={<AccessReview />} />
           <Route path="/identity/sign-in" element={<SignInSetup />} />
           <Route path="/configuration" element={<Configuration />} />
           <Route path="/encryption" element={<Encryption />} />

@@ -671,12 +671,12 @@ yyjson_mut_val *buckets_access_check(yyjson_mut_doc *d, yyjson_val *facts, yyjso
   yyjson_mut_val *out = yyjson_mut_obj(d);
   yyjson_mut_obj_add_str(d, out, "decision", o.d == D_NONE ? "denied" : decision_name(o.d));
   const char *reason =
-      o.d == D_ALLOWED  ? (o.nby ? "Allowed by the statements below." : "The root user may do everything.")
-      : o.d == D_DENIED ? "Denied explicitly by the statements below: a Deny wins over any Allow."
+      o.d == D_ALLOWED  ? (o.nby ? "The statements below allow it." : "The root user may do everything.")
+      : o.d == D_DENIED ? "The statements below refuse it, and a Deny wins over any Allow."
       : o.d == D_CONDITIONAL
-          ? "Depends on conditions: the statements below decide it once their condition values are known."
-      : disabled ? "Denied: the account is disabled."
-                 : "Denied: no statement allows it.";
+          ? "The statements below decide it once their condition values are known."
+      : disabled ? "The account is disabled."
+                 : "No statement allows it.";
   yyjson_mut_obj_add_str(d, out, "reason", reason);
   add_by(d, yyjson_mut_obj_add_arr(d, out, "by"), &o);
   outcome_free(&o);
