@@ -134,6 +134,17 @@ expect "and healed: what it had and all the writes" "$(( $(find "$WORK/n2/d2/pho
 expect "the writes read back" "$(get 3 busy37.txt)" busy37
 expect "online everywhere" "$(offline 1 cluster) $(offline 2 node)" "0 0"
 
+echo "== a drive wiped file by file, its directories left behind (wiping races the writes)"
+had=$(find "$WORK/n1/d2/photos" -name xl.meta | wc -l)
+# Directories as old as a wipe that races writes leaves them; then every file goes.
+python3 -c "import os,sys; [os.utime(os.path.join(r, d), (1e9, 1e9)) for r, ds, _ in os.walk(sys.argv[1]) for d in ds]" "$WORK/n1/d2"
+find "$WORK/n1/d2" -type f -delete
+until_true "[[ -f $WORK/n1/d2/.minio.sys/format.json ]]" || true
+expect "formatted back: empty directories are not data" "$([[ -f $WORK/n1/d2/.minio.sys/format.json ]] && echo yes)" yes
+until_true "[[ \$(find $WORK/n1/d2/photos -name xl.meta 2>/dev/null | wc -l) -ge $had ]]" || true
+expect "and healed ($had)" "$(( $(find "$WORK/n1/d2/photos" -name xl.meta 2>/dev/null | wc -l) >= had ))" 1
+expect "online everywhere" "$(offline 2 cluster) $(offline 1 node)" "0 0"
+
 echo "== a drive that lost only its format.json is left alone"
 mv "$WORK/n3/d1/.minio.sys/format.json" "$WORK/format3.keep"
 until_true "grep -q 'drive $WORK/n3/d1 has no format.json and was not formatted: it holds data' $WORK/log3" || true

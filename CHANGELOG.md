@@ -19,10 +19,8 @@ All notable changes to this project are documented here. The format follows
 - A `Bucket`'s `versioning`, `objectLock` and `quota` were accepted but not applied ("not applied yet" in the status). They are now applied, so a Bucket that declared them changes its bucket when the operator is upgraded.
 
 ### Fixed
+- A drive emptied under write load, as a swapped disk looks, could stay offline for good. A wipe that races writes can't remove the directories those writes are filling, so some are left behind with their older times. The replacement check counted those leftover directories as data "from before", and so never formatted the drive back into its slot. Now only files count as data, so a drive holding just leftover directories is formatted and healed. A drive with older files, such as one that lost only its `format.json`, is still left alone. `tests/integration/drive-health.sh` has a new case, a drive wiped file by file with its directories left behind. Found by `examples/monitoring`, where 2 of 4 swaps under load left the drive offline.
 - The Drives and Buckets dashboards' tables named their columns "Value #A" to "Value #E", and showed sizes as raw numbers. `tools/dashboards/gen.py` now renames each column to its label and gives it a unit, such as bytes.
-
-### Known issues
-- A drive emptied under write load (as a swapped disk looks) can stay offline. Writes that reach it in the moment before Buckets notices its `format.json` is gone make it look like a drive holding data, so it isn't formatted back into its slot. Found by `examples/monitoring` (2 of 4 swaps under load). Wiping the drive again while it's offline brings it back.
 
 ## [1.7.0] - 2026-10-06
 

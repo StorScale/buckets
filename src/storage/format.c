@@ -293,9 +293,10 @@ static bool in_lost_found(const char *path) {
   return strncmp(path + n, "/lost+found", 11) == 0 && (path[n + 11] == '\0' || path[n + 11] == '/');
 }
 
+/* Only files are data. Directories are not: a wipe racing writes leaves some behind (it cannot remove one
+ * a write is filling), with times from before the wipe, and they must not keep the drive from being formatted. */
 static int find_old(const char *path, const struct stat *st, int type, struct FTW *f) {
-  (void)type;
-  if (f->level == 0 || in_lost_found(path)) return 0;
+  if (f->level == 0 || in_lost_found(path) || type != FTW_F) return 0;
 #ifdef __APPLE__
   long long mt = (long long)st->st_mtimespec.tv_sec * 1000 + st->st_mtimespec.tv_nsec / 1000000;
 #else
