@@ -1,0 +1,552 @@
+{
+ "uid": "buckets-drives",
+ "title": "Buckets / Drives and healing",
+ "description": "Every drive's space, errors and latency; erasure sets and healing.",
+ "tags": [
+  "buckets"
+ ],
+ "timezone": "browser",
+ "schemaVersion": 39,
+ "version": 1,
+ "editable": true,
+ "refresh": "30s",
+ "time": {
+  "from": "now-6h",
+  "to": "now"
+ },
+ "templating": {
+  "list": [
+   {
+    "name": "datasource",
+    "label": "Prometheus",
+    "type": "datasource",
+    "query": "prometheus",
+    "hide": 0,
+    "current": {}
+   },
+   {
+    "name": "namespace",
+    "label": "Namespace",
+    "type": "query",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "${datasource}"
+    },
+    "refresh": 2,
+    "hide": 0,
+    "query": {
+     "query": "label_values(minio_cluster_drive_total{scope=\"cluster\"}, namespace)",
+     "refId": "ns"
+    },
+    "definition": "label_values(minio_cluster_drive_total{scope=\"cluster\"}, namespace)",
+    "current": {}
+   },
+   {
+    "name": "cluster",
+    "label": "Cluster",
+    "type": "query",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "${datasource}"
+    },
+    "refresh": 2,
+    "hide": 0,
+    "query": {
+     "query": "label_values(minio_cluster_drive_total{scope=\"cluster\", namespace=\"$namespace\"}, buckets_cluster)",
+     "refId": "cl"
+    },
+    "definition": "label_values(minio_cluster_drive_total{scope=\"cluster\", namespace=\"$namespace\"}, buckets_cluster)",
+    "current": {}
+   }
+  ]
+ },
+ "annotations": {
+  "list": []
+ },
+ "links": [],
+ "panels": [
+  {
+   "type": "row",
+   "title": "Erasure sets",
+   "id": 1,
+   "collapsed": false,
+   "gridPos": {
+    "x": 0,
+    "y": 0,
+    "w": 24,
+    "h": 1
+   },
+   "panels": []
+  },
+  {
+   "type": "timeseries",
+   "title": "Online drives against write quorum",
+   "description": "When a set's online drives reach its write quorum, one more failure stops writes to it.",
+   "id": 2,
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 1,
+    "w": 12,
+    "h": 8
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "min by (pool, set) (minio_cluster_health_erasure_set_online_drives{namespace=\"$namespace\", buckets_cluster=\"$cluster\", scope=\"cluster\"})",
+     "legendFormat": "pool {{pool}} set {{set}} online",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${datasource}"
+     }
+    },
+    {
+     "refId": "B",
+     "expr": "max by (pool, set) (minio_cluster_health_erasure_set_write_quorum{namespace=\"$namespace\", buckets_cluster=\"$cluster\", scope=\"cluster\"})",
+     "legendFormat": "pool {{pool}} set {{set}} write quorum",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${datasource}"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "custom": {
+      "fillOpacity": 10,
+      "showPoints": "never",
+      "stacking": {
+       "mode": "none"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "Healing drives",
+   "description": "",
+   "id": 3,
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 1,
+    "w": 12,
+    "h": 8
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "max by (pool, set) (minio_cluster_health_erasure_set_healing_drives{namespace=\"$namespace\", buckets_cluster=\"$cluster\", scope=\"cluster\"})",
+     "legendFormat": "pool {{pool}} set {{set}}",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${datasource}"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "custom": {
+      "fillOpacity": 10,
+      "showPoints": "never",
+      "stacking": {
+       "mode": "none"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "type": "row",
+   "title": "Drives",
+   "id": 4,
+   "collapsed": false,
+   "gridPos": {
+    "x": 0,
+    "y": 9,
+    "w": 24,
+    "h": 1
+   },
+   "panels": []
+  },
+  {
+   "type": "table",
+   "title": "Drives",
+   "description": "",
+   "id": 5,
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 10,
+    "w": 24,
+    "h": 8
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "max by (server, drive) (minio_node_drive_used_bytes{namespace=\"$namespace\", buckets_cluster=\"$cluster\", scope=\"node\"})",
+     "legendFormat": "used",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${datasource}"
+     },
+     "instant": true,
+     "format": "table"
+    },
+    {
+     "refId": "B",
+     "expr": "max by (server, drive) (minio_node_drive_free_bytes{namespace=\"$namespace\", buckets_cluster=\"$cluster\", scope=\"node\"})",
+     "legendFormat": "free",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${datasource}"
+     },
+     "instant": true,
+     "format": "table"
+    },
+    {
+     "refId": "C",
+     "expr": "max by (server, drive) (minio_node_drive_total_bytes{namespace=\"$namespace\", buckets_cluster=\"$cluster\", scope=\"node\"})",
+     "legendFormat": "total",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${datasource}"
+     },
+     "instant": true,
+     "format": "table"
+    },
+    {
+     "refId": "D",
+     "expr": "sum by (server, drive) (increase(minio_node_drive_errors_ioerror{namespace=\"$namespace\", buckets_cluster=\"$cluster\", scope=\"node\"}[1h]))",
+     "legendFormat": "I/O errors (1h)",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${datasource}"
+     },
+     "instant": true,
+     "format": "table"
+    },
+    {
+     "refId": "E",
+     "expr": "sum by (server, drive) (increase(minio_node_drive_errors_timeout{namespace=\"$namespace\", buckets_cluster=\"$cluster\", scope=\"node\"}[1h]))",
+     "legendFormat": "timeouts (1h)",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${datasource}"
+     },
+     "instant": true,
+     "format": "table"
+    }
+   ],
+   "transformations": [
+    {
+     "id": "merge"
+    },
+    {
+     "id": "organize",
+     "options": {
+      "excludeByName": {
+       "Time": true
+      }
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {},
+    "overrides": []
+   },
+   "options": {
+    "showHeader": true
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "Drive space used",
+   "description": "",
+   "id": 6,
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 18,
+    "w": 12,
+    "h": 8
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "max by (server, drive) (minio_node_drive_used_bytes{namespace=\"$namespace\", buckets_cluster=\"$cluster\", scope=\"node\"}) / max by (server, drive) (minio_node_drive_total_bytes{namespace=\"$namespace\", buckets_cluster=\"$cluster\", scope=\"node\"})",
+     "legendFormat": "{{server}} {{drive}}",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${datasource}"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "custom": {
+      "fillOpacity": 10,
+      "showPoints": "never",
+      "stacking": {
+       "mode": "none"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "Drive errors",
+   "description": "",
+   "id": 7,
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 18,
+    "w": 12,
+    "h": 8
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum by (server, drive) (rate(minio_node_drive_errors_ioerror{namespace=\"$namespace\", buckets_cluster=\"$cluster\", scope=\"node\"}[5m]))",
+     "legendFormat": "{{server}} {{drive}} I/O",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${datasource}"
+     }
+    },
+    {
+     "refId": "B",
+     "expr": "sum by (server, drive) (rate(minio_node_drive_errors_timeout{namespace=\"$namespace\", buckets_cluster=\"$cluster\", scope=\"node\"}[5m]))",
+     "legendFormat": "{{server}} {{drive}} timeout",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${datasource}"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "ops",
+     "custom": {
+      "fillOpacity": 10,
+      "showPoints": "never",
+      "stacking": {
+       "mode": "none"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "Drive latency",
+   "description": "",
+   "id": 8,
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 26,
+    "w": 24,
+    "h": 8
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "max by (server, drive, api) (minio_node_drive_latency_us{namespace=\"$namespace\", buckets_cluster=\"$cluster\", scope=\"node\"})",
+     "legendFormat": "{{server}} {{drive}} {{api}}",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${datasource}"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "µs",
+     "custom": {
+      "fillOpacity": 10,
+      "showPoints": "never",
+      "stacking": {
+       "mode": "none"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "type": "row",
+   "title": "Healing",
+   "id": 9,
+   "collapsed": false,
+   "gridPos": {
+    "x": 0,
+    "y": 34,
+    "w": 24,
+    "h": 1
+   },
+   "panels": []
+  },
+  {
+   "type": "timeseries",
+   "title": "Objects healed",
+   "description": "",
+   "id": 10,
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 35,
+    "w": 24,
+    "h": 8
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "max(rate(minio_heal_objects_heal_total{namespace=\"$namespace\", buckets_cluster=\"$cluster\", scope=\"cluster\"}[5m]))",
+     "legendFormat": "healed",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${datasource}"
+     }
+    },
+    {
+     "refId": "B",
+     "expr": "max(rate(minio_heal_objects_errors_total{namespace=\"$namespace\", buckets_cluster=\"$cluster\", scope=\"cluster\"}[5m]))",
+     "legendFormat": "errors",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${datasource}"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "ops",
+     "custom": {
+      "fillOpacity": 10,
+      "showPoints": "never",
+      "stacking": {
+       "mode": "none"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  }
+ ]
+}

@@ -6,8 +6,11 @@ with scope="cluster" must name a metric of /minio/v2/metrics/cluster, and
 scope="node" one of /minio/v2/metrics/node (src/metrics/minio-catalog.tsv,
 extra-catalog.tsv). So no alert or panel can watch a metric that never comes.
 
-  python3 tests/monitoring/check_metrics.py"""
-import json, os, re, sys
+With PROMTOOL set (a promtool binary), every dashboard query must also parse:
+each becomes a recording rule for `promtool check rules`.
+
+  [PROMTOOL=...] python3 tests/monitoring/check_metrics.py"""
+import json, os, re, subprocess, sys, tempfile
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 MON = os.path.join(ROOT, "operator", "helm", "buckets-operator", "monitoring")
@@ -90,9 +93,23 @@ def main():
             if base not in cat:
                 problems.append(f"{where}: {name} is not a metric bucketsd exports")
                 continue
-            want = re.search(r'scope="(cluster|node)"', sel)
+            want = re.search(r'scope="(cluster|node|bucket)"', sel)
             if want and want.group(1) not in cat[base]:
                 problems.append(f"{where}: {name} is not on the v2 {want.group(1)} endpoint (only {sorted(cat[base])})")
+    promtool = os.environ.get("PROMTOOL")
+    if promtool:
+        queries = [e for w, e in expressions() if w != "rules.yaml"]
+        rules = {"groups": [{"name": "dashboards", "rules": [
+            {"record": f"dashboard_query_{i}", "expr": re.sub(r"\$(namespace|cluster|datasource)", "x", e)}
+            for i, e in enumerate(queries) if not e.startswith("label_values(")]}]}
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+            json.dump(rules, f)  # JSON is YAML
+        r = subprocess.run([promtool, "check", "rules", f.name], capture_output=True, text=True)
+        os.unlink(f.name)
+        if r.returncode:
+            problems.append("dashboard queries do not parse:\n" + r.stdout + r.stderr)
+        else:
+            print(f"queries: {len(rules['groups'][0]['rules'])} dashboard queries parse")
     for p in problems:
         print("FAIL:", p)
     print(f"metrics: {len(used)} used, {len(problems)} problems")
