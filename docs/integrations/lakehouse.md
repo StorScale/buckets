@@ -7,11 +7,11 @@ This guide builds a small data platform on Buckets:
 - **Apache Ranger** decides who may query what, down to rows and columns.
 - **Keycloak** is the identity provider for all of them, so a person's groups mean the same thing in Trino, Ranger and Buckets.
 
-Everything runs from one Compose file in [`examples/lakehouse`](../../examples/lakehouse), and a test script checks every claim in this guide. CI runs it on each change to Buckets.
+Everything runs from one Compose file in [`examples/lakehouse`](../../examples/lakehouse), and a test script checks what this guide says the stack does. CI runs it on each change to Buckets. For Hive Metastore and Spark, see [hive-spark.md](hive-spark.md).
 
 | Component | Version | Role |
 |---|---|---|
-| Buckets | 1.4.0 | S3 storage for the warehouse; sign-in with Keycloak through STS |
+| Buckets | 1.4.2 | S3 storage for the warehouse; sign-in with Keycloak through STS |
 | Nessie | 0.108.8 | Iceberg REST catalog, with a git-like commit history |
 | Trino | 483 | SQL engine, Iceberg connector |
 | Apache Ranger | 2.9.0 | Access policies, column masks, row filters and audit for Trino |
@@ -70,7 +70,7 @@ all checks passed
 
 `docker compose down -v` stops everything and deletes the data. Every password is in `.env`, and all of them are for local use only.
 
-**On arm64** (Apple silicon, AWS Graviton): the Buckets images up to 1.4.0 are amd64 only. Build Buckets from the repository root and point the example at it:
+Buckets' images are multi-arch from 1.4.2, so this runs as is on amd64 and arm64 (Apple silicon, AWS Graviton). To try Buckets built from your checkout, build it from the repository root and point the example at it:
 
 ```bash
 docker build -f docker/Dockerfile.bucketsd -t buckets-local/bucketsd .
@@ -92,7 +92,7 @@ All three have the password `LAKEHOUSE_USER_PASSWORD` from `.env`.
 **Query as someone.** Get their token from Keycloak, then use the Trino CLI in the Trino container:
 
 ```bash
-TOKEN=$(docker compose run --rm -T test python /work/get_token.py alice)
+TOKEN=$(docker compose run --rm -T test python /common/get_token.py alice)
 docker compose exec trino trino --server https://trino:8443 --insecure \
   --user alice --access-token "$TOKEN" --catalog iceberg --schema sales \
   --execute "SELECT id, customer, card_number, region FROM orders"
@@ -186,7 +186,7 @@ ranger.service.name=lakehouse
 ranger.plugin.config.resource=/etc/trino/ranger-trino-security.xml,/etc/trino/ranger-trino-audit.xml
 ```
 
-`ranger-trino-security.xml` points the plugin at Ranger and polls for policy changes every five seconds. It sets `use.rangerGroups`, so a user's groups come from Ranger. Trino has no way to read groups from a token. `ranger-trino-audit.xml` sends audits to Ranger's Solr.
+`ranger-trino-security.xml` (in `examples/common/trino`, with Trino's other shared settings) points the plugin at Ranger and polls for policy changes every five seconds. It sets `use.rangerGroups`, so a user's groups come from Ranger. Trino has no way to read groups from a token. `ranger-trino-audit.xml` sends audits to Ranger's Solr.
 
 ### Ranger
 
@@ -210,7 +210,7 @@ Ranger allows one access policy per resource, so where engineers and analysts sh
 
 ### Keycloak
 
-The realm `lakehouse` (`keycloak/lakehouse-realm.json`) has the three users, two groups, and one client, `lakehouse`, with two token mappers:
+The realm `lakehouse` (`examples/common/keycloak/lakehouse-realm.json`) has the three users, two groups, and one client, `lakehouse`, with two token mappers:
 - **groups:** the user's group names, without the leading `/` (`full.path` off), in the `groups` claim;
 - **audience:** `lakehouse` in the access token's `aud`, which Trino and Buckets both check.
 
@@ -230,7 +230,7 @@ The example takes shortcuts that a real deployment shouldn't:
 
 | Symptom | Cause |
 |---|---|
-| Ranger rejects the admin password until a few minutes have passed | Five failed sign-ins within five minutes lock a Ranger account. The Ranger image's own bootstrap script signs in with the image's default password, so the example replaces that script (`ranger/create-ranger-services.py`) and checks Ranger's health without signing in. |
+| Ranger rejects the admin password until a few minutes have passed | Five failed sign-ins within five minutes lock a Ranger account. The Ranger image's own bootstrap script signs in with the image's default password, so the examples replace that script (`examples/common/ranger/create-ranger-services.py`) and checks Ranger's health without signing in. |
 | Trino logs `Unauthenticated access not allowed` from Ranger | The plugin isn't signing in. Set `ranger.plugin.trino.policy.rest.client.username` and `.password`. |
 | Ranger: `Another policy already exists for matching resource` | Merge the policy items into the existing policy for that resource. |
 | Trino: `Principal alice cannot become user trino` | The CLI sends your OS user name. Pass `--user` with the token's user. |

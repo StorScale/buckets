@@ -11,81 +11,17 @@
      works, the warehouse's files are refused, so she can't read around Ranger;
   6. Ranger's audit log has the denials.
 """
-import os
-import re
-import sys
-import time
+import functools
 import uuid
 
-import boto3
 import requests
-import trino
-from botocore.config import Config
-from botocore.exceptions import ClientError
 
-env = os.environ
-KEYCLOAK_TOKEN = "http://keycloak:8080/realms/lakehouse/protocol/openid-connect/token"
-BUCKETS = "http://buckets:9000"
-failures = []
+from lakekit import (audited_denials, check, code, finish, keys, s3_as, s3_root, wait_for_trino)
+from lakekit import denied as _denied, sql as _sql
 
-
-def check(name, ok, detail=""):
-    print(f"{'ok  ' if ok else 'FAIL'} {name}{f'  ({detail})' if detail else ''}", flush=True)
-    if not ok:
-        failures.append(name)
-
-
-def token(user):
-    r = requests.post(KEYCLOAK_TOKEN, data={"grant_type": "password", "client_id": "lakehouse",
-                                            "username": user, "password": env["LAKEHOUSE_USER_PASSWORD"]}, timeout=10)
-    r.raise_for_status()
-    return r.json()["access_token"]
-
-
-def sql(user, statement):
-    conn = trino.dbapi.connect(host="trino", port=8443, http_scheme="https", user=user,
-                               auth=trino.auth.JWTAuthentication(token(user)), verify="/tls/cert.pem",
-                               catalog="iceberg", schema="sales")
-    cur = conn.cursor()
-    cur.execute(statement)
-    return cur.fetchall()
-
-
-def denied(user, statement):
-    """The Trino error if Ranger refuses the statement, else None."""
-    try:
-        sql(user, statement)
-    except trino.exceptions.TrinoUserError as e:
-        if e.error_name == "PERMISSION_DENIED":
-            return e.message
-        raise
-    return None
-
-
-def s3(**creds):
-    return boto3.client("s3", endpoint_url=BUCKETS, region_name="us-east-1",
-                        config=Config(s3={"addressing_style": "path"}), **creds)
-
-
-def code(fn):
-    try:
-        fn()
-        return "OK"
-    except ClientError as e:
-        return e.response["Error"]["Code"]
-
-
-def wait_for_trino():
-    deadline = time.time() + 300
-    while True:
-        try:
-            if requests.get("https://trino:8443/v1/info", verify="/tls/cert.pem", timeout=5).json()["starting"] is False:
-                return
-        except (requests.RequestException, ValueError, KeyError):
-            pass
-        if time.time() > deadline:
-            sys.exit("test: Trino did not start")
-        time.sleep(2)
+# Every statement here runs in the iceberg catalog's sales schema.
+sql = functools.partial(_sql, catalog="iceberg", schema="sales")
+denied = functools.partial(_denied, catalog="iceberg", schema="sales")
 
 
 ORDERS = [
@@ -123,11 +59,9 @@ def main():
     sql("bob", "INSERT INTO payroll VALUES ('Ana', 5000.00)")
 
     # 2. The table is files in Buckets.
-    root = s3(aws_access_key_id=env["BUCKETS_ROOT_USER"], aws_secret_access_key=env["BUCKETS_ROOT_PASSWORD"])
-    keys = [o["Key"] for p in root.get_paginator("list_objects_v2").paginate(Bucket="warehouse", Prefix="sales/")
-            for o in p.get("Contents", [])]
-    data = [k for k in keys if k.endswith(".parquet") and "/orders" in k]
-    meta = [k for k in keys if k.endswith(".metadata.json") and "/orders" in k]
+    files = keys(s3_root(), "warehouse", "sales/")
+    data = [k for k in files if k.endswith(".parquet") and "/orders" in k]
+    meta = [k for k in files if k.endswith(".metadata.json") and "/orders" in k]
     check("the table's data and metadata are in Buckets", data and meta,
           f"{len(data)} Parquet files, {len(meta)} metadata files under s3://warehouse/sales/")
 
@@ -151,12 +85,7 @@ def main():
     check("people in neither group are denied", msg, msg)
 
     # 5. Buckets: people sign in with the same token, and can't read the warehouse.
-    sts = boto3.client("sts", endpoint_url=BUCKETS, region_name="us-east-1",
-                       aws_access_key_id="unused", aws_secret_access_key="unused")
-    c = sts.assume_role_with_web_identity(RoleArn="arn:minio:iam:::role/lakehouse", RoleSessionName="alice",
-                                          WebIdentityToken=token("alice"), DurationSeconds=900)["Credentials"]
-    alice = s3(aws_access_key_id=c["AccessKeyId"], aws_secret_access_key=c["SecretAccessKey"],
-               aws_session_token=c["SessionToken"])
+    alice = s3_as("alice")
     key = f"alice/{uuid.uuid4().hex}.txt"
     wrote = code(lambda: alice.put_object(Bucket="scratch", Key=key, Body=b"my notes"))
     check("analysts sign in to Buckets with their Keycloak token and use their own bucket", wrote == "OK", wrote)
@@ -165,21 +94,10 @@ def main():
     check("analysts can't read the warehouse's files directly", got == "AccessDenied" and listed == "AccessDenied",
           f"GetObject {got}, ListObjects {listed}")
 
-    # 6. Ranger's audit log (Solr) has the denials. The plugin sends audits in batches.
-    deadline = time.time() + 90
-    hits = 0
-    while time.time() < deadline and not hits:
-        r = requests.get("http://ranger-solr:8983/solr/ranger_audits/select",
-                         params={"q": "reqUser:carol AND result:0", "rows": 0}, timeout=10)
-        hits = r.json()["response"]["numFound"] if r.ok else 0
-        if not hits:
-            time.sleep(5)
+    # 6. Ranger's audit log (Solr) has the denials.
+    hits = audited_denials("carol")
     check("Ranger's audit log records the denials", hits > 0, f"{hits} denied requests by carol")
-
-    print()
-    if failures:
-        sys.exit(f"{len(failures)} of the checks failed")
-    print("all checks passed")
+    finish()
 
 
 if __name__ == "__main__":

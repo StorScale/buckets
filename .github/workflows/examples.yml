@@ -1,41 +1,47 @@
-# The lakehouse example (examples/lakehouse) end to end: Buckets built from
-# this commit, with Nessie, Trino, Apache Ranger and Keycloak, and the checks
-# in examples/lakehouse/tools/test.py. See docs/integrations/lakehouse.md.
-name: lakehouse
+# The integration examples end to end, each against Buckets built from this
+# commit, with the checks in examples/<example>/tools/test.py:
+#   - lakehouse:  Nessie, Trino, Apache Ranger, Keycloak (docs/integrations/lakehouse.md)
+#   - hive-spark: Hive Metastore, Spark, Trino, Apache Ranger, Keycloak
+#                 (docs/integrations/hive-spark.md)
+name: examples
 
 on:
   push:
     branches: [main]
     tags: ['v*']
     paths:
-      - 'examples/lakehouse/**'
+      - 'examples/**'
       - 'src/**'
       - 'docker/Dockerfile.bucketsd'
       - 'CMakeLists.txt'
-      - '.github/workflows/lakehouse.yml'
+      - '.github/workflows/examples.yml'
   pull_request:
     paths:
-      - 'examples/lakehouse/**'
+      - 'examples/**'
       - 'src/**'
       - 'docker/Dockerfile.bucketsd'
       - 'CMakeLists.txt'
-      - '.github/workflows/lakehouse.yml'
+      - '.github/workflows/examples.yml'
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: lakehouse-${{ github.ref }}
+  group: examples-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  lakehouse:
+  example:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        example: [lakehouse, hive-spark]
     defaults:
       run:
-        working-directory: examples/lakehouse
+        working-directory: examples/${{ matrix.example }}
     env:
       BUCKETS_IMAGE: buckets-ci/bucketsd:${{ github.sha }}
     steps:
@@ -46,7 +52,7 @@ jobs:
         run: docker build -f docker/Dockerfile.bucketsd -t "$BUCKETS_IMAGE" .
 
       - name: Start the stack
-        run: docker compose up -d --wait --wait-timeout 600
+        run: docker compose up -d --wait --wait-timeout 900
 
       - name: Run the checks
         run: docker compose run --rm test
