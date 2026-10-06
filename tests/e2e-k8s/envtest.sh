@@ -643,6 +643,22 @@ until_true '[[ $(jp bc/idc "{.status.identity.phase}") == Error ]]'
 expect "saved, but no servers answer" "$(jp bc/idc '{.status.identity.phase}')" Error
 expect "status names the provider" "$(jp bc/idc '{.status.identity.description}')" "Microsoft Entra ID (tenant t-1)"
 expect "the console's copy waits for the servers" "$(k -n tenant get secret idc-identity-console -o name 2>/dev/null || echo none)" none
+# removing people who leave (iam/idsync.h): the sync's settings on the servers, its secret in a Secret
+idsettings='{"openid":{"provider":"entra","tenantId":"t-1","clientId":"app","clientSecret":"s","removal":{"enabled":true,"deleteAfterDays":14}}}'
+k -n tenant create secret generic idc-identity --from-literal=settings.json="$idsettings" --dry-run=client -o yaml | k apply -f - >/dev/null
+syncenv() { jp sts/idc-pool-0 "{.spec.template.spec.containers[0].env[?(@.name==\"$1\")].value}"; }
+until_true '[[ $(syncenv BUCKETS_OPENID_SYNC_TENANT_ID) == t-1 ]]' || true
+expect "the servers get the sync's settings" "$(syncenv BUCKETS_OPENID_SYNC_PROVIDER) $(syncenv BUCKETS_OPENID_SYNC_TENANT_ID) $(syncenv BUCKETS_OPENID_SYNC_CLIENT_ID) $(syncenv BUCKETS_OPENID_REMOVE_AFTER) $(syncenv BUCKETS_OPENID_REMOVE_MAX)" \
+  "entra t-1 app 14 10"
+expect "the client secret from a Secret" "$(jp sts/idc-pool-0 '{.spec.template.spec.containers[0].env[?(@.name=="BUCKETS_OPENID_SYNC_CLIENT_SECRET")].valueFrom.secretKeyRef.name}')" idc-identity-sync
+expect "which holds it" "$(jp secret/idc-identity-sync '{.data.clientSecret}' | base64 -d)" s
+expect "owned by the cluster" "$(jp secret/idc-identity-sync '{.metadata.ownerReferences[0].name}')" idc
+expect "a change restarts the servers" "$([[ -n $(jp sts/idc-pool-0 '{.spec.template.metadata.annotations.buckets\.io/identity-sync}') ]] && echo yes)" yes
+expect "status says so" "$(jp bc/idc '{.status.identity.description}')" "Microsoft Entra ID (tenant t-1), people who leave removed (keys deleted after 14 days)"
+idsettings='{"openid":{"provider":"entra","tenantId":"t-1","clientId":"app","clientSecret":"s","removal":{"enabled":false}}}'
+k -n tenant create secret generic idc-identity --from-literal=settings.json="$idsettings" --dry-run=client -o yaml | k apply -f - >/dev/null
+until_true '[[ -z $(syncenv BUCKETS_OPENID_SYNC_TENANT_ID) ]]' || true
+expect "removal off: the settings go" "$(syncenv BUCKETS_OPENID_SYNC_PROVIDER)/$(jp sts/idc-pool-0 '{.spec.template.metadata.annotations.buckets\.io/identity-sync}')" /
 k -n tenant patch bc idc --type=merge -p '{"spec":{"env":[{"name":"MINIO_IDENTITY_OPENID_CLIENT_ID","value":"x"}]}}' >/dev/null
 until_true '[[ $(jp bc/idc "{.status.identity.phase}") == Conflict ]]'
 expect "spec.env setting sign-in too: refused" "$(jp bc/idc '{.status.identity.message}' | grep -o 'spec.env MINIO_IDENTITY_OPENID_CLIENT_ID')" \

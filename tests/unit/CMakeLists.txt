@@ -35,6 +35,7 @@ buckets_unit_test(test_keskey)
 buckets_unit_test(test_idp)
 buckets_unit_test(test_teams)
 buckets_unit_test(test_access)
+buckets_unit_test(test_idsync)
 buckets_unit_test(test_drive_health)
 
 # scripts/adopt_kes.py (the adoption script's KES carry-over)

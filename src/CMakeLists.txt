@@ -162,6 +162,7 @@ add_library(buckets STATIC
   iam/teams.c
   iam/access.c
   iam/ldapidp.c
+  iam/idsync.c
   iam/plugins.c
   crypto/jwt.c
   crypto/jwk.c

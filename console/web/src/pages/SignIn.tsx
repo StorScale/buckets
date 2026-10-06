@@ -5,6 +5,7 @@ import {
   IdentityConfig,
   identityConfig,
   identityLdapTest,
+  identityRemovalTest,
   identitySaveCandidate,
   IdentitySettings,
   identityTestSignIn,
@@ -13,6 +14,7 @@ import {
   OidcProvider,
   OidcSettings,
   OidcTest,
+  RemovalTest,
 } from "../api";
 import { Copy, ErrorBanner, Spinner } from "../components";
 
@@ -128,7 +130,8 @@ export default function SignInSetup() {
   const fresh = !dirty && !!cfg.candidateHash; // the draft is the saved candidate
   const test = fresh ? cfg.test : undefined;
   const needOidc = !!draft.openid, needLdap = !!draft.ldap;
-  const ready = fresh && (!needOidc || test?.openid?.passed) && (!needLdap || test?.ldap?.passed);
+  const needRemoval = draft.openid?.provider === "entra" && !!draft.openid.removal?.enabled;
+  const ready = fresh && (!needOidc || test?.openid?.passed) && (!needLdap || test?.ldap?.passed) && (!needRemoval || test?.removal?.passed);
 
   const save = async () => {
     setError(undefined);
@@ -198,6 +201,9 @@ export default function SignInSetup() {
             </div>
             <ProviderSteps provider={draft.openid.provider} redirectUri={draft.openid.redirectUri || cfg.redirectUri || ""} cluster={cfg.cluster ?? "buckets"} />
             <OidcForm o={draft.openid} saved={saved} onChange={(openid) => change({ ...draft, openid })} />
+            {draft.openid.provider === "entra" && (
+              <Removal o={draft.openid} onChange={(openid) => change({ ...draft, openid })} enabled={fresh} result={test?.removal} onDone={() => load(false)} />
+            )}
           </>
         )}
       </div>
@@ -238,6 +244,7 @@ export default function SignInSetup() {
             </li>
           )}
           {needLdap && <li className={test?.ldap?.passed ? "done" : ""}>Look up a directory user (above).</li>}
+          {needRemoval && <li className={test?.removal?.passed ? "done" : ""}>Look up a person in Microsoft Graph (People who leave, above).</li>}
           <li className={applied ? "done" : ""}>
             Apply. The servers take the settings at once{needLdap ? "; LDAP is read when they start, so they restart one at a time" : ""}, then the console.{" "}
             <button className="primary" onClick={apply} disabled={!ready || busy !== "" || applied} data-testid="signin-apply">
@@ -247,6 +254,89 @@ export default function SignInSetup() {
         </ol>
         {!needOidc && !needLdap && <p className="muted">With both off, people sign in with access keys only.</p>}
       </div>
+    </div>
+  );
+}
+
+// ---- people who leave ----------------------------------------------------------------------
+
+function Removal({ o, onChange, enabled, result, onDone }: { o: OidcSettings; onChange: (o: OidcSettings) => void; enabled: boolean; result?: RemovalTest; onDone: () => void }) {
+  const r = o.removal ?? { enabled: false };
+  const set = (v: Partial<NonNullable<OidcSettings["removal"]>>) => onChange({ ...o, removal: { ...r, ...v } });
+  const num = (s: string) => (s.trim() === "" ? undefined : Number(s));
+  const [user, setUser] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>();
+  const run = async () => {
+    setBusy(true);
+    setError(undefined);
+    try {
+      await identityRemovalTest(user.trim());
+      onDone();
+    } catch (e) {
+      setError(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="subsection" data-testid="removal">
+      <h3>People who leave</h3>
+      <p className="muted">
+        Every hour the servers ask Microsoft Graph about each person holding Buckets credentials. Someone deleted or disabled in Entra ID loses their temporary credentials at once; their access keys are turned off at once and deleted after the days below. If they come back
+        before then, their keys come back on.
+      </p>
+      <label className="check">
+        <input type="checkbox" checked={r.enabled} onChange={(e) => set({ enabled: e.target.checked })} data-testid="removal-on" />
+        Remove the access of people who leave
+      </label>
+      {r.enabled && (
+        <>
+          <ol className="steps-list">
+            <li>
+              In the app registration, under <strong>API permissions</strong>, add <strong>Microsoft Graph → Application permissions → User.Read.All</strong>.
+            </li>
+            <li>
+              Choose <strong>Grant admin consent</strong>. The sync signs in as the app with its client secret above; it only reads users.
+            </li>
+          </ol>
+          <div className="form-grid">
+            <Field label="Delete their access keys after (days)" help="Keys stay off until then. 30 if empty.">
+              <input type="number" min={1} max={3650} value={r.deleteAfterDays ?? ""} placeholder="30" onChange={(e) => set({ deleteAfterDays: num(e.target.value) })} data-testid="removal-days" />
+            </Field>
+            <Field label="Most people removed in one sync" help="More leaving at once is held back and raises an alert, in case the directory answers wrongly. 10 if empty.">
+              <input type="number" min={1} value={r.maxPerSync ?? ""} placeholder="10" onChange={(e) => set({ maxPerSync: num(e.target.value) })} data-testid="removal-max" />
+            </Field>
+          </div>
+          <h3>Look up a person</h3>
+          <p className="muted">{enabled ? "Asks Microsoft Graph about someone with the saved settings, as the sync will." : "Save the settings first (below)."}</p>
+          <div className="inline-form">
+            <input placeholder="name@example.com" value={user} onChange={(e) => setUser(e.target.value)} disabled={!enabled} data-testid="removal-test-user" />
+            <button onClick={run} disabled={!enabled || !user.trim() || busy} data-testid="removal-test">
+              {busy ? "Looking up…" : "Look up"}
+            </button>
+          </div>
+          <ErrorBanner error={error} onClose={() => setError(undefined)} />
+          {result && (
+            <div className={`test-result ${result.passed ? "ok" : "failed"}`} data-testid="removal-result">
+              {result.passed ? (
+                <dl>
+                  <dt>Name</dt>
+                  <dd>{result.displayName || result.userPrincipalName}</dd>
+                  <dt>Sign-in name</dt>
+                  <dd className="mono">{result.userPrincipalName}</dd>
+                  <dt>Object ID</dt>
+                  <dd className="mono">{result.id}</dd>
+                  <dt>In Entra ID</dt>
+                  <dd>{result.state === "active" ? "active" : "disabled: the sync would remove their access"}</dd>
+                </dl>
+              ) : (
+                <p>{result.error}</p>
+              )}
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }

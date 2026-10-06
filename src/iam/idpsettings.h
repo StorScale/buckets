@@ -20,7 +20,10 @@
  *               "scopes",                            space or comma separated (default per provider)
  *               "redirectUri",                       the console's /oauth_callback, if not derived
  *               "rolePolicy",                        policies for everyone signing in, instead of a claim
- *               "claimUserinfo"},                    true: claims from the UserInfo endpoint too
+ *               "claimUserinfo",                     true: claims from the UserInfo endpoint too
+               "removal": {"enabled",               people who leave lose their access (entra only, for now;
+                           "deleteAfterDays",        iam/idsync.h), with the sign-in app's credentials: their
+                           "maxPerSync"}},           keys off at once, deleted after deleteAfterDays (30)
  *    "ldap":   {"preset": "ad" | "openldap" | "custom",
  *               "serverAddr",                        host[:port]
  *               "tls": "ldaps" | "starttls" | "plain",
@@ -52,6 +55,13 @@ void buckets_idp_config_url(yyjson_val *settings, char *out, size_t cap);
  * a part that is not, its "enable=off" line. Appended to out. False (and why)
  * if the settings do not check. */
 bool buckets_idp_server_config(yyjson_val *settings, buckets_buf *out, char *err, size_t errlen);
+
+/* The identity sync's settings when removal is on (false when off). client_secret points into settings. */
+typedef struct {
+  const char *tenant, *client_id, *client_secret;
+  long delete_after_days, max_per_sync;
+} buckets_idp_removal;
+bool buckets_idp_removal_of(yyjson_val *settings, buckets_idp_removal *out);
 
 /* What the console needs to sign people in, written into d as an object:
  *   {"oidc": {"configUrl", "clientId", "clientSecret", "scopes", "displayName", "redirectUri"} | null,

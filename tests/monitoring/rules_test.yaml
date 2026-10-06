@@ -252,3 +252,44 @@ tests:
               summary: "data/store: the KMS does not answer"
               description: "No KES endpoint answers its status check. Encrypted objects cannot be read or written meanwhile."
               runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketskmsfailing
+
+  # the identity sync failing: once is quiet, twice within three hours fires; only the server running it counts
+  - interval: 30m
+    input_series:
+      - series: 'buckets_node_identity_sync_failures_total{namespace="data",buckets_cluster="store",scope="node",server="s1"}'
+        values: "0 0 1 1 1 1 2 2"
+      - series: 'buckets_node_identity_sync_failures_total{namespace="data",buckets_cluster="store",scope="node",server="s2"}'
+        values: "0x7"
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: BucketsIdentitySyncFailing
+        exp_alerts: []
+      - eval_time: 3h
+        alertname: BucketsIdentitySyncFailing
+        exp_alerts:
+          - exp_labels: {severity: warning, namespace: data, buckets_cluster: store}
+            exp_annotations:
+              summary: "data/store: the identity sync cannot reach the provider"
+              description: "Twice in three hours the sync could not learn whether people with credentials are still in the identity provider. People who left keep their access keys until it works again."
+              runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketsidentitysyncfailing
+
+  # removals held back: fires after a held sync, quiet again two hours later
+  - interval: 30m
+    input_series:
+      - series: 'buckets_node_identity_sync_held_total{namespace="data",buckets_cluster="store",scope="node",server="s1"}'
+        values: "0 0 1x10"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: BucketsIdentitySyncHeld
+        exp_alerts: []
+      - eval_time: 1h30m
+        alertname: BucketsIdentitySyncHeld
+        exp_alerts:
+          - exp_labels: {severity: warning, namespace: data, buckets_cluster: store}
+            exp_annotations:
+              summary: "data/store: the identity sync held back removals"
+              description: "More people left the identity provider at once than BUCKETS_OPENID_REMOVE_MAX allows, so none were removed. Check the provider; if it is right, raise the limit."
+              runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketsidentitysyncheld
+      - eval_time: 4h30m
+        alertname: BucketsIdentitySyncHeld
+        exp_alerts: []
