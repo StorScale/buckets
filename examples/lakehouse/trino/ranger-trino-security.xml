@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+  <property>
+    <name>ranger.plugin.trino.policy.rest.url</name>
+    <value>http://ranger-admin:6080</value>
+  </property>
+  <property>
+    <!-- Ranger lets plugins download policies only when they sign in -->
+    <name>ranger.plugin.trino.policy.rest.client.username</name>
+    <value>trino-plugin</value>
+  </property>
+  <property>
+    <name>ranger.plugin.trino.policy.rest.client.password</name>
+    <value>${env.RANGER_PLUGIN_PASSWORD}</value>
+  </property>
+  <property>
+    <!-- how often Trino picks up policy changes, in ms -->
+    <name>ranger.plugin.trino.policy.pollIntervalMs</name>
+    <value>5000</value>
+  </property>
+  <property>
+    <name>ranger.plugin.trino.policy.cache.dir</name>
+    <value>/tmp/ranger-policy-cache</value>
+  </property>
+  <property>
+    <!-- users' groups come from Ranger, which mirrors the identity provider -->
+    <name>ranger.plugin.trino.use.rangerGroups</name>
+    <value>true</value>
+  </property>
+  <property>
+    <name>ranger.plugin.trino.access.cluster.name</name>
+    <value>lakehouse</value>
+  </property>
+</configuration>

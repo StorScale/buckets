@@ -1,0 +1,62 @@
+# The lakehouse example (examples/lakehouse) end to end: Buckets built from
+# this commit, with Nessie, Trino, Apache Ranger and Keycloak, and the checks
+# in examples/lakehouse/tools/test.py. See docs/integrations/lakehouse.md.
+name: lakehouse
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths:
+      - 'examples/lakehouse/**'
+      - 'src/**'
+      - 'docker/Dockerfile.bucketsd'
+      - 'CMakeLists.txt'
+      - '.github/workflows/lakehouse.yml'
+  pull_request:
+    paths:
+      - 'examples/lakehouse/**'
+      - 'src/**'
+      - 'docker/Dockerfile.bucketsd'
+      - 'CMakeLists.txt'
+      - '.github/workflows/lakehouse.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lakehouse-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lakehouse:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: examples/lakehouse
+    env:
+      BUCKETS_IMAGE: buckets-ci/bucketsd:${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build bucketsd
+        working-directory: .
+        run: docker build -f docker/Dockerfile.bucketsd -t "$BUCKETS_IMAGE" .
+
+      - name: Start the stack
+        run: docker compose up -d --wait --wait-timeout 600
+
+      - name: Run the checks
+        run: docker compose run --rm test
+
+      - name: Logs
+        if: failure()
+        run: |
+          docker compose ps -a
+          docker compose logs --no-color --tail 200
+
+      - name: Stop
+        if: always()
+        run: docker compose down -v
