@@ -37,7 +37,7 @@ services:
 
   # One server, four drives: one erasure set (EC 2+2).
   buckets:
-    image: ${BUCKETS_IMAGE:-ghcr.io/storscale/bucketsd:1.9.0}
+    image: ${BUCKETS_IMAGE:-ghcr.io/storscale/bucketsd:1.9.1}
     command: ["server", "--address", ":9000", "/data1", "/data2", "/data3", "/data4"]
     environment:
       BUCKETS_ROOT_USER: ${BUCKETS_ROOT_USER}
