@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <time.h>
 
 #include "admin/info.h"
 #include "bucket/metasys.h"
@@ -13,6 +14,7 @@
 #include "dist/peer.h"
 #include "dist/peerstream.h"
 #include "notify/notifier.h"
+#include "ransomware/ransomware.h"
 #include "s3/internal.h"
 #include "s3/xml.h"
 
@@ -86,12 +88,59 @@ static bool reserved(const char *k, const char *v) {
   return strcasecmp(k, "x-amz-storage-class") == 0 && strcmp(v, "STANDARD") == 0;
 }
 
+void buckets_s3_credential(const s3_ctx *c, const char **access_key, const char **user, const char **type) {
+  const buckets_iam_ident *id = c->ident;
+  if (!id) {
+    *access_key = "", *user = "anonymous", *type = "anonymous";
+    return;
+  }
+  *access_key = id->access_key ? id->access_key : "";
+  switch (id->type) {
+    case BUCKETS_IAM_ROOT: *user = *access_key, *type = "root"; break;
+    case BUCKETS_IAM_SVC: *user = id->parent ? id->parent : "", *type = "access-key"; break;
+    case BUCKETS_IAM_STS: *user = id->parent ? id->parent : "", *type = "sts"; break;
+    default: *user = *access_key, *type = "user"; break;
+  }
+}
+
+/* What ransomware alerts count (ransomware/ransomware.h): deletes, versions destroyed and overwrites, by the
+ * request's credential. Internal events (lifecycle expiry) have no request and count nowhere. */
+static void count_for_alerts(s3_ctx *c, int event_name, const char *bucket, const buckets_object_info *oi) {
+  if (!c->req || !bucket) return;
+  const char *ak, *user, *type;
+  buckets_s3_credential(c, &ak, &user, &type);
+  int64_t now = (int64_t)time(NULL);
+  switch (event_name) {
+    case BUCKETS_EV_OBJECT_REMOVED_DELETE: /* the data itself */
+      buckets_rw_note(bucket, ak, user, type, BUCKETS_RW_DELETED, 1, now);
+      buckets_rw_note(bucket, ak, user, type, BUCKETS_RW_DESTROYED, 1, now);
+      break;
+    case BUCKETS_EV_OBJECT_REMOVED_DELETE_MARKER_CREATED:
+      buckets_rw_note(bucket, ak, user, type, BUCKETS_RW_DELETED, 1, now);
+      break;
+    case BUCKETS_EV_OBJECT_CREATED_PUT:
+    case BUCKETS_EV_OBJECT_CREATED_POST:
+    case BUCKETS_EV_OBJECT_CREATED_COPY:
+    case BUCKETS_EV_OBJECT_CREATED_COMPLETE_MULTIPART_UPLOAD:
+      if (oi && oi->replaced) buckets_rw_note(bucket, ak, user, type, BUCKETS_RW_OVERWRITTEN, 1, now);
+      break;
+    default: break;
+  }
+}
+
+void buckets_s3_protection_removed(s3_ctx *c, int change, const char *detail) {
+  const char *ak, *user, *type;
+  buckets_s3_credential(c, &ak, &user, &type);
+  buckets_rw_protection(c->bucket, ak, user, type, (buckets_rw_change)change, detail, (int64_t)time(NULL));
+}
+
 static void send_event(s3_ctx *c, int event_name, const char *bucket, const char *object, const buckets_object_info *oi,
                        const char *version_id, bool written, const char *internal_ua) {
+  /* no events for replica writes (sendEvent): the site they come from counts them */
+  if (c->req && buckets_http_header_get(c->req, "X-Minio-Source-Replication-Request").p) return;
+  count_for_alerts(c, event_name, bucket, oi);
   buckets_notifier *n = c->s->notifier;
   if (!n || !c->s->meta) return;
-  /* no events for replica writes (sendEvent) */
-  if (c->req && buckets_http_header_get(c->req, "X-Minio-Source-Replication-Request").p) return;
   /* a bucket just created or removed has no rules: only listeners hear it */
   bool bucket_ev = event_name == BUCKETS_EV_BUCKET_CREATED || event_name == BUCKETS_EV_BUCKET_REMOVED;
   buckets_bucket_state *st = bucket_ev ? NULL : buckets_metasys_get(c->s->meta, bucket);
@@ -315,6 +364,40 @@ void buckets_s3_listen_notification(s3_ctx *c) {
   c->resp->stream = merged_read;
   c->resp->stream_ud = m;
   c->resp->stream_free = merged_free;
+}
+
+void buckets_s3_send_incident_event(buckets_s3_server *s, int event_name, const char *bucket, const char *principal,
+                                    const buckets_event_kv *details, size_t ndetails) {
+  buckets_notifier *n = s->notifier;
+  if (!n || !s->meta) return;
+  buckets_bucket_state *st = buckets_metasys_get(s->meta, bucket);
+  const buckets_notify_config *cfg = st && st->has_notify ? &st->notify : NULL;
+  if (buckets_notifier_wanted(n, cfg, (buckets_event_name)event_name)) {
+    buckets_objlayer *L = s->layer;
+    buckets_event_args a = {
+        .name = (buckets_event_name)event_name,
+        .bucket = bucket,
+        .object = "",
+        .etag = "",
+        .content_type = "",
+        .version_id = "",
+        .user_meta = details,
+        .nuser_meta = ndetails,
+        .no_request = true,
+        .region = "",
+        .principal = principal ? principal : "",
+        .source_ip = "",
+        .request_id = "",
+        .host_id = "",
+        .content_length = "",
+        .origin_endpoint = s->endpoint,
+        .deployment_id = L ? L->deployment_id_str : "",
+        .host = s->cluster && s->cluster->self ? s->cluster->self : "",
+        .user_agent = "Buckets ransomware alerts",
+    };
+    buckets_notifier_send(n, cfg, &a);
+  }
+  buckets_bucket_state_release(st);
 }
 
 void buckets_s3_send_internal_event(buckets_s3_server *s, int event_name, const char *bucket, const char *object,

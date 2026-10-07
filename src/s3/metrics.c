@@ -16,6 +16,7 @@
 #include <time.h>
 
 #include "crypto/fips.h"
+#include "ransomware/ransomware.h"
 #include "admin/admin.h"
 #include "admin/info.h"
 #include "crypto/base64.h"
@@ -789,6 +790,19 @@ static void bucket_metrics(mctx *m) {
     ttfb_rows(m, "minio_bucket_requests_ttfb_seconds_distribution", bs[b].api, bs[b].bucket);
   }
   buckets_stats_buckets_free(bs, nb);
+  /* ransomware alerts' counts on this server since it started (ransomware/ransomware.h) */
+  buckets_rw_total *rw;
+  size_t nrw = buckets_rw_totals(&rw);
+  for (size_t b = 0; b < nrw; b++) {
+    ADD1(m, "buckets_bucket_objects_deleted_total", (double)rw[b].n[BUCKETS_RW_DELETED], "bucket", rw[b].bucket);
+    ADD1(m, "buckets_bucket_versions_destroyed_total", (double)rw[b].n[BUCKETS_RW_DESTROYED], "bucket", rw[b].bucket);
+    ADD1(m, "buckets_bucket_objects_overwritten_total", (double)rw[b].n[BUCKETS_RW_OVERWRITTEN], "bucket", rw[b].bucket);
+    for (int c = 0; c < BUCKETS_RW_NCHANGES; c++)
+      if (rw[b].changes[c])
+        ADD2(m, "buckets_bucket_protection_changes_total", (double)rw[b].changes[c], "bucket", rw[b].bucket, "change",
+             buckets_rw_change_name((buckets_rw_change)c));
+  }
+  buckets_rw_totals_free(rw, nrw);
 }
 
 /* ---- resource metrics (metrics-resource.go) --------------------------------- */
@@ -988,6 +1002,9 @@ static void idsync_metrics(mctx *m) {
 static void iam_node_metrics(mctx *m) {
   idsync_metrics(m);
   ADD0(m, "buckets_node_fips_mode", buckets_fips_mode() ? 1 : 0); /* crypto/fips.h */
+  for (int k = 0; k < 3; k++) /* opened by this server, when it led (s3/ransomguard.h) */
+    ADD1(m, "buckets_ransomware_incidents_total", (double)m->s->rw_incidents[k], "kind",
+         buckets_rw_kind_name((buckets_rw_incident_kind)k));
   buckets_plugins *pl = buckets_s3_plugins(m->s);
   bool on = buckets_idp_plugin_enabled(pl);
   buckets_idp_plugin_metrics pm;

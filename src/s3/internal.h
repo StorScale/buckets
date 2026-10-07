@@ -81,6 +81,12 @@ void buckets_s3_get_notification(s3_ctx *c);
 void buckets_s3_put_notification(s3_ctx *c);
 void buckets_s3_listen_notification(s3_ctx *c);
 /* sendEvent for an object (oi may be NULL: removals, bucket events). */
+/* The request's credential, for reports and alerts: its access key ("" when anonymous), the person behind it, and
+ * "root", "user", "access-key", "sts" or "anonymous". */
+void buckets_s3_credential(const s3_ctx *c, const char **access_key, const char **user, const char **type);
+/* A protection change on c->bucket for ransomware alerts (ransomware/ransomware.h: buckets_rw_change), by the
+ * request's credential; detail in words. */
+void buckets_s3_protection_removed(s3_ctx *c, int change, const char *detail);
 void buckets_s3_send_event(s3_ctx *c, int event_name, const char *bucket, const char *object, const buckets_object_info *oi,
                            const char *version_id);
 /* As MinIO's handlers that send the event before writing the response
@@ -106,6 +112,11 @@ void buckets_s3_audit_internal(void *ud, const char *event, const char *api_name
  * start and end (unix ns), time to first byte and body bytes sent. */
 void buckets_s3_trace_http(s3_ctx *c, int api, int64_t start_ns, int64_t end_ns, int64_t ttfb_ns, uint64_t tx);
 int buckets_s3_api_index(const s3_ctx *c);
+/* A ransomware alerts incident's event (s3:Buckets:*) to the bucket's targets: no object, its details as the
+ * record's metadata, the credential as principal. */
+struct buckets_event_kv;
+void buckets_s3_send_incident_event(buckets_s3_server *s, int event_name, const char *bucket, const char *principal,
+                                    const struct buckets_event_kv *details, size_t ndetails);
 void buckets_s3_send_internal_event(buckets_s3_server *s, int event_name, const char *bucket, const char *object,
                                     const buckets_object_info *oi, const char *version_id, const char *user_agent);
 

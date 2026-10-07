@@ -176,6 +176,7 @@ typedef struct buckets_object_info_s {
   buckets_xl_part *parts; /* numbers and sizes, in object order (etags unset) */
   int data_blocks, parity_blocks; /* the version's erasure coding (EcM, EcN) */
   bool free_version; /* a deleted transitioned version's remnant (buckets_obj_list_versions_all only) */
+  bool replaced; /* writes only: the key had a current version, now replaced or made noncurrent (an overwrite) */
 } buckets_object_info;
 
 void buckets_object_info_free(buckets_object_info *oi);

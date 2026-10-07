@@ -13,6 +13,7 @@ import Policies from "./pages/Policies";
 import AccessKeys from "./pages/AccessKeys";
 import CompliancePage from "./pages/Compliance";
 import UsagePage from "./pages/Usage";
+import ActivityPage from "./pages/Activity";
 import Configuration from "./pages/Configuration";
 import Encryption from "./pages/Encryption";
 import SignInSetup from "./pages/SignIn";
@@ -78,6 +79,7 @@ export default function App() {
         <NavLink to="/identity/access-review">Access review</NavLink>
         <NavLink to="/identity/sign-in">Sign-in</NavLink>
         <div className="nav-group">Reports</div>
+        <NavLink to="/reports/activity">Activity</NavLink>
         <NavLink to="/reports/usage">Usage</NavLink>
         <NavLink to="/reports/retention">Retention</NavLink>
         <NavLink to="/reports/encryption">Encryption coverage</NavLink>
@@ -114,6 +116,7 @@ export default function App() {
           <Route path="/identity/access-review" element={<AccessReview />} />
           <Route path="/identity/sign-in" element={<SignInSetup />} />
           <Route path="/reports/usage" element={<UsagePage />} />
+          <Route path="/reports/activity" element={<ActivityPage />} />
           <Route path="/reports/:tab" element={<CompliancePage />} />
           <Route path="/compliance/:tab" element={<ComplianceMoved />} />
           <Route path="/configuration" element={<Configuration />} />

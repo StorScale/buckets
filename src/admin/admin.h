@@ -37,6 +37,9 @@ void buckets_admin_compliance(s3_ctx *c);
 void buckets_admin_usage(s3_ctx *c);
 void buckets_admin_usage_rates_set(s3_ctx *c);
 void buckets_admin_usage_rates_delete(s3_ctx *c);
+/* Ransomware alerts' incidents (admin/incidents.c): GET and POST buckets/incidents. */
+void buckets_admin_incidents(s3_ctx *c);
+void buckets_admin_incident_action(s3_ctx *c);
 void buckets_admin_background_heal_status(s3_ctx *c);
 /* mc admin heal (heal.c); the peer side of a status request forwarded to
  * the node running a sequence; stopping every sequence at shutdown. */

@@ -266,6 +266,38 @@ for example after the app was pointed at another tenant, fix that first. If they
 did leave, raise **Most people removed in one sync** on the Sign-in page (or
 `BUCKETS_OPENID_REMOVE_MAX`); the next sync removes them.
 
+### BucketsMassDelete
+
+**What:** a bucket, or one credential across buckets, deleted at least 1,000
+objects in 5 minutes, more than 10 times its usual rate ([ransomware
+alerts](ransomware.md)).
+
+**Check:** **Reports → Activity** names the bucket, the credential and the
+person behind it. If you don't recognise the job, turn the credential off there
+(**Turn off credential**), then work out how it was used. With versioning, the
+deleted objects are still there behind delete markers: removing the markers
+restores them. If it was a legitimate job, mark the incident a false alarm. If
+the bucket is emptied regularly, consider `BUCKETS_RANSOMWARE_EXCLUDE`.
+
+### BucketsMassOverwrite
+
+**What:** existing objects are being replaced at many times the usual rate, as
+ransomware does when it encrypts data in place.
+
+**Check:** as for BucketsMassDelete. With versioning, the previous versions are
+kept as noncurrent versions; without it, they are gone, which is why versioning
+with object lock is the protection that matters.
+
+### BucketsProtectionRemoved
+
+**What:** a change that weakens a bucket's protection: versioning suspended, a
+lifecycle rule that expires old versions, Governance retention bypassed, a
+bucket deleted with its data, or a policy letting anyone write or delete.
+
+**Check:** **Reports → Activity** says which change and who made it. An admin's
+change is the usual cause; it is also what an attacker does first. Undo the
+change if it wasn't intended.
+
 ### BucketsMetricsDown
 
 **What:** Prometheus has not been able to scrape a server for 5 minutes. While

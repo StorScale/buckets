@@ -75,6 +75,9 @@ typedef struct buckets_s3_server {
   bool metrics_thread_started;
   pthread_t usage_thread; /* adds this server's traffic to the usage history */
   bool usage_thread_started;
+  pthread_t guard_thread; /* ransomware alerts' cluster view, on the leader (s3/ransomguard.h) */
+  bool guard_thread_started;
+  _Atomic unsigned long long rw_incidents[3]; /* incidents opened here, by kind (buckets_rw_incident_kind) */
 } buckets_s3_server;
 
 void buckets_s3_server_init(buckets_s3_server *s, buckets_objlayer *layer, const char *root_user,

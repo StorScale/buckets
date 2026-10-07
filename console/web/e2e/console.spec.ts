@@ -283,6 +283,38 @@ test.describe("reports", () => {
   });
 });
 
+test.describe("ransomware alerts", () => {
+  test("activity: suspending versioning opens an incident, which can be marked a false alarm", async ({ page }) => {
+    const bucket = unique("guarded");
+    await login(page);
+    await page.goto("/buckets");
+    await page.getByTestId("create-bucket").click();
+    await page.getByTestId("bucket-name").fill(bucket);
+    await page.getByTestId("bucket-create-submit").click();
+    await page.goto(`/buckets/${bucket}/settings`);
+    await page.getByTestId("enable-versioning").click();
+    await expect(page.getByTestId("versioning-status")).toHaveText("Enabled");
+    await page.getByTestId("suspend-versioning").click();
+    await expect(page.getByTestId("versioning-status")).toHaveText("Suspended");
+    await page.getByRole("link", { name: "Activity", exact: true }).click();
+    await expect(page).toHaveURL(/\/reports\/activity$/);
+    await expect(page.getByTestId("activity-rule")).toContainText("objects in");
+    // the leader looks every second here (BUCKETS_RANSOMWARE_INTERVAL)
+    const row = page.locator("tr", { hasText: bucket });
+    await expect(async () => {
+      await page.reload();
+      await expect(row).toContainText("versioning suspended", { timeout: 1000 });
+    }).toPass({ timeout: 30_000 });
+    await expect(row).toContainText("Protection removed");
+    await expect(row).toContainText("open");
+    await row.getByRole("button", { name: "False alarm" }).click();
+    await expect(page.getByTestId("notice")).toHaveText("Marked as a false alarm.");
+    await expect(row).toContainText("false alarm");
+    await page.getByTestId("activity-all").check();
+    await expect(page.locator("tr", { hasText: bucket })).toBeVisible();
+  });
+});
+
 test.describe("identity", () => {
   test("users: create with a policy, sign in as them, disable, delete", async ({ page, browser }) => {
     const user = unique("alice");

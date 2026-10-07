@@ -7,7 +7,9 @@
  *   storage.json          the leader's samples at each scanner cycle:
  *                         {"buckets": {"<name>": {"avg", "count", "peak", "last"}}}
  *   traffic-<server>.json what each server counted, added every few minutes:
- *                         {"buckets": {"<name>": {"in", "out", "read", "write", "delete"}}}
+ *                         {"buckets": {"<name>": {"in", "out", "read", "write", "delete",
+ *                                                 "deleted", "overwritten", "dh": [24], "oh": [24]}}}
+ *                         (objects deleted and overwritten, in all and per UTC hour, for ransomware alerts)
  * The record parts are pure (JSON in, JSON out) and unit tested; reading and writing the files is the caller's. */
 
 #include <stdbool.h>
@@ -44,11 +46,13 @@ buckets_usage_kind buckets_usage_kind_of(const char *api);
 
 typedef struct {
   uint64_t in, out, read, write, del;
+  uint64_t deleted, overwritten; /* objects (ransomware alerts' usual rates), also per UTC hour: "dh", "oh" */
 } buckets_usage_traffic;
 
 typedef struct {
   const char *bucket;
   buckets_usage_traffic t;
+  int hour; /* the UTC hour deleted and overwritten fall in */
 } buckets_usage_traffic_add;
 
 /* A traffic record (or "" for none) with t added for each bucket, written to out. */

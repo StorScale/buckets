@@ -28,6 +28,7 @@
 #include "core/timefmt.h"
 #include "config/sys.h"
 #include "crypto/madmin.h"
+#include "s3/ransomguard.h"
 #include "iam/ldapidp.h"
 #include "iam/openid.h"
 #include "iam/plugins.h"
@@ -2516,6 +2517,8 @@ static const route k_routes[] = {
     {"GET", "/buckets/usage", buckets_admin_usage, "BucketsUsage"},
     {"PUT", "/buckets/usage-rates", buckets_admin_usage_rates_set, "BucketsUsageRatesSet"},
     {"DELETE", "/buckets/usage-rates", buckets_admin_usage_rates_delete, "BucketsUsageRatesDelete"},
+    {"GET", "/buckets/incidents", buckets_admin_incidents, "BucketsIncidents"},
+    {"POST", "/buckets/incidents", buckets_admin_incident_action, "BucketsIncidentAction"},
     {"PUT", "/set-remote-target", buckets_admin_set_remote_target, "SetRemoteTarget"},
     {"GET", "/list-remote-targets", buckets_admin_list_remote_targets, "ListRemoteTargets"},
     {"DELETE", "/remove-remote-target", buckets_admin_remove_remote_target, "RemoveRemoteTarget"},
@@ -2612,6 +2615,8 @@ void buckets_admin_peer(buckets_s3_server *s, const buckets_http_request *req, c
     /* netperf, or its devnull */
   } else if (op && buckets_admin_rtmetrics_peer(s, op, q, resp)) {
     /* a node's realtime metrics */
+  } else if (op && buckets_ransomguard_peer(s, op, q, resp)) {
+    /* ransomware alerts: this node's recent counts */
   } else {
     resp->status = 400;
   }

@@ -96,6 +96,29 @@ static void test_traffic_merge(void **state) {
   buckets_buf_free(&b);
 }
 
+static void test_traffic_hours(void **state) {
+  (void)state;
+  /* objects deleted and overwritten, in all and per UTC hour (ransomware alerts' usual rates) */
+  buckets_buf a = BUCKETS_BUF_INIT, b = BUCKETS_BUF_INIT;
+  buckets_usage_traffic_add x[] = {{"logs", {.del = 2, .deleted = 300}, 2}};
+  buckets_usage_traffic_merge("", 0, x, 1, &a);
+  buckets_usage_traffic_add y[] = {{"logs", {.deleted = 50, .overwritten = 7}, 2}, {"logs", {.deleted = 1}, 23}};
+  buckets_usage_traffic_merge(a.data, a.len, y, 2, &b);
+  yyjson_doc *d = parse(&b);
+  yyjson_val *logs = yyjson_obj_get(yyjson_obj_get(yyjson_doc_get_root(d), "buckets"), "logs");
+  assert_int_equal(yyjson_get_uint(yyjson_obj_get(logs, "deleted")), 351);
+  assert_int_equal(yyjson_get_uint(yyjson_obj_get(logs, "overwritten")), 7);
+  assert_int_equal(yyjson_get_uint(yyjson_obj_get(logs, "delete")), 2);
+  yyjson_val *dh = yyjson_obj_get(logs, "dh"), *oh = yyjson_obj_get(logs, "oh");
+  assert_int_equal(yyjson_arr_size(dh), 24);
+  assert_int_equal(yyjson_get_uint(yyjson_arr_get(dh, 2)), 350);
+  assert_int_equal(yyjson_get_uint(yyjson_arr_get(dh, 23)), 1);
+  assert_int_equal(yyjson_get_uint(yyjson_arr_get(oh, 2)), 7);
+  yyjson_doc_free(d);
+  buckets_buf_free(&a);
+  buckets_buf_free(&b);
+}
+
 static void test_storage_merge(void **state) {
   (void)state;
   buckets_buf a = BUCKETS_BUF_INIT, b = BUCKETS_BUF_INIT, c = BUCKETS_BUF_INIT;
@@ -301,7 +324,7 @@ static void test_rates(void **state) {
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_days),          cmocka_unit_test(test_kinds),
-      cmocka_unit_test(test_traffic_merge), cmocka_unit_test(test_storage_merge),
+      cmocka_unit_test(test_traffic_merge), cmocka_unit_test(test_storage_merge), cmocka_unit_test(test_traffic_hours),
       cmocka_unit_test(test_teams),         cmocka_unit_test(test_report),
       cmocka_unit_test(test_rates),
   };

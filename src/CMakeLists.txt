@@ -159,6 +159,8 @@ add_library(buckets STATIC
   scanner/compliance.c
   usage/history.c
   usage/store.c
+  ransomware/ransomware.c
+  s3/ransomguard.c
   iam/policy.c
   iam/iam.c
   iam/openid.c
@@ -201,6 +203,7 @@ add_library(buckets STATIC
   admin/bucket.c
   admin/compliance.c
   admin/usage.c
+  admin/incidents.c
   admin/replicate.c
   admin/siterepl.c
   admin/tier.c

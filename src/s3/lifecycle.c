@@ -9,6 +9,7 @@
 #include "bucket/lifecycle.h"
 #include "bucket/metasys.h"
 #include "core/timefmt.h"
+#include "ransomware/ransomware.h"
 #include "s3/internal.h"
 #include "s3/xml.h"
 #include "s3/tiering.h"
@@ -38,6 +39,16 @@ static void write_lc_error(s3_ctx *c, const buckets_lc_error *e) {
 static bool tier_valid(void *ud, const char *tier) {
   buckets_s3_server *s = ud;
   return buckets_tiers_valid(s->tiers, tier);
+}
+
+/* Enabled rules that destroy data for good: noncurrent versions expired, or every version of an object. */
+static size_t destroying_rules(const buckets_lifecycle *lc) {
+  size_t n = 0;
+  for (size_t i = 0; lc && i < lc->n; i++) {
+    const buckets_lc_rule *r = &lc->rules[i];
+    if (r->status && !strcmp(r->status, "Enabled") && (r->nve_set || (r->exp_all_set && r->exp_all))) n++;
+  }
+  return n;
 }
 
 void buckets_s3_put_bucket_lifecycle(s3_ctx *c) {
@@ -72,6 +83,7 @@ void buckets_s3_put_bucket_lifecycle(s3_ctx *c) {
     }
     removed = !upd || !buckets_lc_rule_has_expiry(upd);
   }
+  bool destroys_more = destroying_rules(&lc) > destroying_rules(st->has_lifecycle ? &st->lifecycle : NULL);
   buckets_bucket_state_release(st);
   if (buckets_lifecycle_has_expiry(&lc) || removed) lc.expiry_updated_ns = now_ns();
   buckets_buf x = BUCKETS_BUF_INIT;
@@ -84,6 +96,8 @@ void buckets_s3_put_bucket_lifecycle(s3_ctx *c) {
     return;
   }
   c->resp->status = 200;
+  if (destroys_more)
+    buckets_s3_protection_removed(c, BUCKETS_RW_NONCURRENT_EXPIRY, "a lifecycle rule now expires noncurrent versions or all versions");
 }
 
 void buckets_s3_get_bucket_lifecycle(s3_ctx *c) {

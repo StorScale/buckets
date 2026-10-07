@@ -45,6 +45,7 @@
 #include "s3/bucketname.h"
 #include "s3/errors.h"
 #include "s3/sigv4.h"
+#include "ransomware/ransomware.h"
 #include "s3/internal.h"
 #include "s3/replicate.h"
 #include "siterepl/siterepl.h"
@@ -54,6 +55,7 @@
 #include "tier/tier.h"
 #include "s3/sigv2.h"
 #include "s3/xml.h"
+#include "s3/ransomguard.h"
 #include "usage/store.h"
 
 #define DEFAULT_REGION "us-east-1"
@@ -1107,7 +1109,16 @@ static void *metrics_main(void *arg) {
 /* This server's traffic and requests per bucket since the last flush, added to the usage history
  * (usage/history.h) every BUCKETS_USAGE_FLUSH_INTERVAL seconds (300). The counters only grow, apart from a
  * bucket deleted and made again, which starts it over. */
-static void usage_flush(buckets_s3_server *s, buckets_bucket_stats **prev, size_t *nprev) {
+typedef struct {
+  buckets_bucket_stats *req; /* the request counters at the last flush */
+  size_t nreq;
+  buckets_rw_total *rw; /* and ransomware alerts' object counts */
+  size_t nrw;
+} usage_prev;
+
+static void usage_flush(buckets_s3_server *s, usage_prev *up) {
+  buckets_bucket_stats **prev = &up->req;
+  size_t *nprev = &up->nreq;
   buckets_bucket_stats *cur;
   size_t nc = buckets_stats_buckets(&cur), na = 0, napi = buckets_api_count();
   buckets_usage_traffic_add *add = buckets_xcalloc(nc ? nc : 1, sizeof(*add));
@@ -1128,7 +1139,30 @@ static void usage_flush(buckets_s3_server *s, buckets_bucket_stats **prev, size_
     t.read = req[BUCKETS_USAGE_READ] - (p ? preq[BUCKETS_USAGE_READ] : 0);
     t.write = req[BUCKETS_USAGE_WRITE] - (p ? preq[BUCKETS_USAGE_WRITE] : 0);
     t.del = req[BUCKETS_USAGE_DELETE] - (p ? preq[BUCKETS_USAGE_DELETE] : 0);
-    if (t.in || t.out || t.read || t.write || t.del) add[na++] = (buckets_usage_traffic_add){cur[i].bucket, t};
+    if (t.in || t.out || t.read || t.write || t.del) add[na++] = (buckets_usage_traffic_add){cur[i].bucket, t, 0};
+  }
+  /* objects deleted and overwritten since the last flush, in this UTC hour (ransomware alerts' usual rates) */
+  buckets_rw_total *rw;
+  size_t nrw = buckets_rw_totals(&rw);
+  time_t tnow = time(NULL);
+  struct tm tm;
+  gmtime_r(&tnow, &tm);
+  for (size_t i = 0, j = 0; i < nrw; i++) {
+    while (j < up->nrw && strcmp(up->rw[j].bucket, rw[i].bucket) < 0) j++;
+    const buckets_rw_total *p = j < up->nrw && strcmp(up->rw[j].bucket, rw[i].bucket) == 0 ? &up->rw[j] : NULL;
+    uint64_t del = rw[i].n[BUCKETS_RW_DELETED] - (p ? p->n[BUCKETS_RW_DELETED] : 0);
+    uint64_t ow = rw[i].n[BUCKETS_RW_OVERWRITTEN] - (p ? p->n[BUCKETS_RW_OVERWRITTEN] : 0);
+    if (!del && !ow) continue;
+    buckets_usage_traffic_add *a = NULL;
+    for (size_t k = 0; k < na && !a; k++)
+      if (!strcmp(add[k].bucket, rw[i].bucket)) a = &add[k];
+    if (!a) {
+      add = buckets_xrealloc(add, (na + 1) * sizeof(*add));
+      a = &add[na++];
+      memset(a, 0, sizeof(*a));
+      a->bucket = rw[i].bucket;
+    }
+    a->t.deleted = del, a->t.overwritten = ow, a->hour = tm.tm_hour;
   }
   buckets_objlayer *L = atomic_load(&s->layer);
   const char *self = s->cluster && s->cluster->self ? s->cluster->self : "";
@@ -1137,11 +1171,26 @@ static void usage_flush(buckets_s3_server *s, buckets_bucket_stats **prev, size_
   if (err) { /* kept for the next time */
     buckets_log_warn("usage: storing this server's traffic: %s", buckets_obj_strerror(err));
     buckets_stats_buckets_free(cur, nc);
+    buckets_rw_totals_free(rw, nrw);
     return;
   }
   buckets_stats_buckets_free(*prev, *nprev);
   *prev = cur;
   *nprev = nc;
+  buckets_rw_totals_free(up->rw, up->nrw);
+  up->rw = rw, up->nrw = nrw;
+}
+
+/* Ransomware alerts' cluster view (s3/ransomguard.h), every BUCKETS_RANSOMWARE_INTERVAL seconds (30). */
+static void *guard_main(void *arg) {
+  buckets_s3_server *s = arg;
+  const char *env = getenv("BUCKETS_RANSOMWARE_INTERVAL");
+  long interval = env ? strtol(env, NULL, 10) : 30;
+  if (interval < 1) interval = 30;
+  buckets_ransomguard *g = buckets_ransomguard_new();
+  while (bg_sleep(s, interval * 1000L)) buckets_ransomguard_run(s, g);
+  buckets_ransomguard_free(g);
+  return NULL;
 }
 
 static void *usage_main(void *arg) {
@@ -1149,10 +1198,10 @@ static void *usage_main(void *arg) {
   const char *env = getenv("BUCKETS_USAGE_FLUSH_INTERVAL");
   long interval = env ? strtol(env, NULL, 10) : 300;
   if (interval < 1) interval = 300;
-  buckets_bucket_stats *prev = NULL;
-  size_t nprev = 0;
-  while (bg_sleep(s, interval * 1000L)) usage_flush(s, &prev, &nprev);
-  buckets_stats_buckets_free(prev, nprev);
+  usage_prev up = {0};
+  while (bg_sleep(s, interval * 1000L)) usage_flush(s, &up);
+  buckets_stats_buckets_free(up.req, up.nreq);
+  buckets_rw_totals_free(up.rw, up.nrw);
   return NULL;
 }
 
@@ -1180,6 +1229,7 @@ void buckets_s3_server_set_layer(buckets_s3_server *s, buckets_objlayer *layer) 
   s->iam_thread_started = pthread_create(&s->iam_thread, NULL, iam_start_main, s) == 0;
   s->metrics_thread_started = pthread_create(&s->metrics_thread, NULL, metrics_main, s) == 0;
   s->usage_thread_started = pthread_create(&s->usage_thread, NULL, usage_main, s) == 0;
+  s->guard_thread_started = pthread_create(&s->guard_thread, NULL, guard_main, s) == 0;
 }
 
 void buckets_s3_server_stop(buckets_s3_server *s) {
@@ -1199,6 +1249,8 @@ void buckets_s3_server_stop(buckets_s3_server *s) {
   s->metrics_thread_started = false;
   if (s->usage_thread_started) pthread_join(s->usage_thread, NULL);
   s->usage_thread_started = false;
+  if (s->guard_thread_started) pthread_join(s->guard_thread, NULL);
+  s->guard_thread_started = false;
   buckets_sr_stop(s->sr);
   buckets_datamove_stop(s->datamove);
   buckets_batch_stop(s->batch);
@@ -1699,6 +1751,7 @@ static void delete_bucket(s3_ctx *c) {
     if (!buckets_sr_delete_bucket_hook(c->s->sr, c->bucket, force, e, sizeof(e))) buckets_log_warn("site replication: %s", e);
   }
   c->resp->status = 204;
+  if (force) buckets_s3_protection_removed(c, BUCKETS_RW_BUCKET_DELETED, "deleted with everything in it (force)");
   buckets_s3_send_event(c, BUCKETS_EV_BUCKET_REMOVED, c->bucket, "", NULL, NULL);
 }
 
@@ -1753,6 +1806,7 @@ static void put_bucket_versioning(s3_ctx *c) {
   }
   buckets_bucket_state *st = buckets_metasys_get(c->s->meta, c->bucket);
   bool locked = st->lock_enabled;
+  bool suspends = st->versioning.status == BUCKETS_VERSIONING_ENABLED && v.status == BUCKETS_VERSIONING_SUSPENDED;
   buckets_bucket_state_release(st);
   if (locked && (v.status == BUCKETS_VERSIONING_SUSPENDED || v.nexcluded || v.exclude_folders)) {
     buckets_versioning_free(&v);
@@ -1770,12 +1824,24 @@ static void put_bucket_versioning(s3_ctx *c) {
     return;
   }
   c->resp->status = 200;
+  if (suspends) buckets_s3_protection_removed(c, BUCKETS_RW_VERSIONING_SUSPENDED, "versioning Enabled to Suspended");
   buckets_sr_bucket_meta_hook(c->s->sr, c->bucket, "version-config");
 }
 
 /* ---- bucket policy (?policy) -------------------------------------------------- */
 
 #define MAX_BUCKET_POLICY_SIZE (20 * 1024)
+
+/* What a bucket policy lets anyone (no credentials) do that destroys data, in words; NULL when nothing. */
+static const char *anyone_may_destroy(const buckets_policy *p, const char *bucket) {
+  static const char *const actions[] = {"s3:DeleteObject", "s3:PutObject"};
+  static const char *const words[] = {"anyone may delete objects", "anyone may write objects"};
+  for (size_t i = 0; i < 2; i++) {
+    buckets_policy_args a = {.action = actions[i], .bucket = bucket, .object = "any-object", .account = ""};
+    if (buckets_bucket_policy_allowed(p, &a)) return words[i];
+  }
+  return NULL;
+}
 
 static void put_bucket_policy(s3_ctx *c) {
   if (c->req->body_len <= 0) {
@@ -1798,16 +1864,27 @@ static void put_bucket_policy(s3_ctx *c) {
     return;
   }
   bool no_version = !*buckets_policy_version(p);
+  const char *opened = anyone_may_destroy(p, c->bucket);
   buckets_policy_free(p);
   if (no_version) {
     buckets_s3_write_error(c, BUCKETS_ERR_POLICY_INVALID_VERSION);
     return;
   }
+  buckets_bucket_state *was = buckets_metasys_get(c->s->meta, c->bucket);
+  const buckets_buf *old = &was->meta.config[BUCKETS_BCFG_POLICY];
+  buckets_policy *op = NULL;
+  char oerr[64];
+  if (opened && old->len && buckets_bucket_policy_parse(old->data, old->len, c->bucket, &op, oerr, sizeof(oerr))) {
+    if (anyone_may_destroy(op, c->bucket)) opened = NULL; /* it already let them */
+    buckets_policy_free(op);
+  }
+  buckets_bucket_state_release(was);
   if (!buckets_metasys_update(c->s->meta, c->bucket, BUCKETS_BCFG_POLICY, c->doc.data, c->doc.len)) {
     buckets_s3_write_error(c, BUCKETS_ERR_INTERNAL_ERROR);
     return;
   }
   c->resp->status = 204;
+  if (opened) buckets_s3_protection_removed(c, BUCKETS_RW_PUBLIC_WRITE, opened);
   buckets_sr_bucket_meta_hook(c->s->sr, c->bucket, "policy");
 }
 

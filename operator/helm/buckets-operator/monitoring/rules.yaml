@@ -162,6 +162,33 @@ groups:
           description: "More people left the identity provider at once than BUCKETS_OPENID_REMOVE_MAX allows, so none were removed. Check the provider; if it is right, raise the limit."
           runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketsidentitysyncheld
 
+      - alert: BucketsMassDelete
+        expr: sum by (namespace, buckets_cluster) (increase(buckets_ransomware_incidents_total{scope="node",kind="mass-delete"}[10m])) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.namespace }}/{{ $labels.buckets_cluster }}: objects are being deleted far faster than usual"
+          description: "A bucket, or a credential across buckets, deleted at least BUCKETS_RANSOMWARE_FLOOR objects in a few minutes, many times its usual rate: ransomware, a stolen credential, or a mistaken job. Reports → Activity names the bucket and the credential."
+          runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketsmassdelete
+
+      - alert: BucketsMassOverwrite
+        expr: sum by (namespace, buckets_cluster) (increase(buckets_ransomware_incidents_total{scope="node",kind="mass-overwrite"}[10m])) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.namespace }}/{{ $labels.buckets_cluster }}: objects are being overwritten far faster than usual"
+          description: "Existing objects are being replaced at many times the usual rate, as ransomware does when it encrypts data in place. Reports → Activity names the bucket and the credential."
+          runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketsmassoverwrite
+
+      - alert: BucketsProtectionRemoved
+        expr: sum by (namespace, buckets_cluster) (increase(buckets_ransomware_incidents_total{scope="node",kind="protection-removed"}[10m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.namespace }}/{{ $labels.buckets_cluster }}: a bucket's protection was weakened"
+          description: "Versioning suspended, a rule that expires old versions added, retention bypassed, a bucket deleted with its data, or a policy letting anyone write or delete. Often an admin's change; also what an attacker does first. Reports → Activity says which."
+          runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketsprotectionremoved
+
       - alert: BucketsMetricsDown
         expr: max by (namespace, buckets_cluster, pod) (up{buckets_cluster!=""} == 0)
         for: 5m

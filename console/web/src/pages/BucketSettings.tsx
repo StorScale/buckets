@@ -169,6 +169,7 @@ export default function BucketSettings() {
           </button>
           <button
             disabled={versioning !== "Enabled" || lock.enabled}
+            data-testid="suspend-versioning"
             onClick={() =>
               setVersioning(bucket, "Suspended")
                 .then(() => setVer("Suspended"))
