@@ -84,6 +84,7 @@ add_library(buckets STATIC
   s3/tracehttp.c
   trace/trace.c
   logger/httptarget.c
+  logger/sentinel.c
   logger/kafkatarget.c
   logger/logger.c
   logger/console.c
@@ -161,6 +162,7 @@ add_library(buckets STATIC
   usage/store.c
   ransomware/ransomware.c
   s3/ransomguard.c
+  audit/store.c
   iam/policy.c
   iam/iam.c
   iam/openid.c
@@ -204,6 +206,7 @@ add_library(buckets STATIC
   admin/compliance.c
   admin/usage.c
   admin/incidents.c
+  admin/audit.c
   admin/replicate.c
   admin/siterepl.c
   admin/tier.c

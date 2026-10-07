@@ -312,6 +312,50 @@ test.describe("ransomware alerts", () => {
     await expect(row).toContainText("false alarm");
     await page.getByTestId("activity-all").check();
     await expect(page.locator("tr", { hasText: bucket })).toBeVisible();
+    // what the credential did around the incident, in the audit log
+    await page.locator("tr", { hasText: bucket }).getByRole("link", { name: "What it did" }).click();
+    await expect(page).toHaveURL(/\/reports\/audit\?range=custom&accessKey=/);
+    await page.getByTestId("audit-bucket").fill(bucket);
+    await expect(async () => {
+      await page.getByTestId("audit-apply").click();
+      await expect(page.getByTestId("audit-table")).toContainText("PutBucketVersioning", { timeout: 1000 });
+    }).toPass({ timeout: 20_000 });
+  });
+});
+
+test.describe("audit log", () => {
+  test("who used a bucket: entries, filters, details and CSV", async ({ page }) => {
+    const bucket = unique("audited");
+    await login(page);
+    await page.goto("/buckets");
+    await page.getByTestId("create-bucket").click();
+    await page.getByTestId("bucket-name").fill(bucket);
+    await page.getByTestId("bucket-create-submit").click();
+    await page.getByRole("link", { name: bucket }).click();
+    await page.getByTestId("file-input").setInputFiles({ name: "report.txt", mimeType: "text/plain", buffer: Buffer.from("audit me") });
+    await expect(page.getByTestId("notice")).toHaveText("Uploaded 1 file.");
+    await page.goto(`/buckets/${bucket}/settings`);
+    await page.getByTestId("who-used").click();
+    await expect(page).toHaveURL(new RegExp(`/reports/audit\\?range=24h&bucket=${bucket}$`));
+    // each server's writer flushes every second
+    await expect(async () => {
+      await page.getByTestId("audit-apply").click();
+      await expect(page.getByTestId("audit-table")).toContainText("PutObject", { timeout: 1000 });
+    }).toPass({ timeout: 20_000 });
+    await expect(page.getByTestId("audit-coverage")).toContainText("Entries go back to");
+    // writes only
+    await page.getByTestId("audit-kind").selectOption("write");
+    await expect(page.getByTestId("audit-table")).toContainText("report.txt");
+    await expect(page.getByTestId("audit-table")).not.toContainText("ListObjects");
+    // an entry's details
+    await page.getByTestId("audit-row").first().click();
+    await expect(page.getByTestId("audit-detail")).toContainText(`"bucket": "${bucket}"`);
+    await page.keyboard.press("Escape");
+    const csv = page.waitForEvent("download");
+    await page.getByTestId("audit-csv").click();
+    const text = readFileSync(await (await csv).path(), "utf8");
+    expect(text.split("\n")[0]).toContain("person,access key,api,bucket,object");
+    expect(text).toMatch(new RegExp(`PutObject,${bucket},report.txt,200`));
   });
 });
 

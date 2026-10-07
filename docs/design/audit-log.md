@@ -1,6 +1,6 @@
 # Design: audit log viewer, and forwarding to Sentinel and Splunk
 
-Status: proposed, for review. Roadmap: Phase 4, "An audit log viewer, with
+Status: built (user docs: [audit-log.md](../audit-log.md)). Roadmap: Phase 4, "An audit log viewer, with
 forwarding to Microsoft Sentinel or Splunk. With Entra ID sign-in, this gives a
 Microsoft-centric organisation one identity and audit story."
 
@@ -38,7 +38,7 @@ Other pages link into it already filtered:
 - a user, or the access review, links to "this person's actions".
 
 **Forwarding:**
-- **Microsoft Sentinel:** a new audit target, `audit_sentinel`. It sends
+- **Microsoft Sentinel:** a new audit target. It sends
   entries in batches through the Logs Ingestion API, to a data collection rule
   (DCR) and its stream, signed in as an Entra ID app (client credentials). It
   queues entries on disk while Azure can't be reached, as the webhook target
@@ -56,8 +56,9 @@ Audit entries are built today only while an audit target exists. The viewer
 needs them always, so each server **keeps a local copy of what it served:**
 
 - **On the server's first local drive**, outside the erasure-coded data:
-  `<drive>/.minio.sys/buckets/audit/<YYYY-MM-DD>/<HH>.jsonl`, one entry per
-  line. Each server writes only its own, so there's no locking and no network
+  `<drive>/.buckets-audit/<YYYY-MM-DD>/<HH>-<n>.jsonl`, one entry per
+  line. A dot-directory at the drive's root, which neither Buckets nor MinIO
+  takes for a bucket. Each server writes only its own, so there's no locking and no network
   traffic. A copy survives restarts, but not the loss of that drive. For a
   record that must survive, forward to a SIEM: that is the system of record.
 - **Written in the background:** request threads hand entries to a writer
@@ -65,7 +66,7 @@ needs them always, so each server **keeps a local copy of what it served:**
   rather than slow requests, and counts what it dropped (a metric, and a note
   on the page).
 - **Compressed** (gzip, with the libdeflate already linked) once an hour is
-  over. Audit JSON compresses about tenfold.
+  over, or a file reaches 64 MiB. Audit JSON compresses about tenfold.
 - **Kept** for 30 days or 10 GiB per server, whichever comes first, oldest
   hours first (`BUCKETS_AUDIT_LOCAL_DAYS`, `BUCKETS_AUDIT_LOCAL_MAX`).
   `BUCKETS_AUDIT_LOCAL=off` turns the local copy off.
@@ -88,17 +89,16 @@ Buckets extensions to the admin API:
 ```
 GET /minio/admin/v3/buckets/audit?from=&to=&user=&accessKey=&bucket=&prefix=&api=&kind=&status=&ip=&limit=&cursor=
     admin:ServerInfo (as the trace and the logs are)
-  -> {"entries": [{the audit entry, as MinIO writes it, plus "node"}], "cursor": "..." | null,
-      "coverage": [{"node", "oldest", "dropped"}]}
+  -> {"enabled", "entries": [{the audit entry, as MinIO writes it, plus "node"}], "cursor": "..." | null,
+      "coverage": [{"node", "reachable", "enabled", "oldest", "dropped"}]}
 ```
 
-`audit_sentinel` is configured like the other audit targets, through
-`mc admin config set` or the console's Configuration page:
-- `endpoint`: the data collection endpoint, or the DCR's own ingestion
-  endpoint;
-- `dcr_id` (immutable ID) and `stream` (for example `Custom-BucketsAudit_CL`);
-- `tenant_id`, `client_id` and `client_secret`;
-- `batch_size`, `queue_dir` and `queue_size`, as the webhook target has.
+The Sentinel target is set by environment variables
+(`BUCKETS_AUDIT_SENTINEL_ENDPOINT`, `_DCR_ID`, `_STREAM`, `_TENANT_ID`,
+`_CLIENT_ID`, `_CLIENT_SECRET` or `_CLIENT_SECRET_FILE`, `_BATCH_SIZE`,
+`_QUEUE_DIR`, `_QUEUE_SIZE`), not a `config.json` subsystem: MinIO refuses a
+configuration with subsystems it doesn't know, so a new one would break a
+rollback to MinIO.
 
 ## Code
 
@@ -107,11 +107,12 @@ GET /minio/admin/v3/buckets/audit?from=&to=&user=&accessKey=&bucket=&prefix=&api
   filter, the cursor, retention choices.
 - **`src/s3`:** build the entry whenever the local copy is on, as well as for
   targets, and hand it to the store.
-- **`src/logger/sentineltarget.c`:** the Sentinel target: the Entra token
-  (cached until it expires), batches, gzip, retries and the queue.
+- **`src/logger/sentinel.c`:** the Sentinel target: the Entra token (cached
+  until it expires), on the webhook target's batches, retries and queue
+  (`logger/httptarget.c`, which gains JSON-array batches and a bearer token).
 - **`src/admin/audit.c`:** the endpoint and the peer op.
-- **Console:** `AuditLog.tsx`, with the links from Activity, bucket settings,
-  Users and the access review.
+- **Console:** `AuditLog.tsx`, with the links from Activity, bucket settings
+  and Users.
 
 ## Tests
 
@@ -130,20 +131,12 @@ GET /minio/admin/v3/buckets/audit?from=&to=&user=&accessKey=&bucket=&prefix=&api
 - **Browser:** the page, its filters, the details, CSV, and a link from an
   Activity incident.
 
-## Open questions for review
+## Decisions
 
-1. **The local copy on by default?** It's what makes the viewer work without
-   any setup, but it costs some CPU per request (building the entry) and disk
-   (as above). I recommend on, with the caps above, and `off` for those who
-   only want forwarding.
-2. **Reads too, or writes, deletes and admin only?** Reads are most of the
-   volume, but "who downloaded this" is a common question after a leak. I
-   recommend recording everything, with `BUCKETS_AUDIT_LOCAL_READS=off` to
-   leave reads out.
-3. **Each server's own drive, or erasure-coded objects?** Erasure coding
-   survives a drive's loss, but costs a quorum write per batch on every server
-   and competes with real traffic. I recommend the server's own drive, with
-   forwarding to a SIEM as the record that must last.
-4. **Sentinel sign-in:** a client secret now, and Azure workload identity
-   (federated tokens from the pod's service account, no secret) later? Or
-   both now?
+1. **The local copy is on by default,** capped at 30 days or 10 GiB per
+   server; `BUCKETS_AUDIT_LOCAL=off` turns it off.
+2. **Reads are recorded too;** `BUCKETS_AUDIT_LOCAL_READS=off` leaves them out.
+3. **On each server's own drive,** not erasure-coded; a SIEM is the record
+   that must last.
+4. **Sentinel signs in with a client secret** now; Azure workload identity
+   (no secret) can come later.

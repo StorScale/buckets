@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **The audit log** ([docs/audit-log.md](docs/audit-log.md), [the design](docs/design/audit-log.md)): what was done, by whom, from where and with what result, in the console, and forwarded to Microsoft Sentinel.
+  - **Kept on each server:** the audit entries for the requests it served, on its first drive (`.buckets-audit`, outside the erasure-coded data), written in the background and compressed hourly. They are kept for 30 days or 10 GiB per server, whichever comes first (`BUCKETS_AUDIT_LOCAL_DAYS`, `BUCKETS_AUDIT_LOCAL_MAX`). `BUCKETS_AUDIT_LOCAL=off` turns the copy off, and `BUCKETS_AUDIT_LOCAL_READS=off` leaves reads out. A busy server drops entries rather than slowing requests, and counts them (`buckets_node_audit_dropped_total`). `buckets_node_audit_local_bytes` shows the space the copy uses.
+  - **Reports → Audit log** in the console: a time range, filters (person, access key, bucket, object prefix, API, kind, result, source IP), each entry's details, paging, and CSV export. Someone signed in through OpenID appears under the name their token gives. Activity incidents, bucket settings and users link to it already filtered.
+  - **Microsoft Sentinel:** entries go through Azure Monitor's Logs Ingestion API to a data collection rule, signed in as an Entra ID app (`BUCKETS_AUDIT_SENTINEL_*`). They wait in a queue, in memory or on disk, while Azure can't be reached. The docs give the table, the rule's transform and KQL queries.
+  - **Splunk:** the audit webhook target, sent to the HTTP Event Collector with `auth_token="Splunk <token>"`, is now documented and tested.
+  - **For other tools:** `GET /minio/admin/v3/buckets/audit` (`admin:ServerInfo`) asks every server and merges the answers.
+
+### Fixed
+- When the console's browser tests failed to start (a server binary missing, say), the processes they had already started were left running and their data left behind. They are now stopped and removed.
+
 ## [1.14.0] - 2026-10-07
 
 ### Added

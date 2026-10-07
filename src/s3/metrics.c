@@ -40,6 +40,7 @@
 #include "s3/batch.h"
 #include "tier/tier.h"
 #include "object/epool.h"
+#include "audit/store.h"
 #include "s3/internal.h"
 #include "s3/metrics.h"
 #include "scanner/scanner.h"
@@ -1005,6 +1006,10 @@ static void iam_node_metrics(mctx *m) {
   for (int k = 0; k < 3; k++) /* opened by this server, when it led (s3/ransomguard.h) */
     ADD1(m, "buckets_ransomware_incidents_total", (double)m->s->rw_incidents[k], "kind",
          buckets_rw_kind_name((buckets_rw_incident_kind)k));
+  if (m->s->audit_store) { /* the audit log's local copy (audit/store.h) */
+    ADD0(m, "buckets_node_audit_dropped_total", (double)buckets_audit_store_dropped(m->s->audit_store));
+    ADD0(m, "buckets_node_audit_local_bytes", (double)buckets_audit_store_kept(m->s->audit_store));
+  }
   buckets_plugins *pl = buckets_s3_plugins(m->s);
   bool on = buckets_idp_plugin_enabled(pl);
   buckets_idp_plugin_metrics pm;

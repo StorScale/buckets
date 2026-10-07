@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 /* Audit entries (MinIO's logger.AuditLog and madmin-go logger/audit.Entry),
  * one per S3 request, for the audit targets. */
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,7 +14,9 @@
 #include "logger/logger.h"
 #include "metrics/stats.h"
 #include "notify/event.h"
+#include "audit/store.h"
 #include "s3/internal.h"
+#include "usage/history.h"
 
 static void jstr(buckets_buf *b, const char *s) { buckets_json_go_string(b, s ? s : "", s ? strlen(s) : 0); }
 static void jstrn(buckets_buf *b, const char *s, size_t n) { buckets_json_go_string(b, s, n); }
@@ -82,9 +85,18 @@ static const char *status_text(int code) {
   return t ? t : "";
 }
 
+bool buckets_s3_audit_wanted(buckets_s3_server *s) {
+  return s->audit_store || buckets_logger_audit_enabled(s->logger);
+}
+
+/* An entry to the audit targets, and to the local copy (audit/store.h), which leaves reads out when asked to. */
+static void audit_out(buckets_s3_server *s, const buckets_buf *b, bool read) {
+  if (buckets_logger_audit_enabled(s->logger)) buckets_logger_audit(s->logger, b->data, b->len);
+  if (s->audit_store && (!read || buckets_audit_local_reads())) buckets_audit_store_put(s->audit_store, b->data, b->len);
+}
+
 void buckets_s3_audit(s3_ctx *c, int api, int64_t ttfb_ns, int64_t ttr_ns, uint64_t tx) {
-  buckets_logger *lg = c->s->logger;
-  if (!buckets_logger_audit_enabled(lg)) return;
+  if (!buckets_s3_audit_wanted(c->s)) return;
   const buckets_http_request *req = c->req;
   buckets_http_response *resp = c->resp;
   buckets_buf b = BUCKETS_BUF_INIT;
@@ -217,7 +229,14 @@ void buckets_s3_audit(s3_ctx *c, int api, int64_t ttfb_ns, int64_t ttr_ns, uint6
     buckets_buf_append_c(&b, ",\"accessKey\":"), jstr(&b, c->access_key);
   }
   buckets_buf_append_char(&b, '}');
-  buckets_logger_audit(lg, b.data, b.len);
+  bool read = false;
+  if (api >= 0) {
+    char lower[64] = "";
+    const char *n = buckets_api_handler_name(api);
+    for (size_t i = 0; n && n[i] && i < sizeof(lower) - 1; i++) lower[i] = (char)tolower((unsigned char)n[i]);
+    read = buckets_usage_kind_of(lower) == BUCKETS_USAGE_READ;
+  }
+  audit_out(c->s, &b, read);
   buckets_buf_free(&b);
 }
 
@@ -226,7 +245,7 @@ void buckets_s3_audit_internal(void *ud, const char *event, const char *api_name
                                const char *version_id, const char *error, const char *const *keys,
                                const char *const *values, size_t ntags) {
   buckets_s3_server *s = ud;
-  if (!buckets_logger_audit_enabled(s->logger)) return;
+  if (!buckets_s3_audit_wanted(s)) return;
   buckets_buf b = BUCKETS_BUF_INIT;
   struct timespec now;
   clock_gettime(CLOCK_REALTIME, &now);
@@ -281,6 +300,6 @@ void buckets_s3_audit_internal(void *ud, const char *event, const char *api_name
     jstr(&b, error);
   }
   buckets_buf_append_char(&b, '}');
-  buckets_logger_audit(s->logger, b.data, b.len);
+  audit_out(s, &b, false);
   buckets_buf_free(&b);
 }

@@ -75,6 +75,7 @@ typedef struct buckets_s3_server {
   bool metrics_thread_started;
   pthread_t usage_thread; /* adds this server's traffic to the usage history */
   bool usage_thread_started;
+  struct buckets_audit_store *audit_store; /* the audit log's local copy (audit/store.h), or NULL when off */
   pthread_t guard_thread; /* ransomware alerts' cluster view, on the leader (s3/ransomguard.h) */
   bool guard_thread_started;
   _Atomic unsigned long long rw_incidents[3]; /* incidents opened here, by kind (buckets_rw_incident_kind) */
