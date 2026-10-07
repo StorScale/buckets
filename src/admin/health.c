@@ -395,9 +395,11 @@ yyjson_mut_val *buckets_admin_mem_info(yyjson_mut_doc *d, const char *addr) {
   sysctlbyname("hw.memsize", &total, &sz, NULL, 0);
   vm_statistics64_data_t vm;
   mach_msg_type_number_t cnt = HOST_VM_INFO64_COUNT;
-  host_statistics64(mach_host_self(), HOST_VM_INFO64, (host_info64_t)&vm, &cnt);
+  mach_port_t host = mach_host_self(); /* a reference each call: released below */
+  host_statistics64(host, HOST_VM_INFO64, (host_info64_t)&vm, &cnt);
   vm_size_t page = 0;
-  host_page_size(mach_host_self(), &page);
+  host_page_size(host, &page);
+  mach_port_deallocate(mach_task_self(), host);
   freeb = (uint64_t)vm.free_count * page;
   avail = ((uint64_t)vm.free_count + vm.inactive_count) * page;
   struct xsw_usage sw;

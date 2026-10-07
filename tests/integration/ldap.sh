@@ -57,11 +57,18 @@ start() { # extra env...
   env BUCKETS_ROOT_USER=rootadmin BUCKETS_ROOT_PASSWORD=rootsecret123 ${envs[@]+"${envs[@]}"} "$@" \
     "$BIN" server --address "127.0.0.1:$PORT" --certs-dir "$WORK/certs" "$WORK/d{1...4}" 2>>"$WORK/log" &
   PID=$!
+  local up=
   for _ in $(seq 150); do
-    mc alias set root "$EP" rootadmin rootsecret123 >/dev/null 2>&1 && mc admin info root >/dev/null 2>&1 && return
+    mc alias set root "$EP" rootadmin rootsecret123 >/dev/null 2>&1 && mc admin info root >/dev/null 2>&1 && up=1 && break
     sleep 0.1
   done
-  fail "server did not start"
+  [[ -n $up ]] || fail "server did not start"
+  # root works before IAM has loaded; STS answers STSNotInitialized until it has
+  for _ in $(seq 150); do
+    ! grep -q STSNotInitialized <<<"$(sts nobody nopassword)" && return
+    sleep 0.1
+  done
+  fail "IAM did not load"
 }
 stop() { kill "$PID"; wait "$PID" 2>/dev/null || true; PID=; }
 

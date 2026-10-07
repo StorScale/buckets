@@ -145,7 +145,10 @@ bool buckets_mem_stats_get(buckets_mem_stats *out) {
   if (sysctlbyname("hw.memsize", &total, &len, NULL, 0) != 0) return false;
   vm_statistics64_data_t vm;
   mach_msg_type_number_t cnt = HOST_VM_INFO64_COUNT;
-  if (host_statistics64(mach_host_self(), HOST_VM_INFO64, (host_info64_t)&vm, &cnt) != KERN_SUCCESS) return false;
+  mach_port_t host = mach_host_self(); /* a reference each call: released below */
+  kern_return_t kr = host_statistics64(host, HOST_VM_INFO64, (host_info64_t)&vm, &cnt);
+  mach_port_deallocate(mach_task_self(), host);
+  if (kr != KERN_SUCCESS) return false;
   uint64_t page = (uint64_t)getpagesize();
   out->total = total;
   out->free = (uint64_t)vm.free_count * page;
