@@ -38,6 +38,7 @@ buckets_unit_test(test_access)
 buckets_unit_test(test_idsync)
 buckets_unit_test(test_compliance)
 buckets_unit_test(test_usage)
+buckets_unit_test(test_ransomware)
 buckets_unit_test(test_drive_health)
 
 # scripts/adopt_kes.py (the adoption script's KES carry-over)

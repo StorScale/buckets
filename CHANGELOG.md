@@ -6,9 +6,20 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Ransomware alerts** ([docs/ransomware.md](docs/ransomware.md), [the design](docs/design/ransomware-alerts.md)). Buckets notices mass deletion, mass overwriting and weakened protection as they happen, names the bucket and the credential, and can turn that credential off.
+  - **Bursts:** at least 1,000 objects in 5 minutes, and more than 10 times the bucket's usual rate, per bucket or per credential across buckets. Each object of a `DeleteObjects` call counts, as does each delete marker and each write over an existing object. The usual rate is the median of each day's busiest hour over the 14 days before today, so nightly clean-up jobs don't trigger it and an attack doesn't raise the bar for the next. The leader adds up every server's counts every 30 seconds.
+  - **Protection removed,** reported every time: versioning suspended, a lifecycle rule expiring noncurrent versions, Governance retention bypassed, a bucket force-deleted, or a policy letting anyone write or delete.
+  - **Each incident** goes to the bucket's notification targets (`s3:Buckets:MassDelete`, `MassOverwrite`, `ProtectionRemoved`), the server log and three new alerts. It also appears on the console's **Reports → Activity** page, where the credential can be turned off or back on, or the incident marked a false alarm.
+  - **Response:** `BUCKETS_RANSOMWARE_RESPONSE=disable` turns the credential behind a burst off at once (an access key or user turned off, STS sessions revoked; never root).
+  - **For other tools:** `GET` and `POST /minio/admin/v3/buckets/incidents`, per-bucket metrics (`buckets_bucket_objects_deleted_total`, `_versions_destroyed_total`, `_objects_overwritten_total`, `_protection_changes_total`), and `buckets_ransomware_incidents_total`.
+- The usage history's traffic records also count objects deleted and overwritten, per UTC hour.
+
 ### Fixed
 - On macOS, every memory reading (the metrics and `mc admin` health data) leaked a reference to the host's Mach port. The memory it holds is small, but the references never went away.
 - `tests/integration/certsts.sh` failed with OpenSSL's default configuration: its self-signed client certificate came out as a CA, which the server rightly counts as an intermediate, so it reported no certificate instead of an untrusted one. The certificate now says it isn't a CA.
+- The console's sidebar now scrolls when it is taller than the window. Before, the links at the bottom (Configuration, Encryption) could not be reached on a short screen.
+- The metrics endpoints passed `qsort` a null pointer when they had nothing to report: undefined behaviour, on which a sanitizer build stops. A server with no bucket activity hit it when asked for bucket metrics.
 - `tests/integration/ldap.sh` sometimes failed with `STSNotInitialized`: after a start or restart it waited only for root, which works before IAM has loaded. It now waits for STS too.
 
 ## [1.13.0] - 2026-10-07

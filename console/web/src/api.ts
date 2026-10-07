@@ -876,3 +876,33 @@ export const usageReport = (from: string, to: string) =>
 export const setUsageRates = (r: UsageRates) =>
   adminJson<unknown>("PUT", "buckets/usage-rates", { body: JSON.stringify(r), headers: { "Content-Type": "application/json" } });
 export const clearUsageRates = () => adminJson<unknown>("DELETE", "buckets/usage-rates");
+
+// ---- ransomware alerts (docs/design/ransomware-alerts.md) ----
+
+export type IncidentCredential = { accessKey: string; user: string; type: string; count: number };
+export type Incident = {
+  id: string;
+  kind: "mass-delete" | "mass-overwrite" | "protection-removed";
+  bucket: string | null;
+  change?: string;
+  detail?: string;
+  credentials: IncidentCredential[];
+  opened: number;
+  lastSeen: number;
+  closed: number;
+  counts: { deleted?: number; overwritten?: number; changes?: number };
+  usual: number;
+  action: "disabled" | "revoked" | "none" | null;
+  actionError?: string;
+  undone: boolean;
+  falseAlarm: boolean;
+};
+export type Incidents = {
+  incidents: Incident[];
+  rule: { floor: number; factor: number; windowMinutes: number };
+  response: "disable" | "alert";
+};
+export const incidents = (all: boolean) =>
+  adminJson<Incidents>("GET", "buckets/incidents", { query: { state: all ? "all" : "open" } });
+export const incidentAction = (id: string, action: "disable" | "undo" | "false-alarm") =>
+  adminJson<Incident>("POST", "buckets/incidents", { query: { id, action } });

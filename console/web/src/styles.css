@@ -41,7 +41,7 @@ h3 { font-size: 14px; margin: 16px 0 8px; }
 .center { display: flex; align-items: center; justify-content: center; height: 100vh; }
 
 .shell { display: flex; min-height: 100vh; }
-.sidebar { width: 220px; background: var(--side); color: #cfd4de; display: flex; flex-direction: column; padding: 16px 0; position: sticky; top: 0; height: 100vh; }
+.sidebar { width: 220px; background: var(--side); color: #cfd4de; display: flex; flex-direction: column; padding: 16px 0; position: sticky; top: 0; height: 100vh; overflow-y: auto; box-sizing: border-box; }
 .sidebar a { color: #cfd4de; padding: 8px 20px; display: block; text-decoration: none; }
 .sidebar a.active, .sidebar a:hover { background: rgba(255, 255, 255, 0.08); color: #fff; }
 .sidebar .nav-group { padding: 16px 20px 4px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: #7f889a; }

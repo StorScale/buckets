@@ -11,6 +11,7 @@
 
 #include "bucket/metasys.h"
 #include "core/timefmt.h"
+#include "ransomware/ransomware.h"
 #include "s3/internal.h"
 #include "s3/replicate.h"
 #include "s3/xml.h"
@@ -138,6 +139,8 @@ buckets_s3_error buckets_s3_lock_check_delete(s3_ctx *c, const char *object, con
       if (until >= now_ns()) e = BUCKETS_ERR_OBJECT_LOCKED;
     } else if (buckets_s3_authorize(c, "s3:BypassGovernanceRetention", c->bucket, object, NULL)) {
       e = BUCKETS_ERR_ACCESS_DENIED;
+    } else if (until >= now_ns()) {
+      buckets_s3_protection_removed(c, BUCKETS_RW_RETENTION_BYPASSED, "a version under Governance retention deleted");
     }
   }
   buckets_object_info_free(&oi);
@@ -215,7 +218,10 @@ static buckets_s3_error enforce_put_retention(s3_ctx *c, const buckets_object_in
     }
     if (cur == BUCKETS_RET_GOVERNANCE) {
       buckets_s3_error perm = put_retention_allowed(c, until, mode, bypass);
-      if (!bypass && (mode != BUCKETS_RET_GOVERNANCE || until < cur_until)) return BUCKETS_ERR_OBJECT_LOCKED;
+      bool weakens = mode != BUCKETS_RET_GOVERNANCE || until < cur_until;
+      if (!bypass && weakens) return BUCKETS_ERR_OBJECT_LOCKED;
+      if (!perm && weakens)
+        buckets_s3_protection_removed(c, BUCKETS_RW_RETENTION_BYPASSED, "Governance retention shortened or removed");
       return perm;
     }
     if (mode != BUCKETS_RET_COMPLIANCE || until < cur_until) return BUCKETS_ERR_OBJECT_LOCKED;

@@ -848,6 +848,7 @@ typedef struct {
   char key[37], data_dir[37];
   const uint8_t *fv_id; /* free version for a replaced transitioned version */
   bool ok[MAX_SET];
+  bool replaced[MAX_SET]; /* the key had a current version (not a delete marker) on that drive */
 } commit_ctx;
 
 static void new_uuid_bytes(uint8_t id[16], char str[37]);
@@ -868,6 +869,11 @@ static void commit_one(void *ctx, size_t i) {
   }
   buckets_buf_free(&raw);
   free(mpath);
+  for (size_t v = 0; v < x.n; v++) { /* the newest that is not a free version: what this write replaces */
+    if (buckets_xl_is_free_version(&x.versions[v].hdr)) continue;
+    c->replaced[i] = x.versions[v].hdr.type == BUCKETS_XL_TYPE_OBJECT || x.versions[v].hdr.type == BUCKETS_XL_TYPE_LEGACY;
+    break;
+  }
   char old_dir[37] = "";
   long prev = buckets_xlmeta_find(&x, c->o->version_id);
   if (prev >= 0) {
@@ -915,7 +921,8 @@ static void commit_one(void *ctx, size_t i) {
  * directory <.minio.sys>/<src_dir>/<data_dir> into place. */
 static buckets_obj_err commit_version(buckets_eset *s, const char *bucket, const char *object, buckets_xl_object *o,
                                       const int *dist, const bool *alive, const buckets_buf *ibuf,
-                                      const char *src_dir, bool has_data_dir, int quorum, size_t *committed) {
+                                      const char *src_dir, bool has_data_dir, int quorum, size_t *committed,
+                                      bool *replaced) {
   char *op = obj_path(object);
   uint8_t fv_id[16];
   char fv_s[37];
@@ -928,6 +935,10 @@ static buckets_obj_err commit_version(buckets_eset *s, const char *bucket, const
   int ok = 0;
   for (size_t i = 0; i < s->n; i++) ok += c.ok[i];
   if (committed) *committed = (size_t)ok;
+  if (replaced) { /* any drive that took the write saw an object there */
+    *replaced = false;
+    for (size_t i = 0; i < s->n; i++) *replaced |= c.ok[i] && c.replaced[i];
+  }
   free(op);
   return ok >= quorum ? BUCKETS_OBJ_OK : BUCKETS_OBJ_ERR_WRITE_QUORUM;
 }
@@ -1084,6 +1095,7 @@ buckets_obj_err buckets_ep_put(buckets_epool *L, const char *bucket, const char 
     if (!err && opts && opts->pre_commit) err = opts->pre_commit(opts->pre_commit_ud, &cks, &o);
     if (!err && opts && opts->preserve_etag && *opts->preserve_etag)
       buckets_xl_kv_set(&o.meta_user, &o.nmeta_user, "etag", opts->preserve_etag, strlen(opts->preserve_etag));
+    bool replaced = false;
     if (!err) {
       /* Like MinIO, only the commit is locked: the data is already staged. */
       buckets_nslock_entry *lk = lock_ns(L, bucket, object, true);
@@ -1094,7 +1106,7 @@ buckets_obj_err buckets_ep_put(buckets_epool *L, const char *bucket, const char 
       if (!err && opts && opts->expect_mod_time_ns) err = still_expected(L, bucket, object, opts);
       if (!err) {
         err = commit_version(s, bucket, object, &o, e.dist, e.alive, e.inline_mode ? e.ibuf : NULL, tmp_dir.data,
-                             !e.inline_mode, write_quorum(e.data, e.parity), &committed);
+                             !e.inline_mode, write_quorum(e.data, e.parity), &committed, &replaced);
       }
       buckets_nslock_unlock(lk);
       if (!err && committed < s->n) report_partial(L, s, bucket, object, &o, committed);
@@ -1102,6 +1114,7 @@ buckets_obj_err buckets_ep_put(buckets_epool *L, const char *bucket, const char 
     if (!err && out) {
       o.ec_index = 1;
       fill_info(out, object, &o);
+      out->replaced = replaced;
     }
     buckets_xl_object_free(&o);
   }
@@ -2551,7 +2564,7 @@ buckets_obj_err buckets_ep_rehydrate(buckets_epool *L, const char *bucket, const
     size_t committed = 0;
     err = !lk ? BUCKETS_OBJ_ERR_TIMEOUT
               : commit_version(s, bucket, object, &o, e.dist, alive_all, e.inline_mode ? e.ibuf : NULL, tmp_dir.data,
-                               !e.inline_mode, write_quorum(e.data, e.parity), &committed);
+                               !e.inline_mode, write_quorum(e.data, e.parity), &committed, NULL);
     buckets_nslock_unlock(lk);
   }
   if (!e.inline_mode || err) cleanup_tmp(s, tmp_dir.data);
@@ -2660,7 +2673,7 @@ buckets_obj_err buckets_ep_import_version(buckets_epool *L, const char *bucket, 
     int q = o.type == BUCKETS_XL_TYPE_OBJECT ? write_quorum(e.data, e.parity) : write_quorum(set_data(s), s->parity);
     err = !lk ? BUCKETS_OBJ_ERR_TIMEOUT
               : commit_version(s, bucket, object, &o, e.dist, alive_all, e.inline_mode ? e.ibuf : NULL, tmp_dir.data,
-                               has_data && !e.inline_mode, q, &committed);
+                               has_data && !e.inline_mode, q, &committed, NULL);
     buckets_nslock_unlock(lk);
     if (!err) report_partial(L, s, bucket, object, &o, committed);
   }
@@ -3760,10 +3773,11 @@ static buckets_obj_err mpu_complete(buckets_epool *L, const char *bucket, const 
     }
     buckets_nslock_entry *lk = lock_ns(L, bucket, object, true);
     size_t committed = 0;
+    bool replaced = false;
     err = !lk ? BUCKETS_OBJ_ERR_TIMEOUT : check_namespace(u.set, bucket, object);
     if (!err) {
       err = commit_version(u.set, bucket, object, &o, u.dist, u.has, NULL, dir, true,
-                           write_quorum(u.up.ec_m, u.up.ec_n), &committed);
+                           write_quorum(u.up.ec_m, u.up.ec_n), &committed, &replaced);
     }
     buckets_nslock_unlock(lk);
     if (!err && committed < u.set->n) report_partial(L, u.set, bucket, object, &o, committed);
@@ -3774,6 +3788,7 @@ static buckets_obj_err mpu_complete(buckets_epool *L, const char *bucket, const 
       if (out) {
         o.ec_index = 1;
         fill_info(out, object, &o);
+        out->replaced = replaced;
       }
     }
   }
@@ -4044,7 +4059,7 @@ static buckets_obj_err rebuild(buckets_epool *L, buckets_eset *s, const char *bu
     }
     buckets_xl_object copy = *o; /* commit_version only reads it */
     err = commit_version(s, bucket, object, &copy, dist, outdated, is_inline ? e.ibuf : NULL, tmp_dir.data, has_data, 1,
-                         committed);
+                         committed, NULL);
   }
   if (has_data || err) cleanup_tmp(s, tmp_dir.data);
   encoder_free(&e);

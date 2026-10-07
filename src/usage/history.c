@@ -132,6 +132,23 @@ void buckets_usage_traffic_merge(const char *json, size_t len, const buckets_usa
     yyjson_mut_val *o = bucket_obj(d, bs, add[i].bucket);
     const uint64_t v[] = {add[i].t.in, add[i].t.out, add[i].t.read, add[i].t.write, add[i].t.del};
     for (size_t k = 0; k < 5; k++) set_u(d, o, keys[k], mut_u(o, keys[k]) + v[k]);
+    if (add[i].t.deleted || add[i].t.overwritten) {
+      set_u(d, o, "deleted", mut_u(o, "deleted") + add[i].t.deleted);
+      set_u(d, o, "overwritten", mut_u(o, "overwritten") + add[i].t.overwritten);
+      int h = add[i].hour >= 0 && add[i].hour < 24 ? add[i].hour : 0;
+      static const char *const hk[] = {"dh", "oh"};
+      const uint64_t hv[] = {add[i].t.deleted, add[i].t.overwritten};
+      for (size_t k = 0; k < 2; k++) {
+        yyjson_mut_val *arr = yyjson_mut_obj_get(o, hk[k]);
+        if (!yyjson_mut_is_arr(arr) || yyjson_mut_arr_size(arr) != 24) {
+          yyjson_mut_obj_remove_key(o, hk[k]);
+          arr = yyjson_mut_obj_add_arr(d, o, hk[k]);
+          for (int x = 0; x < 24; x++) yyjson_mut_arr_add_uint(d, arr, 0);
+        }
+        yyjson_mut_val *slot = yyjson_mut_arr_get(arr, (size_t)h);
+        yyjson_mut_set_uint(slot, yyjson_mut_get_uint(slot) + hv[k]);
+      }
+    }
   }
   write_doc(d, out);
 }

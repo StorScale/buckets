@@ -42,12 +42,16 @@ static const char *const k_names[] = {
     [BUCKETS_EV_OBJECT_LARGE_VERSIONS] = "s3:Scanner:LargeVersions",
     [BUCKETS_EV_PREFIX_MANY_FOLDERS] = "s3:Scanner:BigPrefix",
     [BUCKETS_EV_ILM_DEL_MARKER_EXPIRATION_DELETE] = "s3:LifecycleDelMarkerExpiration:Delete",
+    [BUCKETS_EV_BUCKETS_MASS_DELETE] = "s3:Buckets:MassDelete",
+    [BUCKETS_EV_BUCKETS_MASS_OVERWRITE] = "s3:Buckets:MassOverwrite",
+    [BUCKETS_EV_BUCKETS_PROTECTION_REMOVED] = "s3:Buckets:ProtectionRemoved",
     [BUCKETS_EV_OBJECT_ACCESSED_ALL] = "s3:ObjectAccessed:*",
     [BUCKETS_EV_OBJECT_CREATED_ALL] = "s3:ObjectCreated:*",
     [BUCKETS_EV_OBJECT_REMOVED_ALL] = "s3:ObjectRemoved:*",
     [BUCKETS_EV_OBJECT_REPLICATION_ALL] = "s3:Replication:*",
     [BUCKETS_EV_OBJECT_RESTORE_ALL] = "s3:ObjectRestore:*",
     [BUCKETS_EV_OBJECT_TRANSITION_ALL] = "s3:ObjectTransition:*",
+    [BUCKETS_EV_BUCKETS_ALL] = "s3:Buckets:*",
 };
 
 const char *buckets_event_name_str(buckets_event_name n) {
@@ -61,6 +65,7 @@ buckets_event_name buckets_event_name_parse(const char *s) {
 }
 
 #define BIT(n) (1ULL << ((n) - 1))
+_Static_assert(BUCKETS_EV__SINGLE_END <= 64, "event masks are 64 bits");
 
 uint64_t buckets_event_name_mask(buckets_event_name n) {
   if (n > BUCKETS_EV_NONE && n < BUCKETS_EV__SINGLE_END) return BIT(n);
@@ -85,6 +90,9 @@ uint64_t buckets_event_name_mask(buckets_event_name n) {
     return BIT(BUCKETS_EV_OBJECT_RESTORE_POST) | BIT(BUCKETS_EV_OBJECT_RESTORE_COMPLETED);
   case BUCKETS_EV_OBJECT_TRANSITION_ALL:
     return BIT(BUCKETS_EV_OBJECT_TRANSITION_FAILED) | BIT(BUCKETS_EV_OBJECT_TRANSITION_COMPLETE);
+  case BUCKETS_EV_BUCKETS_ALL:
+    return BIT(BUCKETS_EV_BUCKETS_MASS_DELETE) | BIT(BUCKETS_EV_BUCKETS_MASS_OVERWRITE) |
+           BIT(BUCKETS_EV_BUCKETS_PROTECTION_REMOVED);
   case BUCKETS_EV_OBJECT_SCANNER_ALL:
     return BIT(BUCKETS_EV_OBJECT_MANY_VERSIONS) | BIT(BUCKETS_EV_OBJECT_LARGE_VERSIONS) |
            BIT(BUCKETS_EV_PREFIX_MANY_FOLDERS);

@@ -11,7 +11,7 @@
 /* An S3 event notification record (MinIO's eventArgs.ToEvent and
  * event.Event), serialized as Go's encoding/json does. */
 
-typedef struct {
+typedef struct buckets_event_kv {
   const char *key, *value;
 } buckets_event_kv;
 

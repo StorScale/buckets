@@ -1,6 +1,6 @@
 # Design: ransomware alerts
 
-Status: proposed, for review. Roadmap: Phase 4, "Ransomware alerts for
+Status: agreed, being built. Roadmap: Phase 4, "Ransomware alerts for
 unusual bursts of deletes or overwrites, using the existing event
 notifications". Phase 4's gate has passed (1.13.0); this is one of its three
 remaining items.
@@ -27,7 +27,7 @@ finds out when users report missing data.
 
 **Detect** a burst of deletes or overwrites, per bucket and per credential,
 against that bucket's normal rate. **Say so at once:** a Prometheus alert, an
-event to the bucket's notification targets, a log line and an audit entry.
+event to the bucket's notification targets, and a log line.
 Each names the bucket, the credential (and, for an access key or STS session,
 the person behind it), and what happened. **Optionally stop it:** turn off the
 credential.
@@ -71,9 +71,10 @@ bucket and credential seen in that hour.
 
   The usual rate comes from the usage history (1.12.0), which keeps daily
   counts for 13 months. Its daily records gain objects deleted and
-  overwritten. The usual rate is the busiest hour of the last 14 days, so
-  nightly clean-up jobs don't raise alerts. A new bucket with no history uses
-  the floor alone.
+  overwritten, per hour. The usual rate is the median of the busiest hour of
+  each of the 14 days before today, so nightly clean-up jobs don't raise
+  alerts, while one unusual day (an attack among them) doesn't move it. A
+  bucket with less than a week of history uses the floor alone.
 - **Once per incident:** an alert fires once, and again only after the burst
   has been quiet for 15 minutes.
 - **Settings:** `BUCKETS_RANSOMWARE_FLOOR` (1000),
@@ -89,8 +90,8 @@ bucket and credential seen in that hour.
   MinIO's own `s3:Scanner:*` events. The record carries the bucket, the
   credential and its parent user, the counts, the usual rate, and the window.
   That fits webhooks, Kafka and the SIEM targets as they are.
-- **Log and audit:** a warning in the server log and an audit entry, so they
-  reach the logger and audit targets (and from there Sentinel or Splunk).
+- **Log:** a warning in the server log, so it reaches the logger targets (and
+  from there Sentinel or Splunk).
 - **Metrics:** cumulative counts per bucket:
   - `buckets_bucket_objects_deleted_total`
   - `buckets_bucket_versions_destroyed_total`
@@ -117,7 +118,9 @@ credential behind an incident as it opens it:
 - root is never touched: the incident says root did it.
 
 The incident records the action, and the console offers to undo it. Turning
-off a key stops a legitimate job too, so this is off by default.
+off a key stops a legitimate job too, so this is off by default; the console's
+**Turn off credential** does the same by hand. Protection changes are never
+acted on by themselves: an admin making a change is the usual case.
 
 ## What it doesn't do
 
@@ -135,9 +138,12 @@ Buckets extensions to the admin API:
 
 ```
 GET  /minio/admin/v3/buckets/incidents?state=open|all     admin:ServerInfo
-  -> {"incidents": [{"id", "kind", "bucket", "credential", "user", "opened", "closed",
-                     "counts": {...}, "usual": n, "action": "disabled" | null, "falseAlarm": bool}]}
-POST /minio/admin/v3/buckets/incidents/<id>?action=false-alarm|undo   admin:ConfigUpdate
+  -> {"incidents": [{"id", "kind", "bucket", "change", "detail",
+                     "credentials": [{"accessKey", "user", "type", "count"}],
+                     "opened", "lastSeen", "closed", "counts": {...}, "usual",
+                     "action": "disabled" | "revoked" | "none" | null, "undone", "falseAlarm"}],
+      "rule": {"floor", "factor", "windowMinutes"}, "response": "disable" | "alert"}
+POST /minio/admin/v3/buckets/incidents?id=<id>&action=disable|undo|false-alarm   admin:ConfigUpdate
 ```
 
 ## Code
@@ -167,18 +173,17 @@ POST /minio/admin/v3/buckets/incidents/<id>?action=false-alarm|undo   admin:Conf
     back on.
 - **Browser:** the Activity page, false alarm, and undo.
 
-## Open questions for review
+## Decisions
 
-1. **Detect on the servers, or in Prometheus only?** Prometheus alone needs no
-   new detection code: it alerts on the new per-bucket counters, against a
-   recorded baseline. But it can't name the credential, send events, or turn
-   a key off, and it needs Prometheus running. I recommend the servers detect,
-   as above, with the metrics as well.
-2. **Automatic response:** off by default, and when on, turn off the
-   credential (as above)? Or never act, and only alert?
+1. **The servers detect,** with the leader's cluster-wide view, and the
+   per-bucket metrics as well.
+2. **Automatic response off by default;** with
+   `BUCKETS_RANSOMWARE_RESPONSE=disable`, the credential behind an incident is
+   turned off (an access key) or revoked (STS sessions). Root never is.
 3. **Defaults:** at least 1,000 objects and 10 times the usual rate over 5
-   minutes, with the usual rate being the busiest hour of the last two weeks?
-   Lower values catch slower attacks but raise false alarms with batch jobs.
-4. **Protection removed:** the four changes above, always? Should making a
-   bucket public (a policy allowing anonymous writes or deletes) count as
-   well?
+   minutes; the usual rate is the median of the busiest hour of each of the
+   14 days before today (not their maximum, so an attack doesn't raise the
+   bar for the next).
+4. **Protection removed, always:** versioning suspended, an expiry rule for
+   noncurrent versions added, retention bypassed, a bucket with data deleted,
+   and a bucket policy that lets anyone write or delete.

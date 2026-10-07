@@ -240,7 +240,7 @@ static int sample_cmp(const void *a, const void *b) {
 size_t buckets_expo_names(const buckets_expo *e, const char ***out) {
   const char **v = buckets_xcalloc(e->n ? e->n : 1, sizeof(*v));
   for (size_t i = 0; i < e->n; i++) v[i] = e->f[i].def->name;
-  qsort(v, e->n, sizeof(*v), (int (*)(const void *, const void *))strcmp);
+  if (e->n) qsort(v, e->n, sizeof(*v), (int (*)(const void *, const void *))strcmp);
   *out = v;
   return e->n;
 }
@@ -254,10 +254,10 @@ static void help_text(buckets_buf *b, const char *h) {
 }
 
 void buckets_expo_write(buckets_expo *e, buckets_buf *out) {
-  qsort(e->f, e->n, sizeof(*e->f), fam_cmp);
+  if (e->n) qsort(e->f, e->n, sizeof(*e->f), fam_cmp); /* none: e->f may be NULL */
   for (size_t i = 0; i < e->n; i++) {
     family *f = &e->f[i];
-    qsort(f->s, f->n, sizeof(*f->s), sample_cmp);
+    if (f->n) qsort(f->s, f->n, sizeof(*f->s), sample_cmp);
     const char *type = "gauge";
     switch (f->def->type) {
     case BUCKETS_MT_COUNTER: type = "counter"; break;
