@@ -48,12 +48,15 @@ function who(r: AccessRow): string {
   return r.name;
 }
 
+const day = (iso: string) => new Date(iso).toLocaleDateString();
+
 function whoDetail(r: AccessRow): string {
   const parts: string[] = [KIND_TEXT[r.kind] ?? r.kind];
   if (r.status === "disabled") parts.push("disabled");
   if (r.members?.length) parts.push(`members: ${r.members.join(", ")}`);
   if (r.kind === "openid-role") parts.push(r.seen?.length ? `seen: ${r.seen.join(", ")}` : "nobody seen yet");
   if (r.owner) parts.push(`of ${r.owner}, with its own policy`);
+  if (r.ownerLeft) parts.push(`its owner left on ${day(r.ownerLeft.since)}; deleted on ${day(r.ownerLeft.deleteAt)}`);
   return parts.join(" · ");
 }
 

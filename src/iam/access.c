@@ -550,7 +550,7 @@ static yyjson_mut_val *row(yyjson_mut_doc *d, const model *m, yyjson_val *p, siz
   yyjson_mut_obj_add_strcpy(
       d, r, "name",
       yyjson_get_str(yyjson_obj_get(p, "name")) ? yyjson_get_str(yyjson_obj_get(p, "name")) : "");
-  static const char *const copy[] = {"status", "members", "seen", "owner", "groups"};
+  static const char *const copy[] = {"status", "members", "seen", "owner", "groups", "ownerLeft"};
   for (size_t i = 0; i < BUCKETS_ARRAY_LEN(copy); i++) {
     yyjson_val *v = yyjson_obj_get(p, copy[i]);
     if (v) yyjson_mut_obj_add_val(d, r, copy[i], yyjson_val_mut_copy(d, v));

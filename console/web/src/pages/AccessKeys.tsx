@@ -35,7 +35,15 @@ export default function AccessKeys() {
               <tr key={a.accessKey} data-testid={`key-${a.accessKey}`}>
                 <td className="mono">{a.accessKey}</td>
                 <td>{a.name || "—"}</td>
-                <td>{a.accountStatus ?? "on"}</td>
+                <td>
+                  {a.ownerLeft ? (
+                    <span title={`Turned off by the identity sync: its owner left the identity provider on ${new Date(a.ownerLeft.since).toLocaleString()}.`} data-testid={`owner-left-${a.accessKey}`}>
+                      off: owner left · deleted on {new Date(a.ownerLeft.deleteAt).toLocaleDateString()}
+                    </span>
+                  ) : (
+                    a.accountStatus ?? "on"
+                  )}
+                </td>
                 <td>{a.expiration && !a.expiration.startsWith("1970") && !a.expiration.startsWith("9999") ? a.expiration : "never"}</td>
                 <td className="row-actions">
                   <ConfirmButton

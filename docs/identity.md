@@ -166,6 +166,9 @@ credentials:
   off at once, and deleted after 30 days (**Delete their access keys after**).
 - **Back within those days:** their keys come back on. A key its owner had
   turned off stays off.
+- **Shown as such:** the Users page, the Access Keys page and the access review
+  say when a key's owner left and when the key will be deleted. The access
+  review counts a key that is off as reaching nothing.
 - **The provider can't be reached, or answers an error:** whoever it didn't
   answer for is left as they are, and the `BucketsIdentitySyncFailing` alert
   says so.
