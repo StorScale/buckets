@@ -1151,6 +1151,34 @@ void buckets_s3_server_stop(buckets_s3_server *s) {
   buckets_iam_stop_refresh(s->iam);
 }
 
+void buckets_s3_server_free(buckets_s3_server *s) {
+  buckets_datamove_free(s->datamove);
+  buckets_batch_free(s->batch);
+  buckets_sr_free(s->sr);
+  buckets_tiering_free(s->tiering);
+  buckets_tiers_free(s->tiers);
+  buckets_repl_free(s->repl);
+  if (s->usage) {
+    buckets_usage_cache_free(s->usage);
+    free(s->usage);
+  }
+  if (s->meta) buckets_metasys_free(s->meta);
+  buckets_openid_release(s->openid);
+  buckets_plugins_release(s->plugins);
+  buckets_ldapidp_release(s->ldap);
+  buckets_iam_free(s->iam);
+  buckets_config_sys_free(s->config);
+  if (s->kms) buckets_kms_free(s->kms); /* last: IAM and the configuration use it */
+  pthread_mutex_destroy(&s->oidc_mu);
+  pthread_mutex_destroy(&s->freeze_mu);
+  pthread_cond_destroy(&s->freeze_cv);
+  pthread_mutex_destroy(&s->bg_mu);
+  pthread_cond_destroy(&s->bg_cv);
+  s->datamove = NULL, s->batch = NULL, s->sr = NULL, s->tiering = NULL, s->tiers = NULL, s->repl = NULL;
+  s->usage = NULL, s->meta = NULL, s->openid = NULL, s->plugins = NULL, s->ldap = NULL;
+  s->iam = NULL, s->config = NULL, s->kms = NULL;
+}
+
 void buckets_s3_server_close_targets(buckets_s3_server *s) {
   buckets_notifier *n = s->notifier;
   buckets_logger *l = s->logger;

@@ -2196,6 +2196,16 @@ buckets_batch *buckets_batch_new(buckets_s3_server *s) {
   return b;
 }
 
+void buckets_batch_free(buckets_batch *b) {
+  if (!b) return;
+  buckets_batch_stop(b);
+  for (size_t i = 0; i < b->nmetrics; i++) buckets_batch_info_free(&b->metrics[i]);
+  free(b->metrics);
+  pthread_mutex_destroy(&b->mu);
+  pthread_cond_destroy(&b->cv);
+  free(b);
+}
+
 void buckets_batch_stop(buckets_batch *b) {
   if (!b) return;
   pthread_mutex_lock(&b->mu);

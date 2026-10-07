@@ -20,6 +20,8 @@ typedef struct buckets_tiering buckets_tiering;
 /* Installs the object layer's remote-read hook and starts the workers. */
 buckets_tiering *buckets_tiering_new(struct buckets_s3_server *s, buckets_objlayer *layer);
 void buckets_tiering_stop(buckets_tiering *t);
+/* Stops it, then frees it. */
+void buckets_tiering_free(buckets_tiering *t);
 
 /* queueTransitionTask: a version due for transition to tier (immediate:
  * right after a write, counted as missed when the queue is full). */

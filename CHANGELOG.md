@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- `bucketsd` now frees everything it made when it stops or fails to start, so sanitizer builds report no leaks at exit. Before, a stopping server left its IAM, configuration, replication, tiering, batch, site replication and decommission state to the process's exit. It also lost the pool list it starts with when it read the one stored on the drives.
+- A drive heal on a deployment with no buckets passed `qsort` a null pointer (undefined behaviour, reported by the sanitizer build).
+
 ## [1.11.1] - 2026-10-07
 
 ### Fixed

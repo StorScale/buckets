@@ -18,6 +18,8 @@ typedef struct buckets_batch buckets_batch;
 
 buckets_batch *buckets_batch_new(struct buckets_s3_server *s);
 void buckets_batch_stop(buckets_batch *b);
+/* Stops it, then frees it. */
+void buckets_batch_free(buckets_batch *b);
 
 /* StartBatchJob: validates and saves the job (which the call takes), then
  * runs it. On success out gets madmin.BatchJobResult JSON; on failure e. */

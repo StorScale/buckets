@@ -643,6 +643,7 @@ static void pool_meta_reconcile(buckets_datamove *d, pool_meta *old) {
         if (strcmp(old->pools[i].cmdline ? old->pools[i].cmdline : "", buckets_objlayer_pool_cmdline(L, p)) == 0)
           buckets_log_warn("pool(%zu) = %s is decommissioned, please remove from server command line", i + 1,
                            old->pools[i].cmdline);
+  pool_meta_free(&d->pm); /* the one made with the server, from the command line alone */
   if (!update) {
     d->pm = *old;
     memset(old, 0, sizeof(*old));
@@ -2120,6 +2121,19 @@ buckets_datamove *buckets_datamove_new(buckets_s3_server *s) {
   }
   d->init_started = pthread_create(&d->init_thread, NULL, init_main, d) == 0;
   return d;
+}
+
+void buckets_datamove_free(buckets_datamove *d) {
+  if (!d) return;
+  buckets_datamove_stop(d);
+  pool_meta_free(&d->pm);
+  rebal_meta_free(d->rm);
+  free((void *)d->decom_cancel);
+  free(d->decom_running);
+  pthread_mutex_destroy(&d->mu);
+  pthread_mutex_destroy(&d->rebal_save_mu);
+  pthread_cond_destroy(&d->cv);
+  free(d);
 }
 
 void buckets_datamove_stop(buckets_datamove *d) {

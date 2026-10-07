@@ -327,6 +327,7 @@ static void test_report(void **state) {
                       "\"lastUpdate\":\"0001-01-01T00:00:00Z\",\"retryAttempts\":0,\"complete\":true,\"failed\":false,"
                       "\"expired\":{\"lastBucket\":\"srcbkt\",\"lastObject\":\"a3\",\"objects\":3,\"objectsFailed\":0,"
                       "\"deleteMarkers\":0,\"deleteMarkersFailed\":0}}");
+  buckets_batch_info_free(&out);
   assert_false(buckets_batch_info_decode("batch-expire.bin", "\x02\x00\x01\x00\x80", 5, &out, err, sizeof(err)) &&
                false);
   assert_string_equal(err, "expire: unknown format: 2");
