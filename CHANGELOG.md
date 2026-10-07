@@ -6,6 +6,9 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- Directories on the drives that no bucket could be named, such as the `lost+found` an ext4 filesystem keeps at its root, counted as buckets in the data usage, the scanner and the compliance report. On the dev cluster `lost+found` showed up there. They are now skipped, as MinIO skips them, and left untouched. `tests/integration/stray-dirs.sh` covers it.
+
 ## [1.11.0] - 2026-10-07
 
 ### Added

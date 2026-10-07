@@ -32,6 +32,7 @@
 #include "object/object.h"
 #include "bucket/replication.h"
 #include "bucket/targets.h"
+#include "s3/bucketname.h"
 
 #define XL_META "xl.meta"
 #define DIR_SUFFIX "__XLDIR__"
@@ -221,6 +222,9 @@ buckets_obj_err buckets_ep_list_buckets(buckets_epool *L, buckets_bucket_info **
     if (buckets_drive_list_vols(L->all[i], &v, &nv) != BUCKETS_DRIVE_OK) continue;
     any = true;
     for (size_t k = 0; k < nv; k++) {
+      /* isReservedOrInvalidBucket(name, false), as MinIO's listBucketsLocal: a directory whose name no bucket
+       * can have (an ext4 drive's lost+found, say) is not a bucket */
+      if (!buckets_bucket_name_valid(v[k].name) || buckets_bucket_name_reserved(v[k].name)) continue;
       size_t j = 0;
       for (; j < *n; j++) {
         if (strcmp((*out)[j].name, v[k].name) == 0) break;
