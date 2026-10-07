@@ -79,7 +79,7 @@ This adds a few comparisons per version to a walk that already happens.
 
 ## API
 
-A Buckets extension to the admin API, like `ownerLeft` (1.11.1) but a new
+A Buckets extension to the admin API, like `ownerLeft` (1.11.0) but a new
 path, since MinIO has nothing like it:
 
 ```

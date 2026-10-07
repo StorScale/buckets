@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.12.0] - 2026-10-07
+
 ### Added
 - **Usage** reports in the console ([docs/usage-reports.md](docs/usage-reports.md), [the design](docs/design/usage-reports.md)). They show who stores and moves how much, per team and per bucket, for this month, last month or any range of days, with **Export CSV**.
   - **What is counted:** storage averaged over the period (GB-months) and at its peak, data in and out, and requests (reads, writes and deletes). Each bucket also has a chart of its daily size.
