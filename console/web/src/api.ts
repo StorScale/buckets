@@ -824,3 +824,42 @@ export type ComplianceBucket = {
 };
 export type Compliance = { scannedAt: number; kms: { configured: boolean; online: boolean }; buckets: ComplianceBucket[] };
 export const complianceReport = () => adminJson<Compliance>("GET", "buckets/compliance");
+
+// ---- usage and chargeback reports (docs/design/usage-reports.md) ----
+
+export type UsageRates = {
+  currency: string;
+  storageGbMonth?: number;
+  outGb?: number;
+  inGb?: number;
+  per10kRead?: number;
+  per10kWrite?: number;
+  per10kDelete?: number;
+};
+export type UsageTotals = {
+  storage: { gbMonths: number; peakBytes: number; lastBytes?: number };
+  dataIn: number;
+  dataOut: number;
+  requests: { read: number; write: number; delete: number };
+};
+export type UsageBucket = UsageTotals & {
+  name: string;
+  team: string | null;
+  namedByTwoTeams?: boolean;
+  daily: { day: string; bytes: number; in: number; out: number }[];
+};
+export type UsageTeam = UsageTotals & { name: string | null; buckets: string[] };
+export type UsageReport = {
+  from: string;
+  to: string;
+  days: number;
+  rates: UsageRates | null;
+  buckets: UsageBucket[];
+  teams: UsageTeam[];
+  missingDays: string[];
+};
+export const usageReport = (from: string, to: string) =>
+  adminJson<UsageReport>("GET", "buckets/usage", { query: { from, to } });
+export const setUsageRates = (r: UsageRates) =>
+  adminJson<unknown>("PUT", "buckets/usage-rates", { body: JSON.stringify(r), headers: { "Content-Type": "application/json" } });
+export const clearUsageRates = () => adminJson<unknown>("DELETE", "buckets/usage-rates");

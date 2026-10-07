@@ -201,7 +201,7 @@ test.describe("object details", () => {
   });
 });
 
-test.describe("compliance", () => {
+test.describe("reports", () => {
   test("retention and encryption coverage: settings per bucket, and CSV", async ({ page }) => {
     const bucket = unique("locked");
     await login(page);
@@ -212,7 +212,7 @@ test.describe("compliance", () => {
     await page.getByRole("dialog").getByText("Object locking").click();
     await page.getByTestId("bucket-create-submit").click();
     await page.getByRole("link", { name: "Retention" }).click();
-    await expect(page).toHaveURL(/\/compliance\/retention$/);
+    await expect(page).toHaveURL(/\/reports\/retention$/);
     await expect(page.getByTestId("retention-summary")).toContainText("with object lock");
     await expect(page.getByTestId(`retention-${bucket}`)).toContainText("on");
     await expect(page.getByTestId(`retention-${bucket}`)).toContainText("Enabled"); // object lock versions the bucket
@@ -225,9 +225,61 @@ test.describe("compliance", () => {
     expect(text).toContain(bucket + ",on,none,Enabled");
     // encryption: the KMS of the local setup, and the bucket without default encryption
     await page.getByTestId("tab-encryption").click();
-    await expect(page).toHaveURL(/\/compliance\/encryption$/);
+    await expect(page).toHaveURL(/\/reports\/encryption$/);
     if (!process.env.CONSOLE_URL) await expect(page.getByTestId("encryption-summary")).toContainText("KMS: online");
     await expect(page.getByTestId(`encryption-${bucket}`)).toContainText("none");
+    // the addresses from before 1.12.0 lead to the same pages
+    await page.goto("/compliance/encryption");
+    await expect(page).toHaveURL(/\/reports\/encryption$/);
+  });
+
+  test("usage: traffic per bucket and team, rates and costs, CSV", async ({ page }) => {
+    const bucket = unique("usage");
+    await login(page);
+    await page.goto("/buckets");
+    await page.getByTestId("create-bucket").click();
+    await page.getByTestId("bucket-name").fill(bucket);
+    await page.getByTestId("bucket-create-submit").click();
+    await page.getByRole("link", { name: bucket }).click();
+    await page.getByTestId("file-input").setInputFiles({ name: "u.bin", mimeType: "application/octet-stream", buffer: Buffer.alloc(200_000, 1) });
+    await expect(page.getByTestId("notice")).toHaveText("Uploaded 1 file.");
+    await page.getByRole("link", { name: "Usage", exact: true }).click();
+    await expect(page).toHaveURL(/\/reports\/usage$/);
+    await expect(page.getByTestId("usage-range")).toContainText("(UTC)");
+    // each server adds what it counted every second here (BUCKETS_USAGE_FLUSH_INTERVAL)
+    await expect(async () => {
+      await page.reload();
+      await page.getByTestId("tab-buckets").click();
+      await expect(page.getByTestId(`bucket-${bucket}`)).toContainText("195.3 KiB", { timeout: 1000 });
+    }).toPass({ timeout: 30_000 });
+    const row = page.getByTestId(`bucket-${bucket}`);
+    await expect(row).toContainText("No team");
+    await row.getByRole("button", { name: bucket }).click();
+    await expect(page.getByTestId(`daily-${bucket}`).getByRole("img")).toBeVisible();
+    // by team: the bucket is in no team
+    await page.getByTestId("tab-teams").click();
+    await expect(page.getByTestId("team-none")).toBeVisible();
+    // rates: costs appear, and the CSV records them
+    await page.getByTestId("rates-edit").click();
+    await page.getByTestId("rate-currency").fill("EUR");
+    await page.getByTestId("rate-inGb").fill("1000");
+    await page.getByTestId("rates-save").click();
+    await expect(page.getByTestId("usage-rates")).toContainText("1000 EUR per GB in");
+    await page.getByTestId("tab-buckets").click();
+    await expect(page.getByTestId(`bucket-${bucket}`).getByTestId("cost")).toHaveText(/^\d+\.\d\d EUR$/);
+    const csv = page.waitForEvent("download");
+    await page.getByTestId("usage-csv").click();
+    const text = readFileSync(await (await csv).path(), "utf8");
+    expect(text.split("\n")[0]).toContain("cost (EUR)");
+    expect(text).toMatch(new RegExp(`^${bucket},No team,`, "m"));
+    expect(text).toContain("currency,EUR");
+    // a bad rate is refused, in words; then the rates are removed
+    await page.getByTestId("rates-edit").click();
+    await page.getByTestId("rate-outGb").fill("-1");
+    await page.getByTestId("rates-save").click();
+    await expect(page.getByRole("dialog")).toContainText("outGb is a price from 0");
+    await page.getByTestId("rates-clear").click();
+    await expect(page.getByTestId("usage-rates")).toHaveCount(0);
   });
 });
 

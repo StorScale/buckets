@@ -1,13 +1,13 @@
 # Compliance reports
 
-The console's **Compliance** section answers two questions auditors ask,
+The console's **Reports** section (called Compliance before 1.12.0) answers two questions auditors ask,
 bucket by bucket, with **Export CSV** for their files. The access review
 (**Identity → Access review**, see [identity.md](identity.md#access-review))
 answers the third: who can reach the data.
 
 ## Retention
 
-**Compliance → Retention** shows, for each bucket:
+**Reports → Retention** shows, for each bucket:
 
 - **Object lock:** on or off. It can only be turned on when a bucket is made.
 - **Default retention:** Governance or Compliance, and for how long. Governance
@@ -27,7 +27,7 @@ Compliance-mode retention, and the furthest date.
 
 ## Encryption coverage
 
-**Compliance → Encryption coverage** shows, for each bucket:
+**Reports → Encryption coverage** shows, for each bucket:
 
 - **Default encryption:** SSE-S3, SSE-KMS with its key, or none. A bucket's
   settings page sets it.

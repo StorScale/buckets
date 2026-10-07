@@ -54,6 +54,7 @@
 #include "tier/tier.h"
 #include "s3/sigv2.h"
 #include "s3/xml.h"
+#include "usage/store.h"
 
 #define DEFAULT_REGION "us-east-1"
 
@@ -1103,6 +1104,58 @@ static void *metrics_main(void *arg) {
   return NULL;
 }
 
+/* This server's traffic and requests per bucket since the last flush, added to the usage history
+ * (usage/history.h) every BUCKETS_USAGE_FLUSH_INTERVAL seconds (300). The counters only grow, apart from a
+ * bucket deleted and made again, which starts it over. */
+static void usage_flush(buckets_s3_server *s, buckets_bucket_stats **prev, size_t *nprev) {
+  buckets_bucket_stats *cur;
+  size_t nc = buckets_stats_buckets(&cur), na = 0, napi = buckets_api_count();
+  buckets_usage_traffic_add *add = buckets_xcalloc(nc ? nc : 1, sizeof(*add));
+  for (size_t i = 0, j = 0; i < nc; i++) {
+    while (j < *nprev && strcmp((*prev)[j].bucket, cur[i].bucket) < 0) j++;
+    const buckets_bucket_stats *p = j < *nprev && strcmp((*prev)[j].bucket, cur[i].bucket) == 0 ? &(*prev)[j] : NULL;
+    buckets_usage_traffic t = {0};
+    uint64_t req[3] = {0}, preq[3] = {0};
+    for (size_t a = 0; a < napi; a++) {
+      buckets_usage_kind k = buckets_usage_kind_of(buckets_api_name((int)a));
+      req[k] += cur[i].api[a].total;
+      if (p) preq[k] += p->api[a].total;
+    }
+    bool reset = p && (cur[i].rx < p->rx || cur[i].tx < p->tx || req[0] < preq[0] || req[1] < preq[1] || req[2] < preq[2]);
+    if (reset) p = NULL;
+    t.in = cur[i].rx - (p ? p->rx : 0);
+    t.out = cur[i].tx - (p ? p->tx : 0);
+    t.read = req[BUCKETS_USAGE_READ] - (p ? preq[BUCKETS_USAGE_READ] : 0);
+    t.write = req[BUCKETS_USAGE_WRITE] - (p ? preq[BUCKETS_USAGE_WRITE] : 0);
+    t.del = req[BUCKETS_USAGE_DELETE] - (p ? preq[BUCKETS_USAGE_DELETE] : 0);
+    if (t.in || t.out || t.read || t.write || t.del) add[na++] = (buckets_usage_traffic_add){cur[i].bucket, t};
+  }
+  buckets_objlayer *L = atomic_load(&s->layer);
+  const char *self = s->cluster && s->cluster->self ? s->cluster->self : "";
+  buckets_obj_err err = buckets_usage_store_traffic(L, self, add, na);
+  free(add);
+  if (err) { /* kept for the next time */
+    buckets_log_warn("usage: storing this server's traffic: %s", buckets_obj_strerror(err));
+    buckets_stats_buckets_free(cur, nc);
+    return;
+  }
+  buckets_stats_buckets_free(*prev, *nprev);
+  *prev = cur;
+  *nprev = nc;
+}
+
+static void *usage_main(void *arg) {
+  buckets_s3_server *s = arg;
+  const char *env = getenv("BUCKETS_USAGE_FLUSH_INTERVAL");
+  long interval = env ? strtol(env, NULL, 10) : 300;
+  if (interval < 1) interval = 300;
+  buckets_bucket_stats *prev = NULL;
+  size_t nprev = 0;
+  while (bg_sleep(s, interval * 1000L)) usage_flush(s, &prev, &nprev);
+  buckets_stats_buckets_free(prev, nprev);
+  return NULL;
+}
+
 void buckets_s3_server_set_layer(buckets_s3_server *s, buckets_objlayer *layer) {
   uint8_t h[32];
   buckets_sha256(layer->deployment_id_str, strlen(layer->deployment_id_str), h);
@@ -1126,6 +1179,7 @@ void buckets_s3_server_set_layer(buckets_s3_server *s, buckets_objlayer *layer) 
   s->datamove = buckets_datamove_new(s);
   s->iam_thread_started = pthread_create(&s->iam_thread, NULL, iam_start_main, s) == 0;
   s->metrics_thread_started = pthread_create(&s->metrics_thread, NULL, metrics_main, s) == 0;
+  s->usage_thread_started = pthread_create(&s->usage_thread, NULL, usage_main, s) == 0;
 }
 
 void buckets_s3_server_stop(buckets_s3_server *s) {
@@ -1143,6 +1197,8 @@ void buckets_s3_server_stop(buckets_s3_server *s) {
   s->idsync_thread_started = false;
   if (s->metrics_thread_started) pthread_join(s->metrics_thread, NULL);
   s->metrics_thread_started = false;
+  if (s->usage_thread_started) pthread_join(s->usage_thread, NULL);
+  s->usage_thread_started = false;
   buckets_sr_stop(s->sr);
   buckets_datamove_stop(s->datamove);
   buckets_batch_stop(s->batch);

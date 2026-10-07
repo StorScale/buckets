@@ -73,6 +73,8 @@ typedef struct buckets_s3_server {
   _Atomic uint64_t ilm_actions[9];       /* their outcomes, by lifecycle action (bucket/lifecycle.h) */
   pthread_t metrics_thread;              /* samples the host for the resource metrics */
   bool metrics_thread_started;
+  pthread_t usage_thread; /* adds this server's traffic to the usage history */
+  bool usage_thread_started;
 } buckets_s3_server;
 
 void buckets_s3_server_init(buckets_s3_server *s, buckets_objlayer *layer, const char *root_user,

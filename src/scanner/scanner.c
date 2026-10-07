@@ -13,6 +13,7 @@
 #include "object/sysconfig.h"
 #include "scanner/scantrace.h"
 #include "scanner/usage.h"
+#include "usage/store.h"
 
 #define BLOOM_CYCLE_PATH "buckets/.bloomcycle.bin" /* dataUsageBloomNamePath: the next cycle */
 #define LIST_PAGE 1000
@@ -300,6 +301,7 @@ static void scan_cycle(buckets_scanner *s) {
     u.last_update_ns = now_ns();
     save_usage(s, &u);
     save_compliance(s, cb, nb);
+    buckets_usage_store_sample(L, &u); /* the usage reports' history (usage/history.h) */
     s->next_cycle++;
     pthread_mutex_lock(&s->mu);
     s->st.current_cycle = 0;
