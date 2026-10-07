@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-10-06
+
 ### Added
 - People who leave Keycloak or Okta lose their Buckets access too, as with Entra ID since 1.9.0 ([docs/identity.md](docs/identity.md#people-who-leave)).
   - **Keycloak:** the sync signs in as the sign-in client, whose service account needs realm-management's `view-users`.
