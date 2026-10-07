@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Usage** reports in the console ([docs/usage-reports.md](docs/usage-reports.md), [the design](docs/design/usage-reports.md)). They show who stores and moves how much, per team and per bucket, for this month, last month or any range of days, with **Export CSV**.
+  - **What is counted:** storage averaged over the period (GB-months) and at its peak, data in and out, and requests (reads, writes and deletes). Each bucket also has a chart of its daily size.
+  - **Teams:** each bucket is charged to one team, the one that names it, else the one whose prefix matches it most closely. Buckets in no team are summed as **No team**.
+  - **Costs:** rates per GB-month, per GB in and out, and per 10,000 requests of each kind, in one currency. Costs are worked out when the report is viewed.
+  - **History:** at each scanner cycle the leader records the buckets' sizes, and each server records its traffic every 5 minutes. The history is kept for 13 months under `.minio.sys/buckets/usage/`, apart from MinIO's data usage. `BUCKETS_USAGE_HISTORY_DAYS` and `BUCKETS_USAGE_FLUSH_INTERVAL` change this.
+  - **For other tools:** `GET /minio/admin/v3/buckets/usage` serves the report (`admin:DataUsageInfo`). `PUT` and `DELETE /minio/admin/v3/buckets/usage-rates` set and remove the rates (`admin:ConfigUpdate`).
+
+### Changed
+- The console's **Compliance** section is now **Reports**, holding Usage, Retention and Encryption coverage. Its old `/compliance/...` addresses lead to the new `/reports/...` ones.
+
 ### Fixed
 - `bucketsd` now frees everything it made when it stops or fails to start, so sanitizer builds report no leaks at exit. Before, a stopping server left its IAM, configuration, replication, tiering, batch, site replication and decommission state to the process's exit. It also lost the pool list it starts with when it read the one stored on the drives.
 - A drive heal on a deployment with no buckets passed `qsort` a null pointer (undefined behaviour, reported by the sanitizer build).

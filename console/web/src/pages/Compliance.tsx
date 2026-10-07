@@ -340,7 +340,7 @@ export default function CompliancePage() {
           role="tab"
           aria-selected={retention}
           className={retention ? "active" : ""}
-          onClick={() => nav("/compliance/retention")}
+          onClick={() => nav("/reports/retention")}
           data-testid="tab-retention"
         >
           Retention
@@ -349,7 +349,7 @@ export default function CompliancePage() {
           role="tab"
           aria-selected={!retention}
           className={retention ? "" : "active"}
-          onClick={() => nav("/compliance/encryption")}
+          onClick={() => nav("/reports/encryption")}
           data-testid="tab-encryption"
         >
           Encryption coverage

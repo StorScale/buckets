@@ -46,6 +46,7 @@ export default async function globalSetup() {
       MINIO_IDENTITY_OPENID_CONFIG_URL: "http://127.0.0.1:19891/.well-known/openid-configuration",
       MINIO_IDENTITY_OPENID_CLIENT_ID: "console",
       MINIO_IDENTITY_OPENID_CLAIM_NAME: "policy",
+      BUCKETS_USAGE_FLUSH_INTERVAL: "1", // the usage report's traffic, within the test's wait
     },
     stdio: ["ignore", "ignore", "inherit"],
   });

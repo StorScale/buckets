@@ -12,6 +12,7 @@ import Groups from "./pages/Groups";
 import Policies from "./pages/Policies";
 import AccessKeys from "./pages/AccessKeys";
 import CompliancePage from "./pages/Compliance";
+import UsagePage from "./pages/Usage";
 import Configuration from "./pages/Configuration";
 import Encryption from "./pages/Encryption";
 import SignInSetup from "./pages/SignIn";
@@ -76,9 +77,10 @@ export default function App() {
         <NavLink to="/identity/access-keys">Access Keys</NavLink>
         <NavLink to="/identity/access-review">Access review</NavLink>
         <NavLink to="/identity/sign-in">Sign-in</NavLink>
-        <div className="nav-group">Compliance</div>
-        <NavLink to="/compliance/retention">Retention</NavLink>
-        <NavLink to="/compliance/encryption">Encryption coverage</NavLink>
+        <div className="nav-group">Reports</div>
+        <NavLink to="/reports/usage">Usage</NavLink>
+        <NavLink to="/reports/retention">Retention</NavLink>
+        <NavLink to="/reports/encryption">Encryption coverage</NavLink>
         <div className="nav-group">Monitoring</div>
         <NavLink to="/monitoring/trace">Trace</NavLink>
         <NavLink to="/monitoring/logs">Logs</NavLink>
@@ -111,7 +113,9 @@ export default function App() {
           <Route path="/identity/access-keys" element={<AccessKeys />} />
           <Route path="/identity/access-review" element={<AccessReview />} />
           <Route path="/identity/sign-in" element={<SignInSetup />} />
-          <Route path="/compliance/:tab" element={<CompliancePage />} />
+          <Route path="/reports/usage" element={<UsagePage />} />
+          <Route path="/reports/:tab" element={<CompliancePage />} />
+          <Route path="/compliance/:tab" element={<ComplianceMoved />} />
           <Route path="/configuration" element={<Configuration />} />
           <Route path="/encryption" element={<Encryption />} />
           <Route path="/encryption/setup" element={<KmsSetup />} />
@@ -121,4 +125,10 @@ export default function App() {
       </main>
     </div>
   );
+}
+
+// The reports were under /compliance before 1.12.0: old links and bookmarks still lead there.
+function ComplianceMoved() {
+  const loc = useLocation();
+  return <Navigate to={loc.pathname.replace(/^\/compliance\//, "/reports/") + loc.search} replace />;
 }
