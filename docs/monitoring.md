@@ -298,6 +298,47 @@ bucket deleted with its data, or a policy letting anyone write or delete.
 change is the usual cause; it is also what an attacker does first. Undo the
 change if it wasn't intended.
 
+### BucketsReplicationTargetOffline
+
+**What:** a server has not reached a replication target for 5 minutes. New
+objects for it wait in the queue, so the copy there falls behind.
+
+**Check:**
+- **Reports → Replication** lists the buckets that replicate to it;
+- whether the target answers from the servers' network
+  (`curl https://<target>/minio/health/live`);
+- a firewall, DNS or certificate change on either side.
+
+When it is back, queued objects go on their own. After a long outage, a
+**Resync** in the bucket's Replication section copies everything again.
+
+### BucketsReplicationFailing
+
+**What:** objects of a bucket could not be copied to its target for 15
+minutes.
+
+**Check:** the bucket's **Replication** section names the target and its
+failures. Common causes:
+- the target's credentials were changed or revoked;
+- versioning was suspended on the target bucket;
+- the target is full, or refuses an object (object lock, a quota).
+
+**Test** in the same section runs the checks again. Failed objects are retried.
+
+### BucketsReplicationBacklog
+
+**What:** objects have waited to be replicated for over an hour, and the queue
+is still growing.
+
+**Check:**
+- the replication latency and bandwidth limit in the bucket's Replication
+  section;
+- whether the write rate jumped (a bulk load);
+- the link between the sites.
+
+A backlog that drains once a bulk load ends needs nothing. One that keeps
+growing needs more bandwidth, or a higher limit.
+
 ### BucketsMetricsDown
 
 **What:** Prometheus has not been able to scrape a server for 5 minutes. While

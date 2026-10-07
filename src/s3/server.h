@@ -5,6 +5,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 
+#include "bucket/lifecycle.h"
 #include "core/query.h"
 #include "iam/iam.h"
 #include "net/http.h"
@@ -78,6 +79,8 @@ typedef struct buckets_s3_server {
   struct buckets_audit_store *audit_store; /* the audit log's local copy (audit/store.h), or NULL when off */
   pthread_t guard_thread; /* ransomware alerts' cluster view, on the leader (s3/ransomguard.h) */
   bool guard_thread_started;
+  pthread_t uploads_thread; /* incomplete multipart uploads removed (MinIO's cleanupStaleUploads) */
+  bool uploads_thread_started;
   _Atomic unsigned long long rw_incidents[3]; /* incidents opened here, by kind (buckets_rw_incident_kind) */
 } buckets_s3_server;
 
@@ -111,6 +114,10 @@ void buckets_s3_peer_admin(void *server, const buckets_http_request *req, const 
 /* Which versions of one key (newest first) lifecycle would delete now. */
 void buckets_s3_lifecycle_due(buckets_s3_server *s, const char *bucket, const buckets_object_info *v, size_t n,
                               bool *due);
+/* The lifecycle's view of one key's versions (newest first), as the scanner evaluates them; enabled and suspended:
+ * the bucket's versioning for the key. */
+void buckets_s3_lc_objs(const buckets_object_info *v, size_t n, bool enabled, bool suspended, int64_t now_ns,
+                        buckets_lc_obj *objs);
 /* This node's contribution to the cluster metrics (Prometheus text). */
 char *buckets_s3_peer_metrics(void *server);
 /* A peer's listener on this node's events (see buckets_peer_handlers.listen). */

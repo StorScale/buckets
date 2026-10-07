@@ -3305,6 +3305,11 @@ buckets_obj_err buckets_ep_mpu_new(buckets_epool *L, const char *bucket, const c
     if (internal) buckets_xl_kv_set(&o.meta_sys, &o.nmeta_sys, meta[i].key, meta[i].value, meta[i].value_len);
     else buckets_xl_kv_set(&o.meta_user, &o.nmeta_user, meta[i].key, meta[i].value, meta[i].value_len);
   }
+  { /* which object it is for, which its directory (a hash) doesn't say: for lifecycle's abort rules */
+    char *k = join(bucket, object);
+    buckets_xl_kv_set(&o.meta_sys, &o.nmeta_sys, BUCKETS_MPU_KEY_META, k, strlen(k));
+    free(k);
+  }
   char uuid[BUCKETS_UUID_STR_LEN + 1], upload_uuid[80], plain[160];
   buckets_uuid_v4(uuid);
   snprintf(upload_uuid, sizeof(upload_uuid), "%sx%lld", uuid, (long long)o.mod_time);
@@ -3715,8 +3720,10 @@ static buckets_obj_err mpu_complete(buckets_epool *L, const char *bucket, const 
       if (strcmp(k, BUCKETS_MPU_CKSUM_META) == 0 || strcmp(k, BUCKETS_MPU_CKSUM_TYPE_META) == 0) continue;
       buckets_xl_kv_set(&o.meta_user, &o.nmeta_user, k, u.up.meta_user[i].value, u.up.meta_user[i].value_len);
     }
-    for (size_t i = 0; i < u.up.nmeta_sys; i++) /* encryption keys and the like carry over */
-      buckets_xl_kv_set(&o.meta_sys, &o.nmeta_sys, u.up.meta_sys[i].key, u.up.meta_sys[i].value, u.up.meta_sys[i].value_len);
+    for (size_t i = 0; i < u.up.nmeta_sys; i++) /* encryption keys and the like carry over; the upload's key doesn't */
+      if (strcasecmp(u.up.meta_sys[i].key, BUCKETS_MPU_KEY_META) != 0)
+        buckets_xl_kv_set(&o.meta_sys, &o.nmeta_sys, u.up.meta_sys[i].key, u.up.meta_sys[i].value,
+                          u.up.meta_sys[i].value_len);
     if (ctype) {
       buckets_checksum fin = {.type = ctype | BUCKETS_CKSUM_MULTIPART | BUCKETS_CKSUM_INCLUDES_MULTIPART,
                               .raw_len = clen, .want_parts = (int)nreq};
@@ -3901,6 +3908,76 @@ buckets_obj_err buckets_ep_mpu_list_uploads(buckets_epool *L, const char *bucket
   }
   free(sd);
   return BUCKETS_OBJ_OK;
+}
+
+static int str_cmp(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+
+size_t buckets_ep_mpu_sweep(buckets_epool *P, size_t si, int64_t now_ns, int64_t expiry_ns, int64_t check_ns,
+                            bool (*abort)(void *ud, const char *bucket, const char *object, int64_t initiated_ns),
+                            void *ud) {
+  buckets_eset *s = &P->sets[si];
+  /* multipart/<sha>/<uuid>x<started>, as any drive of the set has them */
+  char **dirs = NULL;
+  size_t nd = 0, cap = 0;
+  for (size_t i = 0; i < s->n; i++) {
+    if (!s->drives[i]) continue;
+    buckets_dir_list shas;
+    if (buckets_drive_list_dir(s->drives[i], BUCKETS_META_BUCKET, "multipart", &shas) != BUCKETS_DRIVE_OK) continue;
+    for (size_t k = 0; k < shas.n; k++) {
+      size_t sl = strlen(shas.names[k]);
+      if (sl != 65 || shas.names[k][64] != '/') continue;
+      char sd[80];
+      snprintf(sd, sizeof(sd), "multipart/%.64s", shas.names[k]);
+      buckets_dir_list ups;
+      if (buckets_drive_list_dir(s->drives[i], BUCKETS_META_BUCKET, sd, &ups) != BUCKETS_DRIVE_OK) continue;
+      for (size_t u = 0; u < ups.n; u++) {
+        char *nm = ups.names[u];
+        size_t nl = strlen(nm);
+        if (!nl || nm[nl - 1] != '/') continue;
+        nm[nl - 1] = '\0';
+        if (!safe_upload_uuid(nm)) continue;
+        if (nd == cap) dirs = buckets_xrealloc(dirs, (cap = cap ? cap * 2 : 64) * sizeof(*dirs));
+        dirs[nd++] = join(sd, nm);
+      }
+      buckets_dir_list_free(&ups);
+    }
+    buckets_dir_list_free(&shas);
+  }
+  if (nd) qsort(dirs, nd, sizeof(*dirs), str_cmp);
+  size_t removed = 0;
+  for (size_t i = 0; i < nd; i++) {
+    if (i && !strcmp(dirs[i], dirs[i - 1])) continue;
+    const char *x = strrchr(dirs[i], 'x');
+    int64_t started = x ? strtoll(x + 1, NULL, 10) : 0;
+    if (started <= 0) continue;
+    int64_t age = now_ns - started;
+    bool remove = age >= expiry_ns;
+    if (!remove && abort && check_ns && age >= check_ns) { /* the upload says which object it is for */
+      dmeta m[MAX_SET];
+      long vidx[MAX_SET];
+      buckets_xl_object up;
+      load_metas(s, BUCKETS_META_BUCKET, dirs[i], m);
+      if (quorum_version(m, s->n, NULL, &up, vidx) == BUCKETS_OBJ_OK) {
+        const buckets_xl_kv *k = buckets_xl_kv_get(up.meta_sys, up.nmeta_sys, BUCKETS_MPU_KEY_META);
+        char *key = k ? buckets_xstrndup((const char *)k->value, k->value_len) : NULL;
+        char *slash = key ? strchr(key, '/') : NULL;
+        if (slash) {
+          *slash = '\0';
+          remove = abort(ud, key, slash + 1, started);
+        }
+        free(key);
+        buckets_xl_object_free(&up);
+      }
+      free_metas(m, s->n);
+    }
+    if (!remove) continue;
+    for (size_t d = 0; d < s->n; d++)
+      if (s->drives[d]) buckets_drive_delete(s->drives[d], BUCKETS_META_BUCKET, dirs[i], true, true);
+    removed++;
+  }
+  for (size_t i = 0; i < nd; i++) free(dirs[i]);
+  free(dirs);
+  return removed;
 }
 
 void buckets_upload_info_free(buckets_upload_info *u, size_t n) {

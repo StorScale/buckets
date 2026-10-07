@@ -10,7 +10,7 @@ metadata:
   {{- end }}
   labels: {{- include "buckets-operator.labels" . | nindent 4 }}
 rules:
-  - apiGroups: [buckets.io]
+  - apiGroups: [buckets.io] # get, list: also granted to each cluster's console, to show what Buckets declare
     resources: [buckets, bucketssitereplications]
     verbs: [get, list, watch]
   - apiGroups: [buckets.io] # patch: granted to each cluster's console, for its KMS settings

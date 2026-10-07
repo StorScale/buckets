@@ -376,3 +376,47 @@ void buckets_console_kms_handle(buckets_console_kms *m, const buckets_http_reque
   else handle_apply(m, body, resp);
   yyjson_doc_free(d);
 }
+
+/* ---- Buckets declared as resources ------------------------------------------------------- */
+
+void buckets_console_declared_buckets(buckets_console_kms *m, buckets_http_response *resp) {
+  yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
+  yyjson_mut_val *o = yyjson_mut_obj(d);
+  yyjson_mut_doc_set_root(d, o);
+  yyjson_mut_obj_add_bool(d, o, "managed", m != NULL);
+  yyjson_mut_val *arr = yyjson_mut_obj_add_arr(d, o, "buckets");
+  if (!m) {
+    reply(resp, 200, d);
+    return;
+  }
+  yyjson_mut_obj_add_strcpy(d, o, "namespace", m->ns);
+  buckets_buf p = BUCKETS_BUF_INIT;
+  buckets_buf_appendf(&p, GROUP_PATH "/namespaces/%s/buckets", m->ns);
+  yyjson_doc *list = NULL;
+  int st = kube_get(m->k, p.data, &list);
+  buckets_buf_free(&p);
+  if (st != 200) {
+    yyjson_doc_free(list);
+    yyjson_mut_doc_free(d);
+    fail(resp, 502, "KubernetesError", "The Bucket resources could not be read from the Kubernetes API.");
+    return;
+  }
+  size_t i, n;
+  yyjson_val *item;
+  yyjson_arr_foreach(yyjson_obj_get(yyjson_doc_get_root(list), "items"), i, n, item) {
+    yyjson_val *spec = yyjson_obj_get(item, "spec"), *meta = yyjson_obj_get(item, "metadata");
+    const char *cluster = yyjson_get_str(yyjson_obj_get(spec, "cluster"));
+    if (!cluster || strcmp(cluster, m->cluster) != 0) continue;
+    const char *res = yyjson_get_str(yyjson_obj_get(meta, "name"));
+    const char *bucket = yyjson_get_str(yyjson_obj_get(spec, "name"));
+    yyjson_mut_val *b = yyjson_mut_arr_add_obj(d, arr);
+    yyjson_mut_obj_add_strcpy(d, b, "bucket", bucket ? bucket : res ? res : "");
+    yyjson_mut_obj_add_strcpy(d, b, "resource", res ? res : "");
+    /* declared fields: present, even empty ([] or {}), means the operator keeps them */
+    yyjson_mut_obj_add_bool(d, b, "lifecycle", yyjson_obj_get(spec, "lifecycle") != NULL);
+    yyjson_mut_obj_add_bool(d, b, "replication", yyjson_obj_get(spec, "replication") != NULL);
+    yyjson_mut_obj_add_val(d, b, "spec", yyjson_val_mut_copy(d, spec));
+  }
+  yyjson_doc_free(list);
+  reply(resp, 200, d);
+}

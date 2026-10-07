@@ -1,6 +1,6 @@
 # Design: lifecycle and replication editor
 
-Status: proposed. Roadmap: Phase 4, "A lifecycle and replication editor,
+Status: agreed, being built. Roadmap: Phase 4, "A lifecycle and replication editor,
 instead of JSON and `mc` commands." It is the last item of Phase 4.
 
 ## The problem
@@ -80,9 +80,11 @@ saving the form never drops what it didn't show.
    for it. Another Buckets or MinIO cluster is the usual case. The secret is
    sent to the server once, kept as MinIO keeps it (in the bucket's targets,
    encrypted), and never shown again.
-2. **Test** checks that the target answers and that the credentials can
-   replicate (`ValidateBucketReplicationCreds`), and that versioning is on at
-   both ends. If it isn't on here, the form offers to turn it on. It can't
+2. **Test** makes the checks `SetRemoteTarget` makes of the target (the
+   bucket is there, the credentials work, versioning is on, a live server)
+   without saving anything (`buckets/replication-test`).
+   `ValidateBucketReplicationCreds` can't be used: it needs a saved
+   configuration. If it isn't on here, the form offers to turn it on. It can't
    change the target's versioning, so it says to turn it on there.
 3. **What:** the whole bucket, or a prefix and tags; whether deletes and
    delete markers follow; whether objects already in the bucket are copied
@@ -96,12 +98,13 @@ A bucket can replicate to more than one target. Each target is a card of its
 own, in priority order.
 
 **Its state, on the same page, for each target:**
-- online or offline;
-- objects and bytes waiting, failed in the last hour and day, and the
-  replication lag;
-- the last error.
+- online or offline, with the link's latency;
+- objects and bytes waiting, objects replicated, and failures in the last
+  hour and since the servers started.
 
-These come from the replication metrics (`?replication-metrics=2`).
+The counts are kept by each server, so the endpoint asks every server and adds
+them up. The servers keep no lag or last error per target, so neither is
+shown; the failure counts and the link's state say what is wrong.
 **Resync** copies everything again (`?replication-reset`), with its progress
 shown, for a target that was rebuilt or out of reach for long.
 
@@ -141,17 +144,33 @@ Outside Kubernetes, nothing is declared and everything can be edited.
 ### A fix on the way: incomplete uploads
 
 The `Bucket` resource's `abortIncompleteUploadDays` writes S3's
-`AbortIncompleteMultipartUpload`, but the server never reads it. Neither does
-MinIO, which only clears every upload after a day (`stale_uploads_expiry`).
-The setting does nothing today. The scanner will apply it, removing
-incomplete uploads under the rule's prefix after N days. MinIO ignores the
-element, so a rollback loses only the setting, not data.
+`AbortIncompleteMultipartUpload`, but the server never reads it. Worse, the
+server never removes abandoned uploads at all. MinIO removes them after a day
+(`api stale_uploads_expiry`, every `stale_uploads_cleanup_interval`), and
+Buckets has the settings but nothing acts on them, so abandoned parts stay on
+the drives for good.
+
+- **The sweep MinIO has:** every 6 hours each server removes the uploads,
+  on the erasure sets it leads, started more than `stale_uploads_expiry`
+  (24 hours) ago.
+- **The lifecycle rule:** parsed, kept and returned. It matters when it is
+  shorter than `stale_uploads_expiry`: such uploads go after the rule's days.
+  An upload's directory is named by a hash of its bucket and key, so new
+  uploads record their key in their metadata (Buckets' own key, which MinIO
+  ignores and which the finished object doesn't keep). Uploads from before
+  this release only expire.
+- MinIO ignores the element, so a rollback loses only the rule, not data.
 
 ## API
 
 Buckets extensions to the admin API:
 
 ```
+POST /minio/admin/v3/buckets/replication-test?bucket=
+     body: a madmin-encrypted target, as SetRemoteTarget takes it
+     admin:SetBucketTarget
+  -> {"ok": true, "sourceVersioned"}, or the error SetRemoteTarget would give
+
 POST /minio/admin/v3/buckets/lifecycle-preview?bucket=
      body: lifecycle XML (the draft)
      s3:GetLifecycleConfiguration and s3:ListBucketVersions on the bucket
@@ -160,8 +179,10 @@ POST /minio/admin/v3/buckets/lifecycle-preview?bucket=
 
 GET  /minio/admin/v3/buckets/replication?bucket=     (or all buckets, for the report)
      s3:GetReplicationConfiguration
-  -> {"buckets": [{"bucket", "siteReplication", "targets": [{"arn", "endpoint", "bucket",
-       "online", "pending", "failed1h", "failed24h", "lagSeconds", "lastError", "resync"}]}]}
+  -> {"siteReplication", "servers", "serversAnswering", "buckets": [{"bucket", "versioned",
+       "configured", "pending": {"objects", "bytes"}, "rules": [...], "targets": [{"arn",
+       "endpoint", "bucket", "online", "latencyMs", "replicated", "failedLastHour",
+       "failedSinceStart", ...}]}]}
 ```
 
 Everything else uses the S3 and admin calls that `mc` uses:
@@ -178,11 +199,17 @@ every setting made here.
 - **`src/bucket/lifecycle.c`:** the preview reuses the same evaluation the
   scanner uses (`lifecycle eval`), with a clock moved forward for "within 7
   and 30 days". It gains `AbortIncompleteMultipartUpload`.
+- **`src/object`** (`buckets_obj_mpu_sweep`) and **`src/s3/server.c`** (a
+  thread): the incomplete-upload sweep, on the sets each server leads.
 - **`src/admin/lifecycle_preview.c`** and **`src/admin/replication.c`:** the
   two endpoints. The preview walks versions with the object layer's listing,
   bounded by count and time.
 - **Operator:** the console Role gets read access to `Bucket`.
-  The three replication alerts go in `monitoring/rules.yaml`.
+  The three replication alerts go in `monitoring/rules.yaml`. The backlog
+  alert needs a per-bucket queue metric, `buckets_bucket_replication_pending_count`
+  (and `_bytes`).
+- **consoled:** `GET /api/v1/declared-buckets` lists the cluster's `Bucket`
+  resources.
 - **Console:**
   - `pages/Lifecycle.tsx` and `pages/Replication.tsx`, used by the bucket's
     settings page;
@@ -203,7 +230,7 @@ every setting made here.
     `mc ilm rule ls`;
   - the ransomware and object lock warnings;
   - XML with an unknown element kept through a form edit;
-  - replication to a second local server: test, save, an object replicated,
+  - replication to another bucket on the test server: test, save, an object replicated,
     the state shown, a resync, and a failed save leaving no target behind;
   - a declared bucket shown read-only (with the mock Kubernetes API), and
     Copy as YAML.
@@ -224,3 +251,13 @@ every setting made here.
 4. **Incomplete uploads: apply `AbortIncompleteMultipartUpload`, or stop
    offering it?** **Recommended: apply it.** It's what S3 users expect, and
    the `Bucket` resource already promises it. MinIO ignores it on rollback.
+
+## Decisions
+
+1. **A preview endpoint,** bounded at 1 million versions or 30 seconds.
+2. **Declared buckets are read-only** in the console, with Copy as YAML; the
+   console gets read access to `Bucket`.
+3. **Tiers are picked from those that exist;** managing them is left for
+   later.
+4. **`AbortIncompleteMultipartUpload` is applied,** by the incomplete-upload sweep MinIO has (which Buckets
+   lacked until now).

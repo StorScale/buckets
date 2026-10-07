@@ -27,3 +27,5 @@ B	bucket	buckets_bucket_unencrypted_versions	gaugeMetric	"Versions of the bucket
 B	bucket	buckets_bucket_encrypted_bytes	gaugeMetric	"Bytes of the bucket's versions stored encrypted, by kind (sse-s3, sse-kms, sse-c), at the scanner's last complete cycle"
 B	bucket	buckets_bucket_retained_bytes	gaugeMetric	"Bytes of the bucket's versions under object-lock retention, by mode, at the scanner's last complete cycle"
 B	bucket	buckets_bucket_legal_hold_versions	gaugeMetric	"Versions of the bucket under legal hold, at the scanner's last complete cycle"
+B	bucket	buckets_bucket_replication_pending_count	gaugeMetric	"Versions of the bucket queued on this server for replication, not yet sent"
+B	bucket	buckets_bucket_replication_pending_bytes	gaugeMetric	"Bytes of the bucket queued on this server for replication, not yet sent"

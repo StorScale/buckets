@@ -31,6 +31,17 @@ Each promise holds both across 1.x releases and, where it says so, with MinIO. M
 | **Kubernetes resources** | The `buckets.io` CRDs (`BucketsCluster`, `BucketsUser`, `BucketsPolicy`, `Bucket`, `BucketsSiteReplication`) are `v1alpha1`. In 1.x no field is removed or changes meaning, and new fields are optional with defaults that keep today's behaviour. When a later API version arrives it is served beside `v1alpha1`, with conversion, for the rest of 1.x. | `operator/tests/test_manifests.c`, `tests/e2e-k8s/envtest.sh` |
 | **Rolling upgrades** | The operator upgrades a cluster one server at a time. Servers of consecutive 1.x releases work together while that is in progress, so S3 stays available. | Every upgrade of the development cluster (1.0.0 → 1.1.0 → 1.1.1, each rolled with S3 serving); not yet a CI test |
 
+## Additions MinIO ignores
+
+Some things Buckets keeps on the drives mean nothing to MinIO. After a rollback to MinIO, only the addition is
+lost, never data:
+
+- **Lifecycle's `AbortIncompleteMultipartUpload`** (S3's) is kept in the bucket's lifecycle and applied. MinIO
+  ignores the element and removes uploads only after `api stale_uploads_expiry`.
+- **An upload's object**, recorded in the upload's metadata (`x-minio-internal-buckets-upload-key`) so the rule
+  above can find it. The finished object doesn't keep it.
+- **The audit log's local copy**, in `.buckets-audit` at each drive's root, which no bucket name can be.
+
 ## What is not promised
 
 - **Mixed MinIO and Buckets clusters.** The internode protocol is Buckets' own. A cluster is all MinIO or all Buckets; moving between them is done whole, by adoption and rollback, on the same drives.

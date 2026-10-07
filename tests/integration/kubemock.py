@@ -11,7 +11,8 @@ in status.kms.test: running at first, then passed -- or failed, when the
 settings' address or URL contains "unreachable" (Vault's own words), or the
 default key is "missing-key" and may not be created. Applying settings
 (spec.kms.kes) makes status.kms Ready, and saved identity settings make
-status.identity Ready. GET /_state shows what was stored, the Secrets decoded,
+status.identity Ready. Two Bucket resources are listed: declared-e2e, for this
+cluster, declaring lifecycle rules, and one for another cluster. GET /_state shows what was stored, the Secrets decoded,
 for assertions."""
 import base64, copy, http.server, json, os, ssl, subprocess, sys, threading, time
 
@@ -29,6 +30,12 @@ cluster = {"apiVersion": "buckets.io/v1alpha1", "kind": "BucketsCluster",
 secrets = {f"{name}-kms": {}, f"{name}-kms-candidate": {}, f"{name}-identity": {},
            f"{name}-identity-candidate": {}}  # name -> data (base64 values)
 trials = {}  # test id -> time started
+declared = [  # Bucket resources: the console shows what they declare as read-only
+    {"apiVersion": "buckets.io/v1alpha1", "kind": "Bucket", "metadata": {"name": "declared-e2e", "namespace": ns},
+     "spec": {"cluster": name, "versioning": True, "lifecycle": [{"id": "tmp", "prefix": "tmp/", "expireDays": 7}]}},
+    {"apiVersion": "buckets.io/v1alpha1", "kind": "Bucket", "metadata": {"name": "elsewhere", "namespace": ns},
+     "spec": {"cluster": "other", "name": "cfg-other", "lifecycle": []}},
+]
 
 
 def bump(obj):
@@ -127,6 +134,8 @@ class H(http.server.BaseHTTPRequestHandler):
         p = self.path.split("?")[0]
         if p == f"/apis/buckets.io/v1alpha1/namespaces/{ns}/bucketsclusters/{name}":
             return "cluster", None
+        if p == f"/apis/buckets.io/v1alpha1/namespaces/{ns}/buckets":
+            return "buckets", None
         pre = f"/api/v1/namespaces/{ns}/secrets/"
         if p.startswith(pre) and p[len(pre):] in secrets:
             return "secret", p[len(pre):]
@@ -150,6 +159,8 @@ class H(http.server.BaseHTTPRequestHandler):
         with lock:
             if kind == "cluster":
                 return self.reply(200, cluster)
+            if kind == "buckets":
+                return self.reply(200, {"apiVersion": "buckets.io/v1alpha1", "kind": "BucketList", "items": declared})
             if kind == "secret":
                 return self.reply(200, secret_obj(sname))
         self.reply(404, {"kind": "Status", "message": "not found"})

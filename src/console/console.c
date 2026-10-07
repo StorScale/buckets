@@ -1506,6 +1506,8 @@ void buckets_console_handle(const buckets_http_request *req, buckets_http_respon
     char up[4096];
     snprintf(up, sizeof(up), "/minio/admin/v3/%.*s", (int)(path.n - 14), path.p + 14);
     proxy(c, req, resp, &s, up);
+  } else if (buckets_str_eq_c(path, "/api/v1/declared-buckets")) {
+    buckets_console_declared_buckets(c->kms, resp);
   } else if (buckets_str_eq_c(path, "/api/v1/kms-config") || buckets_str_has_prefix(path, "/api/v1/kms-config/")) {
     if (!may_configure(c, &s)) {
       json_error(resp, 403, "AccessDenied", "Setting up the KMS needs the admin:ConfigUpdate permission.");

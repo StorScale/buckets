@@ -55,6 +55,10 @@ size_t buckets_ep_heal_bucket(buckets_epool *P, const char *bucket);
  * set), and with meta_size its xl.meta's size there (0 if unreadable). */
 const char *buckets_ep_scan_drive(buckets_epool *P, const char *object, const char *bucket, int64_t *meta_size);
 
+/* buckets_obj_mpu_sweep, for one set of this pool. */
+size_t buckets_ep_mpu_sweep(buckets_epool *P, size_t set, int64_t now_ns, int64_t expiry_ns, int64_t check_ns,
+                            bool (*abort)(void *ud, const char *bucket, const char *object, int64_t initiated_ns),
+                            void *ud);
 buckets_obj_err buckets_ep_mpu_new(buckets_epool *P, const char *bucket, const char *object, const buckets_xl_kv *meta,
                                    size_t nmeta, char upload_id[BUCKETS_UPLOAD_ID_MAX]);
 buckets_obj_err buckets_ep_mpu_put_part(buckets_epool *P, const char *bucket, const char *object, const char *upload_id,

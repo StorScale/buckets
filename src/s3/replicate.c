@@ -332,29 +332,27 @@ static void hc_key(const char *endpoint, bool secure, char *out, size_t cap) {
   snprintf(out, cap, "%s://%s", secure ? "https" : "http", endpoint);
 }
 
+/* The endpoint's health entry, made (online until the heartbeat says otherwise) when there is none; r->mu held. */
+static ep_health *hc_ensure(buckets_repl *r, const char *key, const char *endpoint, bool secure) {
+  for (size_t i = 0; i < r->nhc; i++)
+    if (strcmp(r->hc[i].key, key) == 0) return &r->hc[i];
+  r->hc = buckets_xrealloc(r->hc, (r->nhc + 1) * sizeof(*r->hc));
+  ep_health *h = &r->hc[r->nhc++];
+  memset(h, 0, sizeof(*h));
+  snprintf(h->key, sizeof(h->key), "%s", key);
+  snprintf(h->endpoint, sizeof(h->endpoint), "%s", endpoint);
+  h->secure = secure;
+  h->online = true;
+  return h;
+}
+
 /* isOffline: an endpoint not yet checked counts as online (and gets checked). */
 bool buckets_repl_offline(buckets_repl *r, const char *endpoint, bool secure) {
   if (!r) return false;
   char key[300];
   hc_key(endpoint, secure, key, sizeof(key));
-  bool offline = false, found = false;
   pthread_mutex_lock(&r->mu);
-  for (size_t i = 0; i < r->nhc; i++) {
-    if (strcmp(r->hc[i].key, key) == 0) {
-      offline = !r->hc[i].online;
-      found = true;
-      break;
-    }
-  }
-  if (!found) {
-    r->hc = buckets_xrealloc(r->hc, (r->nhc + 1) * sizeof(*r->hc));
-    ep_health *h = &r->hc[r->nhc++];
-    memset(h, 0, sizeof(*h));
-    snprintf(h->key, sizeof(h->key), "%s", key);
-    snprintf(h->endpoint, sizeof(h->endpoint), "%s", endpoint);
-    h->secure = secure;
-    h->online = true;
-  }
+  bool offline = !hc_ensure(r, key, endpoint, secure)->online;
   pthread_mutex_unlock(&r->mu);
   return offline;
 }
@@ -378,6 +376,7 @@ void buckets_repl_health_fill(buckets_repl *r, buckets_bucket_target *t) {
   char key[300];
   hc_key(t->endpoint, t->secure, key, sizeof(key));
   pthread_mutex_lock(&r->mu);
+  hc_ensure(r, key, t->endpoint, t->secure); /* a target asked about is watched from now on (initHC) */
   for (size_t i = 0; i < r->nhc; i++) {
     ep_health *h = &r->hc[i];
     if (strcmp(h->key, key) != 0) continue;

@@ -782,6 +782,22 @@ static void bucket_metrics(mctx *m) {
     buckets_data_usage_free(&u);
   }
   buckets_buf_free(&stored);
+  /* waiting to be replicated, on this server: every bucket with replication statistics, without waiting for the
+   * scanner's usage (the editor's backlog, and BucketsReplicationBacklog) */
+  if (m->s->layer) {
+    buckets_bucket_info *bl = NULL;
+    size_t nbl = 0;
+    if (buckets_obj_list_buckets(m->s->layer, &bl, &nbl) == BUCKETS_OBJ_OK) {
+      for (size_t i = 0; i < nbl; i++) {
+        buckets_repl_bucket_stats rst;
+        if (!buckets_repl_stats_get(bl[i].name, &rst)) continue;
+        ADD1(m, "buckets_bucket_replication_pending_count", (double)rst.q_count, "bucket", bl[i].name);
+        ADD1(m, "buckets_bucket_replication_pending_bytes", (double)rst.q_bytes, "bucket", bl[i].name);
+        buckets_repl_bucket_stats_free(&rst);
+      }
+      buckets_bucket_info_free(bl, nbl);
+    }
+  }
   buckets_bucket_stats *bs;
   size_t nb = buckets_stats_buckets(&bs);
   for (size_t b = 0; b < nb; b++) {

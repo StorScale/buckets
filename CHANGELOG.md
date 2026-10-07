@@ -6,6 +6,19 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **A lifecycle and replication editor** in each bucket's settings ([docs/lifecycle-replication.md](docs/lifecycle-replication.md), [the design](docs/design/lifecycle-replication-editor.md)), instead of XML and `mc` commands.
+  - **Lifecycle:** rules shown in plain words and edited in a form: which objects, deletion, moving to a tier, old versions, delete markers and incomplete uploads. Deleting every version must be confirmed. **Preview** shows how many versions and how much data the draft would delete or move on the next run, within 7 days and within 30 days, without acting (`POST buckets/lifecycle-preview`). Warnings before saving say when a rule will open a ransomware alert, when object lock keeps versions anyway, and when a rule does nothing. XML the form can't show stays as XML.
+  - **Replication:** one form for the target, a test of it (`POST buckets/replication-test`, which saves nothing), what to replicate, and saving. A refused rule takes the new target away again. Each target shows whether it's online, its latency, what was replicated and what failed, adding up every server's counts (`GET buckets/replication`). There's a Resync button, and **Reports → Replication** lists every bucket that replicates, the worst first.
+  - **Buckets declared in Kubernetes:** what a `Bucket` resource declares is shown read-only, saying which resource to change, and **Copy as YAML** gives a lifecycle as the resource's block. The operator gives each console read-only access to `Bucket` resources.
+- **Replication alerts:** `BucketsReplicationTargetOffline`, `BucketsReplicationFailing` and `BucketsReplicationBacklog`, with runbooks. There are two new metrics, `buckets_bucket_replication_pending_count` and `_bytes`.
+- Lifecycle rules can remove incomplete multipart uploads (S3's `AbortIncompleteMultipartUpload`, which MinIO ignores). The `Bucket` resource's `abortIncompleteUploadDays` now takes effect.
+
+### Fixed
+- Incomplete multipart uploads were never removed, so abandoned uploads kept their parts on the drives for good. As in MinIO, each server now removes those on its erasure sets after `api stale_uploads_expiry` (24 hours), checking every `stale_uploads_cleanup_interval` (6 hours).
+- A replication target wasn't health-checked until something was first replicated to it, so it read as offline until then. Targets are now watched from the first time anyone asks about them.
+- The console's browser test for teams failed now and then: it checked that a team's row didn't contain "ro", which a randomly named team sometimes did. It now checks the level labels.
+
 ## [1.15.1] - 2026-10-07
 
 ### Fixed

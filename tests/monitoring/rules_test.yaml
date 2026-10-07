@@ -323,3 +323,72 @@ tests:
       - eval_time: 4h30m
         alertname: BucketsIdentitySyncHeld
         exp_alerts: []
+
+  # a replication target unreachable: quiet for 5 minutes, then firing; one that answers stays quiet
+  - interval: 1m
+    input_series:
+      - series: 'minio_node_replication_link_online{namespace="data",buckets_cluster="store",scope="node",server="s1",endpoint="dr.example.com:9000"}'
+        values: "1 1 0x10"
+      - series: 'minio_node_replication_link_online{namespace="data",buckets_cluster="store",scope="node",server="s1",endpoint="ok.example.com:9000"}'
+        values: "1x12"
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: BucketsReplicationTargetOffline
+        exp_alerts: []
+      - eval_time: 9m
+        alertname: BucketsReplicationTargetOffline
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: data
+              buckets_cluster: store
+              endpoint: dr.example.com:9000
+            exp_annotations:
+              summary: "data/store: replication target dr.example.com:9000 is unreachable"
+              description: "New objects wait in the queue until it is back, and the copy there falls behind. Reports → Replication shows which buckets replicate to it."
+              runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketsreplicationtargetoffline
+
+  # failures that keep coming fire; ones that stopped do not
+  - interval: 1m
+    input_series:
+      - series: 'minio_bucket_replication_total_failed_count{namespace="data",buckets_cluster="store",scope="bucket",server="s1",bucket="reports",targetArn="arn:minio:replication::1:dr"}'
+        values: "0+3x30"
+      - series: 'minio_bucket_replication_total_failed_count{namespace="data",buckets_cluster="store",scope="bucket",server="s1",bucket="logs",targetArn="arn:minio:replication::2:dr"}'
+        values: "0 5 10 10x28"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: BucketsReplicationFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: data
+              buckets_cluster: store
+              bucket: reports
+            exp_annotations:
+              summary: "data/store: replication of reports keeps failing"
+              description: "Objects of the bucket could not be copied to its target for 15 minutes: the target refuses them (credentials, versioning, a full disk) or drops the connection. Failed objects are retried; the bucket's Replication section says which target."
+              runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketsreplicationfailing
+
+  # a queue that keeps growing for an hour fires; one that drains does not
+  - interval: 5m
+    input_series:
+      - series: 'buckets_bucket_replication_pending_count{namespace="data",buckets_cluster="store",scope="bucket",server="s1",bucket="reports"}'
+        values: "10+10x40"
+      - series: 'buckets_bucket_replication_pending_count{namespace="data",buckets_cluster="store",scope="bucket",server="s1",bucket="logs"}'
+        values: "400-10x40"
+    alert_rule_test:
+      - eval_time: 50m
+        alertname: BucketsReplicationBacklog
+        exp_alerts: []
+      - eval_time: 3h
+        alertname: BucketsReplicationBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: data
+              buckets_cluster: store
+              bucket: reports
+            exp_annotations:
+              summary: "data/store: replication of reports is falling behind"
+              description: "Objects have waited to be replicated for more than an hour and the queue is still growing: the link is too slow for the write rate, a bandwidth limit is too low, or the target is slow."
+              runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketsreplicationbacklog

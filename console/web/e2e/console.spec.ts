@@ -1,6 +1,7 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { expect, test } from "@playwright/test";
-import { login, ROOT_USER, unique } from "./helpers";
+import { login, ROOT_PASSWORD, ROOT_USER, unique } from "./helpers";
 
 test.describe("session", () => {
   test("rejects bad keys, signs in, and signs out", async ({ page }) => {
@@ -141,12 +142,14 @@ test.describe("buckets and objects", () => {
     await page.getByTestId("save-sse").click();
     await expect(page.getByTestId("notice")).toHaveText("Encryption saved.");
 
+    await page.getByTestId("lifecycle-xml-mode").click();
     await page
       .getByTestId("lifecycle")
       .fill("<LifecycleConfiguration><Rule><ID>tmp</ID><Status>Enabled</Status><Filter><Prefix>tmp/</Prefix></Filter><Expiration><Days>7</Days></Expiration></Rule></LifecycleConfiguration>");
     await page.getByTestId("save-lifecycle").click();
     await expect(page.getByTestId("notice")).toHaveText("Lifecycle saved.");
 
+    await page.getByTestId("lifecycle-xml-mode").click();
     await page.getByTestId("lifecycle").fill("<LifecycleConfiguration><Rule></LifecycleConfiguration>");
     await page.getByTestId("save-lifecycle").click();
     await expect(page.getByTestId("error")).toBeVisible();
@@ -155,7 +158,177 @@ test.describe("buckets and objects", () => {
     await page.reload();
     await expect(page.getByTestId("quota")).toHaveValue("2");
     await expect(page.getByTestId("sse-alg")).toHaveValue("AES256");
-    await expect(page.getByTestId("lifecycle")).toHaveValue(/<ID>tmp<\/ID>/);
+    await expect(page.getByTestId("lc-rule-tmp")).toContainText("Objects under tmp/: deleted 7 days after they're written.");
+  });
+});
+
+test.describe("lifecycle and replication editor", () => {
+  const hdr = { "X-Console-Request": "1" };
+
+  test("lifecycle: rules from the form, previewed, warned about and saved", async ({ page }) => {
+    const bucket = unique("lc");
+    await login(page);
+    await page.request.put(`/api/v1/s3/${bucket}`, { headers: hdr });
+    await page.request.put(`/api/v1/s3/${bucket}?versioning`, {
+      headers: hdr,
+      data: "<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>",
+    });
+    for (const k of ["logs/a.log", "logs/b.log", "keep/k.txt", "logs/a.log"])
+      await page.request.put(`/api/v1/s3/${bucket}/${k}`, { headers: hdr, data: `data of ${k}` });
+    await page.goto(`/buckets/${bucket}/settings`);
+    await expect(page.getByTestId("lifecycle-section")).toContainText("No rules");
+
+    // logs expired on a date long past: everything under logs/ goes on the next run
+    await page.getByTestId("lc-add").click();
+    await page.getByTestId("lc-id").fill("old-logs");
+    await page.getByTestId("lc-prefix").fill("logs/");
+    await page.getByRole("dialog").locator("select").first().selectOption("date");
+    await page.getByTestId("lc-expire-date").fill("2020-01-01");
+    await page.getByTestId("lc-done").click();
+    await expect(page.getByTestId("lc-rule-old-logs")).toContainText("Objects under logs/: deleted on 2020-01-01.");
+    // the versions note: an expired object only gets a delete marker
+    await expect(page.getByTestId("lc-warning-info").first()).toContainText("delete marker");
+    await page.getByTestId("lifecycle-preview").click();
+    await expect(page.getByTestId("lc-preview-old-logs-next-run")).toContainText("2");
+    await expect(page.getByTestId("lifecycle-preview-result")).toContainText("logs/a.log");
+
+    // old versions deleted: the ransomware warning, before and in the preview
+    await page.getByTestId("lc-add").click();
+    await page.getByTestId("lc-id").fill("versions");
+    await page.getByTestId("lc-noncurrent-days").fill("1");
+    await page.getByTestId("lc-done").click();
+    await expect(page.getByTestId("lc-warning-danger")).toContainText("ransomware alert");
+    await page.getByTestId("lifecycle-preview").click();
+    await expect(page.getByTestId("lifecycle-preview-result")).toContainText("Saving opens a ransomware alert");
+    await expect(page.getByTestId("lc-preview-versions-7d")).toContainText("1");
+
+    // every version: only once it's confirmed
+    await page.getByTestId("lc-add").click();
+    await page.getByTestId("lc-id").fill("purge");
+    await page.getByTestId("lc-prefix").fill("tmp/");
+    await page.getByTestId("lc-expire-days").fill("30");
+    await page.getByTestId("lc-all-versions").check();
+    await expect(page.getByTestId("lc-done")).toBeDisabled();
+    await page.getByTestId("lc-all-versions-ok").check();
+    await page.getByTestId("lc-done").click();
+    await expect(page.getByTestId("lc-rule-purge")).toContainText("deleted with all their versions 30 days after they're written");
+
+    await page.getByTestId("save-lifecycle").click();
+    await expect(page.getByTestId("notice")).toHaveText("Lifecycle saved.");
+    const stored = await (await page.request.get(`/api/v1/s3/${bucket}?lifecycle`, { headers: hdr })).text();
+    expect(stored).toContain("<ExpiredObjectAllVersions>true</ExpiredObjectAllVersions>");
+    expect(stored).toContain("<NoncurrentDays>1</NoncurrentDays>");
+
+    // the Bucket resource can't say everything: it says what it leaves out
+    await page.getByTestId("lifecycle-yaml").click();
+    await expect(page.getByTestId("lifecycle-yaml-text")).toContainText("noncurrentExpireDays: 1");
+    await expect(page.getByTestId("lifecycle-yaml-left")).toContainText("an expiry date");
+    await page.keyboard.press("Escape");
+
+    // XML the form can't show stays XML
+    await page.getByTestId("lifecycle-xml-mode").click();
+    await page
+      .getByTestId("lifecycle")
+      .fill(
+        "<LifecycleConfiguration><Rule><ID>x</ID><Status>Enabled</Status><Filter></Filter><NoncurrentVersionExpiration><NoncurrentDays>3</NoncurrentDays><MaxNoncurrentVersions>2</MaxNoncurrentVersions></NoncurrentVersionExpiration></Rule></LifecycleConfiguration>",
+      );
+    await page.getByTestId("lifecycle-form-mode").click();
+    await expect(page.getByTestId("lifecycle-unknown")).toContainText("MaxNoncurrentVersions");
+    await expect(page.getByTestId("lifecycle")).toBeVisible();
+  });
+
+  test("replication: test, save, an object copied, state, resync and removal", async ({ page }) => {
+    const bucket = unique("src");
+    const dr = `${bucket}-dr`;
+    await login(page);
+    await page.request.put(`/api/v1/s3/${bucket}`, { headers: hdr });
+    await page.request.put(`/api/v1/s3/${dr}`, { headers: hdr });
+    await page.goto(`/buckets/${bucket}/settings`);
+    await expect(page.getByTestId("replication-section")).toContainText("Not replicated.");
+    await page.getByTestId("repl-add").click();
+    await page.getByTestId("repl-endpoint").fill("http://127.0.0.1:19889");
+    await page.getByTestId("repl-bucket").fill(dr);
+    await page.getByTestId("repl-access-key").fill(ROOT_USER);
+    await page.getByTestId("repl-secret-key").fill(ROOT_PASSWORD);
+    // the target doesn't keep versions yet: the test says so, in words
+    await page.getByTestId("repl-test").click();
+    await expect(page.getByTestId("repl-test-result")).toContainText("versioning");
+    await expect(page.getByTestId("repl-save")).toBeDisabled();
+    await page.request.put(`/api/v1/s3/${dr}?versioning`, {
+      headers: hdr,
+      data: "<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>",
+    });
+    await page.getByTestId("repl-test").click();
+    await expect(page.getByTestId("repl-test-result")).toContainText("The target answers");
+    // versioning here is turned on with the save
+    await expect(page.getByTestId("repl-versioning")).toBeChecked();
+    // a rule the server refuses leaves no target behind
+    await page.route(/\/api\/v1\/s3\/[^/?]+\?replication(=|&|$)/, (route) =>
+      route.request().method() === "PUT"
+        ? route.fulfill({ status: 400, contentType: "application/xml", body: "<Error><Code>MalformedXML</Code><Message>refused for the test</Message></Error>" })
+        : route.continue(),
+    );
+    await page.getByTestId("repl-save").click();
+    await expect(page.getByTestId("error")).toContainText("refused for the test");
+    const after = await (await page.request.get(`/api/v1/admin/list-remote-targets?bucket=${bucket}`, { headers: { ...hdr, "X-Console-Decrypt": "1" } })).text();
+    expect(after).not.toContain(dr);
+    await page.unroute(/\/api\/v1\/s3\/[^/?]+\?replication(=|&|$)/);
+    await page.getByTestId("repl-save").click();
+    await expect(page.getByTestId("notice")).toHaveText(`Replication to ${dr} saved.`);
+    await expect(page.getByTestId("versioning-status")).toHaveText("Enabled");
+    // the servers check targets every 5 seconds
+    await expect(async () => {
+      await page.reload();
+      await expect(page.getByTestId(`repl-online-${dr}`)).toHaveText("online", { timeout: 1000 });
+    }).toPass({ timeout: 20_000 });
+
+    // an object written here arrives there, and is counted
+    await page.request.put(`/api/v1/s3/${bucket}/hello.txt`, { headers: hdr, data: "hello" });
+    await expect(async () => {
+      const r = await page.request.get(`/api/v1/s3/${dr}/hello.txt`, { headers: hdr });
+      expect(await r.text()).toBe("hello");
+    }).toPass({ timeout: 20_000 });
+    await expect(async () => {
+      await page.reload();
+      await expect(page.getByTestId(`repl-counts-${dr}`)).toContainText("1 replicated", { timeout: 1000 });
+    }).toPass({ timeout: 20_000 });
+
+    // the report lists it
+    await page.goto("/reports/replication");
+    await expect(page.getByTestId(`replication-row-${bucket}`)).toContainText(dr);
+    await page.goto(`/buckets/${bucket}/settings`);
+
+    await page.getByTestId(`repl-resync-${dr}`).click();
+    await page.getByTestId(`repl-resync-${dr}-yes`).click();
+    await expect(page.getByTestId("notice")).toHaveText(`Copying every object to ${dr} again.`);
+
+    await page.getByTestId(`repl-remove-${dr}`).click();
+    await page.getByTestId(`repl-remove-${dr}-yes`).click();
+    await expect(page.getByTestId("notice")).toHaveText(`Replication to ${dr} removed.`);
+    await expect(page.getByTestId("replication-section")).toContainText("Not replicated.");
+    const targets = await (await page.request.get(`/api/v1/admin/list-remote-targets?bucket=${bucket}`, { headers: { ...hdr, "X-Console-Decrypt": "1" } })).text();
+    expect(targets).not.toContain(dr);
+  });
+
+  test("a bucket declared in Kubernetes: read-only, and Copy as YAML", async ({ page }) => {
+    test.skip(!!process.env.CONSOLE_URL, "needs the mock Kubernetes API");
+    await login(page);
+    await page.request.put(`/api/v1/s3/declared-e2e`, { headers: hdr });
+    const lc = "<LifecycleConfiguration><Rule><ID>tmp</ID><Status>Enabled</Status><Filter><Prefix>tmp/</Prefix></Filter><Expiration><Days>7</Days></Expiration></Rule></LifecycleConfiguration>";
+    const put = await page.request.put(`/api/v1/s3/declared-e2e?lifecycle`, {
+      headers: { ...hdr, "Content-MD5": createHash("md5").update(lc).digest("base64") }, // S3 requires it here
+      data: lc,
+    });
+    expect(put.status()).toBe(200);
+    await page.goto(`/buckets/declared-e2e/settings`);
+    await expect(page.getByTestId("lifecycle-declared")).toContainText("Declared in Kubernetes (Bucket declared-e2e)");
+    await expect(page.getByTestId("lc-add")).toHaveCount(0);
+    await expect(page.getByTestId("lc-edit-tmp")).toHaveCount(0);
+    // replication isn't declared there: it can be set up
+    await expect(page.getByTestId("repl-add")).toBeVisible();
+    await page.getByTestId("lifecycle-yaml").click();
+    await expect(page.getByTestId("lifecycle-yaml-text")).toContainText('prefix: "tmp/"');
+    await expect(page.getByTestId("lifecycle-yaml-text")).toContainText("expireDays: 7");
   });
 });
 
@@ -456,8 +629,9 @@ test.describe("identity", () => {
     await expect(access).toBeVisible(); // saving opens the access dialog again
     await page.keyboard.press("Escape");
     await expect(access).toHaveCount(0);
-    await expect(row).not.toContainText("ro");
-    await expect(row).toContainText("admin");
+    // the level pills, not the row's text: a random team name can contain "ro"
+    await expect(row.locator(".pill", { hasText: /^ro$/ })).toHaveCount(0);
+    await expect(row.locator(".pill", { hasText: /^admin$/ })).toHaveCount(1);
 
     await page.getByTestId(`team-delete-${team}`).click();
     await page.getByTestId(`team-delete-${team}-yes`).click();
