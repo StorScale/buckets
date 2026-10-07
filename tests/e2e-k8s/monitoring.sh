@@ -53,7 +53,7 @@ kc apply --server-side --force-conflicts -f "$ROOT/operator/deploy/crds/" >/dev/
 helm ${KUBECONTEXT:+--kube-context $KUBECONTEXT} -n "$NS" install mon-operator "$ROOT/operator/helm/buckets-operator" \
   --set image.repository="$REGISTRY/buckets-operator" --set image.tag="$BUCKETS_TAG" --set watchNamespace="$NS" \
   --set replicaCount=1 --set monitoring.dashboards.namespace="$NS" ${AFF:+--set-json affinity="$AFF"} \
-  --wait --timeout 5m >/dev/null
+  --skip-crds --wait --timeout 5m >/dev/null
 expect "the alert rules" "$(k get prometheusrule -o name | wc -l | tr -d ' ')" 1
 expect "four dashboards" "$(k get configmap -l grafana_dashboard=1 -o name | wc -l | tr -d ' ')" 4
 

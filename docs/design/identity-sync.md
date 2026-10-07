@@ -169,5 +169,8 @@ manifest.
    Showing "owner left" in the access review and on the Access Keys page is
    left for later: such keys show as off meanwhile.
 2. Roles kept current.
-3. Okta and Keycloak.
+3. ✅ Okta and Keycloak: Keycloak through the sign-in client's service account
+   (realm-management's view-users), Okta through a read-only API token; their
+   people matched by the token's issuer and `sub`. The cluster test disables a
+   real Keycloak user.
 4. SCIM endpoint (optional), acting through the same removal code.

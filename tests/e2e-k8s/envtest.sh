@@ -655,9 +655,23 @@ expect "which holds it" "$(jp secret/idc-identity-sync '{.data.clientSecret}' | 
 expect "owned by the cluster" "$(jp secret/idc-identity-sync '{.metadata.ownerReferences[0].name}')" idc
 expect "a change restarts the servers" "$([[ -n $(jp sts/idc-pool-0 '{.spec.template.metadata.annotations.buckets\.io/identity-sync}') ]] && echo yes)" yes
 expect "status says so" "$(jp bc/idc '{.status.identity.description}')" "Microsoft Entra ID (tenant t-1), people who leave removed (keys deleted after 14 days)"
+# Okta: an API token instead of a client secret, the authorization server's issuer, the check interval
+idsettings='{"openid":{"provider":"okta","domain":"example.okta.com","clientId":"app","clientSecret":"s","removal":{"enabled":true,"apiToken":"00tok","intervalMinutes":5}}}'
+k -n tenant create secret generic idc-identity --from-literal=settings.json="$idsettings" --dry-run=client -o yaml | k apply -f - >/dev/null
+until_true '[[ $(syncenv BUCKETS_OPENID_SYNC_PROVIDER) == okta ]]' || true
+expect "Okta: the sync's settings" "$(syncenv BUCKETS_OPENID_SYNC_URL) $(syncenv BUCKETS_OPENID_SYNC_ISSUER) $(syncenv BUCKETS_OPENID_SYNC_INTERVAL)" \
+  "https://example.okta.com https://example.okta.com/oauth2/default 300"
+expect "Okta: the API token from the Secret" "$(jp sts/idc-pool-0 '{.spec.template.spec.containers[0].env[?(@.name=="BUCKETS_OPENID_SYNC_API_TOKEN")].valueFrom.secretKeyRef.key}')/$(jp secret/idc-identity-sync '{.data.apiToken}' | base64 -d)" apiToken/00tok
+expect "Okta: no client secret or tenant for the sync" "$(syncenv BUCKETS_OPENID_SYNC_TENANT_ID)$(jp sts/idc-pool-0 '{.spec.template.spec.containers[0].env[?(@.name=="BUCKETS_OPENID_SYNC_CLIENT_SECRET")].name}')" ""
+# Keycloak: the realm and the client's service account
+idsettings='{"openid":{"provider":"keycloak","url":"https://kc.example.com","realm":"corp","clientId":"buckets","clientSecret":"s","removal":{"enabled":true}}}'
+k -n tenant create secret generic idc-identity --from-literal=settings.json="$idsettings" --dry-run=client -o yaml | k apply -f - >/dev/null
+until_true '[[ $(syncenv BUCKETS_OPENID_SYNC_PROVIDER) == keycloak ]]' || true
+expect "Keycloak: the sync's settings" "$(syncenv BUCKETS_OPENID_SYNC_URL) $(syncenv BUCKETS_OPENID_SYNC_REALM) $(syncenv BUCKETS_OPENID_SYNC_ISSUER) $(syncenv BUCKETS_OPENID_SYNC_CLIENT_ID) $(syncenv BUCKETS_OPENID_SYNC_INTERVAL)" \
+  "https://kc.example.com corp https://kc.example.com/realms/corp buckets 3600"
 idsettings='{"openid":{"provider":"entra","tenantId":"t-1","clientId":"app","clientSecret":"s","removal":{"enabled":false}}}'
 k -n tenant create secret generic idc-identity --from-literal=settings.json="$idsettings" --dry-run=client -o yaml | k apply -f - >/dev/null
-until_true '[[ -z $(syncenv BUCKETS_OPENID_SYNC_TENANT_ID) ]]' || true
+until_true '[[ -z $(syncenv BUCKETS_OPENID_SYNC_PROVIDER) ]]' || true
 expect "removal off: the settings go" "$(syncenv BUCKETS_OPENID_SYNC_PROVIDER)/$(jp sts/idc-pool-0 '{.spec.template.metadata.annotations.buckets\.io/identity-sync}')" /
 k -n tenant patch bc idc --type=merge -p '{"spec":{"env":[{"name":"MINIO_IDENTITY_OPENID_CLIENT_ID","value":"x"}]}}' >/dev/null
 until_true '[[ $(jp bc/idc "{.status.identity.phase}") == Conflict ]]'

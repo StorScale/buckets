@@ -33,28 +33,58 @@ static bool copy(char *dst, size_t cap, const char *v, const char *name, char *e
   return true;
 }
 
+static bool provider_is(const buckets_idsync_settings *s, const char *name) {
+  return strcmp(s->provider, name) == 0;
+}
+
 bool buckets_idsync_settings_from_env(buckets_idsync_settings *s, char *err, size_t errlen) {
   memset(s, 0, sizeof(*s));
   const char *p = env("BUCKETS_OPENID_SYNC_PROVIDER");
   if (!p) return true;
-  if (strcmp(p, "entra") != 0) {
-    snprintf(err, errlen, "BUCKETS_OPENID_SYNC_PROVIDER %s: only entra is supported", p);
+  if (strcmp(p, "entra") != 0 && strcmp(p, "keycloak") != 0 && strcmp(p, "okta") != 0) {
+    snprintf(err, errlen, "BUCKETS_OPENID_SYNC_PROVIDER %s: entra, keycloak or okta", p);
     return false;
   }
   snprintf(s->provider, sizeof(s->provider), "%s", p);
-  if (!copy(s->tenant, sizeof(s->tenant), env("BUCKETS_OPENID_SYNC_TENANT_ID"),
-            "BUCKETS_OPENID_SYNC_TENANT_ID", err, errlen) ||
-      !copy(s->client_id, sizeof(s->client_id), env("BUCKETS_OPENID_SYNC_CLIENT_ID"),
-            "BUCKETS_OPENID_SYNC_CLIENT_ID", err, errlen) ||
-      !copy(s->client_secret, sizeof(s->client_secret), env("BUCKETS_OPENID_SYNC_CLIENT_SECRET"),
-            "BUCKETS_OPENID_SYNC_CLIENT_SECRET", err, errlen))
-    return false;
-  const char *login = env("BUCKETS_OPENID_SYNC_LOGIN_URL"), *graph = env("BUCKETS_OPENID_SYNC_GRAPH_URL");
-  if (!copy(s->login_url, sizeof(s->login_url), login ? login : "https://login.microsoftonline.com",
-            "BUCKETS_OPENID_SYNC_LOGIN_URL", err, errlen) ||
-      !copy(s->graph_url, sizeof(s->graph_url), graph ? graph : "https://graph.microsoft.com",
-            "BUCKETS_OPENID_SYNC_GRAPH_URL", err, errlen))
-    return false;
+#define NEED(field, name) copy(s->field, sizeof(s->field), env(name), name, err, errlen)
+  const char *u = env("BUCKETS_OPENID_SYNC_URL");
+  if (u && strlen(u) < sizeof(s->url)) { /* without trailing slashes, for building URLs and the issuer */
+    snprintf(s->url, sizeof(s->url), "%s", u);
+    for (size_t n = strlen(s->url); n && s->url[n - 1] == '/';) s->url[--n] = '\0';
+  }
+  if (provider_is(s, "entra")) {
+    if (!NEED(tenant, "BUCKETS_OPENID_SYNC_TENANT_ID") || !NEED(client_id, "BUCKETS_OPENID_SYNC_CLIENT_ID") ||
+        !NEED(client_secret, "BUCKETS_OPENID_SYNC_CLIENT_SECRET"))
+      return false;
+    const char *login = env("BUCKETS_OPENID_SYNC_LOGIN_URL"), *graph = env("BUCKETS_OPENID_SYNC_GRAPH_URL");
+    if (!copy(s->login_url, sizeof(s->login_url), login ? login : "https://login.microsoftonline.com",
+              "BUCKETS_OPENID_SYNC_LOGIN_URL", err, errlen) ||
+        !copy(s->graph_url, sizeof(s->graph_url), graph ? graph : "https://graph.microsoft.com",
+              "BUCKETS_OPENID_SYNC_GRAPH_URL", err, errlen))
+      return false;
+  } else if (provider_is(s, "keycloak")) {
+    if (!*s->url) { /* unset or too long: copy says which */
+      copy(s->url, sizeof(s->url), u, "BUCKETS_OPENID_SYNC_URL", err, errlen);
+      return false;
+    }
+    if (!NEED(realm, "BUCKETS_OPENID_SYNC_REALM") || !NEED(client_id, "BUCKETS_OPENID_SYNC_CLIENT_ID") ||
+        !NEED(client_secret, "BUCKETS_OPENID_SYNC_CLIENT_SECRET"))
+      return false;
+    const char *iss = env("BUCKETS_OPENID_SYNC_ISSUER");
+    if (iss) {
+      if (!NEED(issuer, "BUCKETS_OPENID_SYNC_ISSUER")) return false;
+    } else {
+      snprintf(s->issuer, sizeof(s->issuer), "%s/realms/%s", s->url, s->realm);
+    }
+  } else {          /* okta */
+    if (!*s->url) { /* unset or too long: copy says which */
+      copy(s->url, sizeof(s->url), u, "BUCKETS_OPENID_SYNC_URL", err, errlen);
+      return false;
+    }
+    if (!NEED(api_token, "BUCKETS_OPENID_SYNC_API_TOKEN") || !NEED(issuer, "BUCKETS_OPENID_SYNC_ISSUER"))
+      return false;
+  }
+#undef NEED
   const char *iv = env("BUCKETS_OPENID_SYNC_INTERVAL");
   s->interval_s = iv ? atol(iv) : 3600;
   if (s->interval_s <= 0) {
@@ -85,6 +115,18 @@ bool buckets_idsync_settings_from_env(buckets_idsync_settings *s, char *err, siz
   return true;
 }
 
+const char *buckets_idsync_person_of(const buckets_idsync_settings *s, const char *tid, const char *oid,
+                                     const char *iss, const char *sub) {
+  if (provider_is(s, "entra")) return tid && oid && *oid && strcmp(tid, s->tenant) == 0 ? oid : NULL;
+  if (!*s->provider) return NULL;
+  /* Keycloak and Okta: the token's subject, from this issuer (a trailing slash aside) */
+  if (!iss || !sub || !*sub) return NULL;
+  size_t a = strlen(iss), b = strlen(s->issuer);
+  while (a && iss[a - 1] == '/') a--;
+  while (b && s->issuer[b - 1] == '/') b--;
+  return a == b && strncmp(iss, s->issuer, a) == 0 ? sub : NULL;
+}
+
 /* ---- what the provider says ----------------------------------------------------------------- */
 
 const char *buckets_idsync_state_name(buckets_idsync_state st) {
@@ -107,6 +149,41 @@ buckets_idsync_state buckets_idsync_graph_state(int status, const char *body, si
     /* only Graph's own "no such user", not a 404 from a wrong URL or a proxy */
     const char *code = yyjson_get_str(yyjson_obj_get(yyjson_obj_get(root, "error"), "code"));
     if (code && strcmp(code, "Request_ResourceNotFound") == 0) st = BUCKETS_IDSYNC_GONE;
+  }
+  yyjson_doc_free(d);
+  return st;
+}
+
+buckets_idsync_state buckets_idsync_keycloak_state(int status, const char *body, size_t len) {
+  yyjson_doc *d = body && len ? yyjson_read(body, len, 0) : NULL;
+  yyjson_val *root = yyjson_doc_get_root(d);
+  buckets_idsync_state st = BUCKETS_IDSYNC_UNKNOWN;
+  if (status == 200) {
+    yyjson_val *en = yyjson_obj_get(root, "enabled");
+    if (yyjson_is_bool(en)) st = yyjson_get_bool(en) ? BUCKETS_IDSYNC_ACTIVE : BUCKETS_IDSYNC_DISABLED;
+  } else if (status == 404) {
+    /* only "User not found", not a realm that is not there */
+    const char *e = yyjson_get_str(yyjson_obj_get(root, "error"));
+    if (e && strcmp(e, "User not found") == 0) st = BUCKETS_IDSYNC_GONE;
+  }
+  yyjson_doc_free(d);
+  return st;
+}
+
+buckets_idsync_state buckets_idsync_okta_state(int status, const char *body, size_t len) {
+  yyjson_doc *d = body && len ? yyjson_read(body, len, 0) : NULL;
+  yyjson_val *root = yyjson_doc_get_root(d);
+  buckets_idsync_state st = BUCKETS_IDSYNC_UNKNOWN;
+  if (status == 200) {
+    /* Okta's user lifecycle: only these two take sign-in away for good */
+    const char *s = yyjson_get_str(yyjson_obj_get(root, "status"));
+    if (s)
+      st = strcmp(s, "SUSPENDED") == 0 || strcmp(s, "DEPROVISIONED") == 0 ? BUCKETS_IDSYNC_DISABLED
+                                                                          : BUCKETS_IDSYNC_ACTIVE;
+  } else if (status == 404) {
+    const char *code = yyjson_get_str(yyjson_obj_get(root, "errorCode"));
+    const char *sum = yyjson_get_str(yyjson_obj_get(root, "errorSummary"));
+    if (code && strcmp(code, "E0000007") == 0 && sum && strstr(sum, "(User)")) st = BUCKETS_IDSYNC_GONE;
   }
   yyjson_doc_free(d);
   return st;
@@ -246,43 +323,58 @@ void buckets_idsync_held_free(buckets_idsync_held *h, size_t n) {
   free(h);
 }
 
-/* ---- Entra ------------------------------------------------------------------------------------- */
+/* ---- the provider's API ------------------------------------------------------------------------- */
 
-struct buckets_idsync_entra {
+struct buckets_idsync_client {
   buckets_idsync_settings s;
   pthread_mutex_t mu;
   char *token;
   long long token_until;
 };
 
-buckets_idsync_entra *buckets_idsync_entra_new(const buckets_idsync_settings *s) {
-  buckets_idsync_entra *e = buckets_xcalloc(1, sizeof(*e));
-  e->s = *s;
-  pthread_mutex_init(&e->mu, NULL);
-  return e;
+buckets_idsync_client *buckets_idsync_client_new(const buckets_idsync_settings *s) {
+  buckets_idsync_client *c = buckets_xcalloc(1, sizeof(*c));
+  c->s = *s;
+  pthread_mutex_init(&c->mu, NULL);
+  return c;
 }
 
-void buckets_idsync_entra_free(buckets_idsync_entra *e) {
-  if (!e) return;
-  memset(e->s.client_secret, 0, sizeof(e->s.client_secret));
-  free(e->token);
-  pthread_mutex_destroy(&e->mu);
-  free(e);
+void buckets_idsync_client_free(buckets_idsync_client *c) {
+  if (!c) return;
+  memset(c->s.client_secret, 0, sizeof(c->s.client_secret));
+  memset(c->s.api_token, 0, sizeof(c->s.api_token));
+  free(c->token);
+  pthread_mutex_destroy(&c->mu);
+  free(c);
 }
 
-/* An app-only token for Graph (client credentials), cached until a minute before it expires. */
-static bool entra_token(buckets_idsync_entra *e, bool fresh, char *err, size_t errlen) {
+static const char *provider_title(const buckets_idsync_settings *s) {
+  return provider_is(s, "entra") ? "Microsoft Graph" : provider_is(s, "keycloak") ? "Keycloak" : "Okta";
+}
+
+/* An app-only token (client credentials): Entra's for Graph, or the Keycloak client's service account. Cached
+ * until a minute before it expires. Okta's API token needs none. */
+static bool client_token(buckets_idsync_client *c, bool fresh, char *err, size_t errlen) {
+  if (provider_is(&c->s, "okta")) return true;
   long long now = (long long)time(NULL);
-  if (!fresh && e->token && now < e->token_until) return true;
+  if (!fresh && c->token && now < c->token_until) return true;
   buckets_buf url = BUCKETS_BUF_INIT, body = BUCKETS_BUF_INIT;
-  buckets_buf_appendf(&url, "%s/", e->s.login_url);
-  buckets_url_encode(&url, e->s.tenant, false);
-  buckets_buf_append_c(&url, "/oauth2/v2.0/token");
-  buckets_buf_append_c(
-      &body, "grant_type=client_credentials&scope=https%3A%2F%2Fgraph.microsoft.com%2F.default&client_id=");
-  buckets_url_encode(&body, e->s.client_id, false);
+  if (provider_is(&c->s, "entra")) {
+    buckets_buf_appendf(&url, "%s/", c->s.login_url);
+    buckets_url_encode(&url, c->s.tenant, false);
+    buckets_buf_append_c(&url, "/oauth2/v2.0/token");
+    buckets_buf_append_c(&body,
+                         "grant_type=client_credentials&scope=https%3A%2F%2Fgraph.microsoft.com%2F.default");
+  } else {
+    buckets_buf_appendf(&url, "%s/realms/", c->s.url);
+    buckets_url_encode(&url, c->s.realm, false);
+    buckets_buf_append_c(&url, "/protocol/openid-connect/token");
+    buckets_buf_append_c(&body, "grant_type=client_credentials");
+  }
+  buckets_buf_append_c(&body, "&client_id=");
+  buckets_url_encode(&body, c->s.client_id, false);
   buckets_buf_append_c(&body, "&client_secret=");
-  buckets_url_encode(&body, e->s.client_secret, false);
+  buckets_url_encode(&body, c->s.client_secret, false);
   buckets_http_kv h[] = {{"Content-Type", "application/x-www-form-urlencoded"}};
   buckets_http_result r;
   bool ok = buckets_fetch("POST", url.data, NULL, h, 1, body.data, body.len, 15000, &r, err, errlen);
@@ -290,63 +382,127 @@ static bool entra_token(buckets_idsync_entra *e, bool fresh, char *err, size_t e
   buckets_buf_free(&body);
   buckets_buf_free(&url);
   if (!ok) return false;
-  yyjson_doc *d = r.status == 200 ? yyjson_read(r.body.data ? r.body.data : "", r.body.len, 0) : NULL;
-  const char *tok = yyjson_get_str(yyjson_obj_get(yyjson_doc_get_root(d), "access_token"));
-  long long exp = yyjson_get_sint(yyjson_obj_get(yyjson_doc_get_root(d), "expires_in"));
+  yyjson_doc *d = yyjson_read(r.body.data ? r.body.data : "", r.body.len, 0);
+  yyjson_val *root = yyjson_doc_get_root(d);
+  const char *tok = r.status == 200 ? yyjson_get_str(yyjson_obj_get(root, "access_token")) : NULL;
+  long long exp = yyjson_get_sint(yyjson_obj_get(root, "expires_in"));
   if (tok) {
-    free(e->token);
-    e->token = buckets_xstrdup(tok);
-    e->token_until = now + (exp > 120 ? exp - 60 : 60);
+    free(c->token);
+    c->token = buckets_xstrdup(tok);
+    c->token_until = now + (exp > 120 ? exp - 60 : 60);
   } else {
-    yyjson_doc *ed = d ? NULL : yyjson_read(r.body.data ? r.body.data : "", r.body.len, 0);
-    const char *why = yyjson_get_str(yyjson_obj_get(yyjson_doc_get_root(ed), "error_description"));
-    snprintf(err, errlen, "Microsoft sign-in for the sync refused (%d): %.300s", r.status,
-             why ? why : "no access token");
-    yyjson_doc_free(ed);
+    const char *why = yyjson_get_str(yyjson_obj_get(root, "error_description"));
+    if (!why) why = yyjson_get_str(yyjson_obj_get(root, "error"));
+    snprintf(err, errlen, "%s sign-in for the sync refused (%d): %.300s",
+             provider_is(&c->s, "entra") ? "Microsoft" : "Keycloak", r.status, why ? why : "no access token");
   }
   yyjson_doc_free(d);
   buckets_http_result_free(&r);
   return tok != NULL;
 }
 
-buckets_idsync_state buckets_idsync_entra_lookup(buckets_idsync_entra *e, const char *oid,
-                                                 buckets_idsync_person *who, char *err, size_t errlen) {
+static void fill_person(const buckets_idsync_settings *s, yyjson_val *u, buckets_idsync_person *who) {
+  const char *id = yyjson_get_str(yyjson_obj_get(u, "id")), *name = NULL, *login = NULL;
+  char full[256] = "";
+  if (provider_is(s, "entra")) {
+    name = yyjson_get_str(yyjson_obj_get(u, "displayName"));
+    login = yyjson_get_str(yyjson_obj_get(u, "userPrincipalName"));
+  } else {
+    yyjson_val *src = provider_is(s, "okta") ? yyjson_obj_get(u, "profile") : u;
+    const char *first = yyjson_get_str(yyjson_obj_get(src, "firstName")),
+               *last = yyjson_get_str(yyjson_obj_get(src, "lastName"));
+    snprintf(full, sizeof(full), "%s%s%s", first ? first : "", first && last ? " " : "", last ? last : "");
+    name = full;
+    login = yyjson_get_str(yyjson_obj_get(src, provider_is(s, "okta") ? "login" : "username"));
+  }
+  snprintf(who->id, sizeof(who->id), "%s", id ? id : "");
+  snprintf(who->display_name, sizeof(who->display_name), "%s", name ? name : "");
+  snprintf(who->upn, sizeof(who->upn), "%s", login ? login : "");
+}
+
+/* One GET of the provider's API as the sync; the status (0 when it cannot be reached) and the body in r. */
+static bool client_get(buckets_idsync_client *c, const char *path_and_query, buckets_http_result *r,
+                       char *err, size_t errlen) {
+  buckets_buf url = BUCKETS_BUF_INIT, auth = BUCKETS_BUF_INIT;
+  buckets_buf_appendf(&url, "%s%s", provider_is(&c->s, "entra") ? c->s.graph_url : c->s.url, path_and_query);
+  if (provider_is(&c->s, "okta"))
+    buckets_buf_appendf(&auth, "SSWS %s", c->s.api_token);
+  else
+    buckets_buf_appendf(&auth, "Bearer %s", c->token);
+  buckets_http_kv h[] = {{"Authorization", auth.data}, {"Accept", "application/json"}};
+  bool ok = buckets_fetch("GET", url.data, NULL, h, 2, NULL, 0, 15000, r, err, errlen);
+  memset(auth.data, 0, auth.len);
+  buckets_buf_free(&url);
+  buckets_buf_free(&auth);
+  return ok;
+}
+
+static buckets_idsync_state state_from(const buckets_idsync_settings *s, int status, const char *body,
+                                       size_t len) {
+  if (provider_is(s, "entra")) return buckets_idsync_graph_state(status, body, len);
+  if (provider_is(s, "keycloak")) return buckets_idsync_keycloak_state(status, body, len);
+  return buckets_idsync_okta_state(status, body, len);
+}
+
+buckets_idsync_state buckets_idsync_client_lookup(buckets_idsync_client *c, const char *id,
+                                                  buckets_idsync_person *who, char *err, size_t errlen) {
   if (who) memset(who, 0, sizeof(*who));
   buckets_idsync_state st = BUCKETS_IDSYNC_UNKNOWN;
-  pthread_mutex_lock(&e->mu);
+  pthread_mutex_lock(&c->mu);
   for (int attempt = 0; attempt < 2; attempt++) {
-    if (!entra_token(e, attempt > 0, err, errlen)) break;
-    buckets_buf url = BUCKETS_BUF_INIT, auth = BUCKETS_BUF_INIT;
-    buckets_buf_appendf(&url, "%s/v1.0/users/", e->s.graph_url);
-    buckets_url_encode(&url, oid, false);
-    buckets_buf_append_c(&url, who ? "?$select=id,accountEnabled,displayName,userPrincipalName"
-                                   : "?$select=id,accountEnabled");
-    buckets_buf_appendf(&auth, "Bearer %s", e->token);
-    buckets_http_kv h[] = {{"Authorization", auth.data}, {"Accept", "application/json"}};
+    if (!client_token(c, attempt > 0, err, errlen)) break;
+    buckets_buf path = BUCKETS_BUF_INIT;
+    if (provider_is(&c->s, "entra")) {
+      buckets_buf_append_c(&path, "/v1.0/users/");
+      buckets_url_encode(&path, id, false);
+      buckets_buf_append_c(&path, who ? "?$select=id,accountEnabled,displayName,userPrincipalName"
+                                      : "?$select=id,accountEnabled");
+    } else if (provider_is(&c->s, "keycloak")) {
+      buckets_buf_append_c(&path, "/admin/realms/");
+      buckets_url_encode(&path, c->s.realm, false);
+      buckets_buf_append_c(&path, "/users/");
+      buckets_url_encode(&path, id, false);
+    } else {
+      buckets_buf_append_c(&path, "/api/v1/users/"); /* an ID, or a login (the console's lookup) */
+      buckets_url_encode(&path, id, false);
+    }
     buckets_http_result r;
-    bool ok = buckets_fetch("GET", url.data, NULL, h, 2, NULL, 0, 15000, &r, err, errlen);
-    buckets_buf_free(&url);
-    buckets_buf_free(&auth);
+    bool ok = client_get(c, path.data, &r, err, errlen);
+    buckets_buf_free(&path);
     if (!ok) break;
     int status = r.status;
-    st = buckets_idsync_graph_state(status, r.body.data, r.body.len);
-    if (who && status == 200) {
-      yyjson_doc *d = yyjson_read(r.body.data ? r.body.data : "", r.body.len, 0);
-      yyjson_val *root = yyjson_doc_get_root(d);
-      const char *id = yyjson_get_str(yyjson_obj_get(root, "id")),
-                 *dn = yyjson_get_str(yyjson_obj_get(root, "displayName")),
-                 *upn = yyjson_get_str(yyjson_obj_get(root, "userPrincipalName"));
-      snprintf(who->id, sizeof(who->id), "%s", id ? id : "");
-      snprintf(who->display_name, sizeof(who->display_name), "%s", dn ? dn : "");
-      snprintf(who->upn, sizeof(who->upn), "%s", upn ? upn : "");
-      yyjson_doc_free(d);
+    st = state_from(&c->s, status, r.body.data, r.body.len);
+    yyjson_doc *d = status == 200 && who ? yyjson_read(r.body.data ? r.body.data : "", r.body.len, 0) : NULL;
+    if (d) fill_person(&c->s, yyjson_doc_get_root(d), who);
+    yyjson_doc_free(d);
+    if (st == BUCKETS_IDSYNC_GONE && who && provider_is(&c->s, "keycloak")) {
+      /* the console's lookup may give a user name: Keycloak finds those by search */
+      buckets_buf q = BUCKETS_BUF_INIT;
+      buckets_buf_append_c(&q, "/admin/realms/");
+      buckets_url_encode(&q, c->s.realm, false);
+      buckets_buf_append_c(&q, "/users?exact=true&username=");
+      buckets_url_encode(&q, id, false);
+      buckets_http_result sr;
+      if (client_get(c, q.data, &sr, err, errlen)) {
+        yyjson_doc *sd =
+            sr.status == 200 ? yyjson_read(sr.body.data ? sr.body.data : "", sr.body.len, 0) : NULL;
+        yyjson_val *u = yyjson_arr_get(yyjson_doc_get_root(sd), 0);
+        if (u) {
+          yyjson_val *en = yyjson_obj_get(u, "enabled");
+          st = yyjson_get_bool(en) ? BUCKETS_IDSYNC_ACTIVE : BUCKETS_IDSYNC_DISABLED;
+          fill_person(&c->s, u, who);
+        }
+        yyjson_doc_free(sd);
+        buckets_http_result_free(&sr);
+      }
+      buckets_buf_free(&q);
     }
     if (st == BUCKETS_IDSYNC_UNKNOWN)
-      snprintf(err, errlen, "Microsoft Graph answered %d for user %s: %.200s", status, oid,
+      snprintf(err, errlen, "%s answered %d for user %s: %.200s", provider_title(&c->s), status, id,
                r.body.data ? r.body.data : "");
     buckets_http_result_free(&r);
-    if (status != 401) break; /* 401: the token went stale; once more with a new one */
+    if (status != 401 || provider_is(&c->s, "okta")) break; /* 401: the token went stale; once more */
   }
-  pthread_mutex_unlock(&e->mu);
+  pthread_mutex_unlock(&c->mu);
   return st;
 }

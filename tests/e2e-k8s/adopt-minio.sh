@@ -340,7 +340,7 @@ kc apply -f "$ROOT/operator/deploy/crds/" >/dev/null
 helm ${KUBECONTEXT:+--kube-context $KUBECONTEXT} -n "$NS" install adopt-operator "$ROOT/operator/helm/buckets-operator" \
   --set image.repository="$REGISTRY/buckets-operator" --set image.tag="$BUCKETS_TAG" --set watchNamespace="$NS" \
   --set replicaCount=1 --set kesImage="$REGISTRY/buckets-kes:$BUCKETS_TAG" ${AFF:+--set-json affinity="$AFF"} \
-  --wait --timeout 5m >/dev/null
+  --skip-crds --wait --timeout 5m >/dev/null
 ADOPT=("$ROOT/scripts/adopt-minio.sh" -n "$NS" -t "$T" ${KUBECONTEXT:+--context $KUBECONTEXT} --state "$STATE"
   --image "$REGISTRY/bucketsd:$BUCKETS_TAG" ${KES:+--check-kes})
 "${ADOPT[@]}" > "$WORK/adopt.log" 2>&1 && ok=yes || { ok=no; cat "$WORK/adopt.log"; }

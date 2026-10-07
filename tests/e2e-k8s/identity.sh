@@ -3,7 +3,9 @@
 # real OpenLDAP: settings saved and tested (Keycloak's own login form, in a
 # client pod playing the browser), applied by the operator to the servers,
 # taken up by the console without a restart, and a real sign-in; a team made
-# on the Teams page, reached by a Keycloak user whose only role names it; then LDAP
+# on the Teams page, reached by a Keycloak user whose only role names it; people
+# who leave Keycloak: removal set up and tested, a person's access key turned
+# off when they are disabled there, and back on when they return; then LDAP
 # added, looked up, tested again, applied (the servers restart one at a time
 # for it) and offered by the console.
 #
@@ -141,13 +143,21 @@ kca create users -r buckets -s username=kcteam -s enabled=true -s email=kcteam@e
   -s firstName=KC -s lastName=Team >/dev/null
 kca set-password -r buckets --username kcteam --new-password kcteam123 >/dev/null
 kca add-roles -r buckets --uusername kcteam --rolename team-finance-rw >/dev/null
-echo "   Keycloak: realm buckets, client buckets-console, user kcuser with readwrite, kcteam with team-finance-rw"
+# someone who will leave, and the client's service account for asking Keycloak about people
+kca create users -r buckets -s username=kcleaver -s enabled=true -s email=kcleaver@example.org -s emailVerified=true \
+  -s firstName=KC -s lastName=Leaver >/dev/null
+kca set-password -r buckets --username kcleaver --new-password kcleave123 >/dev/null
+kca add-roles -r buckets --uusername kcleaver --rolename readwrite >/dev/null
+kca update "clients/$CID" -r buckets -s serviceAccountsEnabled=true >/dev/null
+kca add-roles -r buckets --uusername service-account-buckets-console --cclientid realm-management --rolename view-users >/dev/null
+echo "   Keycloak: realm buckets, client buckets-console (its service account may view users), user kcuser with readwrite,"
+echo "   kcteam with team-finance-rw, kcleaver with readwrite"
 
 echo "== the operator and a cluster with its console ($REGISTRY, $BUCKETS_TAG)"
 kc apply --server-side --force-conflicts -f "$ROOT/operator/deploy/crds/" >/dev/null
 helm ${KUBECONTEXT:+--kube-context $KUBECONTEXT} -n "$NS" install idp-operator "$ROOT/operator/helm/buckets-operator" \
   --set image.repository="$REGISTRY/buckets-operator" --set image.tag="$BUCKETS_TAG" --set watchNamespace="$NS" \
-  --set replicaCount=1 ${AFF:+--set-json affinity="$AFF"} --wait --timeout 5m >/dev/null
+  --set replicaCount=1 ${AFF:+--set-json affinity="$AFF"} --skip-crds --wait --timeout 5m >/dev/null
 k apply -f - >/dev/null <<YAML
 apiVersion: buckets.io/v1alpha1
 kind: BucketsCluster
@@ -187,7 +197,15 @@ spec:
   volumes: [{name: driver, configMap: {name: identity-driver}}]
 YAML
 k wait --for=condition=Ready pod/client --timeout=300s >/dev/null
-drive() { k exec client -- python3 /driver/identity_driver.py "$1" || rc=1; }
+drive() { k exec client -- python3 /driver/identity_driver.py "$@" || rc=1; }
+servers_with() { # annotation: wait until every server runs with it set, and the cluster is ready
+  for _ in $(seq 120); do
+    ann=$(k get pods -l buckets.io/cluster=idp -o jsonpath="{range .items[*]}{.metadata.annotations.buckets\.io/$1}{\" \"}{end}" | wc -w)
+    [[ $ann -eq 4 && $(k get bc idp -o jsonpath='{.status.phase} {.status.readyServersText}') == "Ready 4/4" ]] && return 0
+    sleep 5
+  done
+  return 1
+}
 
 echo "== Keycloak: saved, tested, applied, taken up by the console, a real sign-in"
 drive oidc
@@ -195,6 +213,19 @@ echo "   status.identity: $(k get bc idp -o jsonpath='{.status.identity.phase}: 
 
 echo "== Teams: a team made on the page, and a Keycloak role that names its policy"
 drive teams
+
+echo "== people who leave Keycloak: removal on, a key made, the person disabled, then back"
+drive removal
+if servers_with identity-sync; then echo "ok    the servers restarted with the sync's settings"; else echo "FAIL  servers with the sync's settings"; rc=1; fi
+drive removal-key
+LID=$(kca get users -r buckets -q username=kcleaver --fields id --format csv --noquotes)
+kca update "users/$LID" -r buckets -s enabled=false >/dev/null
+echo "   kcleaver disabled in Keycloak"
+drive removal-expect off
+kca update "users/$LID" -r buckets -s enabled=true >/dev/null
+echo "   kcleaver enabled again"
+drive removal-expect on
+echo "   the sync's log: $(k logs -l buckets.io/cluster=idp --tail=-1 2>/dev/null | grep -o 'identity sync: [a-z]* access key [A-Z0-9]*' | sort | uniq -c | tr -s ' ' | tr '\n' ';')"
 
 echo "== LDAP added: looked up, tested again, applied"
 before=$(k get pods -l buckets.io/cluster=idp -o jsonpath='{range .items[*]}{.metadata.uid}{" "}{end}')

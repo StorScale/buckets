@@ -56,6 +56,7 @@ function missing(s: IdentitySettings, saved: Set<string>): string[] {
     if (o.provider === "generic" && !/^https?:\/\//.test(o.configUrl ?? "")) m.push("the discovery URL");
     if (!o.clientId) m.push("the client ID");
     if (!o.clientSecret && !saved.has("openid.clientSecret")) m.push("the client secret");
+    if (o.provider === "okta" && o.removal?.enabled && !o.removal.apiToken && !saved.has("openid.removal.apiToken")) m.push("an Okta API token");
   }
   const l = s.ldap;
   if (l) {
@@ -130,7 +131,7 @@ export default function SignInSetup() {
   const fresh = !dirty && !!cfg.candidateHash; // the draft is the saved candidate
   const test = fresh ? cfg.test : undefined;
   const needOidc = !!draft.openid, needLdap = !!draft.ldap;
-  const needRemoval = draft.openid?.provider === "entra" && !!draft.openid.removal?.enabled;
+  const needRemoval = !!draft.openid && draft.openid.provider !== "generic" && !!draft.openid.removal?.enabled;
   const ready = fresh && (!needOidc || test?.openid?.passed) && (!needLdap || test?.ldap?.passed) && (!needRemoval || test?.removal?.passed);
 
   const save = async () => {
@@ -201,8 +202,8 @@ export default function SignInSetup() {
             </div>
             <ProviderSteps provider={draft.openid.provider} redirectUri={draft.openid.redirectUri || cfg.redirectUri || ""} cluster={cfg.cluster ?? "buckets"} />
             <OidcForm o={draft.openid} saved={saved} onChange={(openid) => change({ ...draft, openid })} />
-            {draft.openid.provider === "entra" && (
-              <Removal o={draft.openid} onChange={(openid) => change({ ...draft, openid })} enabled={fresh} result={test?.removal} onDone={() => load(false)} />
+            {draft.openid.provider !== "generic" && (
+              <Removal o={draft.openid} saved={saved} onChange={(openid) => change({ ...draft, openid })} enabled={fresh} result={test?.removal} onDone={() => load(false)} />
             )}
           </>
         )}
@@ -244,7 +245,7 @@ export default function SignInSetup() {
             </li>
           )}
           {needLdap && <li className={test?.ldap?.passed ? "done" : ""}>Look up a directory user (above).</li>}
-          {needRemoval && <li className={test?.removal?.passed ? "done" : ""}>Look up a person in Microsoft Graph (People who leave, above).</li>}
+          {needRemoval && <li className={test?.removal?.passed ? "done" : ""}>Look up a person (People who leave, above).</li>}
           <li className={applied ? "done" : ""}>
             Apply. The servers take the settings at once{needLdap ? "; LDAP is read when they start, so they restart one at a time" : ""}, then the console.{" "}
             <button className="primary" onClick={apply} disabled={!ready || busy !== "" || applied} data-testid="signin-apply">
@@ -260,10 +261,57 @@ export default function SignInSetup() {
 
 // ---- people who leave ----------------------------------------------------------------------
 
-function Removal({ o, onChange, enabled, result, onDone }: { o: OidcSettings; onChange: (o: OidcSettings) => void; enabled: boolean; result?: RemovalTest; onDone: () => void }) {
+// What each provider calls things, and what it needs for the servers to ask about people.
+const REMOVAL: Record<"entra" | "keycloak" | "okta", { asks: string; leaving: string; where: string; placeholder: string; steps: ReactNode[] }> = {
+  entra: {
+    asks: "Microsoft Graph",
+    leaving: "deleted or disabled in Entra ID",
+    where: "In Entra ID",
+    placeholder: "name@example.com",
+    steps: [
+      <>
+        In the app registration, under <strong>API permissions</strong>, add <strong>Microsoft Graph → Application permissions → User.Read.All</strong>.
+      </>,
+      <>
+        Choose <strong>Grant admin consent</strong>. The sync signs in as the app with its client secret above; it only reads users.
+      </>,
+    ],
+  },
+  keycloak: {
+    asks: "Keycloak",
+    leaving: "deleted or disabled in Keycloak",
+    where: "In Keycloak",
+    placeholder: "user name",
+    steps: [
+      <>
+        In the client above, under <strong>Settings → Capability config</strong>, turn on <strong>Service accounts roles</strong> (Client authentication is on already).
+      </>,
+      <>
+        Under <strong>Service accounts roles</strong>, choose <strong>Assign role</strong>, filter by clients, and assign <strong>realm-management: view-users</strong>. The sync signs in as the
+        client with its secret above; it only reads users.
+      </>,
+    ],
+  },
+  okta: {
+    asks: "Okta",
+    leaving: "deactivated, suspended or deleted in Okta",
+    where: "In Okta",
+    placeholder: "name@example.com",
+    steps: [
+      <>
+        Sign in to the Okta Admin Console as an administrator who may read users (<strong>Read-only Administrator</strong> is enough), then go to <strong>Security → API → Tokens</strong> and
+        choose <strong>Create token</strong>.
+      </>,
+      <>Paste the token below. Okta tokens expire after 30 days unused; the sync uses it every hour.</>,
+    ],
+  },
+};
+
+function Removal({ o, saved, onChange, enabled, result, onDone }: { o: OidcSettings; saved: Set<string>; onChange: (o: OidcSettings) => void; enabled: boolean; result?: RemovalTest; onDone: () => void }) {
   const r = o.removal ?? { enabled: false };
   const set = (v: Partial<NonNullable<OidcSettings["removal"]>>) => onChange({ ...o, removal: { ...r, ...v } });
   const num = (s: string) => (s.trim() === "" ? undefined : Number(s));
+  const p = REMOVAL[o.provider as keyof typeof REMOVAL];
   const [user, setUser] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>();
@@ -283,8 +331,8 @@ function Removal({ o, onChange, enabled, result, onDone }: { o: OidcSettings; on
     <div className="subsection" data-testid="removal">
       <h3>People who leave</h3>
       <p className="muted">
-        Every hour the servers ask Microsoft Graph about each person holding Buckets credentials. Someone deleted or disabled in Entra ID loses their temporary credentials at once; their access keys are turned off at once and deleted after the days below. If they come back
-        before then, their keys come back on.
+        The servers regularly ask {p.asks} about each person holding Buckets credentials. Someone {p.leaving} loses their temporary credentials at once; their access keys are turned off at once and
+        deleted after the days below. If they come back before then, their keys come back on.
       </p>
       <label className="check">
         <input type="checkbox" checked={r.enabled} onChange={(e) => set({ enabled: e.target.checked })} data-testid="removal-on" />
@@ -293,25 +341,30 @@ function Removal({ o, onChange, enabled, result, onDone }: { o: OidcSettings; on
       {r.enabled && (
         <>
           <ol className="steps-list">
-            <li>
-              In the app registration, under <strong>API permissions</strong>, add <strong>Microsoft Graph → Application permissions → User.Read.All</strong>.
-            </li>
-            <li>
-              Choose <strong>Grant admin consent</strong>. The sync signs in as the app with its client secret above; it only reads users.
-            </li>
+            {p.steps.map((s, i) => (
+              <li key={i}>{s}</li>
+            ))}
           </ol>
           <div className="form-grid">
+            {o.provider === "okta" && (
+              <Field label="Okta API token">
+                <Secret value={r.apiToken} field="openid.removal.apiToken" saved={saved} onChange={(v) => set({ apiToken: v })} testId="removal-api-token" />
+              </Field>
+            )}
             <Field label="Delete their access keys after (days)" help="Keys stay off until then. 30 if empty.">
               <input type="number" min={1} max={3650} value={r.deleteAfterDays ?? ""} placeholder="30" onChange={(e) => set({ deleteAfterDays: num(e.target.value) })} data-testid="removal-days" />
+            </Field>
+            <Field label="Check every (minutes)" help="60 if empty.">
+              <input type="number" min={1} max={1440} value={r.intervalMinutes ?? ""} placeholder="60" onChange={(e) => set({ intervalMinutes: num(e.target.value) })} data-testid="removal-interval" />
             </Field>
             <Field label="Most people removed in one sync" help="More leaving at once is held back and raises an alert, in case the directory answers wrongly. 10 if empty.">
               <input type="number" min={1} value={r.maxPerSync ?? ""} placeholder="10" onChange={(e) => set({ maxPerSync: num(e.target.value) })} data-testid="removal-max" />
             </Field>
           </div>
           <h3>Look up a person</h3>
-          <p className="muted">{enabled ? "Asks Microsoft Graph about someone with the saved settings, as the sync will." : "Save the settings first (below)."}</p>
+          <p className="muted">{enabled ? `Asks ${p.asks} about someone with the saved settings, as the sync will.` : "Save the settings first (below)."}</p>
           <div className="inline-form">
-            <input placeholder="name@example.com" value={user} onChange={(e) => setUser(e.target.value)} disabled={!enabled} data-testid="removal-test-user" />
+            <input placeholder={p.placeholder} value={user} onChange={(e) => setUser(e.target.value)} disabled={!enabled} data-testid="removal-test-user" />
             <button onClick={run} disabled={!enabled || !user.trim() || busy} data-testid="removal-test">
               {busy ? "Looking up…" : "Look up"}
             </button>
@@ -325,9 +378,9 @@ function Removal({ o, onChange, enabled, result, onDone }: { o: OidcSettings; on
                   <dd>{result.displayName || result.userPrincipalName}</dd>
                   <dt>Sign-in name</dt>
                   <dd className="mono">{result.userPrincipalName}</dd>
-                  <dt>Object ID</dt>
+                  <dt>ID</dt>
                   <dd className="mono">{result.id}</dd>
-                  <dt>In Entra ID</dt>
+                  <dt>{p.where}</dt>
                   <dd>{result.state === "active" ? "active" : "disabled: the sync would remove their access"}</dd>
                 </dl>
               ) : (
