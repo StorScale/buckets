@@ -488,7 +488,12 @@ static buckets_read_fn xform_open(sse_put *p, buckets_read_fn rd, void *ud, int6
 
 static void xform_close(sse_put *p) {
   if (p->w) buckets_sse_writer_free(p->w);
-  if (p->compressed) buckets_s2_writer_free(&p->cw);
+  if (p->compressed) {
+    buckets_s2_writer_free(&p->cw);
+    buckets_md5_cleanup(&p->ph.md5); /* finished by sse_pre_commit when the write got that far */
+    buckets_sha256_cleanup(&p->ph.sha);
+    buckets_cksum_hasher_cleanup(&p->ph.cks);
+  }
   buckets_buf_free(&p->index);
 }
 
@@ -1327,6 +1332,8 @@ static void put_extract(s3_ctx *c) {
     else if (b.want_sha && memcmp(sha, b.sha, 32) != 0) buckets_s3_write_error(c, BUCKETS_ERR_CONTENT_SHA256_MISMATCH);
     else c->resp->status = 200;
   }
+  buckets_md5_cleanup(&w.md5); /* a failed body is not finished */
+  buckets_sha256_cleanup(&w.sha);
   if (s2) buckets_s2_reader_free(s2);
   buckets_decomp_free(dc);
   free(sc), free(prefix_all);

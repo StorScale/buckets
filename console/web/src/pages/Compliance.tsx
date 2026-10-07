@@ -225,6 +225,7 @@ function Encryption({ r }: { r: Compliance }) {
   const plain = sum(...all.map((b) => b.counts!.unencrypted));
   const total = enc.bytes + plain.bytes;
   const noDefault = r.buckets.filter((b) => !b.encryption.algorithm).length;
+  const chacha = sum(...all.map((b) => b.counts!.chacha20));
   return (
     <>
       <p data-testid="encryption-summary">
@@ -241,6 +242,17 @@ function Encryption({ r }: { r: Compliance }) {
         · {noDefault} bucket{noDefault === 1 ? "" : "s"} without default
         encryption
       </p>
+      {chacha.versions > 0 && (
+        <p data-testid="chacha20-summary">
+          <span className="pill warn">ChaCha20</span> {amount(chacha)} encrypted
+          with ChaCha20-Poly1305, which{" "}
+          {r.fips
+            ? "this server, in FIPS mode, cannot read"
+            : "FIPS mode cannot read"}
+          . <strong>Encrypt existing objects</strong> re-encrypts them with
+          AES-256-GCM (outside FIPS mode).
+        </p>
+      )}
       <table data-testid="encryption-table">
         <thead>
           <tr>
@@ -251,6 +263,7 @@ function Encryption({ r }: { r: Compliance }) {
             <th>SSE-KMS</th>
             <th>SSE-C</th>
             <th>Unencrypted</th>
+            {chacha.versions > 0 && <th>ChaCha20</th>}
           </tr>
         </thead>
         <tbody>
@@ -299,9 +312,14 @@ function Encryption({ r }: { r: Compliance }) {
                       </>
                     ) : null}
                   </td>
+                  {chacha.versions > 0 && (
+                    <td data-testid={`chacha20-${b.name}`}>
+                      {amount(b.counts.chacha20)}
+                    </td>
+                  )}
                 </>
               ) : (
-                <td colSpan={4} className="muted">
+                <td colSpan={chacha.versions > 0 ? 5 : 4} className="muted">
                   {r.scannedAt
                     ? "not counted yet: made since the last scan"
                     : "not counted yet: the scanner's first cycle has not finished"}

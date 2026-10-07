@@ -2,6 +2,8 @@
 # src/metrics/minio-catalog.tsv. Names start with buckets_, which the
 # metric-name comparison with MinIO (tests/integration/metrics-names.sh)
 # leaves out: new metrics may be added (docs/compatibility.md).
+B	cluster	buckets_node_fips_mode	gaugeMetric	"1 when the server runs in FIPS 140-3 mode (BUCKETS_FIPS: every security function in the OpenSSL FIPS provider), else 0"
+B	node	buckets_node_fips_mode	gaugeMetric	"1 when the server runs in FIPS 140-3 mode (BUCKETS_FIPS: every security function in the OpenSSL FIPS provider), else 0"
 B	cluster	buckets_node_identity_sync_runs_total	counterMetric	"Identity syncs run on this server (the one leading pool 0, set 0)"
 B	node	buckets_node_identity_sync_runs_total	counterMetric	"Identity syncs run on this server (the one leading pool 0, set 0)"
 B	cluster	buckets_node_identity_sync_failures_total	counterMetric	"Identity syncs that could not learn about everyone: the provider failed, or what the sync turned off could not be read"

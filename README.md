@@ -162,7 +162,7 @@ With OpenID sign-in, the Users page also lists the provider's people that Bucket
 | `tests/fuzz/soak.sh` | Every fuzz target under libFuzzer with ASan/UBSan in a Linux container, for `SECONDS` each (needs docker) |
 | `scripts/ci.sh` | The full gate: release, ASan/UBSan and TSan builds, unit, smoke and interop tests |
 
-`.github/workflows/images.yml` builds the `bucketsd`, `buckets-operator`, `buckets-console` and `buckets-kes` images on every push to `main` and on tags, and pushes them to `ghcr.io/storscale/<image>`: the short commit SHA (8 characters) and `main`, or the version (the tag without its `v`) and `latest`. Each image carries an SBOM and build provenance. Release images are signed with cosign, keyless, as this workflow, and the operator's Helm chart is pushed to `oci://ghcr.io/storscale/charts/buckets-operator`. To verify an image:
+`.github/workflows/images.yml` builds the `bucketsd`, `buckets-operator`, `buckets-console` and `buckets-kes` images on every push to `main` and on tags, and pushes them to `ghcr.io/storscale/<image>`: the short commit SHA (8 characters) and `main`, or the version (the tag without its `v`) and `latest`. Each image carries an SBOM and build provenance, and also comes as a `-fips` build (`<version>-fips`) that runs in FIPS 140-3 mode ([docs/fips.md](docs/fips.md)). Release images are signed with cosign, keyless, as this workflow, and the operator's Helm chart is pushed to `oci://ghcr.io/storscale/charts/buckets-operator`. To verify an image:
 
 ```bash
 cosign verify ghcr.io/storscale/bucketsd:<version> \

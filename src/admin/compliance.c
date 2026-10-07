@@ -13,7 +13,10 @@
  *                 "encryption": {"algorithm": "SSE-S3" | "SSE-KMS" | "", "keyId",
  *                                "keyStatus": "ok" | "missing" | "error" | "no-kms" | ""},
  *                 "counts": {"sseS3", "sseKms", "sseC", "unencrypted", "governance", "compliance",
- *                            "legalHold": {"versions", "bytes"}, "latestRetainUntil"} | null}]} */
+ *                            "legalHold": {"versions", "bytes"}, "latestRetainUntil",
+ *                            "chacha20": versions whose key is sealed with ChaCha20, which FIPS mode can't read}
+ *                 | null}],
+ *    "fips": whether this server runs in FIPS mode} */
 #include "scanner/compliance.h"
 
 #include <stdio.h>
@@ -22,6 +25,7 @@
 #include <yyjson.h>
 
 #include "admin/admin.h"
+#include "crypto/fips.h"
 #include "bucket/metasys.h"
 #include "kms/kms.h"
 #include "object/sysconfig.h"
@@ -92,6 +96,7 @@ void buckets_admin_compliance(s3_ctx *c) {
   yyjson_mut_val *k = yyjson_mut_obj_add_obj(d, root, "kms");
   yyjson_mut_obj_add_bool(d, k, "configured", kms != NULL);
   yyjson_mut_obj_add_bool(d, k, "online", kms && buckets_kms_online(kms));
+  yyjson_mut_obj_add_bool(d, root, "fips", buckets_fips_mode());
   yyjson_mut_val *arr = yyjson_mut_obj_add_arr(d, root, "buckets");
   key_seen *seen = NULL;
   size_t nseen = 0;
@@ -134,6 +139,7 @@ void buckets_admin_compliance(s3_ctx *c) {
       put_count(d, co, "governance", &cc.governance);
       put_count(d, co, "compliance", &cc.compliance);
       put_count(d, co, "legalHold", &cc.legal_hold);
+      put_count(d, co, "chacha20", &cc.chacha20);
       yyjson_mut_obj_add_sint(d, co, "latestRetainUntil", cc.latest_until);
     } else {
       yyjson_mut_obj_add_null(d, o, "counts"); /* made since the last cycle */

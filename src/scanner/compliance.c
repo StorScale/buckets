@@ -9,6 +9,8 @@
 
 #include "bucket/objectlock.h"
 #include "core/timefmt.h"
+#include "crypto/base64.h"
+#include "crypto/dare.h"
 #include "s3/sse.h"
 
 /* user metadata as MinIO writes it (canonical case) or as some clients send it (lower case) */
@@ -22,6 +24,23 @@ static void count(buckets_compliance_count *c, int64_t size) {
   c->bytes += size > 0 ? (uint64_t)size : 0;
 }
 
+/* Whether the version's object key is sealed with ChaCha20-Poly1305: the cipher byte of the sealed key's DARE
+ * header. MinIO seals the key and encrypts the data in one request with the same choice of cipher. */
+static bool sealed_with_chacha20(const buckets_object_info *v) {
+  static const char *const keys[] = {BUCKETS_SSE_META_SEALED_S3, BUCKETS_SSE_META_SEALED_KMS,
+                                     BUCKETS_SSE_META_SEALED_SSEC};
+  for (size_t i = 0; i < v->nmeta_sys; i++) {
+    const buckets_xl_kv *kv = &v->meta_sys[i];
+    bool sealed = false;
+    for (size_t k = 0; k < sizeof(keys) / sizeof(keys[0]) && !sealed; k++) sealed = strcmp(kv->key, keys[k]) == 0;
+    if (!sealed || kv->value_len < 4) continue;
+    uint8_t head[3]; /* the first four base64 characters */
+    return buckets_base64_decode((const char *)kv->value, 4, head) == 3 && head[0] == BUCKETS_DARE_VERSION20 &&
+           head[1] == 1;
+  }
+  return false;
+}
+
 void buckets_compliance_add(buckets_compliance_counts *c, const buckets_object_info *v, int64_t size,
                             int64_t now) {
   if (v->delete_marker) return;
@@ -31,6 +50,7 @@ void buckets_compliance_add(buckets_compliance_counts *c, const buckets_object_i
     case BUCKETS_SSE_C: count(&c->sse_c, size); break;
     default: count(&c->plain, size); break;
   }
+  if (sealed_with_chacha20(v)) count(&c->chacha20, size);
   const char *mode = meta2(v, BUCKETS_LOCK_MODE_META, "X-Amz-Object-Lock-Mode");
   const char *until = meta2(v, BUCKETS_LOCK_UNTIL_META, "X-Amz-Object-Lock-Retain-Until-Date");
   long long sec;
@@ -66,6 +86,7 @@ static const struct {
     {"governance", offsetof(buckets_compliance_counts, governance)},
     {"compliance", offsetof(buckets_compliance_counts, compliance)},
     {"legalHold", offsetof(buckets_compliance_counts, legal_hold)},
+    {"chacha20", offsetof(buckets_compliance_counts, chacha20)},
 };
 
 void buckets_compliance_json(const buckets_compliance_bucket *b, size_t n, int64_t scanned_at,

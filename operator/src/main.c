@@ -8,6 +8,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "crypto/fips.h"
 #include "core/log.h"
 #include "lease.h"
 #include "reconcile.h"
@@ -39,6 +40,14 @@ int main(int argc, char **argv) {
   if (argc > 1 && (strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "version") == 0)) {
     printf("buckets-operator %s\n", BUCKETS_VERSION);
     return 0;
+  }
+  {
+    char cerr[512];
+    if (!buckets_crypto_init(cerr, sizeof(cerr))) {
+      buckets_log_error("fips: %s", cerr);
+      return 1;
+    }
+    if (buckets_fips_mode()) buckets_log_info("fips: FIPS 140-3 mode, with %s", buckets_fips_module());
   }
   buckets_log_level level;
   if (getenv("BUCKETS_LOG_LEVEL") && buckets_log_parse_level(getenv("BUCKETS_LOG_LEVEL"), &level)) {

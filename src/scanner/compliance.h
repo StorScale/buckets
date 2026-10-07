@@ -23,6 +23,8 @@ typedef struct {
   buckets_compliance_count sse_s3, sse_kms, sse_c, plain; /* every version but delete markers */
   buckets_compliance_count governance, compliance;        /* retention in force now, by mode */
   buckets_compliance_count legal_hold;
+  buckets_compliance_count chacha20; /* encrypted versions whose key is sealed with ChaCha20-Poly1305, which FIPS
+                                        mode can't read (crypto/fips.h): MinIO picks it on CPUs without AES */
   int64_t latest_until; /* the furthest retain-until in force (unix seconds), 0 when none */
 } buckets_compliance_counts;
 

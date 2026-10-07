@@ -25,6 +25,7 @@ add_library(buckets STATIC
   core/msgpack.c
   core/pool.c
   crypto/sha256.c
+  crypto/fips.c
   crypto/md5.c
   crypto/hex.c
   crypto/base64.c

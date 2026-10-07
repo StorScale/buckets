@@ -13,7 +13,10 @@
 #                       cosign (keyless: this workflow's GitHub identity), and the
 #                       operator's Helm chart goes to oci://ghcr.io/storscale/charts
 # Every image is multi-arch (linux/amd64 and linux/arm64, each built natively)
-# and carries an SBOM and build provenance as attestations.
+# and carries an SBOM and build provenance as attestations. Each also comes as
+# a -fips build (the Dockerfiles' fips target, every tag with -fips appended:
+# <version>-fips, latest-fips, ...), which always runs in FIPS 140-3 mode with
+# OpenSSL's FIPS provider (docs/fips.md).
 #
 # Verify a release image:
 #   cosign verify ghcr.io/storscale/bucketsd:<version> \
@@ -51,6 +54,7 @@ jobs:
       matrix:
         name: [bucketsd, buckets-operator, buckets-console, buckets-kes]
         arch: [amd64, arm64]
+        variant: [standard, fips]
         include:
           - arch: amd64
             runner: ubuntu-latest
@@ -81,6 +85,7 @@ jobs:
         with:
           context: .
           file: ${{ matrix.dockerfile }}
+          target: ${{ matrix.variant == 'fips' && 'fips' || '' }}
           platforms: linux/${{ matrix.arch }}
           outputs: type=image,name=${{ env.REGISTRY }}/${{ matrix.name }},push-by-digest=true,name-canonical=true,push=true
           labels: |
@@ -89,8 +94,8 @@ jobs:
             org.opencontainers.image.licenses=AGPL-3.0-or-later
           sbom: true
           provenance: mode=max
-          cache-from: type=gha,scope=${{ matrix.name }}-${{ matrix.arch }}
-          cache-to: type=gha,scope=${{ matrix.name }}-${{ matrix.arch }},mode=max
+          cache-from: type=gha,scope=${{ matrix.name }}-${{ matrix.arch }}-${{ matrix.variant }}
+          cache-to: type=gha,scope=${{ matrix.name }}-${{ matrix.arch }}-${{ matrix.variant }},mode=max
 
       - name: Record the digest
         run: |
@@ -99,7 +104,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: digest-${{ matrix.name }}-${{ matrix.arch }}
+          name: digest-${{ matrix.name }}-${{ matrix.variant }}-${{ matrix.arch }}
           path: digests/*
           retention-days: 1
 
@@ -114,10 +119,11 @@ jobs:
       fail-fast: false
       matrix:
         name: [bucketsd, buckets-operator, buckets-console, buckets-kes]
+        variant: [standard, fips]
     steps:
       - uses: actions/download-artifact@v4
         with:
-          pattern: digest-${{ matrix.name }}-*
+          pattern: digest-${{ matrix.name }}-${{ matrix.variant }}-*
           merge-multiple: true
           path: digests
 
@@ -125,11 +131,12 @@ jobs:
         id: tags
         run: |
           image="$REGISTRY/${{ matrix.name }}"
+          sfx=${{ matrix.variant == 'fips' && '-fips' || '' }}
           if [[ $GITHUB_REF == refs/tags/v* ]]; then
             version=${GITHUB_REF_NAME#v}
-            echo "list=$image:$version $image:latest" >> "$GITHUB_OUTPUT"
+            echo "list=$image:$version$sfx $image:latest$sfx" >> "$GITHUB_OUTPUT"
           else
-            echo "list=$image:${GITHUB_SHA::8} $image:${GITHUB_REF_NAME//\//-}" >> "$GITHUB_OUTPUT"
+            echo "list=$image:${GITHUB_SHA::8}$sfx $image:${GITHUB_REF_NAME//\//-}$sfx" >> "$GITHUB_OUTPUT"
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
 

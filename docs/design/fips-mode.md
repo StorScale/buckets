@@ -1,6 +1,6 @@
 # Design: FIPS 140-3 mode
 
-Status: proposed, for review. Roadmap: Phase 4, "FIPS 140-3 mode using the
+Status: agreed, being built. Roadmap: Phase 4, "FIPS 140-3 mode using the
 OpenSSL 3 FIPS provider". With the usage, access and retention reports done,
 it is the last part of Phase 4's gate: "FIPS mode is documented and tested".
 
@@ -56,6 +56,10 @@ one visible exception.
   The rest of OpenSSL can be newer, which OpenSSL supports. The normal images
   don't change.
 - **`BUCKETS_FIPS=on`**, which the FIPS images set. At startup the server:
+  - runs `openssl fipsinstall` for the module on this machine, into a private
+    directory. The 3.1.2 module's security policy requires its config to be
+    generated on every machine and never copied, so it can't be baked into the
+    image;
   - loads the `fips` and `base` providers and makes `fips=yes` the default;
   - runs the module's self-tests;
   - refuses to start if any of this fails, and never falls back.
@@ -77,12 +81,16 @@ one visible exception.
 | KES keys and the KMS secret key | AES-256 or ChaCha20 | AES-256 only. ChaCha20 keys can't be created or used. |
 | OIDC and JWT | RS*, PS*, ES*, EdDSA, HS* | whatever the provider approves. A refused token says which algorithm. |
 | SFTP (libssh) | libssh defaults, curve25519 and ChaCha20 included | key exchange, ciphers, MACs and host keys limited to ECDH over NIST curves, AES-GCM or AES-CTR, HMAC-SHA2, and RSA-SHA2 or ECDSA |
-| Notification targets | as configured | Postgres MD5 password authentication and MySQL's SHA-1 native passwords can't connect; the docs list what works (SCRAM-SHA-256, `caching_sha2_password`, TLS). NATS nkeys (Ed25519) are refused if the provider refuses them. |
+| Notification targets | as configured | Postgres MD5 password authentication is refused (MD5 would protect the password); SCRAM-SHA-256 works. MySQL's password exchanges use SHA-1 and SHA-256 hashing, which the module provides. NATS nkeys (Ed25519) fail: the 3.1.2 module has no Ed25519. |
 | Console sessions | PBKDF2 with AES-GCM | the same, through the FIPS provider |
 
 **Before turning FIPS on** for an existing cluster, a site needs to know
 whether it holds ChaCha20 data. The encryption coverage report (1.11.0)
-gains a **ChaCha20** count per bucket from the scanner. If it's zero, the
+gains a **ChaCha20** count per bucket from the scanner. The scanner reads only
+metadata, so it uses the sealed object key's cipher: MinIO seals the key and
+encrypts the data in the same request with the same cipher choice (`sio`
+picks ChaCha20 for both on CPUs without AES). Reads still check each package's
+cipher, so an object the count missed is refused all the same. If it's zero, the
 switch is safe. If not, **Encrypt existing objects** re-encrypts those objects
 with AES-256-GCM first.
 
@@ -114,25 +122,16 @@ than 5% in normal mode is a bug.
   - how to turn FIPS on, and what stops working;
   - the module's certificate.
 
-## Open questions for review
+## Decisions
 
-1. **A separate `-fips` image, or one image with a switch?** One image is
-   simpler to ship, but it would carry the FIPS provider for everyone, and
-   people auditing it want an image that can only run in FIPS mode. I
-   recommend a separate image that always runs in FIPS mode.
-2. **Encrypted admin payloads from a standard `mc`.** `mc` encrypts admin
-   payloads (new users, keys, configuration) with Argon2id. A strict reading
-   refuses them, which breaks `mc admin user add` against a FIPS cluster
-   unless `mc` is a FIPS build. The payload already travels inside TLS from
-   the FIPS module; the Argon2 layer adds to that protection, it isn't the
-   protection itself. I recommend accepting Argon2id payloads on the way in,
-   saying so in the docs, and sending only PBKDF2. A setting
-   (`BUCKETS_FIPS_STRICT=on`) would refuse them instead, for sites whose
-   auditors require it.
-3. **ChaCha20 data:** refuse it in FIPS mode, and count it in the encryption
-   report beforehand (as above)? The alternative is to keep reading it outside
-   the module, which defeats the purpose. I recommend refusing it.
-4. **Which module version:** pin the newest OpenSSL FIPS provider version with
-   a FIPS 140-3 certificate, which I'll confirm against NIST's CMVP list when
-   building. Newer provider versions under review would be offered only once
-   they're certified.
+1. **A separate `-fips` image** for each of the four images, which always runs
+   in FIPS mode. The normal images are unchanged.
+2. **Argon2id admin payloads from a standard `mc` are accepted** on the way in,
+   outside the module, as documented; the server sends only PBKDF2.
+   `BUCKETS_FIPS_STRICT=on` refuses them.
+3. **ChaCha20 data is refused** in FIPS mode, after the encryption report
+   shows where it is.
+4. **The module is OpenSSL's FIPS provider 3.1.2**, FIPS 140-3 certificate
+   #4985, valid until 10 March 2030. OpenSSL 3.5.4's provider is under CMVP
+   review and will be offered once it is certified. The rest of OpenSSL stays
+   at 3.5.

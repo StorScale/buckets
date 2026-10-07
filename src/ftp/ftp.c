@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
+#include "net/tls.h"
 #include "ftp/ftp.h"
 
 #include <arpa/inet.h>
@@ -1292,7 +1293,7 @@ bool buckets_ftp_start(buckets_ftp_opts *o, bool s3_tls, const char *certs_dir, 
   snprintf(g_srv.name, sizeof(g_srv.name), tls ? "Buckets FTP(Secure) Server" : "Buckets FTP Server");
   if (tls) {
     SSL_CTX *ctx = SSL_CTX_new(TLS_server_method());
-    SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
+    buckets_tls_ctx_setup(ctx);
     /* a peer closing without close_notify ends the stream, as for Go */
     SSL_CTX_set_options(ctx, SSL_OP_IGNORE_UNEXPECTED_EOF);
     if (SSL_CTX_use_certificate_chain_file(ctx, g_srv.o.cert) != 1 ||

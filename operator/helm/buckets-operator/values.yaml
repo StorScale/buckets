@@ -5,6 +5,9 @@ image:
   repository: ghcr.io/storscale/buckets-operator
   tag: "" # defaults to the chart's appVersion
   pullPolicy: IfNotPresent
+# FIPS 140-3 mode for the operator itself (docs/fips.md): its -fips image, with the operator's TLS in the OpenSSL
+# FIPS provider. Clusters choose for themselves, with spec.fips.
+fips: false
 imagePullSecrets: []
 
 # Watch BucketsClusters in one namespace only (RBAC then becomes a Role

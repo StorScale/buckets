@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
+#include "crypto/fips.h"
 #include "kes/server.h"
 
 #include <ctype.h>
@@ -625,7 +626,8 @@ static void h_import(buckets_kes_server *s, const buckets_http_request *req, con
     snprintf(m, sizeof(m), "invalid key size for '%s'", cipher ? cipher : "");
     fail(resp, 406, m);
   } else if (!buckets_kes_key_import(&k, cipher, (const uint8_t *)raw.data, id)) {
-    snprintf(m, sizeof(m), "algorithm '%s' is not supported", cipher ? cipher : "");
+    snprintf(m, sizeof(m), "algorithm '%s' is not supported%s", cipher ? cipher : "",
+             buckets_fips_mode() ? " in FIPS mode" : "");
     fail(resp, 406, m);
   } else {
     store_new_key(s, req, res, &k, resp);
@@ -726,8 +728,15 @@ static void h_generate(buckets_kes_server *s, const buckets_http_request *req, c
   uint8_t dek[32];
   buckets_random(dek, 32);
   buckets_buf ct = BUCKETS_BUF_INIT;
-  buckets_kes_encrypt(&k, dek, 32, ctx.data, ctx.len, &ct);
+  bool sealed = buckets_kes_encrypt(&k, dek, 32, ctx.data, ctx.len, &ct);
   buckets_kes_key_wipe(&k);
+  if (!sealed) {
+    OPENSSL_cleanse(dek, 32);
+    buckets_buf_free(&ct);
+    buckets_buf_free(&ctx);
+    fail(resp, 501, "the key is a ChaCha20 key, which FIPS mode does not provide");
+    return;
+  }
   yyjson_mut_val *o;
   yyjson_mut_doc *d = obj(&o);
   add_b64(d, o, "plaintext", dek, 32);
@@ -748,8 +757,10 @@ static void h_encrypt(buckets_kes_server *s, const buckets_http_request *req, co
   buckets_kes_status st;
   if (!body_bytes(body, "plaintext", &pt) || !body_bytes(body, "context", &ctx)) fail(resp, 400, "invalid request body");
   else if ((st = get_key(s, res, &k, err, sizeof(err))) != BUCKETS_KES_OK) store_fail(s, req, resp, st, err, "failed to read key");
-  else {
-    buckets_kes_encrypt(&k, pt.data, pt.len, ctx.data, ctx.len, &ct);
+  else if (!buckets_kes_encrypt(&k, pt.data, pt.len, ctx.data, ctx.len, &ct)) {
+    buckets_kes_key_wipe(&k);
+    fail(resp, 501, "the key is a ChaCha20 key, which FIPS mode does not provide");
+  } else {
     buckets_kes_key_wipe(&k);
     yyjson_mut_val *o;
     yyjson_mut_doc *d = obj(&o);

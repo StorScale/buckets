@@ -1298,7 +1298,7 @@ void buckets_s3_write_error_msg(s3_ctx *c, buckets_s3_error e, const char *messa
                            c->request_id, c->s->host_id);
 }
 
-void buckets_s3_write_error(s3_ctx *c, buckets_s3_error e) { buckets_s3_write_error_msg(c, e, NULL); }
+void buckets_s3_write_error(s3_ctx *c, buckets_s3_error e) { buckets_s3_write_error_msg(c, e, c->err_message); }
 
 void buckets_s3_write_rejected(s3_ctx *c) {
   /* notImplementedHandler runs before any handler names the bucket or key */

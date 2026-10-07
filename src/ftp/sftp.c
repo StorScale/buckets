@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
+#include "crypto/fips.h"
 #include "ftp/sftp.h"
 
 #include <arpa/inet.h>
@@ -1001,6 +1002,33 @@ static void *accept_run(void *arg) {
   return NULL;
 }
 
+/* The names of list (comma-separated) that are in allowed, into out; false when none is. */
+static bool keep_allowed(const char *list, const char *const *allowed, char *out, size_t cap) {
+  size_t n = 0;
+  out[0] = '\0';
+  for (const char *p = list; p && *p;) {
+    size_t len = strcspn(p, ",");
+    for (const char *const *a = allowed; *a; a++) {
+      if (strlen(*a) != len || strncmp(p, *a, len) != 0) continue;
+      int w = snprintf(out + n, cap - n, "%s%s", n ? "," : "", *a);
+      if (w > 0 && (size_t)w < cap - n) n += (size_t)w;
+      break;
+    }
+    p += len;
+    if (*p == ',') p++;
+  }
+  return n > 0;
+}
+
+/* Whether the host key is one FIPS mode can sign with: not Ed25519. */
+static bool fips_host_key(const char *file) {
+  ssh_key k = NULL;
+  if (ssh_pki_import_privkey_file(file, NULL, NULL, NULL, &k) != SSH_OK) return true; /* reported below */
+  enum ssh_keytypes_e t = ssh_key_type(k);
+  ssh_key_free(k);
+  return t != SSH_KEYTYPE_ED25519;
+}
+
 static void join_default(const char *const *set, char *out, size_t cap) {
   buckets_buf b = BUCKETS_BUF_INIT;
   for (size_t i = 0; set[i]; i++)
@@ -1012,6 +1040,11 @@ static void join_default(const char *const *set, char *out, size_t cap) {
 bool buckets_sftp_start(buckets_sftp_opts *o, char *err, size_t errlen) {
   g_srv.o = *o;
   ssh_init();
+  if (buckets_fips_mode() && !fips_host_key(o->key_file)) {
+    snprintf(err, errlen, "invalid arguments passed, FIPS mode needs an ECDSA (NIST curve) or RSA host key: %s",
+             o->key_file);
+    return false;
+  }
   ssh_key host = NULL;
   if (access(o->key_file, R_OK) != 0) {
     snprintf(err, errlen, "invalid arguments passed, private key file is not accessible: open %s: %s", o->key_file,
@@ -1047,6 +1080,31 @@ bool buckets_sftp_start(buckets_sftp_opts *o, char *err, size_t errlen) {
   join_default(k_pubkey_supported, pubs, sizeof(pubs));
   const char *K = o->kex_algos ? o->kex_algos : kex, *C = o->cipher_algos ? o->cipher_algos : ciphers,
              *M = o->mac_algos ? o->mac_algos : macs;
+  char fk[1024], fc[1024], fm[1024], fp[2048];
+  if (buckets_fips_mode()) { /* only what the FIPS module provides, from the defaults or --sftp's lists */
+    static const char *const fips_kex[] = {"ecdh-sha2-nistp256", "ecdh-sha2-nistp384", "ecdh-sha2-nistp521",
+                                           "diffie-hellman-group14-sha256", "diffie-hellman-group16-sha512",
+                                           "diffie-hellman-group18-sha512", NULL};
+    static const char *const fips_ciphers[] = {"aes128-gcm@openssh.com", "aes256-gcm@openssh.com", "aes128-ctr",
+                                               "aes192-ctr", "aes256-ctr", NULL};
+    static const char *const fips_macs[] = {"hmac-sha2-256", "hmac-sha2-512", "hmac-sha2-256-etm@openssh.com",
+                                            "hmac-sha2-512-etm@openssh.com", NULL};
+    static const char *const fips_pubs[] = {"ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521",
+                                            "rsa-sha2-256", "rsa-sha2-512", NULL};
+    const char *what = NULL;
+    if (!keep_allowed(K, fips_kex, fk, sizeof(fk))) what = "key exchange";
+    else if (!keep_allowed(C, fips_ciphers, fc, sizeof(fc))) what = "cipher";
+    else if (!keep_allowed(M, fips_macs, fm, sizeof(fm))) what = "MAC";
+    else if (!keep_allowed(o->pub_key_algos ? o->pub_key_algos : pubs, fips_pubs, fp, sizeof(fp))) what = "public key";
+    if (what) {
+      snprintf(err, errlen, "Unable to start SFTP Server: FIPS mode leaves no %s algorithm of those given", what);
+      return false;
+    }
+    K = fk, C = fc, M = fm;
+    snprintf(pubs, sizeof(pubs), "%s", fp);
+    free(o->pub_key_algos); /* the FIPS list replaces it */
+    o->pub_key_algos = NULL;
+  }
   /* certificates for every key type allowed: a trusted CA's user certificates */
   buckets_buf pk = BUCKETS_BUF_INIT;
   buckets_buf_append_c(&pk, o->pub_key_algos ? o->pub_key_algos : pubs);

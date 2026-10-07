@@ -11,6 +11,8 @@
  * FIPS-mode clients. */
 bool buckets_madmin_encrypt(const char *password, const void *data, size_t n, buckets_buf *out);
 bool buckets_madmin_decrypt(const char *password, const void *data, size_t n, buckets_buf *out);
+/* Whether data is sealed with Argon2id, which BUCKETS_FIPS_STRICT refuses (crypto/fips.h): why decrypt failed. */
+bool buckets_madmin_fips_refused(const void *data, size_t n);
 bool buckets_madmin_is_encrypted(const void *data, size_t n);
 
 #endif

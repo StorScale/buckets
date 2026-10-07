@@ -26,8 +26,13 @@ size_t buckets_cksum_raw_len(uint32_t type) {
 void buckets_cksum_hasher_init(buckets_cksum_hasher *h, uint32_t type) {
   memset(h, 0, sizeof(*h));
   h->type = type & BUCKETS_CKSUM_BASE_MASK;
-  buckets_sha1_init(&h->s1);
-  buckets_sha256_init(&h->s256);
+  if (is(h->type, BUCKETS_CKSUM_SHA1)) buckets_sha1_init(&h->s1);
+  else if (is(h->type, BUCKETS_CKSUM_SHA256)) buckets_sha256_init(&h->s256);
+}
+
+void buckets_cksum_hasher_cleanup(buckets_cksum_hasher *h) {
+  buckets_sha1_cleanup(&h->s1);
+  buckets_sha256_cleanup(&h->s256);
 }
 
 void buckets_cksum_hasher_update(buckets_cksum_hasher *h, const void *data, size_t n) {

@@ -78,6 +78,13 @@ void buckets_admin_error_msg(s3_ctx *c, buckets_s3_error e, const char *message)
 
 void buckets_admin_error(s3_ctx *c, buckets_s3_error e) { buckets_admin_error_msg(c, e, NULL); }
 
+void buckets_admin_decrypt_error(s3_ctx *c, buckets_s3_error e, const char *message) {
+  if (buckets_madmin_fips_refused(c->doc.data, c->doc.len))
+    message = "FIPS strict mode: the request is sealed with Argon2id, which is outside the FIPS module; send it with "
+              "PBKDF2 (a FIPS build of mc), or unset BUCKETS_FIPS_STRICT";
+  buckets_admin_error_msg(c, e, message);
+}
+
 /* A custom-coded admin error (AdminError / APIError literals in MinIO). */
 static void custom_error(s3_ctx *c, int status, const char *code, const char *message) {
   buckets_admin_json_error(c, status, code, message, NULL, NULL);
@@ -199,7 +206,7 @@ static yyjson_doc *read_encrypted(s3_ctx *c) {
   buckets_buf plain = BUCKETS_BUF_INIT;
   if (!buckets_madmin_decrypt(c->ident->secret_key, c->doc.data, c->doc.len, &plain)) {
     buckets_buf_free(&plain);
-    buckets_admin_error(c, BUCKETS_ERR_ADMIN_CONFIG_BAD_JSON);
+    buckets_admin_decrypt_error(c, BUCKETS_ERR_ADMIN_CONFIG_BAD_JSON, NULL);
     return NULL;
   }
   yyjson_doc *d = yyjson_read(plain.data ? plain.data : "", plain.len, 0);

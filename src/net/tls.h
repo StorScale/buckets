@@ -19,6 +19,11 @@
 
 typedef struct buckets_tls buckets_tls;
 
+/* Protocol floor, ciphers and groups for any TLS context of ours: TLS 1.2 or later with ECDHE and AEAD suites; in
+ * FIPS mode (crypto/fips.h) only AES-GCM and the NIST curves. */
+struct ssl_ctx_st;
+void buckets_tls_ctx_setup(struct ssl_ctx_st *ctx);
+
 /* NULL (err set) when the directory has no usable default certificate. The
  * private key may be encrypted: password from BUCKETS_CERT_PASSWD or
  * MINIO_CERT_PASSWD. */

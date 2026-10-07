@@ -15,6 +15,7 @@
 #include <sys/statvfs.h>
 #include <time.h>
 
+#include "crypto/fips.h"
 #include "admin/admin.h"
 #include "admin/info.h"
 #include "crypto/base64.h"
@@ -986,6 +987,7 @@ static void idsync_metrics(mctx *m) {
 
 static void iam_node_metrics(mctx *m) {
   idsync_metrics(m);
+  ADD0(m, "buckets_node_fips_mode", buckets_fips_mode() ? 1 : 0); /* crypto/fips.h */
   buckets_plugins *pl = buckets_s3_plugins(m->s);
   bool on = buckets_idp_plugin_enabled(pl);
   buckets_idp_plugin_metrics pm;

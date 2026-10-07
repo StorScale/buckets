@@ -175,5 +175,7 @@ void buckets_admin_iam_error(s3_ctx *c, buckets_iam_err e, const char *detail);
 /* A JSON error body (writeErrorResponseJSON). */
 void buckets_admin_error(s3_ctx *c, buckets_s3_error e);
 void buckets_admin_error_msg(s3_ctx *c, buckets_s3_error e, const char *message);
+/* An encrypted request that would not decrypt: e (with message, when given), or why FIPS strict mode refused it. */
+void buckets_admin_decrypt_error(s3_ctx *c, buckets_s3_error e, const char *message);
 
 #endif

@@ -26,8 +26,10 @@ build() {
   run ctest --test-dir "$dir" --output-on-failure
 }
 
-build build-ci -DCMAKE_BUILD_TYPE=RelWithDebInfo
+# the FIPS provider (built once into .deps) for test_fips and fips.sh
+build build-ci -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUCKETS_FIPS_PROVIDER=ON
 run tests/integration/smoke.sh build-ci/src/bucketsd
+run tests/integration/fips.sh build-ci/src/bucketsd
 run tests/integration/erasure.sh build-ci/src/bucketsd
 run tests/integration/concurrency.sh build-ci/src/bucketsd
 run tests/integration/heal.sh build-ci/src/bucketsd
@@ -44,6 +46,7 @@ run tests/e2e-k8s/envtest.sh build-ci/operator/buckets-operator
 
 build build-ci-asan -DCMAKE_BUILD_TYPE=Debug -DBUCKETS_SANITIZE=address,undefined
 run tests/integration/smoke.sh build-ci-asan/src/bucketsd
+run tests/integration/fips.sh build-ci-asan/src/bucketsd
 run tests/integration/erasure.sh build-ci-asan/src/bucketsd
 run tests/integration/concurrency.sh build-ci-asan/src/bucketsd
 run tests/integration/heal.sh build-ci-asan/src/bucketsd

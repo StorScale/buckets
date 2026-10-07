@@ -1,25 +1,20 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
-/* MD5 on OpenSSL's assembly block function (about 2.5x the portable C on
- * arm64). MD5 feeds every PUT's ETag, so it is on the hot path. */
-#define OPENSSL_SUPPRESS_DEPRECATED
+/* MD5 through EVP, from OpenSSL's default provider in every mode (crypto/fips.h): S3 ETags and Content-MD5 need it,
+ * and it protects nothing. */
 #include "crypto/md5.h"
 
-#include <openssl/md5.h>
-#include <string.h>
+#include "crypto/evpmd.h"
+#include "crypto/fips.h"
 
-_Static_assert(sizeof(MD5_CTX) <= sizeof(((buckets_md5_ctx *)0)->opaque), "MD5_CTX does not fit");
-
-void buckets_md5_init(buckets_md5_ctx *ctx) { MD5_Init((MD5_CTX *)ctx->opaque); }
-
+void buckets_md5_init(buckets_md5_ctx *ctx) { ctx->evp = buckets_evpmd_init(buckets_md_md5()); }
 void buckets_md5_update(buckets_md5_ctx *ctx, const void *data, size_t n) {
-  if (n) MD5_Update((MD5_CTX *)ctx->opaque, data, n);
+  buckets_evpmd_update(ctx->evp, data, n);
 }
-
-void buckets_md5_final(buckets_md5_ctx *ctx, uint8_t out[BUCKETS_MD5_LEN]) { MD5_Final(out, (MD5_CTX *)ctx->opaque); }
+void buckets_md5_final(buckets_md5_ctx *ctx, uint8_t out[BUCKETS_MD5_LEN]) {
+  buckets_evpmd_final(&ctx->evp, out);
+}
+void buckets_md5_cleanup(buckets_md5_ctx *ctx) { buckets_evpmd_cleanup(&ctx->evp); }
 
 void buckets_md5(const void *data, size_t n, uint8_t out[BUCKETS_MD5_LEN]) {
-  buckets_md5_ctx ctx;
-  buckets_md5_init(&ctx);
-  buckets_md5_update(&ctx, data, n);
-  buckets_md5_final(&ctx, out);
+  buckets_evpmd_oneshot(buckets_md_md5(), data, n, out);
 }

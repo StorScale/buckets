@@ -13,7 +13,11 @@
 #define BC_KIND "BucketsCluster"
 #define BC_S3_PORT 9000
 #define BC_CONSOLE_PORT 9090
+#define BC_SERVER_IMAGE "ghcr.io/storscale/bucketsd:1.12.0"
 #define BC_CONSOLE_IMAGE "ghcr.io/storscale/buckets-console:1.12.0"
+/* spec.fips: the images built for FIPS mode (docs/fips.md), the default images' tags with this suffix */
+#define BC_FIPS_TAG "-fips"
+#define BC_FIPS_DIR "/run/buckets-fips"
 #define BC_MAX_POOLS 32
 #define BC_KES_PORT 7373
 /* buckets-kes, Buckets' own KES-compatible server; BUCKETS_KES_IMAGE (the
@@ -40,6 +44,7 @@ typedef struct {
   const char *name, *ns, *uid;
   long long generation;
   const char *image, *pull_policy;
+  bool fips; /* spec.fips: FIPS 140-3 mode (docs/fips.md) */
   yyjson_val *pull_secrets, *env;
   const char *creds_secret; /* NULL: operator-managed <name>-root */
   /* MinIO Operator compatibility, for adopting a tenant's volumes in place:

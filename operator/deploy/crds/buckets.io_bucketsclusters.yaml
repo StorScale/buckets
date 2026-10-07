@@ -38,9 +38,12 @@ spec:
               type: object
               required: [pools]
               properties:
+                fips:
+                  type: boolean
+                  description: "FIPS 140-3 mode (docs/fips.md): the servers, console and KES run the -fips images, with every security function in the OpenSSL FIPS provider, and refuse to start without it."
                 image:
                   type: string
-                  description: bucketsd container image.
+                  description: bucketsd container image (with fips, the default is its -fips build).
                   default: ghcr.io/storscale/bucketsd:1.12.0
                 imagePullPolicy:
                   type: string

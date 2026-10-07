@@ -522,6 +522,13 @@ typedef struct {
   buckets_obj_err err;
 } source;
 
+/* Frees the hashes of a source that was not finished (safe after they were). */
+static void source_cleanup(source *src) {
+  buckets_md5_cleanup(&src->md5);
+  buckets_sha256_cleanup(&src->sha);
+  buckets_cksum_hasher_cleanup(&src->cks);
+}
+
 static size_t source_read(source *s, uint8_t *buf, size_t n) {
   size_t want = (size_t)BUCKETS_MIN((int64_t)n, s->remaining), got = 0;
   while (got < want) {
@@ -1048,6 +1055,7 @@ buckets_obj_err buckets_ep_put(buckets_epool *L, const char *bucket, const char 
     cks.type = ctype;
     cks.raw_len = buckets_cksum_hasher_final(&src.cks, cks.raw);
   }
+  source_cleanup(&src);
   if (!err && opts && opts->want_md5 && memcmp(md5, opts->want_md5, 16) != 0) err = BUCKETS_OBJ_ERR_BAD_DIGEST;
   if (!err && opts && opts->want_sha256 && memcmp(sha, opts->want_sha256, 32) != 0) {
     err = BUCKETS_OBJ_ERR_SHA256_MISMATCH;
@@ -2530,6 +2538,7 @@ buckets_obj_err buckets_ep_rehydrate(buckets_epool *L, const char *bucket, const
     buckets_sha256_init(&src.sha);
     buckets_cksum_hasher_init(&src.cks, 0);
     err = encode_stream(&e, &src, o.parts[p].size, file.data);
+    source_cleanup(&src); /* restored data is not hashed for the client */
     if (!err && src.total != o.parts[p].size) err = BUCKETS_OBJ_ERR_INCOMPLETE_BODY;
     for (size_t i = 0; i < s->n; i++) alive_all[i] &= e.alive[i];
     buckets_buf_free(&file);
@@ -2636,6 +2645,7 @@ buckets_obj_err buckets_ep_import_version(buckets_epool *L, const char *bucket, 
       buckets_sha256_init(&srcr.sha);
       buckets_cksum_hasher_init(&srcr.cks, 0);
       err = encode_stream(&e, &srcr, o.parts[p].size, file.data);
+      source_cleanup(&srcr);
       if (!err && srcr.total != o.parts[p].size) err = BUCKETS_OBJ_ERR_INCOMPLETE_BODY;
       for (size_t i = 0; i < s->n; i++) alive_all[i] &= e.alive[i];
       buckets_buf_free(&file);
@@ -3421,6 +3431,7 @@ static buckets_obj_err mpu_put_part(buckets_epool *L, const char *bucket, const 
     cks.type = ctype;
     cks.raw_len = buckets_cksum_hasher_final(&src.cks, cks.raw);
   }
+  source_cleanup(&src);
   if (!err && opts && opts->want_md5 && memcmp(md5, opts->want_md5, 16) != 0) err = BUCKETS_OBJ_ERR_BAD_DIGEST;
   if (!err && opts && opts->want_sha256 && memcmp(sha, opts->want_sha256, 32) != 0) err = BUCKETS_OBJ_ERR_SHA256_MISMATCH;
   if (!err && opts && opts->pre_commit) err = opts->pre_commit(opts->pre_commit_ud, &cks, NULL);
@@ -3716,6 +3727,7 @@ static buckets_obj_err mpu_complete(buckets_epool *L, const char *bucket, const 
       buckets_buf_free(&stored);
     }
   }
+  if (err) buckets_md5_cleanup(&etag_md5);
   if (!err) {
     uint8_t sum[16];
     char etag[48];
