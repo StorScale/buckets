@@ -63,10 +63,17 @@ int64_t buckets_audit_time_ns(yyjson_val *e) {
   return (int64_t)sec * 1000000000LL + nsec;
 }
 
+/* An entry's API name, or for the server's own work (healing, lifecycle), which has none, its event. */
+static const char *api_name(yyjson_val *e) {
+  const char *n = yyjson_get_str(yyjson_obj_get(yyjson_obj_get(e, "api"), "name"));
+  return n && *n ? n : yyjson_get_str(yyjson_obj_get(e, "event"));
+}
+
 const char *buckets_audit_kind(yyjson_val *e) {
   const char *path = yyjson_get_str(yyjson_obj_get(e, "requestPath"));
   if (path && !strncmp(path, "/minio/admin/", 13)) return "admin";
   const char *name = yyjson_get_str(yyjson_obj_get(yyjson_obj_get(e, "api"), "name"));
+  if (!name || !*name) return "system"; /* no request: the server's own work */
   char lower[64] = "";
   for (size_t i = 0; name && name[i] && i < sizeof(lower) - 1; i++)
     lower[i] = (char)tolower((unsigned char)name[i]);
@@ -99,12 +106,19 @@ bool buckets_audit_match(yyjson_val *e, const buckets_audit_query *q) {
   }
   if (!empty(q->access_key) && !str_eq(yyjson_obj_get(e, "accessKey"), q->access_key)) return false;
   if (!empty(q->bucket) && !str_eq(yyjson_obj_get(api, "bucket"), q->bucket)) return false;
-  if (!empty(q->prefix)) {
+  if (!empty(q->prefix)) { /* the object, or any of "objects" (DeleteObjects, the server's own work) */
     const char *o = yyjson_get_str(yyjson_obj_get(api, "object"));
-    if (!o || strncmp(o, q->prefix, strlen(q->prefix)) != 0) return false;
+    bool any = o && !strncmp(o, q->prefix, strlen(q->prefix));
+    size_t i, im;
+    yyjson_val *x;
+    yyjson_arr_foreach(yyjson_obj_get(api, "objects"), i, im, x) {
+      const char *n = yyjson_get_str(yyjson_obj_get(x, "objectName"));
+      if (!any && n && !strncmp(n, q->prefix, strlen(q->prefix))) any = true;
+    }
+    if (!any) return false;
   }
   if (!empty(q->api)) {
-    const char *n = yyjson_get_str(yyjson_obj_get(api, "name"));
+    const char *n = api_name(e);
     if (!n || strcasecmp(n, q->api) != 0) return false;
   }
   if (!empty(q->kind) && strcmp(buckets_audit_kind(e), q->kind) != 0) return false;

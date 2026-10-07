@@ -64,8 +64,8 @@ static bool query_of(const buckets_query *qs, buckets_audit_query *q, char *err,
   long lim = l && *l ? strtol(l, NULL, 10) : 100;
   q->limit = (size_t)(lim < 1 ? 1 : lim > MAX_LIMIT ? MAX_LIMIT : lim);
   if (q->kind && *q->kind && strcmp(q->kind, "read") && strcmp(q->kind, "write") &&
-      strcmp(q->kind, "delete") && strcmp(q->kind, "admin")) {
-    snprintf(err, errlen, "kind is read, write, delete or admin");
+      strcmp(q->kind, "delete") && strcmp(q->kind, "admin") && strcmp(q->kind, "system")) {
+    snprintf(err, errlen, "kind is read, write, delete, admin or system");
     return false;
   }
   if (q->status && *q->status && strcmp(q->status, "ok") && strcmp(q->status, "denied") &&

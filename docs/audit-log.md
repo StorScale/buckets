@@ -14,7 +14,8 @@ The design is in [design/audit-log.md](design/audit-log.md).
 
 - **When:** the last hour, day or week, or a range of your choice.
 - **Filters:** person, access key, bucket, object prefix, API (such as
-  `DeleteObject`), kind (reads, writes, deletes, administration), result
+  `DeleteObject`), kind (reads, writes, deletes, administration, or the
+  servers' own background work such as healing and lifecycle), result
   (succeeded, denied, failed) and source IP. Press **Apply** to run the
   filters again, which also picks up entries that arrived since.
 - **Details:** click an entry to see all of it, as JSON.
@@ -219,7 +220,8 @@ GET /minio/admin/v3/buckets/audit?from=&to=&user=&accessKey=&bucket=&prefix=&api
 
 - `admin:ServerInfo`.
 - `from` and `to` are RFC 3339 times. The defaults are the hour up to now.
-- `kind` is `read`, `write`, `delete` or `admin`. `status` is `ok`, `denied`
+- `kind` is `read`, `write`, `delete`, `admin` or `system` (the servers'
+  own work: healing, lifecycle expiry, which has an `event` and no API name). `status` is `ok`, `denied`
   or `failed`. `limit` is 1 to 1000, and 100 by default.
 
 It returns

@@ -61,6 +61,24 @@ static void test_match(void **state) {
   assert_true(matches(sso, &q));
   q.user = "alice";
   assert_false(matches(sso, &q));
+  /* the server's own work: an event, no API name, its keys in "objects" */
+  const char *heal =
+      "{\"time\":\"2026-10-07T10:00:04Z\",\"event\":\"HealObject\",\"trigger\":\"HealObject\","
+      "\"api\":{\"bucket\":\"logs\",\"objects\":[{\"objectName\":\"app/b.log\"}]}}";
+  memset(&q, 0, sizeof(q));
+  q.kind = "system";
+  assert_true(matches(heal, &q));
+  assert_false(matches(put, &q));
+  q.kind = "read";
+  assert_false(matches(heal, &q));
+  memset(&q, 0, sizeof(q));
+  q.api = "HealObject";
+  assert_true(matches(heal, &q));
+  memset(&q, 0, sizeof(q));
+  q.prefix = "app/";
+  assert_true(matches(heal, &q));
+  q.prefix = "other/";
+  assert_false(matches(heal, &q));
   memset(&q, 0, sizeof(q));
   q.kind = "delete";
   assert_true(matches(del, &q));

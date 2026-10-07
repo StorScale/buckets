@@ -146,7 +146,7 @@ while :; do
 done
 expect "paged with a cursor: every entry once" "$(tr ' ' '\n' <<<"$seen" | grep -c . ) $(tr ' ' '\n' <<<"$seen" | grep . | sort -u | wc -l)" "12 12"
 expect "bad parameters are refused, in words" "$(audit 1 'kind=everything' | python3 -c 'import json,sys; print(json.load(sys.stdin)["Message"])')" \
-  "kind is read, write, delete or admin"
+  "kind is read, write, delete, admin or system"
 expect "a user without admin:ServerInfo is refused" \
   "$(curl -s -o /dev/null -w '%{http_code}' --aws-sigv4 "aws:amz:us-east-1:s3" --user bobkey01:bobkeysecret1 "$(ep 1)/minio/admin/v3/buckets/audit")" 403
 
