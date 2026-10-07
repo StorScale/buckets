@@ -10,12 +10,12 @@ The order below leads with what builds on work that already exists (MinIO on-dis
 
 A successor can't depend on what it replaces. MinIO no longer publishes its images or binaries, so Buckets now ships its own key server (`buckets-kes`) in place of MinIO's KES, and keeps mirrors of MinIO's last images only for adoption and rollback.
 
-**Where things stand (2026-10-07):** Buckets 1.14.0 is released, and the main repository is https://github.com/StorScale/buckets. Phases 0 and 3 are done. Every item of Phase 1 is done too.
+**Where things stand (2026-10-07):** Buckets 1.15.0 is released, and the main repository is https://github.com/StorScale/buckets. Phases 0 and 3 are done. Every item of Phase 1 is done too.
 
 - **Left in Phase 1:** its gate, the round trip in CI. The job (`adopt-roundtrip`) is built and waits for access to the cluster it runs on.
 - **Left in Phase 2:** SCIM, for providers that push changes. Done so far: guided sign-in setup (1.2.0) for Entra ID, Okta, Keycloak, other OpenID providers and LDAP, per-team roles (1.3.0), the access review (1.4.0), and removing people who leave Entra ID (1.9.0), Keycloak and Okta (1.10.0).
 - **Phase 3 is done (1.5.0 to 1.8.0):** monitoring and drive health, runtime drive replacement, console scheduling, cert-manager, and buckets, replication and site replication as resources.
-- **Phase 4's gate has passed (1.13.0):** an auditor gets usage, access and retention reports from the console, and FIPS 140-3 mode is documented and tested. Done: the retention and encryption coverage reports (1.11.0), the usage and chargeback reports (1.12.0), FIPS mode (1.13.0) and ransomware alerts (1.14.0). Left: the lifecycle and replication editor, and the audit log viewer.
+- **Phase 4's gate has passed (1.13.0):** an auditor gets usage, access and retention reports from the console, and FIPS 140-3 mode is documented and tested. Done: the retention and encryption coverage reports (1.11.0), the usage and chargeback reports (1.12.0), FIPS mode (1.13.0), ransomware alerts (1.14.0) and the audit log (1.15.0). Left: the lifecycle and replication editor.
 
 ## Priorities at a glance
 
@@ -89,8 +89,8 @@ The full admin console and OpenSSL 3 are already in place; this phase turns them
 **Console**
 
 - [x] **Usage and chargeback reports** (1.12.0; [usage-reports.md](usage-reports.md)): storage (GB-months and peak), data in and out, and requests per bucket and per team, for any period in the last 13 months, with costs from rates and CSV export.
+- [x] **Audit log** (1.15.0; [audit-log.md](audit-log.md)): every request, by whom, from where and with what result, kept on each server and searched in the console (filters, details, CSV); forwarded to Microsoft Sentinel through the Logs Ingestion API, or to Splunk's HTTP Event Collector. With Entra ID sign-in, people appear by name.
 - A lifecycle and replication editor, instead of JSON and `mc` commands.
-- An audit log viewer, with forwarding to Microsoft Sentinel or Splunk. With Entra ID sign-in, this gives a Microsoft-centric organisation one identity and audit story.
 
 **Compliance and security**
 
@@ -116,6 +116,7 @@ The roadmap builds on what exists: MinIO's exact on-disk format, 220 of 222 MinI
 
 | Date | Change | What it gives |
 | --- | --- | --- |
+| 2026-10-07 | 1.15.0: audit log | Each server keeps its audit entries (30 days or 10 GiB); Reports → Audit log searches them across the cluster; forwarding to Microsoft Sentinel, and Splunk documented |
 | 2026-10-07 | 1.14.0: ransomware alerts | Mass deletes and overwrites against each bucket's usual rate, and weakened protection, with the credential behind them: `s3:Buckets:*` events, three alerts, Reports → Activity, and an optional automatic response |
 | 2026-10-07 | 1.13.0: FIPS 140-3 mode | `-fips` images running every security function in the OpenSSL FIPS Provider 3.1.2; `spec.fips` in the operator; ChaCha20 data counted in the encryption report; Phase 4's gate passed |
 | 2026-10-07 | 1.12.0: usage and chargeback reports; clean shutdown | Usage per team and per bucket with costs and CSV, from daily history kept 13 months; Compliance becomes Reports; the server frees everything when it stops, so sanitizer builds report no leaks |

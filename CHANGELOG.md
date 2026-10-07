@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.15.0] - 2026-10-07
+
 ### Added
 - **The audit log** ([docs/audit-log.md](docs/audit-log.md), [the design](docs/design/audit-log.md)): what was done, by whom, from where and with what result, in the console, and forwarded to Microsoft Sentinel.
   - **Kept on each server:** the audit entries for the requests it served, on its first drive (`.buckets-audit`, outside the erasure-coded data), written in the background and compressed hourly. They are kept for 30 days or 10 GiB per server, whichever comes first (`BUCKETS_AUDIT_LOCAL_DAYS`, `BUCKETS_AUDIT_LOCAL_MAX`). `BUCKETS_AUDIT_LOCAL=off` turns the copy off, and `BUCKETS_AUDIT_LOCAL_READS=off` leaves reads out. A busy server drops entries rather than slowing requests, and counts them (`buckets_node_audit_dropped_total`). `buckets_node_audit_local_bytes` shows the space the copy uses.
