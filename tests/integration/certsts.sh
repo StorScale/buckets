@@ -43,8 +43,9 @@ sign reader "/CN=readers/O=Buckets QA" 1 "extendedKeyUsage=clientAuth"
 sign nopolicy "/CN=nosuchpolicy" 1 "extendedKeyUsage=clientAuth"
 sign serveronly "/CN=readers" 1 "extendedKeyUsage=serverAuth"
 key "$C/rogue.key"
+# self-signed, and explicitly no CA: req -x509's defaults make it one, and CAs in the chain count as intermediates
 openssl req -x509 -sha256 -new -key "$C/rogue.key" -days 1 -subj "/CN=readers" -out "$C/rogue.crt" \
-  -addext "extendedKeyUsage=clientAuth" 2>/dev/null
+  -addext "basicConstraints=critical,CA:FALSE" -addext "extendedKeyUsage=clientAuth" 2>/dev/null
 cp "$C/server.crt" "$WORK/certs/public.crt"
 cp "$C/server.key" "$WORK/certs/private.key"
 cp "$C/ca.crt" "$WORK/certs/CAs/ca.crt"

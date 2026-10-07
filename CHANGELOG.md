@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- On macOS, every memory reading (the metrics and `mc admin` health data) leaked a reference to the host's Mach port. The memory it holds is small, but the references never went away.
+- `tests/integration/certsts.sh` failed with OpenSSL's default configuration: its self-signed client certificate came out as a CA, which the server rightly counts as an intermediate, so it reported no certificate instead of an untrusted one. The certificate now says it isn't a CA.
+- `tests/integration/ldap.sh` sometimes failed with `STSNotInitialized`: after a start or restart it waited only for root, which works before IAM has loaded. It now waits for STS too.
+
 ## [1.13.0] - 2026-10-07
 
 ### Added
