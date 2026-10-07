@@ -55,6 +55,8 @@
 #include "tier/tier.h"
 #include "s3/sigv2.h"
 #include "s3/xml.h"
+#include "audit/store.h"
+#include "logger/sentinel.h"
 #include "s3/ransomguard.h"
 #include "usage/store.h"
 
@@ -1228,6 +1230,23 @@ void buckets_s3_server_set_layer(buckets_s3_server *s, buckets_objlayer *layer) 
   s->datamove = buckets_datamove_new(s);
   s->iam_thread_started = pthread_create(&s->iam_thread, NULL, iam_start_main, s) == 0;
   s->metrics_thread_started = pthread_create(&s->metrics_thread, NULL, metrics_main, s) == 0;
+  /* Microsoft Sentinel as an audit target, from the environment (logger/sentinel.h) */
+  char serr[512];
+  buckets_http_target *sentinel =
+      buckets_sentinel_target_from_env(layer->deployment_id_str, getenv("BUCKETS_AUDIT_SENTINEL_CA_FILE"), serr, sizeof(serr));
+  if (sentinel) {
+    buckets_logger_set_sentinel(s->logger, sentinel);
+    buckets_log_info("audit: entries go to Microsoft Sentinel (stream %s)", getenv("BUCKETS_AUDIT_SENTINEL_STREAM"));
+  } else if (*serr) {
+    buckets_log_error("audit: Sentinel: %s", serr);
+  }
+  /* the audit log's local copy, on this server's first drive (audit/store.h) */
+  buckets_drive *first = buckets_objlayer_scratch(layer);
+  if (buckets_audit_local_enabled() && first && first->root) {
+    char root[4200];
+    snprintf(root, sizeof(root), "%s/" BUCKETS_AUDIT_DIR, first->root);
+    s->audit_store = buckets_audit_store_new(root);
+  }
   s->usage_thread_started = pthread_create(&s->usage_thread, NULL, usage_main, s) == 0;
   s->guard_thread_started = pthread_create(&s->guard_thread, NULL, guard_main, s) == 0;
 }
@@ -1260,6 +1279,8 @@ void buckets_s3_server_stop(buckets_s3_server *s) {
 }
 
 void buckets_s3_server_free(buckets_s3_server *s) {
+  buckets_audit_store_free(s->audit_store); /* what is queued is written first */
+  s->audit_store = NULL;
   buckets_datamove_free(s->datamove);
   buckets_batch_free(s->batch);
   buckets_sr_free(s->sr);
@@ -2459,7 +2480,7 @@ void buckets_s3_handle(const buckets_http_request *req, buckets_http_response *r
   }
   if (!buckets_str_has_prefix(req->path, "/minio/") && !buckets_sts_matches(&c)) {
     api = buckets_s3_api_index(&c); /* collectAPIStats: after the validity filter, before auth */
-    if (api >= 0 && buckets_logger_audit_enabled(s->logger)) {
+    if (api >= 0 && buckets_s3_audit_wanted(s)) {
       c.audited = true;
       buckets_audit_tags_set(&c.tags);
     }
@@ -2483,7 +2504,7 @@ void buckets_s3_handle(const buckets_http_request *req, buckets_http_response *r
     pthread_mutex_unlock(&s->freeze_mu);
   }
   if (buckets_admin_is_admin_path(req->path)) {
-    if (buckets_logger_audit_enabled(s->logger)) { /* adminMiddleware audits every admin call */
+    if (buckets_s3_audit_wanted(s)) { /* adminMiddleware audits every admin call */
       c.audited = true;
       buckets_audit_tags_set(&c.tags);
     }

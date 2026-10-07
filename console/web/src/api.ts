@@ -906,3 +906,51 @@ export const incidents = (all: boolean) =>
   adminJson<Incidents>("GET", "buckets/incidents", { query: { state: all ? "all" : "open" } });
 export const incidentAction = (id: string, action: "disable" | "undo" | "false-alarm") =>
   adminJson<Incident>("POST", "buckets/incidents", { query: { id, action } });
+
+// ---- the audit log (docs/design/audit-log.md) ----
+
+export type AuditEntry = {
+  time: string;
+  node: string;
+  api: {
+    name: string;
+    bucket?: string;
+    object?: string;
+    objects?: { objectName: string; versionId?: string }[];
+    status?: string;
+    statusCode?: number;
+    rx?: number;
+    tx?: number;
+    timeToResponse?: string;
+  };
+  remotehost?: string;
+  requestID?: string;
+  userAgent?: string;
+  requestPath?: string;
+  accessKey?: string;
+  parentUser?: string;
+  requestClaims?: { preferred_username?: string; upn?: string; email?: string; [k: string]: unknown };
+  [k: string]: unknown;
+};
+export type AuditFilter = {
+  from?: string;
+  to?: string;
+  user?: string;
+  accessKey?: string;
+  bucket?: string;
+  prefix?: string;
+  api?: string;
+  kind?: string;
+  status?: string;
+  ip?: string;
+};
+export type AuditPage = {
+  enabled: boolean;
+  entries: AuditEntry[];
+  cursor: string | null;
+  coverage: { node: string; reachable: boolean; enabled?: boolean; oldest?: number; dropped?: number }[];
+};
+export const auditLog = (f: AuditFilter, cursor?: string, limit = 100) =>
+  adminJson<AuditPage>("GET", "buckets/audit", {
+    query: { ...(f as Record<string, string | undefined>), cursor, limit: String(limit) },
+  });

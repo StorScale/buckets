@@ -26,6 +26,11 @@ typedef struct {
   int max_retry;         /* 0: retry forever */
   int retry_interval_ms;
   int http_timeout_ms;
+  /* Buckets' own targets (logger/sentinel.h): a batch as one JSON array instead of lines, and a bearer token got
+   * for each POST (false: why in err, and the batch is retried later) */
+  bool json_array;
+  bool (*bearer)(void *ud, char *token, size_t cap, char *err, size_t errlen);
+  void *bearer_ud;
 } buckets_http_target_cfg;
 
 typedef struct buckets_http_target buckets_http_target;

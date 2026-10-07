@@ -64,6 +64,37 @@ static bool wait_locked(buckets_http_target *t, int64_t ms) {
 static bool post(buckets_http_target *t, const char *body, size_t len, size_t count) {
   char cnt[24];
   snprintf(cnt, sizeof(cnt), "%zu", count);
+  buckets_buf arr = BUCKETS_BUF_INIT;
+  if (t->cfg.json_array) { /* the lines, as one JSON array */
+    buckets_buf_append_char(&arr, '[');
+    bool first = true;
+    for (size_t p = 0; p < len;) {
+      size_t l = 0;
+      while (p + l < len && body[p + l] != '\n') l++;
+      if (l) {
+        if (!first) buckets_buf_append_char(&arr, ',');
+        buckets_buf_append(&arr, body + p, l);
+        first = false;
+      }
+      p += l + 1;
+    }
+    buckets_buf_append_char(&arr, ']');
+    body = arr.data, len = arr.len;
+  }
+  char auth[8192] = "", berr[256] = "";
+  if (t->cfg.bearer) {
+    char tok[8000];
+    if (!t->cfg.bearer(t->cfg.bearer_ud, tok, sizeof(tok), berr, sizeof(berr))) {
+      buckets_buf_free(&arr);
+      pthread_mutex_lock(&t->mu);
+      t->failed += count;
+      t->online = false;
+      pthread_mutex_unlock(&t->mu);
+      buckets_log_warn("unable to send audit/log entry(s) to '%s' err '%s': %zu", t->cfg.name, berr, count);
+      return false;
+    }
+    snprintf(auth, sizeof(auth), "Bearer %s", tok);
+  }
   buckets_http_kv h[6];
   size_t nh = 0;
   h[nh++] = (buckets_http_kv){"Content-Type", "application/json"};
@@ -71,7 +102,8 @@ static bool post(buckets_http_target *t, const char *body, size_t len, size_t co
   h[nh++] = (buckets_http_kv){"x-minio-version", BUCKETS_VERSION};
   h[nh++] = (buckets_http_kv){"x-minio-deployment-id", t->cfg.deployment_id ? t->cfg.deployment_id : ""};
   if (t->cfg.user_agent) h[nh++] = (buckets_http_kv){"User-Agent", t->cfg.user_agent};
-  if (t->cfg.auth_token) h[nh++] = (buckets_http_kv){"Authorization", t->cfg.auth_token};
+  if (*auth) h[nh++] = (buckets_http_kv){"Authorization", auth};
+  else if (t->cfg.auth_token) h[nh++] = (buckets_http_kv){"Authorization", t->cfg.auth_token};
   buckets_http_result r;
   char err[256];
   bool ok = buckets_fetch("POST", t->cfg.endpoint, t->cfg.ca_file, h, nh, body, len, t->cfg.http_timeout_ms, &r, err,
@@ -87,6 +119,7 @@ static bool post(buckets_http_target *t, const char *body, size_t len, size_t co
   t->online = ok || reached;
   pthread_mutex_unlock(&t->mu);
   if (!ok) buckets_log_warn("unable to send audit/log entry(s) to '%s' err '%s': %zu", t->cfg.name, err, count);
+  buckets_buf_free(&arr);
   return ok;
 }
 

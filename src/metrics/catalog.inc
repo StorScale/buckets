@@ -11,6 +11,8 @@ static const buckets_metric_def k_catalog_v2[] = {
     {"buckets_bucket_unencrypted_bytes", BUCKETS_MT_GAUGE, "Bytes of the bucket's versions stored without encryption, at the scanner's last complete cycle", ""},
     {"buckets_bucket_unencrypted_versions", BUCKETS_MT_GAUGE, "Versions of the bucket stored without encryption, at the scanner's last complete cycle", ""},
     {"buckets_bucket_versions_destroyed_total", BUCKETS_MT_COUNTER, "Versions removed for good in the bucket through this server (deletes that leave no delete marker), since it started", ""},
+    {"buckets_node_audit_dropped_total", BUCKETS_MT_COUNTER, "Audit entries this server did not keep in its local copy, because its writer fell behind or the drive refused them (forwarding to targets is not affected)", ""},
+    {"buckets_node_audit_local_bytes", BUCKETS_MT_GAUGE, "Bytes of audit entries this server keeps on its drive (BUCKETS_AUDIT_LOCAL_MAX caps it, 10 GiB by default)", ""},
     {"buckets_node_fips_mode", BUCKETS_MT_GAUGE, "1 when the server runs in FIPS 140-3 mode (BUCKETS_FIPS: every security function in the OpenSSL FIPS provider), else 0", ""},
     {"buckets_node_identity_sync_actions_total", BUCKETS_MT_COUNTER, "What identity syncs did, by action: revoke (temporary credentials), disable, enable, delete (access keys)", ""},
     {"buckets_node_identity_sync_failures_total", BUCKETS_MT_COUNTER, "Identity syncs that could not learn about everyone: the provider failed, or what the sync turned off could not be read", ""},

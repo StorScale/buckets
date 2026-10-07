@@ -1,3 +1,4 @@
+import { Link } from "react-router-dom";
 import { FormEvent, useState } from "react";
 import {
   addUser,
@@ -72,6 +73,9 @@ export default function Users() {
                   >
                     {u.status === "enabled" ? "Disable" : "Enable"}
                   </button>
+                  <Link className="button" to={`/reports/audit?range=7d&user=${encodeURIComponent(name)}`} data-testid={`audit-user-${name}`}>
+                    Actions
+                  </Link>
                   <ConfirmButton
                     label="Delete"
                     confirm={`Delete ${name}?`}

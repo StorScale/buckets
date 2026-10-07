@@ -22,6 +22,7 @@ struct buckets_logger {
   size_t nlog, naudit;
   buckets_kafka_target **kafka; /* audit_kafka */
   size_t nkafka;
+  buckets_http_target *sentinel; /* Buckets' own: from the environment (logger/sentinel.h), never reconfigured */
 };
 
 buckets_logger *buckets_logger_new(void) {
@@ -45,6 +46,7 @@ void buckets_logger_free(buckets_logger *l) {
   free_targets(l->log, l->nlog);
   free_targets(l->audit, l->naudit);
   free_kafka(l->kafka, l->nkafka);
+  buckets_http_target_free(l->sentinel);
   pthread_rwlock_destroy(&l->lock);
   free(l);
 }
@@ -324,7 +326,7 @@ bool buckets_logger_configure(buckets_logger *l, const buckets_config *cfg, cons
 bool buckets_logger_audit_enabled(buckets_logger *l) {
   if (!l) return false;
   pthread_rwlock_rdlock(&l->lock);
-  bool on = l->naudit > 0 || l->nkafka > 0;
+  bool on = l->naudit > 0 || l->nkafka > 0 || l->sentinel;
   pthread_rwlock_unlock(&l->lock);
   return on;
 }
@@ -336,20 +338,29 @@ static void send_all(buckets_logger *l, bool audit, const char *json, size_t n) 
   size_t k = audit ? l->naudit : l->nlog;
   for (size_t i = 0; i < k; i++) buckets_http_target_send(t[i], json, n);
   for (size_t i = 0; audit && i < l->nkafka; i++) buckets_kafka_target_send(l->kafka[i], json, n);
+  if (audit && l->sentinel) buckets_http_target_send(l->sentinel, json, n);
   pthread_rwlock_unlock(&l->lock);
 }
 
 void buckets_logger_audit(buckets_logger *l, const char *json, size_t n) { send_all(l, true, json, n); }
 void buckets_logger_log(buckets_logger *l, const char *json, size_t n) { send_all(l, false, json, n); }
 
+void buckets_logger_set_sentinel(buckets_logger *l, buckets_http_target *t) {
+  pthread_rwlock_wrlock(&l->lock);
+  buckets_http_target *old = l->sentinel;
+  l->sentinel = t;
+  pthread_rwlock_unlock(&l->lock);
+  buckets_http_target_free(old);
+}
+
 size_t buckets_logger_targets(buckets_logger *l, buckets_logger_target_info **out) {
   *out = NULL;
   if (!l) return 0;
   pthread_rwlock_rdlock(&l->lock);
-  size_t nh = l->nlog + l->naudit, n = nh + l->nkafka;
+  size_t nh = l->nlog + l->naudit + (l->sentinel ? 1 : 0), n = nh + l->nkafka;
   buckets_logger_target_info *v = buckets_xcalloc(n ? n : 1, sizeof(*v));
   for (size_t i = 0; i < nh; i++) {
-    buckets_http_target *t = i < l->nlog ? l->log[i] : l->audit[i - l->nlog];
+    buckets_http_target *t = i < l->nlog ? l->log[i] : i < l->nlog + l->naudit ? l->audit[i - l->nlog] : l->sentinel;
     snprintf(v[i].name, sizeof(v[i].name), "%s", buckets_http_target_name(t));
     snprintf(v[i].endpoint, sizeof(v[i].endpoint), "%s", buckets_http_target_endpoint(t));
     v[i].audit = i >= l->nlog;

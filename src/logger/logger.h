@@ -29,6 +29,9 @@ bool buckets_logger_validate_kafka(const buckets_config *cfg, char *err, size_t 
 bool buckets_logger_audit_enabled(buckets_logger *l);
 /* An audit entry (JSON) to every audit target. */
 void buckets_logger_audit(buckets_logger *l, const char *json, size_t n);
+/* The Sentinel audit target (logger/sentinel.h), which config changes leave alone; NULL removes it. */
+struct buckets_http_target;
+void buckets_logger_set_sentinel(buckets_logger *l, struct buckets_http_target *t);
 /* A log entry (JSON) to every logger target. */
 void buckets_logger_log(buckets_logger *l, const char *json, size_t n);
 /* A server warning or error as MinIO's log.Entry JSON (appended to b). */

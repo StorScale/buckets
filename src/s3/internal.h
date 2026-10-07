@@ -84,6 +84,8 @@ void buckets_s3_listen_notification(s3_ctx *c);
 /* The request's credential, for reports and alerts: its access key ("" when anonymous), the person behind it, and
  * "root", "user", "access-key", "sts" or "anonymous". */
 void buckets_s3_credential(const s3_ctx *c, const char **access_key, const char **user, const char **type);
+/* Whether audit entries are built: for the local copy (audit/store.h) or an audit target. */
+bool buckets_s3_audit_wanted(buckets_s3_server *s);
 /* A protection change on c->bucket for ransomware alerts (ransomware/ransomware.h: buckets_rw_change), by the
  * request's credential; detail in words. */
 void buckets_s3_protection_removed(s3_ctx *c, int change, const char *detail);

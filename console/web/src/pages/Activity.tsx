@@ -152,6 +152,16 @@ export default function ActivityPage() {
                           {c.accessKey || "anonymous"}
                         </span>
                         {c.user && c.user !== c.accessKey && <> ({c.user})</>}
+                        {c.accessKey && (
+                          <div>
+                            <Link
+                              to={`/reports/audit?range=custom&accessKey=${encodeURIComponent(c.accessKey)}&from=${new Date((x.opened - 1800) * 1000).toISOString()}&to=${new Date(((x.closed || x.lastSeen) + 600) * 1000).toISOString()}`}
+                              data-testid={`audit-link-${x.id}`}
+                            >
+                              What it did
+                            </Link>
+                          </div>
+                        )}
                         {x.credentials.length > 1 && (
                           <span className="muted">
                             {" "}
