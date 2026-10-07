@@ -13,7 +13,7 @@ Everything runs from [`examples/superset`](../../examples/superset), which inclu
 | Trino | 483 | SQL engine; runs each query as its person |
 | Apache Ranger | 2.9.0 | Policies, masks, row filters and audit, per person |
 | Keycloak | 26.8 | Users and groups, OpenID Connect |
-| Buckets, Nessie | 1.15.0, 0.108.8 | Storage and the Iceberg catalog, as in the lakehouse |
+| Buckets, Nessie | 1.15.1, 0.108.8 | Storage and the Iceberg catalog, as in the lakehouse |
 
 ## How it fits together
 

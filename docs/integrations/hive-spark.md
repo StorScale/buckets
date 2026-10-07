@@ -12,7 +12,7 @@ Everything runs from one Compose file in [`examples/hive-spark`](../../examples/
 
 | Component | Version | Role |
 |---|---|---|
-| Buckets | 1.15.0 | S3 storage for the warehouse; sign-in with Keycloak through STS |
+| Buckets | 1.15.1 | S3 storage for the warehouse; sign-in with Keycloak through STS |
 | Hive Metastore | 4.2.1 (standalone), on Postgres 18 | The catalog for Hive and Iceberg tables; also serves an Iceberg REST catalog |
 | Apache Spark | 4.1.3, with Iceberg 1.12.0 | Writes and transforms tables; runs as a Spark Connect server |
 | Trino | 483 | SQL engine: Hive and Iceberg connectors |
