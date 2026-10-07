@@ -35,6 +35,7 @@ typedef struct {
   /* Bucket and key reported in error documents from here on, when set (MinIO's
    * checkRequestAuthType rewrites them, e.g. to a copy source). Owned. */
   char *err_bucket, *err_object;
+  const char *err_message; /* the next error document's message instead of the code's (static text) */
   char access_key[256];
   buckets_auth_type auth;
   buckets_sigv4_result sig; /* valid for SigV4-authenticated requests */

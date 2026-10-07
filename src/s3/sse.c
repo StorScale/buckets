@@ -8,8 +8,11 @@
 #include <strings.h>
 #include <yyjson.h>
 
+#include "core/log.h"
 #include "crypto/base64.h"
 #include "crypto/hex.h"
+#include "crypto/aead.h"
+#include "crypto/fips.h"
 #include "crypto/objkey.h"
 #include "bucket/metasys.h"
 #include "config/config.h"
@@ -386,6 +389,14 @@ buckets_s3_error buckets_s3_sse_object_key(s3_ctx *c, const buckets_object_info 
     free(dek);
     if (ke) return kms_error_op(ke, true);
   }
+  if (buckets_fips_mode() && sealed[1] == BUCKETS_AEAD_CHACHA20_POLY1305) { /* the sealed key's DARE header */
+    OPENSSL_cleanse(ext, sizeof(ext));
+    buckets_log_warn("fips: %s/%s is encrypted with ChaCha20-Poly1305, which the FIPS module does not provide", bucket,
+                     object);
+    c->err_message = "FIPS mode: this object is encrypted with ChaCha20-Poly1305, which the FIPS module does not "
+                     "provide; re-encrypt it with AES-256-GCM outside FIPS mode (Encrypt existing objects)";
+    return BUCKETS_ERR_NOT_IMPLEMENTED;
+  }
   bool ok = buckets_objkey_unseal(ext, sealed, iv, alg, domain, bucket, object, key);
   OPENSSL_cleanse(ext, sizeof(ext));
   return ok ? BUCKETS_ERR_NONE : BUCKETS_ERR_ACCESS_DENIED; /* ErrSecretKeyMismatch */
@@ -526,6 +537,9 @@ void buckets_sse_writer_init_nonce(buckets_sse_writer *w, const uint8_t key[32],
 }
 
 void buckets_sse_writer_free(buckets_sse_writer *w) {
+  buckets_md5_cleanup(&w->md5);
+  buckets_sha256_cleanup(&w->sha);
+  buckets_cksum_hasher_cleanup(&w->cks);
   buckets_dare_enc_free(&w->enc);
   free(w->in);
   free(w->out);

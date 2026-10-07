@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
+#include "crypto/fips.h"
 #include "kes/key.h"
 
 #include <stdio.h>
@@ -37,6 +38,7 @@ static void set_creator(buckets_kes_key *k, const char *created_by) {
  * (x86 AES-NI and PCLMULQDQ; arm64 AES and PMULL, as golang.org/x/sys/cpu
  * sees them, which it does not on macOS), else ChaCha20. */
 static buckets_kes_cipher default_cipher(void) {
+  if (buckets_fips_mode()) return BUCKETS_KES_AES256; /* ChaCha20 is not in the FIPS module */
 #if defined(__x86_64__) || defined(__i386__)
   __builtin_cpu_init();
   if (__builtin_cpu_supports("aes") && __builtin_cpu_supports("pclmul")) return BUCKETS_KES_AES256;
@@ -66,6 +68,7 @@ static bool parse_cipher(const char *s, buckets_kes_cipher *c) {
 bool buckets_kes_key_import(buckets_kes_key *k, const char *cipher, const uint8_t bytes[32], const char *created_by) {
   memset(k, 0, sizeof(*k));
   if (!cipher || !*cipher || !parse_cipher(cipher, &k->cipher)) return false;
+  if (k->cipher == BUCKETS_KES_CHACHA20 && buckets_fips_mode()) return false;
   memcpy(k->key, bytes, 32);
   k->has_hmac = true;
   buckets_random(k->hmac, 32);
@@ -289,17 +292,19 @@ static buckets_aead_alg subkey(const buckets_kes_key *k, const uint8_t iv[16], u
   return BUCKETS_AEAD_AES_256_GCM;
 }
 
-void buckets_kes_encrypt(const buckets_kes_key *k, const void *pt, size_t n, const void *ctx, size_t nctx,
+bool buckets_kes_encrypt(const buckets_kes_key *k, const void *pt, size_t n, const void *ctx, size_t nctx,
                          buckets_buf *out) {
   uint8_t rnd[RAND_SIZE], key[32];
   buckets_random(rnd, sizeof(rnd));
   buckets_aead_alg alg = subkey(k, rnd, key);
   size_t at = out->len;
   buckets_buf_reserve(out, n + BUCKETS_AEAD_TAG + RAND_SIZE);
-  buckets_aead_seal1(alg, key, rnd + IV_SIZE, ctx, nctx, pt, n, (uint8_t *)out->data + at);
+  bool ok = buckets_aead_seal1(alg, key, rnd + IV_SIZE, ctx, nctx, pt, n, (uint8_t *)out->data + at);
+  OPENSSL_cleanse(key, sizeof(key));
+  if (!ok) return false;
   out->len = at + n + BUCKETS_AEAD_TAG;
   buckets_buf_append(out, rnd, RAND_SIZE);
-  OPENSSL_cleanse(key, sizeof(key));
+  return true;
 }
 
 /* The older ciphertexts, as bytes || iv || nonce; false if b is neither. */

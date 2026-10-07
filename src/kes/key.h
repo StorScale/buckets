@@ -44,10 +44,11 @@ bool buckets_kes_key_decode(const char *s, size_t n, buckets_kes_key *k, char *e
 
 const char *buckets_kes_cipher_name(buckets_kes_cipher c); /* "AES256", "ChaCha20" */
 
-/* Encrypts with associated data ctx (may be empty). */
-void buckets_kes_encrypt(const buckets_kes_key *k, const void *pt, size_t n, const void *ctx, size_t nctx,
+/* Encrypts with associated data ctx (may be empty); false when the key's cipher is refused (ChaCha20 in FIPS
+ * mode). */
+bool buckets_kes_encrypt(const buckets_kes_key *k, const void *pt, size_t n, const void *ctx, size_t nctx,
                          buckets_buf *out);
-/* False when the ciphertext is not authentic (or not one of the forms). */
+/* False when the ciphertext is not authentic (or not one of the forms), or the key's cipher is refused. */
 bool buckets_kes_decrypt(const buckets_kes_key *k, const void *ct, size_t n, const void *ctx, size_t nctx,
                          buckets_buf *out);
 /* HMAC-SHA256 with the key's HMAC key (has_hmac must be set). */

@@ -6,6 +6,19 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **FIPS 140-3 mode** ([docs/fips.md](docs/fips.md), [the design](docs/design/fips-mode.md)). Every security function runs in the OpenSSL FIPS Provider 3.1.2 (FIPS 140-3 certificate #4985), with only the algorithms it approves.
+  - **Images:** each of the four images also comes as a `-fips` build (`<version>-fips`), which always runs in FIPS mode. On every start it installs and self-tests the module for that machine, as the module's security policy requires, and it refuses to start if that fails.
+  - **The operator:** `spec.fips: true` runs a cluster's servers, console and KES on the `-fips` images; the chart's `fips` value does the same for the operator.
+  - **Seeing it:** the log names the module, `mc admin info` reports it per server, the metric `buckets_node_fips_mode` is 1, and the console's Dashboard shows **FIPS 140-3**.
+  - **Inside the module:** TLS uses only AES-GCM and the NIST curves; signatures, tokens, SSE and KMS keys run through it; the server sends admin payloads with PBKDF2.
+  - **Outside, documented:** MD5 ETags, bitrot checksums and placement hashing, which protect nothing. Argon2id admin payloads from a standard `mc` are accepted too, unless `BUCKETS_FIPS_STRICT=on`.
+  - **Refused, saying why:** data, KES keys and TLS that need ChaCha20; Ed25519 SFTP host keys; PostgreSQL MD5 password authentication.
+  - **Before switching:** the encryption coverage report counts versions encrypted with ChaCha20-Poly1305, which MinIO uses on CPUs without AES, so a site can re-encrypt them first.
+
+### Changed
+- Every hash now goes through OpenSSL's provider interface rather than its low-level functions, so that FIPS mode covers it. Throughput is unchanged (docs/fips.md has the figures).
+
 ## [1.12.0] - 2026-10-07
 
 ### Added

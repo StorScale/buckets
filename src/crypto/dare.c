@@ -1,7 +1,10 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 #include "crypto/dare.h"
 
+#include "crypto/fips.h"
+
 #include <openssl/crypto.h>
+#include <stdlib.h>
 #include <string.h>
 
 static void le32(uint8_t *p, uint32_t v) {
@@ -14,10 +17,18 @@ static void package_nonce(const uint8_t header[16], uint32_t seq, uint8_t nonce[
   le32(nonce + 8, get_le32(nonce + 8) ^ seq);
 }
 
+/* BUCKETS_DARE_TEST_CIPHER=chacha20 seals with ChaCha20-Poly1305, as MinIO does on CPUs without AES: for tests of
+ * what FIPS mode makes of such data (tests/integration/fips.sh). Never in FIPS mode. */
+static buckets_aead_alg seal_cipher(void) {
+  const char *t = getenv("BUCKETS_DARE_TEST_CIPHER");
+  bool chacha = t && !strcmp(t, "chacha20") && !buckets_fips_mode();
+  return chacha ? BUCKETS_AEAD_CHACHA20_POLY1305 : BUCKETS_AEAD_AES_256_GCM;
+}
+
 void buckets_dare_enc_init(buckets_dare_enc *e, const uint8_t key[32], const uint8_t *nonce, uint32_t seq) {
   memset(e, 0, sizeof(*e));
-  e->cipher = BUCKETS_AEAD_AES_256_GCM;
-  e->aead = buckets_aead_new(BUCKETS_AEAD_AES_256_GCM, key);
+  e->cipher = seal_cipher();
+  e->aead = buckets_aead_new(e->cipher, key);
   if (nonce) memcpy(e->rand, nonce, 12);
   else buckets_random(e->rand, 12);
   e->seq = seq;
@@ -82,6 +93,7 @@ long buckets_dare_open(buckets_dare_dec *d, const uint8_t *pkg, size_t n, uint8_
   if (final) ref[0] |= 0x80;
   if (CRYPTO_memcmp(pkg + 4, ref, 12) != 0) return BUCKETS_DARE_ERR_NONCE;
   if (!d->aead[c]) d->aead[c] = buckets_aead_new((buckets_aead_alg)c, d->key);
+  if (!d->aead[c]) return BUCKETS_DARE_ERR_REFUSED;
   uint8_t nonce[12];
   package_nonce(pkg, d->seq, nonce);
   if (!buckets_aead_open(d->aead[c], nonce, pkg, 4, pkg + BUCKETS_DARE_HEADER, len + BUCKETS_DARE_TAG, out))

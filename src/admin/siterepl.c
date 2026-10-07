@@ -32,7 +32,7 @@ static bool body(s3_ctx *c, bool encrypted, buckets_buf *out) {
     return true;
   }
   if (!buckets_madmin_decrypt(c->ident->secret_key, c->doc.data ? c->doc.data : "", c->doc.len, out)) {
-    buckets_admin_error_msg(c, BUCKETS_ERR_SITE_REPLICATION_INVALID_REQUEST, "unable to decrypt the request");
+    buckets_admin_decrypt_error(c, BUCKETS_ERR_SITE_REPLICATION_INVALID_REQUEST, "unable to decrypt the request");
     return false;
   }
   return true;

@@ -304,7 +304,14 @@ export type ServerInfo = {
   buckets?: { count: number };
   objects?: { count: number };
   usage?: { size: number };
-  servers?: { endpoint: string; state: string; version: string; uptime: number; drives?: { state: string; totalspace?: number; usedspace?: number }[] }[];
+  servers?: {
+    endpoint: string;
+    state: string;
+    version: string;
+    uptime: number;
+    drives?: { state: string; totalspace?: number; usedspace?: number }[];
+    fips?: { enabled: boolean; module: string }; // Buckets' own: FIPS 140-3 mode
+  }[];
   backend?: { backendType: string; onlineDisks: number; offlineDisks: number; standardSCParity?: number };
 };
 export const serverInfo = () => adminJson<ServerInfo>("GET", "info");
@@ -820,9 +827,15 @@ export type ComplianceBucket = {
     compliance: ComplianceCount;
     legalHold: ComplianceCount;
     latestRetainUntil: number;
+    chacha20?: ComplianceCount; // keys sealed with ChaCha20, which FIPS mode can't read (1.13.0)
   } | null;
 };
-export type Compliance = { scannedAt: number; kms: { configured: boolean; online: boolean }; buckets: ComplianceBucket[] };
+export type Compliance = {
+  scannedAt: number;
+  kms: { configured: boolean; online: boolean };
+  fips?: boolean;
+  buckets: ComplianceBucket[];
+};
 export const complianceReport = () => adminJson<Compliance>("GET", "buckets/compliance");
 
 // ---- usage and chargeback reports (docs/design/usage-reports.md) ----

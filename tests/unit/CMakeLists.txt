@@ -45,3 +45,9 @@ find_package(Python3 COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
   add_test(NAME test_adopt_kes COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_adopt_kes.py)
 endif()
+
+# FIPS mode, against the FIPS provider when one is built (cmake/OpenSSLFips.cmake); skipped otherwise
+buckets_unit_test(test_fips)
+if(EXISTS "${BUCKETS_FIPS_DIR}/lib/ossl-modules/fips.so")
+  target_compile_definitions(test_fips PRIVATE BUCKETS_TEST_FIPS_DIR="${BUCKETS_FIPS_DIR}")
+endif()

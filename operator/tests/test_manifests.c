@@ -908,13 +908,67 @@ static void test_cert_manager(void **state) {
   yyjson_doc_free(d);
 }
 
+/* spec.fips: the -fips images (the CRD's default image included), FIPS mode on, and an in-memory directory where
+ * the module installs itself, in the servers, console and KES. */
+static yyjson_mut_val *first_container_of(bc_object *o, size_t n, const char *kind) {
+  for (size_t i = 0; i < n; i++) {
+    yyjson_mut_val *r = yyjson_mut_doc_get_root(o[i].doc);
+    if (strcmp(yyjson_mut_get_str(yyjson_mut_obj_get(r, "kind")), kind) == 0)
+      return yyjson_mut_arr_get_first(AT(r, "spec", "template", "spec", "containers"));
+  }
+  return NULL;
+}
+
+static void check_fips_pod(bc_object *o, size_t n, const char *kind, const char *image) {
+  yyjson_mut_val *c = first_container_of(o, n, kind);
+  assert_non_null(c);
+  assert_string_equal(yyjson_mut_get_str(yyjson_mut_obj_get(c, "image")), image);
+  assert_string_equal(env_value_of(c, "BUCKETS_FIPS"), "on");
+  assert_string_equal(env_value_of(c, "BUCKETS_FIPS_DIR"), BC_FIPS_DIR);
+  bool mounted = false;
+  size_t i, max;
+  yyjson_mut_val *m;
+  yyjson_mut_arr_foreach(yyjson_mut_obj_get(c, "volumeMounts"), i, max, m) {
+    if (strcmp(yyjson_mut_get_str(yyjson_mut_obj_get(m, "name")), "fips") == 0)
+      mounted = strcmp(yyjson_mut_get_str(yyjson_mut_obj_get(m, "mountPath")), BC_FIPS_DIR) == 0;
+  }
+  assert_true(mounted);
+}
+
+static void test_fips(void **state) {
+  (void)state;
+  const char *json = "{\"metadata\":{\"name\":\"store\",\"namespace\":\"data\",\"uid\":\"u\"},"
+                     "\"spec\":{\"fips\":true,\"image\":\"" BC_SERVER_IMAGE "\",\"console\":{\"enabled\":true},"
+                     "\"kms\":{\"kes\":{}},\"pools\":[{\"servers\":4,\"volumesPerServer\":1}]}}";
+  bc_spec s;
+  unsetenv("BUCKETS_KES_IMAGE");
+  yyjson_doc *d = parse(json, &s, true);
+  bc_object *o;
+  size_t n = bc_desired(&s, &o);
+  check_fips_pod(o, n, "StatefulSet", BC_SERVER_IMAGE BC_FIPS_TAG);
+  check_fips_pod(o, n, "Deployment", BC_CONSOLE_IMAGE BC_FIPS_TAG);
+  bc_objects_free(o, n);
+  n = bc_kes_objects(&s, false, "{}", NULL, &o);
+  check_fips_pod(o, n, "Deployment", BC_KES_IMAGE BC_FIPS_TAG);
+  bc_objects_free(o, n);
+  yyjson_doc_free(d);
+  /* an image named explicitly is used as given; without spec.fips nothing changes */
+  d = parse(k_kes, &s, true);
+  n = bc_desired(&s, &o);
+  yyjson_mut_val *c = first_container_of(o, n, "StatefulSet");
+  assert_string_equal(yyjson_mut_get_str(yyjson_mut_obj_get(c, "image")), "bucketsd:test");
+  assert_null(env_value_of(c, "BUCKETS_FIPS"));
+  bc_objects_free(o, n);
+  yyjson_doc_free(d);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_volumes_and_topology), cmocka_unit_test(test_desired_objects), cmocka_unit_test(test_tls),
       cmocka_unit_test(test_root_secret_not_owned), cmocka_unit_test(test_invalid),
       cmocka_unit_test(test_console), cmocka_unit_test(test_console_tls), cmocka_unit_test(test_console_env),
       cmocka_unit_test(test_minio_tenant_layout), cmocka_unit_test(test_kes_spec), cmocka_unit_test(test_kes_objects), cmocka_unit_test(test_kes_log_reason), cmocka_unit_test(test_kes_adopted), cmocka_unit_test(test_identity), cmocka_unit_test(test_identity_conflicts),
-      cmocka_unit_test(test_monitoring), cmocka_unit_test(test_console_scheduling), cmocka_unit_test(test_cert_manager),
+      cmocka_unit_test(test_monitoring), cmocka_unit_test(test_console_scheduling), cmocka_unit_test(test_cert_manager), cmocka_unit_test(test_fips),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

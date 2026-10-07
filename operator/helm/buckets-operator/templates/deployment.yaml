@@ -29,7 +29,7 @@ spec:
       securityContext: {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
         - name: operator
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}{{ if .Values.fips }}-fips{{ end }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
             - name: POD_NAME
@@ -38,6 +38,10 @@ spec:
               valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
             - name: BUCKETS_LOG_LEVEL
               value: {{ .Values.logLevel | quote }}
+            {{- if .Values.fips }}
+            - name: BUCKETS_FIPS # the operator's own TLS through the FIPS module (docs/fips.md)
+              value: "on"
+            {{- end }}
             {{- with .Values.watchNamespace }}
             - name: BUCKETS_OPERATOR_NAMESPACE
               value: {{ . | quote }}

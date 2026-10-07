@@ -43,7 +43,7 @@ static bool decrypted_body(s3_ctx *c, buckets_buf *out) {
     return false;
   }
   if (!buckets_madmin_decrypt(c->ident->secret_key, c->doc.data ? c->doc.data : "", c->doc.len, out)) {
-    buckets_admin_error(c, BUCKETS_ERR_ADMIN_CONFIG_BAD_JSON);
+    buckets_admin_decrypt_error(c, BUCKETS_ERR_ADMIN_CONFIG_BAD_JSON, NULL);
     return false;
   }
   return true;

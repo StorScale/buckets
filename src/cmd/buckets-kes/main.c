@@ -22,6 +22,7 @@
 #include <openssl/pem.h>
 #include <openssl/x509.h>
 
+#include "crypto/fips.h"
 #include "core/log.h"
 #include "core/loop.h"
 #include "core/pool.h"
@@ -165,6 +166,14 @@ int main(int argc, char **argv) {
   if (argc > 1 && (strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "version") == 0)) {
     printf("buckets-kes %s\n", BUCKETS_VERSION);
     return 0;
+  }
+  {
+    char cerr[512];
+    if (!buckets_crypto_init(cerr, sizeof(cerr))) {
+      buckets_log_error("fips: %s", cerr);
+      return 1;
+    }
+    if (buckets_fips_mode()) buckets_log_info("fips: FIPS 140-3 mode, with %s", buckets_fips_module());
   }
   if (argc == 4 && strcmp(argv[1], "identity") == 0 && strcmp(argv[2], "of") == 0) return identity_of(argv[3]);
   if (argc > 1 && strcmp(argv[1], "check") == 0) return check(argc, argv);

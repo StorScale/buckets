@@ -43,6 +43,8 @@ size_t buckets_cksum_raw_len(uint32_t type);
 void buckets_cksum_hasher_init(buckets_cksum_hasher *h, uint32_t type);
 void buckets_cksum_hasher_update(buckets_cksum_hasher *h, const void *data, size_t n);
 size_t buckets_cksum_hasher_final(buckets_cksum_hasher *h, uint8_t *raw);
+/* Frees a hasher started but not finished; safe after final, and on a zeroed one. */
+void buckets_cksum_hasher_cleanup(buckets_cksum_hasher *h);
 
 /* Checksum of A||B from checksum(A), checksum(B) and len(B), for the CRC
  * types (FULL_OBJECT multipart checksums). raw values are big-endian. */

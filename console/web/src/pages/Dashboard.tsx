@@ -8,6 +8,8 @@ export default function Dashboard() {
   const u = usage.data;
   const drives = i?.servers?.flatMap((s) => s.drives ?? []) ?? [];
   const online = drives.filter((d) => d.state === "ok").length;
+  const servers = i?.servers ?? [];
+  const fips = servers.length > 0 && servers.every((s) => s.fips?.enabled);
   return (
     <div>
       <h1>Dashboard</h1>
@@ -23,6 +25,12 @@ export default function Dashboard() {
             <Tile label="Servers" value={String(i.servers?.length ?? 0)} />
             <Tile label="Mode" value={i.mode} />
           </div>
+          {fips && (
+            <p data-testid="fips-mode">
+              <span className="pill ok">FIPS 140-3</span> Every server runs its cryptography in the{" "}
+              {servers[0].fips?.module}.
+            </p>
+          )}
           <p className="muted">
             Deployment {i.deploymentID}
             {u?.lastUpdate && <> · usage as of {formatDate(u.lastUpdate)}</>}

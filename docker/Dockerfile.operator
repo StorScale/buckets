@@ -13,6 +13,25 @@ RUN cmake -S . -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release \
  && ninja -C /build buckets-operator \
  && strip /build/operator/buckets-operator
 
+# OpenSSL's FIPS provider, for the -fips image (docs/fips.md): scripts/build-fips-provider.sh sets the version.
+FROM debian:trixie-slim AS fips-provider
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends build-essential perl curl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+COPY scripts/build-fips-provider.sh /usr/local/bin/build-fips-provider.sh
+RUN build-fips-provider.sh /opt/fips
+
+# The -fips image (docker build --target fips): FIPS mode always on, with the provider and the openssl
+# program that installs it on each start (its security policy forbids copying that configuration).
+FROM gcr.io/distroless/cc-debian13:nonroot AS fips
+COPY --from=build /build/operator/buckets-operator /usr/local/bin/buckets-operator
+COPY --from=fips-provider /opt/fips/lib/ossl-modules/fips.so /usr/lib/buckets/fips/fips.so
+COPY --from=fips-provider /opt/fips/bin/openssl /usr/lib/buckets/fips/openssl
+ENV BUCKETS_FIPS=on
+USER nonroot:nonroot
+ENTRYPOINT ["/usr/local/bin/buckets-operator"]
+
+# The standard image (the default target).
 FROM gcr.io/distroless/cc-debian13:nonroot
 COPY --from=build /build/operator/buckets-operator /usr/local/bin/buckets-operator
 USER nonroot:nonroot

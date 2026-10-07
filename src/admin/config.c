@@ -53,7 +53,7 @@ static char *read_body(s3_ctx *c) {
   buckets_buf plain = BUCKETS_BUF_INIT;
   if (!buckets_madmin_decrypt(c->ident->secret_key, c->doc.data, c->doc.len, &plain)) {
     buckets_buf_free(&plain);
-    buckets_admin_error(c, BUCKETS_ERR_ADMIN_CONFIG_BAD_JSON);
+    buckets_admin_decrypt_error(c, BUCKETS_ERR_ADMIN_CONFIG_BAD_JSON, NULL);
     return NULL;
   }
   return buckets_buf_detach(&plain);

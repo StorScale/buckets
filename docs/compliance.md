@@ -36,6 +36,10 @@ Compliance-mode retention, and the furthest date.
 - **SSE-S3, SSE-KMS, SSE-C and Unencrypted:** how many versions, and how many
   bytes, are stored each way. **Encrypt existing objects**, in the bucket's
   settings, encrypts what is left unencrypted in place.
+- **ChaCha20** (shown only when there is any): versions encrypted with
+  ChaCha20-Poly1305, which MinIO uses on CPUs without AES instructions and
+  which [FIPS mode](fips.md) can't read. **Encrypt existing objects**
+  re-encrypts them with AES-256-GCM.
 
 The summary line gives the KMS's state, the share of bytes encrypted, and the
 buckets without default encryption.

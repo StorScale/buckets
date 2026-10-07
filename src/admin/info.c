@@ -2,6 +2,7 @@
 /* ServerInfo (mc admin info): madmin.InfoMessage, from this node's view
  * plus every peer's ServerProperties. Replaces MinIO's getServerInfo and
  * getLocalServerProperty (cmd/admin-handlers.go, cmd/admin-server-info.go). */
+#include "crypto/fips.h"
 #include "admin/info.h"
 #include "notify/notifier.h"
 
@@ -280,6 +281,9 @@ static yyjson_mut_val *server_props(yyjson_mut_doc *d, buckets_s3_server *s, con
     }
   }
   yyjson_mut_obj_add_str(d, o, "edition", ""); /* MinIO leaves it empty */
+  yyjson_mut_val *fips = yyjson_mut_obj_add_obj(d, o, "fips"); /* Buckets' own (crypto/fips.h) */
+  yyjson_mut_obj_add_bool(d, fips, "enabled", buckets_fips_mode());
+  yyjson_mut_obj_add_str(d, fips, "module", buckets_fips_module());
   yyjson_mut_obj_add_bool(d, o, "is_leader", false);
   yyjson_mut_obj_add_bool(d, o, "ilm_expiry_in_progress", false);
   return o;

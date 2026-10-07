@@ -21,6 +21,7 @@ include(Warnings)
 include(Sanitizers)
 include(Dependencies)
 include(OpenSSL)
+include(OpenSSLFips)
 include(LibSSH)
 
 if(BUCKETS_BUILD_TESTS)

@@ -46,6 +46,7 @@ typedef enum {
   BUCKETS_DARE_ERR_NONCE = -4,
   BUCKETS_DARE_ERR_TAG = -5,
   BUCKETS_DARE_ERR_UNEXPECTED_DATA = -6, /* a package after the final one */
+  BUCKETS_DARE_ERR_REFUSED = -7,         /* the cipher is refused: ChaCha20-Poly1305 in FIPS mode */
 } buckets_dare_err;
 
 typedef struct {

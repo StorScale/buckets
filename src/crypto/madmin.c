@@ -7,6 +7,8 @@
 #include <openssl/rand.h>
 #include <string.h>
 
+#include "crypto/fips.h"
+
 #define SALT_LEN 32
 #define NONCE_LEN 8
 #define TAG_LEN 16
@@ -14,11 +16,28 @@
 
 enum { ARGON2ID_AES_GCM = 0x00, ARGON2ID_CHACHA20 = 0x01, PBKDF2_AES_GCM = 0x02 };
 
+/* Argon2id and ChaCha20 are not FIPS approved: in FIPS mode they come from outside the module, and only for what
+ * clients send (a standard mc seals admin payloads with Argon2id), unless BUCKETS_FIPS_STRICT refuses them too. */
 static bool derive(uint8_t id, const char *password, const uint8_t *salt, uint8_t key[32]) {
   if (id == PBKDF2_AES_GCM) {
-    return PKCS5_PBKDF2_HMAC(password, (int)strlen(password), salt, SALT_LEN, 8192, EVP_sha256(), 32, key) == 1;
+    EVP_KDF *kdf = EVP_KDF_fetch(NULL, "PBKDF2", NULL);
+    EVP_KDF_CTX *ctx = kdf ? EVP_KDF_CTX_new(kdf) : NULL;
+    EVP_KDF_free(kdf);
+    if (!ctx) return false;
+    unsigned int iter = 8192;
+    OSSL_PARAM params[] = {
+        OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_PASSWORD, (void *)password, strlen(password)),
+        OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_SALT, (void *)salt, SALT_LEN),
+        OSSL_PARAM_construct_uint(OSSL_KDF_PARAM_ITER, &iter),
+        OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_DIGEST, "SHA2-256", 0),
+        OSSL_PARAM_construct_end(),
+    };
+    bool ok = EVP_KDF_derive(ctx, key, 32, params) == 1;
+    EVP_KDF_CTX_free(ctx);
+    return ok;
   }
-  EVP_KDF *kdf = EVP_KDF_fetch(NULL, "ARGON2ID", NULL);
+  if (buckets_fips_strict()) return false;
+  EVP_KDF *kdf = EVP_KDF_fetch(NULL, "ARGON2ID", buckets_crypto_nonfips_props());
   if (!kdf) return false;
   EVP_KDF_CTX *ctx = EVP_KDF_CTX_new(kdf);
   EVP_KDF_free(kdf);
@@ -31,6 +50,8 @@ static bool derive(uint8_t id, const char *password, const uint8_t *salt, uint8_
       OSSL_PARAM_construct_uint32(OSSL_KDF_PARAM_ARGON2_MEMCOST, &mem),
       OSSL_PARAM_construct_uint32(OSSL_KDF_PARAM_ARGON2_LANES, &lanes),
       OSSL_PARAM_construct_uint32(OSSL_KDF_PARAM_THREADS, &threads),
+      /* its BLAKE2b, from outside the module as well */
+      OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_PROPERTIES, (char *)buckets_crypto_nonfips_props(), 0),
       OSSL_PARAM_construct_end(),
   };
   bool ok = EVP_KDF_derive(ctx, key, 32, params) == 1;
@@ -39,15 +60,17 @@ static bool derive(uint8_t id, const char *password, const uint8_t *salt, uint8_
 }
 
 static const EVP_CIPHER *cipher_for(uint8_t id) {
-  return id == ARGON2ID_CHACHA20 ? EVP_chacha20_poly1305() : EVP_aes_256_gcm();
+  return id == ARGON2ID_CHACHA20 ? buckets_cipher_chacha20poly1305_madmin() : buckets_cipher_aes256gcm();
 }
 
 /* One AEAD seal/open of a fragment (12-byte nonce, 16-byte tag). */
 static bool aead(bool seal, uint8_t id, const uint8_t key[32], const uint8_t nonce[12], const uint8_t *ad, size_t adn,
                  const uint8_t *in, size_t n, uint8_t *out, uint8_t tag[16]) {
+  const EVP_CIPHER *cipher = cipher_for(id);
+  if (!cipher) return false;
   EVP_CIPHER_CTX *c = EVP_CIPHER_CTX_new();
   int len;
-  bool ok = c && EVP_CipherInit_ex(c, cipher_for(id), NULL, NULL, NULL, seal) == 1 &&
+  bool ok = c && EVP_CipherInit_ex(c, cipher, NULL, NULL, NULL, seal) == 1 &&
             EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_AEAD_SET_IVLEN, 12, NULL) == 1 &&
             EVP_CipherInit_ex(c, NULL, NULL, key, nonce, seal) == 1 &&
             (adn == 0 || EVP_CipherUpdate(c, NULL, &len, ad, (int)adn) == 1) &&
@@ -84,7 +107,7 @@ bool buckets_madmin_is_encrypted(const void *data, size_t n) {
 bool buckets_madmin_encrypt(const char *password, const void *data, size_t n, buckets_buf *out) {
   uint8_t salt[SALT_LEN], base[NONCE_LEN], key[32], ad[1 + TAG_LEN];
   if (RAND_bytes(salt, SALT_LEN) != 1 || RAND_bytes(base, NONCE_LEN) != 1) return false;
-  uint8_t id = ARGON2ID_AES_GCM;
+  uint8_t id = buckets_fips_mode() ? PBKDF2_AES_GCM : ARGON2ID_AES_GCM; /* as madmin-go's FIPS build does */
   if (!derive(id, password, salt, key) || !stream_ad(id, key, base, ad)) return false;
   buckets_buf_append(out, salt, SALT_LEN);
   buckets_buf_append_char(out, (char)id);
@@ -142,4 +165,9 @@ bool buckets_madmin_decrypt(const char *password, const void *data, size_t n, bu
   }
   if (out->data) out->data[out->len] = '\0';
   return true;
+}
+
+bool buckets_madmin_fips_refused(const void *data, size_t n) {
+  const uint8_t *p = data;
+  return buckets_fips_strict() && n > SALT_LEN && p[SALT_LEN] != PBKDF2_AES_GCM;
 }

@@ -28,6 +28,7 @@
 
 #include "core/common.h"
 #include "crypto/base64.h"
+#include "crypto/fips.h"
 #include "crypto/md5.h"
 #include "crypto/sha256.h"
 #include "net/conn.h"
@@ -637,6 +638,12 @@ static pstatus pg_connect(pg *p, char *err, size_t errlen) {
     if (t != 'R' || body.len < 4) continue; /* ParameterStatus, BackendKeyData, notices */
     uint32_t code = get32((uint8_t *)body.data);
     if (code == 0) continue;
+    if (code == 5 && buckets_fips_mode()) { /* MD5 protects the password here: not outside the module */
+      snprintf(err, errlen, "pq: the server asks for md5 password authentication, which FIPS mode does not allow; "
+                            "use scram-sha-256");
+      st = P_ERR;
+      break;
+    }
     if (code == 3 || code == 5) {
       char pw[80];
       if (code == 3) snprintf(pw, sizeof(pw), "%s", pass);

@@ -24,6 +24,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "crypto/fips.h"
 #include "console/console.h"
 #include "core/log.h"
 #include "core/loop.h"
@@ -106,6 +107,14 @@ int main(int argc, char **argv) {
       fprintf(stderr, "usage: consoled [--address HOST:PORT] [--web-dir DIR] [--certs-dir DIR]\n");
       return 2;
     }
+  }
+  {
+    char cerr[512];
+    if (!buckets_crypto_init(cerr, sizeof(cerr))) {
+      buckets_log_error("fips: %s", cerr);
+      return 1;
+    }
+    if (buckets_fips_mode()) buckets_log_info("fips: FIPS 140-3 mode, with %s", buckets_fips_module());
   }
   if (!web_dir) web_dir = env2("BUCKETS_CONSOLE_WEB_DIR", NULL);
   const char *server = env2("BUCKETS_CONSOLE_SERVER", "CONSOLE_MINIO_SERVER");

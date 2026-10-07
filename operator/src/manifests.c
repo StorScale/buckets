@@ -84,8 +84,11 @@ bool bc_parse(yyjson_val *obj, const char *cluster_domain, bc_spec *out, char *e
     snprintf(err, errlen, "name %s must be a DNS label of at most 40 characters", out->name);
     return false;
   }
+  out->fips = yyjson_get_bool(yyjson_obj_get(spec, "fips"));
   out->image = str_at(spec, "image");
-  if (!out->image) out->image = "ghcr.io/storscale/bucketsd:1.12.0";
+  /* the CRD's default is the normal image: FIPS mode takes its -fips build instead */
+  if (!out->image || (out->fips && !strcmp(out->image, BC_SERVER_IMAGE)))
+    out->image = out->fips ? BC_SERVER_IMAGE BC_FIPS_TAG : BC_SERVER_IMAGE;
   out->pull_policy = str_at(spec, "imagePullPolicy");
   if (!out->pull_policy) out->pull_policy = "IfNotPresent";
   out->pull_secrets = yyjson_obj_get(spec, "imagePullSecrets");
@@ -141,7 +144,7 @@ bool bc_parse(yyjson_val *obj, const char *cluster_domain, bc_spec *out, char *e
   out->console.replicas = (int)yyjson_get_int(yyjson_obj_get(con, "replicas"));
   if (out->console.replicas < 1) out->console.replicas = 1;
   out->console.image = str_at(con, "image");
-  if (!out->console.image) out->console.image = BC_CONSOLE_IMAGE;
+  if (!out->console.image) out->console.image = out->fips ? BC_CONSOLE_IMAGE BC_FIPS_TAG : BC_CONSOLE_IMAGE;
   out->console.service_type = str_at(con, "serviceType");
   if (!out->console.service_type) out->console.service_type = "ClusterIP";
   yyjson_val *ing = yyjson_obj_get(con, "ingress");
@@ -171,7 +174,10 @@ bool bc_parse(yyjson_val *obj, const char *cluster_domain, bc_spec *out, char *e
   out->kes.replicas = (int)yyjson_get_int(yyjson_obj_get(kes, "replicas"));
   if (out->kes.replicas < 1) out->kes.replicas = 2;
   out->kes.image = str_at(kes, "image");
-  if (!out->kes.image) out->kes.image = getenv("BUCKETS_KES_IMAGE") && *getenv("BUCKETS_KES_IMAGE") ? getenv("BUCKETS_KES_IMAGE") : BC_KES_IMAGE;
+  if (!out->kes.image)
+    out->kes.image = getenv("BUCKETS_KES_IMAGE") && *getenv("BUCKETS_KES_IMAGE") ? getenv("BUCKETS_KES_IMAGE")
+                     : out->fips                                                  ? BC_KES_IMAGE BC_FIPS_TAG
+                                                                                  : BC_KES_IMAGE;
   out->kes.key_name = str_at(kes, "keyName");
   if (!out->kes.key_name || !*out->kes.key_name) out->kes.key_name = BC_KES_DEFAULT_KEY;
   out->kes.resources = yyjson_obj_get(kes, "resources");
@@ -374,6 +380,23 @@ static void env_secret(mdoc *d, mval *env, const char *name, const char *secret,
   ADD_STR(d, ref, "key", key);
 }
 
+/* spec.fips: FIPS mode, and an in-memory directory where the module installs itself on each start (its security
+ * policy forbids copying that configuration from elsewhere; the root filesystem is read-only). An image without the
+ * module then refuses to start rather than run outside FIPS mode. */
+static void fips_container(mdoc *d, const bc_spec *s, mval *c, mval *mounts, mval *vols) {
+  if (!s->fips) return;
+  mval *env = yyjson_mut_obj_get(c, "env");
+  if (!env) env = ADD_ARR(d, c, "env");
+  env_value(d, env, "BUCKETS_FIPS", "on");
+  env_value(d, env, "BUCKETS_FIPS_DIR", BC_FIPS_DIR);
+  mval *m = yyjson_mut_arr_add_obj(d, mounts);
+  ADD_STR(d, m, "name", "fips");
+  ADD_STR(d, m, "mountPath", BC_FIPS_DIR);
+  mval *v = yyjson_mut_arr_add_obj(d, vols);
+  ADD_STR(d, v, "name", "fips");
+  ADD_STR(d, ADD_OBJ(d, v, "emptyDir"), "medium", "Memory");
+}
+
 static void probe(mdoc *d, mval *c, const char *key, const char *path, bool https, int period, int failures,
                   int initial) {
   mval *p = ADD_OBJ(d, c, key);
@@ -515,6 +538,7 @@ static bc_object statefulset(const bc_spec *s, size_t pi, const char *volumes, c
   yyjson_mut_arr_add_str(d, ADD_ARR(d, ADD_OBJ(d, csec, "capabilities"), "drop"), "ALL");
 
   mval *mounts = ADD_ARR(d, c, "volumeMounts"), *vols = ADD_ARR(d, pod, "volumes");
+  fips_container(d, s, c, mounts, vols);
   for (int v = 0; v < bp->volumes; v++) {
     char vn[16], mp[256];
     snprintf(vn, sizeof(vn), "data%d", v);
@@ -740,6 +764,7 @@ static bc_object console_deployment(const bc_spec *s) {
   ADD_BOOL(d, csec, "readOnlyRootFilesystem", true);
   yyjson_mut_arr_add_str(d, ADD_ARR(d, ADD_OBJ(d, csec, "capabilities"), "drop"), "ALL");
   mval *mounts = ADD_ARR(d, c, "volumeMounts"), *vols = ADD_ARR(d, pod, "volumes");
+  fips_container(d, s, c, mounts, vols);
   /* Large uploads spool to /tmp. */
   mval *m = yyjson_mut_arr_add_obj(d, mounts);
   ADD_STR(d, m, "name", "tmp");
@@ -1109,6 +1134,7 @@ size_t bc_kes_objects(const bc_spec *s, bool trial, const char *config, const ch
   ADD_BOOL(d, csec, "readOnlyRootFilesystem", true);
   yyjson_mut_arr_add_str(d, ADD_ARR(d, ADD_OBJ(d, csec, "capabilities"), "drop"), "ALL");
   mval *mounts = ADD_ARR(d, c, "volumeMounts"), *vols = ADD_ARR(d, pod, "volumes");
+  fips_container(d, s, c, mounts, vols);
   const char *mv[][3] = {{"config", "/etc/kes/config", cfg}, {"tls", "/etc/kes/tls", tlsn}};
   for (int i = 0; i < 2; i++) {
     mval *m = yyjson_mut_arr_add_obj(d, mounts);

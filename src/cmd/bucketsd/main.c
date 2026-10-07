@@ -17,6 +17,7 @@
 #include <mach-o/dyld.h>
 #endif
 
+#include "crypto/fips.h"
 #include "config/config.h"
 #include "core/log.h"
 #include "dist/dsync.h"
@@ -601,6 +602,14 @@ int main(int argc, char **argv) {
   if (argc < 2 || strcmp(argv[1], "server") != 0) {
     usage(stderr);
     return 2;
+  }
+  {
+    char cerr[512];
+    if (!buckets_crypto_init(cerr, sizeof(cerr))) {
+      buckets_log_error("fips: %s", cerr);
+      return 1;
+    }
+    if (buckets_fips_mode()) buckets_log_info("fips: FIPS 140-3 mode, with %s", buckets_fips_module());
   }
 
   const char *address = ":9000";

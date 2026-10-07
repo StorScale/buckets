@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 #include "net/tls.h"
 
+#include "crypto/fips.h"
+
 #include <dirent.h>
 #include <errno.h>
 #include <openssl/core_names.h>
@@ -21,6 +23,24 @@
 #define CIPHERS                                                                                              \
   "ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:"                 \
   "ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256"
+
+/* FIPS mode (crypto/fips.h): AES-GCM suites and NIST curves only, as the FIPS provider allows */
+#define FIPS_CIPHERS                                                                                         \
+  "ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES128-GCM-SHA256:"                 \
+  "ECDHE-RSA-AES128-GCM-SHA256"
+#define FIPS_TLS13 "TLS_AES_256_GCM_SHA384:TLS_AES_128_GCM_SHA256"
+#define FIPS_GROUPS "P-256:P-384:P-521"
+
+void buckets_tls_ctx_setup(SSL_CTX *ctx) {
+  SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
+  if (buckets_fips_mode()) {
+    SSL_CTX_set_cipher_list(ctx, FIPS_CIPHERS);
+    SSL_CTX_set_ciphersuites(ctx, FIPS_TLS13);
+    SSL_CTX_set1_groups_list(ctx, FIPS_GROUPS);
+  } else {
+    SSL_CTX_set_cipher_list(ctx, CIPHERS);
+  }
+}
 
 #define MAX_CERTS 64
 
@@ -90,8 +110,7 @@ static bool load_cert_files(buckets_tls *t, const char *crt_file, const char *ke
     ssl_err(err, errlen, "create TLS context for", dir);
     goto done;
   }
-  SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
-  SSL_CTX_set_cipher_list(ctx, CIPHERS);
+  buckets_tls_ctx_setup(ctx);
   SSL_CTX_set_options(ctx, SSL_OP_CIPHER_SERVER_PREFERENCE | SSL_OP_NO_RENEGOTIATION | SSL_OP_NO_COMPRESSION);
   SSL_CTX_set_mode(ctx, SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER | SSL_MODE_RELEASE_BUFFERS);
   SSL_CTX_set_default_passwd_cb(ctx, password_cb);
@@ -555,8 +574,7 @@ buckets_tls_client *buckets_tls_client_new(const char *ca_dir, char *err, size_t
     ssl_err(err, errlen, "create TLS client context", "");
     return NULL;
   }
-  SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
-  SSL_CTX_set_cipher_list(ctx, CIPHERS);
+  buckets_tls_ctx_setup(ctx);
   SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
   SSL_CTX_set_default_verify_paths(ctx);
   X509_STORE *store = SSL_CTX_get_cert_store(ctx);
