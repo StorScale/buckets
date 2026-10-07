@@ -1,6 +1,6 @@
 # Buckets Roadmap
 
-As of 2026-10-06 · Russell Myers
+As of 2026-10-07 · Russell Myers
 
 ## Summary
 
@@ -10,7 +10,7 @@ The order below leads with what builds on work that already exists (MinIO on-dis
 
 A successor can't depend on what it replaces. MinIO no longer publishes its images or binaries, so Buckets now ships its own key server (`buckets-kes`) in place of MinIO's KES, and keeps mirrors of MinIO's last images only for adoption and rollback.
 
-**Where things stand (2026-10-06):** Buckets 1.10.0 is released, and the main repository is https://github.com/StorScale/buckets. Phases 0 and 3 are done. Every item of Phase 1 is done too.
+**Where things stand (2026-10-07):** Buckets 1.11.0 is released, and the main repository is https://github.com/StorScale/buckets. Phases 0 and 3 are done. Every item of Phase 1 is done too.
 
 - **Left in Phase 1:** its gate, the round trip in CI. The job (`adopt-roundtrip`) is built and waits for access to the cluster it runs on.
 - **Left in Phase 2:** SCIM, for providers that push changes. Done so far: guided sign-in setup (1.2.0) for Entra ID, Okta, Keycloak, other OpenID providers and LDAP, per-team roles (1.3.0), the access review (1.4.0), and removing people who leave Entra ID (1.9.0), Keycloak and Okta (1.10.0).
@@ -94,8 +94,8 @@ The full admin console and OpenSSL 3 are already in place; this phase turns them
 **Compliance and security**
 
 - **FIPS 140-3 mode** using the OpenSSL 3 FIPS provider. Buckets links OpenSSL 3.5, which makes this more practical than in a Go codebase.
-- **WORM compliance reports** built on the existing object lock: which buckets are locked, in which mode, until when.
-- **Encryption coverage reports:** which buckets encrypt by default, with which key, and how many objects are still stored unencrypted.
+- [x] **WORM compliance reports** (1.11.0; [compliance.md](compliance.md)): which buckets are locked, in which mode and for how long, and how much data is under retention or legal hold, per bucket, with CSV export.
+- [x] **Encryption coverage reports** (1.11.0): which buckets encrypt by default and with which key (flagged when it no longer works), and how much data is stored encrypted, by kind, or not; per-bucket metrics for alerting on unencrypted data.
 - **Ransomware alerts** for unusual bursts of deletes or overwrites, using the existing event notifications.
 
 Done when: an auditor can get usage, access and retention reports from the console, and FIPS mode is documented and tested.
@@ -115,6 +115,7 @@ The roadmap builds on what exists: MinIO's exact on-disk format, 220 of 222 MinI
 
 | Date | Change | What it gives |
 | --- | --- | --- |
+| 2026-10-07 | 1.11.0: compliance reports; keys of people who left say so | Retention and encryption coverage per bucket with CSV, from the scanner's counts; "owner left" on keys the identity sync turned off; the access review no longer counts keys that are off |
 | 2026-10-06 | 1.10.0: people who leave Keycloak and Okta lose their access | The same sync for Keycloak (service account with view-users) and Okta (read-only API token); a configurable interval; a real Keycloak user disabled in the cluster test |
 | 2026-10-06 | 1.9.1: the capacity alert ignores rolling restarts | `BucketsCapacityFullIn7Days` no longer reads a restart's free-space dip as a trend |
 | 2026-10-06 | 1.9.0: people who leave Entra ID lose their access | Microsoft Graph asked hourly; temporary credentials revoked, access keys off then deleted after 30 days; a lookup test before Apply, two alerts, a safety limit |

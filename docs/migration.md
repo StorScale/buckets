@@ -25,7 +25,7 @@ Then point the Tenant (and the MinIO Operator) at the mirror before adopting. Ad
 
 ```bash
 helm install buckets-operator oci://ghcr.io/storscale/charts/buckets-operator \
-  --version 1.10.0 -n buckets-system --create-namespace \
+  --version 1.11.0 -n buckets-system --create-namespace \
   --set watchNamespace=<namespace>          # leave out to watch every namespace
 ```
 
@@ -67,7 +67,7 @@ The script runs from a machine with `kubectl` and Python 3 (PyYAML too, if the t
 scripts/adopt-minio.sh --context <ctx> -n <namespace> -t <tenant> --state ./adopt-<tenant>
 ```
 
-The servers run the operator's default image, `ghcr.io/storscale/bucketsd` at its version. To run a mirrored or pinned image, add `--image <registry>/bucketsd:1.10.0`, here and when applying.
+The servers run the operator's default image, `ghcr.io/storscale/bucketsd` at its version. To run a mirrored or pinned image, add `--image <registry>/bucketsd:1.11.0`, here and when applying.
 
 Without `--apply`, nothing changes. The script reads the Tenant (or the StatefulSets), its PVCs and PVs, and prints:
 

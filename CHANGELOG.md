@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.11.0] - 2026-10-07
+
 ### Added
 - Keys the identity sync turned off say so. The Users page, the Access Keys page and the access review show when the owner left the identity provider and when the key will be deleted. The admin API's key listings and key info carry this as `ownerLeft` (`since`, `deleteAt`), which MinIO clients ignore.
 - A **Compliance** section in the console ([docs/compliance.md](docs/compliance.md), [the design](docs/design/compliance-reports.md)). Each page has one row per bucket and **Export CSV**.
