@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.14.0] - 2026-10-07
+
 ### Added
 - **Ransomware alerts** ([docs/ransomware.md](docs/ransomware.md), [the design](docs/design/ransomware-alerts.md)). Buckets notices mass deletion, mass overwriting and weakened protection as they happen, names the bucket and the credential, and can turn that credential off.
   - **Bursts:** at least 1,000 objects in 5 minutes, and more than 10 times the bucket's usual rate, per bucket or per credential across buckets. Each object of a `DeleteObjects` call counts, as does each delete marker and each write over an existing object. The usual rate is the median of each day's busiest hour over the 14 days before today, so nightly clean-up jobs don't trigger it and an attack doesn't raise the bar for the next. The leader adds up every server's counts every 30 seconds.
