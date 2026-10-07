@@ -440,6 +440,33 @@ static void idsync_run(buckets_s3_server *s, const buckets_idsync_settings *st, 
   free(all);
 }
 
+void buckets_s3_idsync_view_load(buckets_s3_server *s, buckets_s3_idsync_view *v) {
+  memset(v, 0, sizeof(*v));
+  buckets_objlayer *L = atomic_load(&s->layer);
+  if (!s->idsync_on || !L) return;
+  v->remove_after_s = s->idsync_remove_after_s;
+  buckets_buf b = BUCKETS_BUF_INIT;
+  if (buckets_sysconfig_read(L, IDSYNC_PATH, &b, NULL) == BUCKETS_OBJ_OK)
+    buckets_idsync_held_parse(b.data, b.len, &v->held, &v->n);
+  buckets_buf_free(&b);
+}
+
+bool buckets_s3_idsync_view_find(const buckets_s3_idsync_view *v, const char *access_key, long long *since,
+                                 long long *delete_at) {
+  for (size_t i = 0; v && i < v->n; i++) {
+    if (strcmp(v->held[i].access_key, access_key) != 0) continue;
+    *since = v->held[i].since;
+    *delete_at = v->held[i].since + v->remove_after_s;
+    return true;
+  }
+  return false;
+}
+
+void buckets_s3_idsync_view_free(buckets_s3_idsync_view *v) {
+  buckets_idsync_held_free(v->held, v->n);
+  memset(v, 0, sizeof(*v));
+}
+
 static void *idsync_main(void *arg) {
   buckets_s3_server *s = arg;
   buckets_idsync_settings st;
@@ -449,6 +476,7 @@ static void *idsync_main(void *arg) {
     return NULL;
   }
   if (!*st.provider) return NULL;
+  s->idsync_remove_after_s = st.remove_after_s;
   s->idsync_on = true;
   buckets_idsync_client *client = buckets_idsync_client_new(&st);
   memset(st.client_secret, 0, sizeof(st.client_secret));

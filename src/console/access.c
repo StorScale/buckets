@@ -89,14 +89,23 @@ static void add_key(facts *f, call *c, const char *ak, const char *owner, bool i
   if (find(f, "key", ak)) return;
   yyjson_mut_val *p = principal(f, "key", ak);
   yyjson_mut_obj_add_strcpy(f->d, p, "owner", owner);
-  if (implied) return;
-  /* its own policy, narrowing its owner's */
   buckets_buf q = BUCKETS_BUF_INIT;
   buckets_buf_append_c(&q, "accessKey=");
   buckets_url_encode(&q, ak, false);
   yyjson_doc *info = get(c, "info-access-key", q.data, true);
   buckets_buf_free(&q);
-  const char *pol = yyjson_get_str(yyjson_obj_get(yyjson_doc_get_root(info), "policy"));
+  /* a key turned off reaches nothing; one the identity sync turned off says its owner left */
+  yyjson_val *ir = yyjson_doc_get_root(info);
+  const char *st = yyjson_get_str(yyjson_obj_get(ir, "accountStatus"));
+  if (st && strcmp(st, "off") == 0) yyjson_mut_obj_add_str(f->d, p, "status", "disabled");
+  yyjson_val *left = yyjson_obj_get(ir, "ownerLeft");
+  if (yyjson_is_obj(left)) yyjson_mut_obj_add_val(f->d, p, "ownerLeft", yyjson_val_mut_copy(f->d, left));
+  if (implied) {
+    yyjson_doc_free(info);
+    return;
+  }
+  /* its own policy, narrowing its owner's */
+  const char *pol = yyjson_get_str(yyjson_obj_get(ir, "policy"));
   yyjson_doc *pd = pol && *pol ? yyjson_read(pol, strlen(pol), 0) : NULL;
   if (yyjson_is_obj(yyjson_doc_get_root(pd)))
     yyjson_mut_obj_add_val(f->d, p, "policy", yyjson_val_mut_copy(f->d, yyjson_doc_get_root(pd)));

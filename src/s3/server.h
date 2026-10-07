@@ -55,6 +55,7 @@ typedef struct buckets_s3_server {
   bool iam_thread_started, ldap_thread_started, idsync_thread_started;
   /* identity sync (iam/idsync.h): runs, failed runs, and what it did, for metrics */
   _Atomic bool idsync_on; /* set up (the metrics are shown) */
+  _Atomic long long idsync_remove_after_s; /* its grace period, for "deleted on" */
   _Atomic unsigned long long idsync_runs, idsync_failures, idsync_held, idsync_revoked, idsync_disabled,
       idsync_enabled, idsync_deleted;
   char host_id[65];   /* x-amz-id-2 */
@@ -115,6 +116,20 @@ void buckets_s3_service(buckets_s3_server *s, const char *action, bool local);
 
 /* The LDAP identity provider (a reference to release), or NULL. */
 struct buckets_ldapidp *buckets_s3_ldap(buckets_s3_server *s);
+
+/* What the identity sync turned off (iam/idsync.h), for the admin API's key listings: empty when the sync is
+ * off or turned nothing off. */
+typedef struct {
+  struct buckets_idsync_held_s *held;
+  size_t n;
+  long long remove_after_s;
+} buckets_s3_idsync_view;
+void buckets_s3_idsync_view_load(buckets_s3_server *s, buckets_s3_idsync_view *v);
+/* When the key's owner was found gone or disabled, and when the key is deleted; false when the sync did not
+ * turn it off. */
+bool buckets_s3_idsync_view_find(const buckets_s3_idsync_view *v, const char *access_key, long long *since,
+                                 long long *delete_at);
+void buckets_s3_idsync_view_free(buckets_s3_idsync_view *v);
 
 /* A configuration object under .minio.sys (path relative to it), written
  * SSE-S3-encrypted when a KMS is configured, as MinIO saves tier-config.bin;

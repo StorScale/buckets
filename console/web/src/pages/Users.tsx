@@ -242,7 +242,19 @@ function OpenIDUsers({ provider }: { provider: string }) {
                   <td>{u.email || <span className="mono">{u.ID}</span>}</td>
                   <td>{u.policies?.length ? u.policies.map((p) => <span key={p} className="pill">{p}</span>) : "—"}</td>
                   <td>{until ? new Date(until).toLocaleString() : "—"}</td>
-                  <td>{u.serviceAccounts?.length ?? 0}</td>
+                  <td>
+                    {u.serviceAccounts?.length ?? 0}
+                    {(() => {
+                      const left = (u.serviceAccounts ?? []).filter((k) => k.ownerLeft).map((k) => k.ownerLeft!);
+                      if (!left.length) return null;
+                      const del = left.map((l) => l.deleteAt).sort()[0];
+                      return (
+                        <span className="pill warn" title="This person left the identity provider: the identity sync turned their keys off." data-testid={`left-${u.email || u.ID}`}>
+                          left: {left.length === u.serviceAccounts!.length ? "all" : left.length} off, deleted {new Date(del).toLocaleDateString()}
+                        </span>
+                      );
+                    })()}
+                  </td>
                 </tr>
               );
             })}

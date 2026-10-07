@@ -78,7 +78,7 @@ typedef struct {
 } buckets_idsync_cred;
 
 /* An access key the sync turned off: who owned it, and when (unix seconds). */
-typedef struct {
+typedef struct buckets_idsync_held_s {
   char *access_key, *person;
   long long since;
 } buckets_idsync_held;

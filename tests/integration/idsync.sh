@@ -7,9 +7,10 @@
 # Okta's users API, with each person's state
 # set by the test. Also: a provider answering errors removes no one, too
 # many people leaving at once are held, and other tenants are left alone.
-#   tests/integration/idsync.sh [bucketsd]
+#   tests/integration/idsync.sh [bucketsd] [consoled]
 set -euo pipefail
 BIN=${1:-build/src/bucketsd}
+CBIN=${2:-$(dirname "$BIN")/consoled}
 PORT=${PORT:-19760}
 OPORT=${OPORT:-19761}
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/buckets-idsync-XXXXXX")
@@ -170,6 +171,28 @@ expect "ann's temporary credentials gone" "$(sts_code "${ANN[@]}")" 403
 expect "bob's key still works" "$(key_code KEYBOB0001 KEYBOB0001secret123)" 200
 expect "another tenant's person left alone" "$(key_code KEYZED0001 KEYZED0001secret123)" 200
 expect "logged" "$(grep -c 'identity sync: disable access key KEYANN0001 (owner gone in the provider)' "$WORK/log")" 1
+
+echo "== what an admin sees: when the owner left, and when the key goes"
+CPORT=$((PORT + 5))
+env CONSOLE_MINIO_SERVER="$EP" CONSOLE_PBKDF_PASSPHRASE=it CONSOLE_PBKDF_SALT=it \
+  "$CBIN" --address "127.0.0.1:$CPORT" 2>>"$WORK/clog" &
+PIDS+=($!)
+until_true "curl -s -o /dev/null http://127.0.0.1:$CPORT/healthz"
+CJ="$WORK/console.jar"
+curl -s -c "$CJ" -H 'X-Console-Request: 1' -d '{"accessKey":"rootadmin","secretKey":"rootsecret123"}' "http://127.0.0.1:$CPORT/api/v1/login" >/dev/null
+capi() { curl -s -b "$CJ" -H 'X-Console-Request: 1' -H 'X-Console-Decrypt: 1' "http://127.0.0.1:$CPORT$1"; }
+py() { python3 -c "import json,sys,datetime; d=json.load(sys.stdin); $1"; }
+expect "the key's info says its owner left, deleted after the grace period" \
+  "$(capi '/api/v1/admin/info-access-key?accessKey=KEYANN0001' | py 'o=d["ownerLeft"]; t=lambda s: datetime.datetime.fromisoformat(s.replace("Z","+00:00")); print(d["accountStatus"], int((t(o["deleteAt"])-t(o["since"])).total_seconds()))')" "off 8"
+expect "the Users page's listing marks it" \
+  "$(capi '/api/v1/admin/idp/openid/list-access-keys-bulk?all=true&listType=all' | py 'print(sum(1 for c in d for u in (c["users"] or []) for k in (u["serviceAccounts"] or []) if k.get("ownerLeft")))')" 1
+expect "and nobody else's key" "$(capi '/api/v1/admin/info-access-key?accessKey=KEYBOB0001' | py 'print("ownerLeft" in d)')" False
+rev=$(capi '/api/v1/access/bucket/docs?level=read')
+expect "the access review: the key is disabled, its owner gone" \
+  "$(py 'r=[x for x in d["rows"] if x["kind"]=="key" and x["name"]=="KEYANN0001"]; print(r[0].get("status"), "ownerLeft" in r[0]) if r else print("not listed")' <<<"$rev")" "disabled True"
+expect "and the check says the key cannot" \
+  "$(curl -s -b "$CJ" -H 'X-Console-Request: 1' -H 'Content-Type: application/json' -d '{"who":{"kind":"key","name":"KEYANN0001"},"action":"s3:GetObject","bucket":"docs","object":"a.txt"}' "http://127.0.0.1:$CPORT/api/v1/access/check" | py 'print(d["decision"], d["reason"])')" \
+  "denied The account is disabled."
 
 echo "== ann comes back within the grace period: the key comes back on"
 person o-ann active

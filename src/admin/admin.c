@@ -135,6 +135,16 @@ static void add_time(yyjson_mut_doc *d, yyjson_mut_val *o, const char *key, buck
   yyjson_mut_obj_add_strcpy(d, o, key, ts);
 }
 
+/* Buckets extension: a key the identity sync turned off because its owner left the provider says when, and
+ * when it is deleted ({"since", "deleteAt"}, RFC 3339). MinIO clients ignore it. */
+static void add_owner_left(yyjson_mut_doc *d, yyjson_mut_val *o, const buckets_s3_idsync_view *v, const char *ak) {
+  long long since, del;
+  if (!v || !buckets_s3_idsync_view_find(v, ak, &since, &del)) return;
+  yyjson_mut_val *ol = yyjson_mut_obj_add_obj(d, o, "ownerLeft");
+  add_time(d, ol, "since", (buckets_iam_time){since, 0});
+  add_time(d, ol, "deleteAt", (buckets_iam_time){del, 0});
+}
+
 static bool parse_time(yyjson_val *v, buckets_iam_time *out) {
   const char *s = yyjson_get_str(v);
   return s && buckets_time_parse_rfc3339(s, &out->sec, &out->nsec);
@@ -1256,6 +1266,10 @@ static void h_info_svc(s3_ctx *c) {
   if (svc->name) yyjson_mut_obj_add_strcpy(d, root, "name", svc->name);
   if (svc->description) yyjson_mut_obj_add_strcpy(d, root, "description", svc->description);
   if (buckets_iam_time_is_set(svc->expiration)) add_time(d, root, "expiration", svc->expiration);
+  buckets_s3_idsync_view held;
+  buckets_s3_idsync_view_load(c->s, &held);
+  add_owner_left(d, root, &held, svc->access_key);
+  buckets_s3_idsync_view_free(&held);
   write_json(c, d, true);
   yyjson_mut_doc_free(d);
   free(policy);
@@ -1276,6 +1290,8 @@ static void h_list_svc(s3_ctx *c) {
   buckets_iam_ident **list;
   size_t n;
   buckets_iam_list_derived(c->s->iam, target, BUCKETS_IAM_SVC, &list, &n);
+  buckets_s3_idsync_view held;
+  buckets_s3_idsync_view_load(c->s, &held);
   yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
   yyjson_mut_val *root = yyjson_mut_obj(d);
   yyjson_mut_doc_set_root(d, root);
@@ -1292,9 +1308,11 @@ static void h_list_svc(s3_ctx *c) {
     if (svc->name) yyjson_mut_obj_add_strcpy(d, o, "name", svc->name);
     if (svc->description) yyjson_mut_obj_add_strcpy(d, o, "description", svc->description);
     add_time(d, o, "expiration", svc->expiration);
+    add_owner_left(d, o, &held, svc->access_key);
     buckets_iam_ident_release(svc);
   }
   free(list);
+  buckets_s3_idsync_view_free(&held);
   write_json(c, d, true);
   yyjson_mut_doc_free(d);
 }
@@ -1344,7 +1362,14 @@ static size_t qall(s3_ctx *c, const char *key, const char ***out) {
   return n;
 }
 
+static void add_key_infos_seen(yyjson_mut_doc *d, yyjson_mut_val *o, const char *key, buckets_iam_ident **ids,
+                               size_t n, const buckets_s3_idsync_view *v);
 static void add_key_infos(yyjson_mut_doc *d, yyjson_mut_val *o, const char *key, buckets_iam_ident **ids, size_t n) {
+  add_key_infos_seen(d, o, key, ids, n, NULL);
+}
+
+static void add_key_infos_seen(yyjson_mut_doc *d, yyjson_mut_val *o, const char *key, buckets_iam_ident **ids,
+                               size_t n, const buckets_s3_idsync_view *v) {
   if (!n) {
     yyjson_mut_obj_add_null(d, o, key);
     return;
@@ -1357,6 +1382,7 @@ static void add_key_infos(yyjson_mut_doc *d, yyjson_mut_val *o, const char *key,
     yyjson_mut_obj_add_bool(d, e, "impliedPolicy", false);
     yyjson_mut_obj_add_strcpy(d, e, "accessKey", ids[i]->access_key);
     add_time(d, e, "expiration", ids[i]->expiration);
+    add_owner_left(d, e, v, ids[i]->access_key);
   }
 }
 
@@ -1413,6 +1439,8 @@ static void h_list_access_keys_bulk(s3_ctx *c) {
       }
     }
   }
+  buckets_s3_idsync_view held;
+  buckets_s3_idsync_view_load(c->s, &held);
   d = yyjson_mut_doc_new(NULL);
   yyjson_mut_val *root = yyjson_mut_obj(d);
   yyjson_mut_doc_set_root(d, root);
@@ -1424,7 +1452,7 @@ static void h_list_access_keys_bulk(s3_ctx *c) {
     bool skip = (sts && !svc && !ns) || (svc && !sts && !nv);
     if (!skip) {
       yyjson_mut_val *o = yyjson_mut_obj(d);
-      add_key_infos(d, o, "serviceAccounts", vk, nv);
+      add_key_infos_seen(d, o, "serviceAccounts", vk, nv, &held);
       add_key_infos(d, o, "stsKeys", sk, ns);
       yyjson_mut_obj_add(root, yyjson_mut_strcpy(d, names[i]), o);
     }
@@ -1435,6 +1463,7 @@ static void h_list_access_keys_bulk(s3_ctx *c) {
     free(names[i]);
   }
   free(names);
+  buckets_s3_idsync_view_free(&held);
   write_json(c, d, true);
 out:
   yyjson_mut_doc_free(d);
@@ -1483,6 +1512,12 @@ static void write_key_info(s3_ctx *c, buckets_iam_ident *id, bool access_key_for
   if (id->name) yyjson_mut_obj_add_strcpy(d, root, "name", id->name);
   if (id->description) yyjson_mut_obj_add_strcpy(d, root, "description", id->description);
   if (buckets_iam_time_is_set(id->expiration)) add_time(d, root, "expiration", id->expiration);
+  if (buckets_iam_ident_is_svc(id)) {
+    buckets_s3_idsync_view held;
+    buckets_s3_idsync_view_load(c->s, &held);
+    add_owner_left(d, root, &held, id->access_key);
+    buckets_s3_idsync_view_free(&held);
+  }
   if (access_key_form) {
     yyjson_mut_obj_add_str(d, root, "userType", buckets_iam_ident_is_temp(id) ? "STS" : "Service Account");
     char provider[128];
@@ -2129,6 +2164,8 @@ static void h_openid_list_access_keys_bulk(s3_ctx *c) {
     }
     free(list);
   }
+  buckets_s3_idsync_view held;
+  buckets_s3_idsync_view_load(c->s, &held);
   yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
   yyjson_mut_val *root = yyjson_mut_arr(d);
   yyjson_mut_doc_set_root(d, root);
@@ -2152,7 +2189,7 @@ static void h_openid_list_access_keys_bulk(s3_ctx *c) {
       yyjson_mut_obj_add_strcpy(d, uo, "ID", u->id);
       yyjson_mut_obj_add_strcpy(d, uo, "readableName", u->readable);
       add_oidc_profile(d, uo, u, policy_claim);
-      add_key_infos(d, uo, "serviceAccounts", u->svc, u->nsvc);
+      add_key_infos_seen(d, uo, "serviceAccounts", u->svc, u->nsvc, &held);
       add_key_infos(d, uo, "stsKeys", u->sts, u->nsts);
       release_idents(u->svc, u->nsvc);
       release_idents(u->sts, u->nsts);
@@ -2162,6 +2199,7 @@ static void h_openid_list_access_keys_bulk(s3_ctx *c) {
     }
     free(ce[i].u);
   }
+  buckets_s3_idsync_view_free(&held);
   write_json(c, d, true);
   yyjson_mut_doc_free(d);
   free(ce);

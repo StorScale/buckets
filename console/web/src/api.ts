@@ -537,7 +537,9 @@ export async function jobProgress(id: string): Promise<JobProgress> {
 }
 
 // People from the OpenID provider that Buckets knows of: signed in now, or holding access keys.
-type KeyInfo = { accessKey: string; expiration?: string };
+// A key the identity sync turned off because its owner left the provider: when, and when it is deleted.
+export type OwnerLeft = { since: string; deleteAt: string };
+type KeyInfo = { accessKey: string; expiration?: string; ownerLeft?: OwnerLeft };
 export type OpenIDUser = {
   minioAccessKey: string;
   ID: string;
@@ -580,7 +582,7 @@ export const updateGroupMembers = (group: string, members: string[], isRemove: b
 export const setGroupStatus = (group: string, status: "enabled" | "disabled") =>
   call("PUT", admin("set-group-status"), { query: { group, status } });
 
-export type ServiceAccount = { accessKey: string; parentUser?: string; accountStatus?: string; name?: string; description?: string; expiration?: string };
+export type ServiceAccount = { accessKey: string; parentUser?: string; accountStatus?: string; name?: string; description?: string; expiration?: string; ownerLeft?: OwnerLeft };
 export const listServiceAccounts = (user?: string) =>
   adminJson<{ accounts: ServiceAccount[] | null }>("GET", "list-service-accounts", { query: user ? { user } : {} });
 export const addServiceAccount = (req: { name?: string; description?: string; policy?: string; targetUser?: string }) =>
@@ -778,6 +780,7 @@ export type AccessRow = {
   seen?: string[];
   owner?: string;
   groups?: string[];
+  ownerLeft?: OwnerLeft;
   access: "full" | "limited" | "conditional";
   actions: { action: string; decision: "allowed" | "limited" | "conditional"; limits?: string[]; by: AccessBy[] }[];
 };

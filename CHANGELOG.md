@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- Keys the identity sync turned off say so. The Users page, the Access Keys page and the access review show when the owner left the identity provider and when the key will be deleted. The admin API's key listings and key info carry this as `ownerLeft` (`since`, `deleteAt`), which MinIO clients ignore.
+
+### Fixed
+- The access review counted access keys that are turned off as routes to a bucket, and "Would this be allowed?" said yes for them. It now reads each key's status: an off key is listed as disabled, and the check answers "The account is disabled."
+
 ## [1.10.0] - 2026-10-06
 
 ### Added
