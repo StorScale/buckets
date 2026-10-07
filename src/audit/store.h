@@ -45,8 +45,9 @@ typedef struct {
   const char *access_key;
   const char *bucket;
   const char *prefix; /* of the object's key */
-  const char *api;    /* the API's name, e.g. "PutObject", "ServerInfo" */
-  const char *kind;   /* "read", "write", "delete" or "admin" */
+  const char *api;    /* the API's name, e.g. "PutObject", "ServerInfo"; or the event, e.g. "HealObject" */
+  const char
+      *kind; /* "read", "write", "delete", "admin" or "system" (the server's own work: healing, lifecycle) */
   const char *status; /* "ok" (below 400), "denied" (401, 403) or "failed" (other errors) */
   const char *ip;     /* remotehost */
   size_t limit;       /* at most this many (0: 100), newest first */
@@ -56,7 +57,8 @@ typedef struct {
 bool buckets_audit_match(yyjson_val *entry, const buckets_audit_query *q);
 /* An entry's time ("time", RFC 3339) in unix nanoseconds; 0 when it has none. */
 int64_t buckets_audit_time_ns(yyjson_val *entry);
-/* An API's kind, by its name: "admin" when the request path is the admin API's, else read, write or delete. */
+/* An API's kind, by its name: "admin" when the request path is the admin API's, "system" for the server's own work
+ * (no API name, an event instead), else read, write or delete. */
 const char *buckets_audit_kind(yyjson_val *entry);
 
 /* The entries under root matching q, newest first, as a JSON array appended to out; *oldest_ns: the oldest entry

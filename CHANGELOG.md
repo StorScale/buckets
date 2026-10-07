@@ -6,6 +6,9 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- The audit log treated the servers' own work (healing, lifecycle expiry), which has an event and no API name, as reads. So the Reads filter showed it, the Action column was blank, the API and object-prefix filters couldn't find it, and Who said "anonymous". It now has its own kind, **Background (healing, lifecycle)** (`kind=system`), shows its event (such as `HealObject`) as the action and "Buckets" as who, and matches the API and prefix filters.
+
 ## [1.15.0] - 2026-10-07
 
 ### Added

@@ -912,8 +912,9 @@ export const incidentAction = (id: string, action: "disable" | "undo" | "false-a
 export type AuditEntry = {
   time: string;
   node: string;
+  event?: string;
   api: {
-    name: string;
+    name?: string;
     bucket?: string;
     object?: string;
     objects?: { objectName: string; versionId?: string }[];

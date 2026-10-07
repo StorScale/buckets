@@ -29,7 +29,9 @@ const who = (e: AuditEntry) =>
   e.requestClaims?.email ||
   e.parentUser ||
   e.accessKey ||
-  "anonymous";
+  (e.api.name ? "anonymous" : "Buckets");
+// the server's own work (healing, lifecycle) has an event and no API
+const action = (e: AuditEntry) => e.api.name || e.event || "";
 const objectOf = (e: AuditEntry) =>
   e.api.object ??
   (e.api.objects?.length
@@ -133,7 +135,7 @@ export default function AuditLogPage() {
           e.time,
           who(e),
           e.accessKey ?? "",
-          e.api.name,
+          action(e),
           e.api.bucket ?? "",
           objectOf(e),
           e.api.statusCode ?? "",
@@ -237,6 +239,7 @@ export default function AuditLogPage() {
           <option value="write">Writes</option>
           <option value="delete">Deletes</option>
           <option value="admin">Administration</option>
+          <option value="system">Background (healing, lifecycle)</option>
         </select>
         <select
           value={params.get("status") ?? ""}
@@ -312,7 +315,7 @@ export default function AuditLogPage() {
                     <div className="muted mono">{e.accessKey}</div>
                   )}
                 </td>
-                <td className="mono">{e.api.name}</td>
+                <td className="mono">{action(e)}</td>
                 <td>
                   {e.api.bucket ?? ""}
                   {objectOf(e) && (
@@ -343,7 +346,7 @@ export default function AuditLogPage() {
       )}
       {open && (
         <Modal
-          title={`${open.api.name} by ${who(open)}`}
+          title={`${action(open)} by ${who(open)}`}
           onClose={() => setOpen(null)}
         >
           <p className="muted">
