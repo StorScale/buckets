@@ -798,3 +798,26 @@ export type LocalUsersReport = { provider: string | null; users: { name: string;
 export async function accessLocalUsers(): Promise<LocalUsersReport> {
   return (await call("GET", "/api/v1/access/local-users")).json();
 }
+
+// ---- compliance reports (GET /minio/admin/v3/buckets/compliance, Buckets' own; admin:DataUsageInfo) ----
+export type ComplianceCount = { versions: number; bytes: number };
+export type ComplianceBucket = {
+  name: string;
+  versioning: "Enabled" | "Suspended" | "Off";
+  objectLock: { enabled: boolean; mode: "GOVERNANCE" | "COMPLIANCE" | ""; days: number; years: number };
+  lifecycleExpires: boolean;
+  encryption: { algorithm: "SSE-S3" | "SSE-KMS" | ""; keyId: string; keyStatus: "ok" | "missing" | "error" | "no-kms" | "" };
+  // from the scanner's last complete cycle; null for a bucket made since
+  counts: {
+    sseS3: ComplianceCount;
+    sseKms: ComplianceCount;
+    sseC: ComplianceCount;
+    unencrypted: ComplianceCount;
+    governance: ComplianceCount;
+    compliance: ComplianceCount;
+    legalHold: ComplianceCount;
+    latestRetainUntil: number;
+  } | null;
+};
+export type Compliance = { scannedAt: number; kms: { configured: boolean; online: boolean }; buckets: ComplianceBucket[] };
+export const complianceReport = () => adminJson<Compliance>("GET", "buckets/compliance");

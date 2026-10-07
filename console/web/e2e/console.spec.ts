@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { expect, test } from "@playwright/test";
 import { login, ROOT_USER, unique } from "./helpers";
 
@@ -197,6 +198,36 @@ test.describe("object details", () => {
     expect(await del.text()).toContain("WORM protected");
     await page.getByTestId("legal-hold").uncheck();
     await expect(page.getByRole("dialog").getByTestId("notice")).toHaveText("Legal hold off.");
+  });
+});
+
+test.describe("compliance", () => {
+  test("retention and encryption coverage: settings per bucket, and CSV", async ({ page }) => {
+    const bucket = unique("locked");
+    await login(page);
+    // a bucket with object lock, made as people do
+    await page.goto("/buckets");
+    await page.getByTestId("create-bucket").click();
+    await page.getByTestId("bucket-name").fill(bucket);
+    await page.getByRole("dialog").getByText("Object locking").click();
+    await page.getByTestId("bucket-create-submit").click();
+    await page.getByRole("link", { name: "Retention" }).click();
+    await expect(page).toHaveURL(/\/compliance\/retention$/);
+    await expect(page.getByTestId("retention-summary")).toContainText("with object lock");
+    await expect(page.getByTestId(`retention-${bucket}`)).toContainText("on");
+    await expect(page.getByTestId(`retention-${bucket}`)).toContainText("Enabled"); // object lock versions the bucket
+    await expect(page.getByTestId("scanned-at")).toBeVisible();
+    const csv = page.waitForEvent("download");
+    await page.getByTestId("compliance-csv").click();
+    const file = await (await csv).path();
+    const text = readFileSync(file, "utf8");
+    expect(text.split("\n")[0]).toContain("default retention");
+    expect(text).toContain(bucket + ",on,none,Enabled");
+    // encryption: the KMS of the local setup, and the bucket without default encryption
+    await page.getByTestId("tab-encryption").click();
+    await expect(page).toHaveURL(/\/compliance\/encryption$/);
+    if (!process.env.CONSOLE_URL) await expect(page.getByTestId("encryption-summary")).toContainText("KMS: online");
+    await expect(page.getByTestId(`encryption-${bucket}`)).toContainText("none");
   });
 });
 
