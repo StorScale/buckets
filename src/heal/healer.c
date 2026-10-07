@@ -170,7 +170,7 @@ static bool heal_drive(buckets_healer *h, size_t di) {
     tracker_free(&t);
     return false;
   }
-  qsort(bk, nb, sizeof(*bk), cmp_str);
+  if (nb) qsort(bk, nb, sizeof(*bk), cmp_str);
   buckets_heal_opts opts = {.remove_dangling = true, .scan_mode = 1};
   size_t since_save = 0;
   bool complete = true;

@@ -108,6 +108,9 @@ static const char *env2(const char *primary, const char *compat) {
   return (v && *v) ? v : NULL;
 }
 
+static char *g_secrets[4]; /* the secrets read from files, kept for the process's life */
+static size_t g_nsecrets;
+
 /* A secret from <NAME>_FILE (a mounted Kubernetes or Docker secret) when set,
  * else from <NAME>, with the MINIO_* fallback for both. Trailing newlines in
  * the file are dropped. The result is never freed (it lives for the process). */
@@ -123,6 +126,7 @@ static const char *env_secret(const char *primary, const char *compat) {
     exit(1);
   }
   char *buf = buckets_xcalloc(1, 4096);
+  if (g_nsecrets < BUCKETS_ARRAY_LEN(g_secrets)) g_secrets[g_nsecrets++] = buf;
   size_t n = fread(buf, 1, 4095, f);
   fclose(f);
   while (n && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) buf[--n] = '\0';
@@ -361,9 +365,9 @@ static void topology_connect(topology *t) {
 }
 
 static void topology_free(topology *t) {
-  for (size_t p = 0; p < t->npools; p++) {
-    for (size_t i = 0; t->eps[p] && i < t->layouts[p].ndrives; i++) buckets_endpoint_free(&t->eps[p][i]);
-    free(t->eps[p]);
+  for (size_t p = 0; t->layouts && p < t->npools; p++) {
+    for (size_t i = 0; t->eps && t->eps[p] && i < t->layouts[p].ndrives; i++) buckets_endpoint_free(&t->eps[p][i]);
+    if (t->eps) free(t->eps[p]);
     buckets_layout_free(&t->layouts[p]);
   }
   free(t->eps);
@@ -376,6 +380,8 @@ static void topology_free(topology *t) {
   for (size_t i = 0; i < t->nlocal; i++) buckets_drive_close(t->local_drives[i]);
   free(t->local_drives);
   buckets_lock_server_free(t->lock_server);
+  for (size_t p = 0; t->cmdlines && p < t->npools; p++) free(t->cmdlines[p]);
+  free(t->cmdlines);
 }
 
 /* A pool's drives for one negotiation attempt: local paths opened raw,
@@ -605,6 +611,8 @@ int main(int argc, char **argv) {
   size_t nftp_args = 0;
   char **sftp_args = buckets_xcalloc((size_t)argc, sizeof(char *));
   size_t nsftp_args = 0;
+  char *vols_copy = NULL, *host = NULL;
+  int ret = 0; /* the exit status: every exit from here frees what it made, on the way out */
   for (int i = 2; i < argc; i++) {
     if (strncmp(argv[i], "--sftp=", 7) == 0) {
       sftp_args[nsftp_args++] = argv[i] + 7;
@@ -620,10 +628,11 @@ int main(int argc, char **argv) {
       certs_dir = argv[++i];
     } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
       usage(stdout);
-      return 0;
+      goto out_args;
     } else if (argv[i][0] == '-') {
       fprintf(stderr, "unknown flag: %s\n", argv[i]);
-      return 2;
+      ret = 2;
+      goto out_args;
     } else {
       drive_args[ndrive_args++] = argv[i];
     }
@@ -633,23 +642,25 @@ int main(int argc, char **argv) {
   if (!ndrive_args) {
     const char *vols = env2("BUCKETS_VOLUMES", "MINIO_VOLUMES");
     if (vols) {
-      char *copy = buckets_xstrdup(vols), *save = NULL;
-      for (char *t = strtok_r(copy, " \t\n", &save); t; t = strtok_r(NULL, " \t\n", &save)) {
+      char *save = NULL;
+      vols_copy = buckets_xstrdup(vols);
+      for (char *t = strtok_r(vols_copy, " \t\n", &save); t; t = strtok_r(NULL, " \t\n", &save)) {
         drive_args = buckets_xrealloc(drive_args, (ndrive_args + 1) * sizeof(char *));
-        drive_args[ndrive_args++] = t; /* copy lives for the process */
+        drive_args[ndrive_args++] = t;
       }
     }
   }
   if (!ndrive_args) {
     usage(stderr);
-    return 2;
+    ret = 2;
+    goto out_args;
   }
 
-  char *host = NULL;
   int port = 0;
   if (!parse_address(address, &host, &port)) {
     fprintf(stderr, "invalid --address %s (want [HOST]:PORT)\n", address);
-    return 2;
+    ret = 2;
+    goto out_args;
   }
 
   const char *root_user = env_secret("BUCKETS_ROOT_USER", "MINIO_ROOT_USER");
@@ -663,12 +674,14 @@ int main(int argc, char **argv) {
   }
   if (!root_user || !root_password) {
     buckets_log_error("root user and password must be set together");
-    return 1;
+    ret = 1;
+    goto out_args;
   }
   /* Same limits as MinIO's auth.IsAccessKeyValid / IsSecretKeyValid. */
   if (strlen(root_user) < 3 || strlen(root_password) < 8) {
     buckets_log_error("root user must be at least 3 characters and password at least 8");
-    return 1;
+    ret = 1;
+    goto out_args;
   }
   /* Drives -> pools -> erasure sets (MinIO's ellipses + set sizing). As in
    * MinIO, every ellipsis argument is its own pool; plain drive lists form
@@ -678,8 +691,10 @@ int main(int argc, char **argv) {
   for (size_t i = 0; i < ndrive_args; i++) nell += buckets_ell_has(drive_args[i]);
   if (nell && nell != ndrive_args) {
     buckets_log_error("all drive arguments must use ellipses (one pool each), or none may");
-    return 1;
+    ret = 1;
+    goto out_args;
   }
+  buckets_pool *io_pool = NULL;
   topology topo = {.port = port};
   topo.npools = nell ? ndrive_args : 1;
   topo.legacy = nell == 0;
@@ -705,22 +720,27 @@ int main(int argc, char **argv) {
     if (!buckets_layout_pool(args, nargs, sdc ? (size_t)strtoul(sdc, NULL, 10) : 0, &topo.layouts[p], lerr,
                              sizeof(lerr))) {
       buckets_log_error("invalid drive layout%s: %s", topo.npools > 1 ? " in a pool" : "", lerr);
-      return 1;
+      ret = 1;
+      goto out_topo;
     }
     if (topo.npools > 1 && topo.layouts[p].ndrives == 1) {
       buckets_log_error("a single-drive deployment cannot be expanded with more pools");
-      return 1;
+      ret = 1;
+      goto out_topo;
     }
     for (size_t i = 0; i < topo.layouts[p].ndrives; i++) nurl += strstr(topo.layouts[p].drives[i], "://") != NULL;
     total += topo.layouts[p].ndrives;
   }
-  free(drive_args);
   if (nurl && nurl != total) {
     buckets_log_error("drives must be all local paths or all http(s):// URLs");
-    return 1;
+    ret = 1;
+    goto out_topo;
   }
   topo.distributed = nurl > 0;
-  if (topo.distributed && !topology_resolve(&topo)) return 1;
+  if (topo.distributed && !topology_resolve(&topo)) {
+    ret = 1;
+    goto out_topo;
+  }
 
   const char *region = env2("BUCKETS_REGION", "MINIO_REGION");
   buckets_internode_set_secret(root_user, root_password);
@@ -734,7 +754,6 @@ int main(int argc, char **argv) {
   const char *iot = getenv("BUCKETS_IO_THREADS");
   /* +3: the payload hashes (MD5, SHA-256, checksum) run beside the writes. */
   long nio = iot ? strtol(iot, NULL, 10) : (long)max_set - 1 + 3 + (topo.distributed ? 8 : 0);
-  buckets_pool *io_pool = NULL;
   if (nio > 0) {
     io_pool = buckets_pool_new((int)BUCKETS_MIN(nio, 1024L));
     buckets_io_pool_set(io_pool);
@@ -745,12 +764,23 @@ int main(int argc, char **argv) {
   /* Other servers change bucket metadata too: trust snapshots only briefly. */
   s3.meta_ttl_ms = topo.distributed ? 5000 : 0;
   boot_state boot = {.topo = &topo, .s3 = &s3};
-  if (!topo.distributed && !bootstrap(&boot)) return 1; /* a single node formats before it serves */
+  /* what the server stage makes, freed at out_server however far it got */
+  buckets_pool *api_pool = NULL, *control_pool = NULL, *perf_pool = NULL, *internode_pool = NULL;
+  buckets_storage_server *storage_srv = NULL;
+  buckets_tls *tls = NULL;
+  app_state app = {0};
+  pthread_t boot_thread;
+  bool boot_started = false;
+  if (!topo.distributed && !bootstrap(&boot)) { /* a single node formats before it serves */
+    ret = 1;
+    goto out_server;
+  }
 
   g_loop = buckets_loop_new();
   if (!g_loop) {
     buckets_log_error("create event loop failed");
-    return 1;
+    ret = 1;
+    goto out_server;
   }
   /* Bodies too large for memory spool to the first local drive. */
   char spool[4096];
@@ -769,7 +799,7 @@ int main(int argc, char **argv) {
   const char *apit = getenv("BUCKETS_API_THREADS");
   long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
   long napi = apit ? strtol(apit, NULL, 10) : BUCKETS_MAX(8L, 2 * ncpu);
-  buckets_pool *api_pool = napi > 0 ? buckets_pool_new((int)BUCKETS_MIN(napi, 4096L)) : NULL;
+  api_pool = napi > 0 ? buckets_pool_new((int)BUCKETS_MIN(napi, 4096L)) : NULL;
   s3.requests_max = napi > 0 ? (int)BUCKETS_MIN(napi, 4096L) : 0; /* X-Ratelimit-Limit */
   hcfg.workers = api_pool;
   /* Loop threads moving the bytes (one saturates on large GETs). Inline
@@ -780,10 +810,10 @@ int main(int argc, char **argv) {
   /* The admin API and health probes get their own workers: a frozen S3 API
    * (mc admin service freeze) parks its requests, which must not block the
    * unfreeze or the kubelet's probes. */
-  buckets_pool *control_pool = api_pool ? buckets_pool_new(4) : NULL;
+  control_pool = api_pool ? buckets_pool_new(4) : NULL;
   /* The network speedtests' devnull endpoints hold a worker per incoming
    * stream for the whole test (tens of them per peer): workers of their own. */
-  buckets_pool *perf_pool = api_pool ? buckets_pool_new(96) : NULL;
+  perf_pool = api_pool ? buckets_pool_new(96) : NULL;
   if (perf_pool) {
     static const char *const perf[] = {"/minio/admin/v3/speedtest/client/devnull",
                                        "/minio/admin/v3/site-replication/devnull"};
@@ -799,8 +829,6 @@ int main(int argc, char **argv) {
 
   /* Internode RPC gets its own workers, so peers never wait behind clients
    * (two nodes filling each other's pools with S3 requests would deadlock). */
-  buckets_pool *internode_pool = NULL;
-  buckets_storage_server *storage_srv = NULL;
   static buckets_peer_handlers peer_handlers;
   peer_handlers = (buckets_peer_handlers){buckets_s3_peer_iam, buckets_s3_peer_bucket, buckets_s3_peer_server_info,
                                           buckets_s3_peer_metrics, buckets_s3_peer_listen, &s3,
@@ -831,7 +859,6 @@ int main(int argc, char **argv) {
       if (access(crt, R_OK) == 0) certs_dir = certs_buf;
     }
   }
-  buckets_tls *tls = NULL;
   if (certs_dir) {
     char crt[4200];
     snprintf(crt, sizeof(crt), "%s/public.crt", certs_dir);
@@ -839,7 +866,8 @@ int main(int argc, char **argv) {
       char terr[512];
       if (!(tls = buckets_tls_server_new(certs_dir, terr, sizeof(terr)))) {
         buckets_log_error("TLS: %s", terr);
-        return 1;
+        ret = 1;
+        goto out_server;
       }
       buckets_log_info("TLS enabled with %zu certificate%s from %s", buckets_tls_cert_count(tls),
                        buckets_tls_cert_count(tls) == 1 ? "" : "s", certs_dir);
@@ -858,7 +886,8 @@ int main(int argc, char **argv) {
     snprintf(cas, sizeof(cas), "%s/CAs", certs_dir ? certs_dir : ".");
     if (!(topo.tls_client = buckets_tls_client_new(cas, terr, sizeof(terr)))) {
       buckets_log_error("TLS client: %s", terr);
-      return 1;
+      ret = 1;
+      goto out_server;
     }
   }
   __atomic_store_n(&s3.cluster, cluster_describe(&topo, host, tls != NULL), __ATOMIC_RELEASE); /* metrics_main polls it */
@@ -876,9 +905,11 @@ int main(int argc, char **argv) {
     s3.lock_server = topo.lock_server;
   }
 
-  app_state app = {0};
   app.http = buckets_http_server_start(g_loop, &hcfg, buckets_s3_handle, &s3);
-  if (!app.http) return 1;
+  if (!app.http) {
+    ret = 1;
+    goto out_server;
+  }
   origin_endpoint(s3.endpoint, sizeof(s3.endpoint), host, buckets_http_server_port(app.http), tls != NULL);
   buckets_fs_init(&s3, buckets_http_server_port(app.http), tls != NULL);
   if (nftp_args) {
@@ -887,7 +918,8 @@ int main(int argc, char **argv) {
     if (!buckets_ftp_parse(ftp_args, nftp_args, &fo, ferr, sizeof(ferr)) ||
         !buckets_ftp_start(&fo, tls != NULL, certs_dir, ferr, sizeof(ferr))) {
       buckets_log_error("unable to start FTP server: %s", ferr);
-      return 1;
+      ret = 1;
+      goto out_server;
     }
   }
   if (nsftp_args) {
@@ -896,7 +928,8 @@ int main(int argc, char **argv) {
     if (!buckets_sftp_parse(sftp_args, nsftp_args, &so, serr, sizeof(serr)) ||
         !buckets_sftp_start(&so, serr, sizeof(serr))) {
       buckets_log_error("unable to start SFTP server: %s", serr);
-      return 1;
+      ret = 1;
+      goto out_server;
     }
   }
   buckets_loop_set_wake(g_loop, on_wake, &app);
@@ -912,15 +945,14 @@ int main(int argc, char **argv) {
 
   buckets_log_info("bucketsd %s listening on %s://%s:%d", BUCKETS_VERSION, tls ? "https" : "http", *host ? host : "*",
                    buckets_http_server_port(app.http));
-  pthread_t boot_thread;
-  bool boot_started = false;
   if (topo.distributed) {
     buckets_log_info("cluster of %zu node%s; waiting for peers to format and start", topo.npeers + 1,
                      topo.npeers ? "s" : "");
     boot_started = pthread_create(&boot_thread, NULL, bootstrap_thread, &boot) == 0;
   }
-  int rc = buckets_loop_run(g_loop);
+  if (buckets_loop_run(g_loop) != 0) ret = 1;
 
+out_server:
   atomic_store(&boot.stop, true);
   if (boot_started) pthread_join(boot_thread, NULL);
   /* A frozen API would hold its workers forever. */
@@ -941,25 +973,32 @@ int main(int argc, char **argv) {
   buckets_healer_stop(boot.healer);
   buckets_drive_health_stop(); /* its threads check the layer's drives */
   buckets_s3_server_close_targets(&s3); /* the scanner sends lifecycle events */
+  buckets_s3_server_free(&s3);           /* before the object layer, which some of it points at */
   buckets_loop_free(g_loop);
   if (boot.layer) buckets_objlayer_set_locker(boot.layer, NULL, NULL, NULL);
   buckets_peer_sys_free(s3.peers);
   free(s3.internode);
   buckets_cluster_info_free(s3.cluster);
-  buckets_dsync_free(topo.dsync);
-  buckets_objlayer_free(boot.layer);
+  buckets_objlayer_free(boot.layer); /* its locker is unset: dsync can go after it */
   buckets_storage_server_free(storage_srv);
+out_topo:
+  buckets_dsync_free(topo.dsync);
   topology_free(&topo);
   buckets_tls_client_free(topo.tls_client);
   buckets_io_pool_set(NULL);
   buckets_pool_free(io_pool);
+out_args:
   free(host);
+  free(drive_args);
+  free(vols_copy);
+  free(ftp_args);
+  free(sftp_args);
   if (atomic_load(&g_restart)) {
     buckets_log_info("bucketsd restarting");
     execv(self_exe, argv);
     buckets_log_error("restart: exec %s: %s", self_exe, strerror(errno));
     return 1;
   }
-  buckets_log_info("bucketsd stopped");
-  return rc == 0 ? 0 : 1;
+  if (g_loop) buckets_log_info("bucketsd stopped"); /* it served */
+  return ret;
 }

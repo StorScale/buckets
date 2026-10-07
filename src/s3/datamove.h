@@ -19,6 +19,8 @@ typedef struct buckets_datamove buckets_datamove;
 
 buckets_datamove *buckets_datamove_new(struct buckets_s3_server *s);
 void buckets_datamove_stop(buckets_datamove *d);
+/* Stops it, then frees it. */
+void buckets_datamove_free(buckets_datamove *d);
 
 /* The admin API's operations: op is "decom-start", "decom-cancel",
  * "decom-status", "pools-list", "rebal-start", "rebal-status" or

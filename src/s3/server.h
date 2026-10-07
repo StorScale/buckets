@@ -87,6 +87,9 @@ void buckets_s3_server_stop(buckets_s3_server *s);
 /* Closes the notification and log targets (MQTT brokers get a DISCONNECT,
  * connections close); after everything that sends events has stopped. */
 void buckets_s3_server_close_targets(buckets_s3_server *s);
+/* Frees what buckets_s3_server_init and _set_layer made, once stopped and its targets closed, before the
+ * object layer goes. Not the peers or the cluster description, which the caller set and frees. */
+void buckets_s3_server_free(buckets_s3_server *s);
 /* The data scanner's hooks: cycle length from `scanner speed`, bucket
  * versioning from the metadata cache. */
 void buckets_s3_scanner_hooks(buckets_s3_server *s, void *hooks /* buckets_scanner_hooks */);

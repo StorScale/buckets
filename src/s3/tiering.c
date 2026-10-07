@@ -462,6 +462,15 @@ buckets_tiering *buckets_tiering_new(buckets_s3_server *s, buckets_objlayer *lay
   return tg;
 }
 
+void buckets_tiering_free(buckets_tiering *tg) {
+  if (!tg) return;
+  buckets_tiering_stop(tg);
+  free(tg->threads);
+  pthread_mutex_destroy(&tg->mu);
+  pthread_cond_destroy(&tg->cv);
+  free(tg);
+}
+
 void buckets_tiering_stop(buckets_tiering *tg) {
   if (!tg) return;
   pthread_mutex_lock(&tg->mu);
