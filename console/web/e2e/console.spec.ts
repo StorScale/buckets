@@ -431,7 +431,7 @@ test.describe("encryption", () => {
   test("the KMS and its keys, a bucket encrypted with one, and its existing objects", async ({ page }) => {
     test.skip(!!process.env.CONSOLE_URL, "needs the static KMS key of the local setup");
     await login(page);
-    await page.getByRole("link", { name: "Encryption" }).click();
+    await page.getByRole("link", { name: "Encryption", exact: true }).click();
     await expect(page.getByTestId("kms-status")).toContainText("Built-in static key");
     await expect(page.getByTestId("kms-status")).toContainText("e2e-key");
     await expect(page.getByTestId("kms-key-e2e-key")).toContainText("works");
@@ -460,7 +460,7 @@ test.describe("encryption", () => {
     const head = await page.request.head(`/api/v1/s3/${bucket}/old.txt`);
     expect(head.headers()["x-amz-server-side-encryption"]).toBe("aws:kms");
     // the key page now names the bucket it encrypts
-    await page.getByRole("link", { name: "Encryption" }).click();
+    await page.getByRole("link", { name: "Encryption", exact: true }).click();
     await expect(page.getByTestId("kms-key-e2e-key")).toContainText(bucket);
   });
 });
