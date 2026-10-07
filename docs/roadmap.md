@@ -10,12 +10,12 @@ The order below leads with what builds on work that already exists (MinIO on-dis
 
 A successor can't depend on what it replaces. MinIO no longer publishes its images or binaries, so Buckets now ships its own key server (`buckets-kes`) in place of MinIO's KES, and keeps mirrors of MinIO's last images only for adoption and rollback.
 
-**Where things stand (2026-10-07):** Buckets 1.12.0 is released, and the main repository is https://github.com/StorScale/buckets. Phases 0 and 3 are done. Every item of Phase 1 is done too.
+**Where things stand (2026-10-07):** Buckets 1.13.0 is released, and the main repository is https://github.com/StorScale/buckets. Phases 0 and 3 are done. Every item of Phase 1 is done too.
 
 - **Left in Phase 1:** its gate, the round trip in CI. The job (`adopt-roundtrip`) is built and waits for access to the cluster it runs on.
 - **Left in Phase 2:** SCIM, for providers that push changes. Done so far: guided sign-in setup (1.2.0) for Entra ID, Okta, Keycloak, other OpenID providers and LDAP, per-team roles (1.3.0), the access review (1.4.0), and removing people who leave Entra ID (1.9.0), Keycloak and Okta (1.10.0).
 - **Phase 3 is done (1.5.0 to 1.8.0):** monitoring and drive health, runtime drive replacement, console scheduling, cert-manager, and buckets, replication and site replication as resources.
-- **Phase 4 so far:** the retention and encryption coverage reports (1.11.0) and the usage and chargeback reports (1.12.0). Left: the lifecycle and replication editor, the audit log viewer, FIPS mode and ransomware alerts.
+- **Phase 4's gate has passed (1.13.0):** an auditor gets usage, access and retention reports from the console, and FIPS 140-3 mode is documented and tested. Done: the retention and encryption coverage reports (1.11.0), the usage and chargeback reports (1.12.0) and FIPS mode (1.13.0). Left: the lifecycle and replication editor, the audit log viewer and ransomware alerts.
 
 ## Priorities at a glance
 
@@ -94,7 +94,7 @@ The full admin console and OpenSSL 3 are already in place; this phase turns them
 
 **Compliance and security**
 
-- **FIPS 140-3 mode** using the OpenSSL 3 FIPS provider. Buckets links OpenSSL 3.5, which makes this more practical than in a Go codebase.
+- [x] **FIPS 140-3 mode** (1.13.0; [fips.md](fips.md)): every security function in the OpenSSL FIPS Provider 3.1.2 (certificate #4985), in `-fips` images and with the operator's `spec.fips`; what isn't approved is refused, saying why.
 - [x] **WORM compliance reports** (1.11.0; [compliance.md](compliance.md)): which buckets are locked, in which mode and for how long, and how much data is under retention or legal hold, per bucket, with CSV export.
 - [x] **Encryption coverage reports** (1.11.0): which buckets encrypt by default and with which key (flagged when it no longer works), and how much data is stored encrypted, by kind, or not; per-bucket metrics for alerting on unencrypted data.
 - **Ransomware alerts** for unusual bursts of deletes or overwrites, using the existing event notifications.
@@ -116,6 +116,7 @@ The roadmap builds on what exists: MinIO's exact on-disk format, 220 of 222 MinI
 
 | Date | Change | What it gives |
 | --- | --- | --- |
+| 2026-10-07 | 1.13.0: FIPS 140-3 mode | `-fips` images running every security function in the OpenSSL FIPS Provider 3.1.2; `spec.fips` in the operator; ChaCha20 data counted in the encryption report; Phase 4's gate passed |
 | 2026-10-07 | 1.12.0: usage and chargeback reports; clean shutdown | Usage per team and per bucket with costs and CSV, from daily history kept 13 months; Compliance becomes Reports; the server frees everything when it stops, so sanitizer builds report no leaks |
 | 2026-10-07 | 1.11.1: stray directories are not buckets | A drive's `lost+found` (or any name no bucket can have) is left out of data usage, the scanner and the compliance report, as MinIO does |
 | 2026-10-07 | 1.11.0: compliance reports; keys of people who left say so | Retention and encryption coverage per bucket with CSV, from the scanner's counts; "owner left" on keys the identity sync turned off; the access review no longer counts keys that are off |

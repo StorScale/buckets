@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.13.0] - 2026-10-07
+
 ### Added
 - **FIPS 140-3 mode** ([docs/fips.md](docs/fips.md), [the design](docs/design/fips-mode.md)). Every security function runs in the OpenSSL FIPS Provider 3.1.2 (FIPS 140-3 certificate #4985), with only the algorithms it approves.
   - **Images:** each of the four images also comes as a `-fips` build (`<version>-fips`), which always runs in FIPS mode. On every start it installs and self-tests the module for that machine, as the module's security policy requires, and it refuses to start if that fails.

@@ -5,7 +5,7 @@ kind: BucketsCluster
 metadata:
   name: store
 spec:
-  image: ghcr.io/storscale/bucketsd:1.12.0
+  image: ghcr.io/storscale/bucketsd:1.13.0
   pools:
     - servers: 4
       volumesPerServer: 4
