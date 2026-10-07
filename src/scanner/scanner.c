@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 #include "scanner/scanner.h"
+#include "scanner/compliance.h"
 
 #include <pthread.h>
 #include <stdio.h>
@@ -32,6 +33,7 @@ struct buckets_scanner {
   buckets_data_usage *usage; /* the leader's cycle's usage */
   char **tiers;              /* the remote tiers this cycle (tierStats wanted when any) */
   size_t ntiers;
+  buckets_compliance_counts *compliance; /* the leader's counts for the bucket being scanned */
 };
 
 static int64_t now_ns(void) {
@@ -140,6 +142,10 @@ static void scan_key(buckets_scanner *s, const char *bucket, buckets_object_info
       }
       markers += v[i].delete_marker;
       tier_usage(s, &v[i]);
+      if (s->compliance) {
+        int64_t csz = s->hooks.actual_size ? s->hooks.actual_size(s->hooks.ud, &v[i]) : v[i].size;
+        buckets_compliance_add(s->compliance, &v[i], csz, now_ns() / 1000000000LL);
+      }
       /* ToObjectInfo leaves VersionID empty for a null version when the
        * bucket is not versioned; those are not counted as versions. */
       bool has_id = versioned || strcmp(v[i].version_id, "null") != 0;
@@ -226,6 +232,15 @@ static void save_usage(buckets_scanner *s, buckets_data_usage *u) {
   pthread_mutex_unlock(&s->mu);
 }
 
+/* The compliance reports' counts, stored apart from MinIO's data usage (scanner/compliance.h). */
+static void save_compliance(buckets_scanner *s, const buckets_compliance_bucket *cb, size_t n) {
+  buckets_buf j = BUCKETS_BUF_INIT;
+  buckets_compliance_json(cb, n, now_ns() / 1000000000LL, &j);
+  buckets_obj_err err = buckets_sysconfig_write(s->L, BUCKETS_COMPLIANCE_PATH, j.data, j.len);
+  if (err) buckets_log_warn("scanner: storing the compliance counts: %s", buckets_obj_strerror(err));
+  buckets_buf_free(&j);
+}
+
 static void save_cycle(buckets_scanner *s) {
   uint8_t b[8];
   for (int i = 0; i < 8; i++) b[i] = (uint8_t)(s->next_cycle >> (8 * i));
@@ -241,6 +256,7 @@ static void scan_cycle(buckets_scanner *s) {
   if (buckets_obj_list_buckets(L, &bk, &nb) != BUCKETS_OBJ_OK) return;
   buckets_data_usage u = {0};
   bool complete = true;
+  buckets_compliance_bucket *cb = leader ? buckets_xcalloc(nb + 1, sizeof(*cb)) : NULL;
   if (leader && s->hooks.tier_names) s->ntiers = s->hooks.tier_names(s->hooks.ud, &s->tiers);
   s->usage = leader ? &u : NULL;
   if (leader) {
@@ -261,7 +277,12 @@ static void scan_cycle(buckets_scanner *s) {
     s->st.folders++;
     pthread_mutex_unlock(&s->mu);
     bool done = true;
-    if (leader) done = usage_bucket(s, bk[b].name, buckets_data_usage_add_bucket(&u, bk[b].name));
+    if (leader) {
+      cb[b].name = buckets_xstrdup(bk[b].name);
+      s->compliance = &cb[b].c;
+      done = usage_bucket(s, bk[b].name, buckets_data_usage_add_bucket(&u, bk[b].name));
+      s->compliance = NULL;
+    }
     else heal_bucket(s, bk[b].name);
     complete &= done;
     pthread_mutex_lock(&s->mu);
@@ -278,6 +299,7 @@ static void scan_cycle(buckets_scanner *s) {
     buckets_data_usage_total(&u);
     u.last_update_ns = now_ns();
     save_usage(s, &u);
+    save_compliance(s, cb, nb);
     s->next_cycle++;
     pthread_mutex_lock(&s->mu);
     s->st.current_cycle = 0;
@@ -295,6 +317,8 @@ static void scan_cycle(buckets_scanner *s) {
   s->tiers = NULL;
   s->ntiers = 0;
   buckets_data_usage_free(&u);
+  for (size_t i = 0; cb && i < nb; i++) free(cb[i].name);
+  free(cb);
   buckets_bucket_info_free(bk, nb);
   pthread_mutex_lock(&s->mu);
   if (complete) s->st.cycles++;

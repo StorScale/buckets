@@ -42,6 +42,8 @@
 #include "s3/metrics.h"
 #include "scanner/scanner.h"
 #include "scanner/usage.h"
+#include "object/sysconfig.h"
+#include "scanner/compliance.h"
 #include "storage/drivestats.h"
 #include "storage/remote.h"
 
@@ -720,8 +722,26 @@ void buckets_metrics_go_collector(buckets_expo *e) {
 }
 
 /* getBucketUsageMetrics, getHTTPMetrics(bucketOnly), getBucketTTFBMetric */
+/* The compliance counts the scanner stored (scanner/compliance.h), per bucket. */
+static void compliance_metrics(mctx *m, const char *bucket, const char *stored, size_t len) {
+  buckets_compliance_counts c;
+  int64_t at;
+  if (!buckets_compliance_lookup(stored, len, bucket, &c, &at)) return;
+  ADD1(m, "buckets_bucket_unencrypted_bytes", (double)c.plain.bytes, "bucket", bucket);
+  ADD1(m, "buckets_bucket_unencrypted_versions", (double)c.plain.versions, "bucket", bucket);
+  ADD2(m, "buckets_bucket_encrypted_bytes", (double)c.sse_s3.bytes, "bucket", bucket, "kind", "sse-s3");
+  ADD2(m, "buckets_bucket_encrypted_bytes", (double)c.sse_kms.bytes, "bucket", bucket, "kind", "sse-kms");
+  ADD2(m, "buckets_bucket_encrypted_bytes", (double)c.sse_c.bytes, "bucket", bucket, "kind", "sse-c");
+  ADD2(m, "buckets_bucket_retained_bytes", (double)c.governance.bytes, "bucket", bucket, "mode", "governance");
+  ADD2(m, "buckets_bucket_retained_bytes", (double)c.compliance.bytes, "bucket", bucket, "mode", "compliance");
+  ADD1(m, "buckets_bucket_legal_hold_versions", (double)c.legal_hold.versions, "bucket", bucket);
+}
+
 static void bucket_metrics(mctx *m) {
   buckets_data_usage u;
+  buckets_buf stored = BUCKETS_BUF_INIT;
+  if (m->s->layer && buckets_sysconfig_read(m->s->layer, BUCKETS_COMPLIANCE_PATH, &stored, NULL) != BUCKETS_OBJ_OK)
+    buckets_buf_reset(&stored);
   if (usage_of(m->s, &u)) {
     ADD0(m, "minio_bucket_usage_last_activity_nano_seconds", (double)(now_ns() - u.last_update_ns));
     for (size_t b = 0; b < u.nbuckets; b++) {
@@ -754,9 +774,11 @@ static void bucket_metrics(mctx *m) {
       histogram_range(m, "minio_bucket_objects_size_distribution", bu->sizes, BUCKETS_USAGE_SIZE_BINS, true, bu->name);
       histogram_range(m, "minio_bucket_objects_version_distribution", bu->version_counts, BUCKETS_USAGE_VERSION_BINS,
                       false, bu->name);
+      if (stored.len) compliance_metrics(m, bu->name, stored.data, stored.len);
     }
     buckets_data_usage_free(&u);
   }
+  buckets_buf_free(&stored);
   buckets_bucket_stats *bs;
   size_t nb = buckets_stats_buckets(&bs);
   for (size_t b = 0; b < nb; b++) {

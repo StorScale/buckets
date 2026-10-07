@@ -155,6 +155,7 @@ add_library(buckets STATIC
   scanner/scanner.c
   scanner/scantrace.c
   scanner/usage.c
+  scanner/compliance.c
   iam/policy.c
   iam/iam.c
   iam/openid.c
@@ -195,6 +196,7 @@ add_library(buckets STATIC
   admin/config.c
   admin/iamxfer.c
   admin/bucket.c
+  admin/compliance.c
   admin/replicate.c
   admin/siterepl.c
   admin/tier.c

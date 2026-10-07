@@ -8,6 +8,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 - Keys the identity sync turned off say so. The Users page, the Access Keys page and the access review show when the owner left the identity provider and when the key will be deleted. The admin API's key listings and key info carry this as `ownerLeft` (`since`, `deleteAt`), which MinIO clients ignore.
+- A **Compliance** section in the console ([docs/compliance.md](docs/compliance.md), [the design](docs/design/compliance-reports.md)). Each page has one row per bucket and **Export CSV**.
+  - **Retention:** object lock, default retention, versioning, the versions and bytes under Governance or Compliance retention or legal hold, the furthest retain-until date, and whether lifecycle rules expire versions.
+  - **Encryption coverage:** default encryption and key (flagged when the key no longer works), and the versions and bytes stored with SSE-S3, SSE-KMS, SSE-C or unencrypted, with a link to encrypt what is left.
+  - **Where the figures come from:** bucket settings are read live. The counts come from the data scanner's last complete cycle, stored apart from MinIO's data usage.
+  - **For other tools:** `GET /minio/admin/v3/buckets/compliance` serves the same data (`admin:DataUsageInfo`). The per-bucket metrics gain `buckets_bucket_unencrypted_bytes` and `_versions`, `_encrypted_bytes{kind}`, `_retained_bytes{mode}` and `_legal_hold_versions`.
 
 ### Fixed
 - The access review counted access keys that are turned off as routes to a bucket, and "Would this be allowed?" said yes for them. It now reads each key's status: an off key is listed as disabled, and the check answers "The account is disabled."

@@ -177,8 +177,11 @@ done
 # latency in whole milliseconds is 0 (and left out) on a fast enough machine.
 TIMING_FAMILIES='minio_cluster_iam_last_sync_duration_millis|minio_system_network_internode_dial_errors_total|minio_heal_objects_errors_total|minio_bucket_replication_latency_ms'
 TIMING="^(\\(help\\) )?($TIMING_FAMILIES)[ :]"
+# Buckets' own families (buckets_*, src/metrics/buckets-catalog.tsv) are additions MinIO does not have; the
+# compatibility promise allows new metrics, so they are not compared either.
+OWN="^(\\(help\\) )?buckets_"
 for f in "$WORK"/minio/*.sig "$WORK"/buckets/*.sig; do
-  grep -Ev "$TIMING" "$f" >"$f.tmp" || true
+  grep -Ev "$TIMING" "$f" | grep -Ev "$OWN" >"$f.tmp" || true
   mv "$f.tmp" "$f"
 done
 fails=0

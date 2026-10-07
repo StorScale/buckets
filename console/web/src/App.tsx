@@ -11,6 +11,7 @@ import Users from "./pages/Users";
 import Groups from "./pages/Groups";
 import Policies from "./pages/Policies";
 import AccessKeys from "./pages/AccessKeys";
+import CompliancePage from "./pages/Compliance";
 import Configuration from "./pages/Configuration";
 import Encryption from "./pages/Encryption";
 import SignInSetup from "./pages/SignIn";
@@ -75,6 +76,9 @@ export default function App() {
         <NavLink to="/identity/access-keys">Access Keys</NavLink>
         <NavLink to="/identity/access-review">Access review</NavLink>
         <NavLink to="/identity/sign-in">Sign-in</NavLink>
+        <div className="nav-group">Compliance</div>
+        <NavLink to="/compliance/retention">Retention</NavLink>
+        <NavLink to="/compliance/encryption">Encryption coverage</NavLink>
         <div className="nav-group">Monitoring</div>
         <NavLink to="/monitoring/trace">Trace</NavLink>
         <NavLink to="/monitoring/logs">Logs</NavLink>
@@ -107,6 +111,7 @@ export default function App() {
           <Route path="/identity/access-keys" element={<AccessKeys />} />
           <Route path="/identity/access-review" element={<AccessReview />} />
           <Route path="/identity/sign-in" element={<SignInSetup />} />
+          <Route path="/compliance/:tab" element={<CompliancePage />} />
           <Route path="/configuration" element={<Configuration />} />
           <Route path="/encryption" element={<Encryption />} />
           <Route path="/encryption/setup" element={<KmsSetup />} />
