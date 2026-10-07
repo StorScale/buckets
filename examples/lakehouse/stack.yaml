@@ -36,7 +36,7 @@ services:
       retries: 60
 
   buckets:
-    image: ${BUCKETS_IMAGE:-ghcr.io/storscale/bucketsd:1.11.0}
+    image: ${BUCKETS_IMAGE:-ghcr.io/storscale/bucketsd:1.11.1}
     environment:
       BUCKETS_ROOT_USER: ${BUCKETS_ROOT_USER}
       BUCKETS_ROOT_PASSWORD: ${BUCKETS_ROOT_PASSWORD}

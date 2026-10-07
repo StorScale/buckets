@@ -13,13 +13,13 @@
 #define BC_KIND "BucketsCluster"
 #define BC_S3_PORT 9000
 #define BC_CONSOLE_PORT 9090
-#define BC_CONSOLE_IMAGE "ghcr.io/storscale/buckets-console:1.11.0"
+#define BC_CONSOLE_IMAGE "ghcr.io/storscale/buckets-console:1.11.1"
 #define BC_MAX_POOLS 32
 #define BC_KES_PORT 7373
 /* buckets-kes, Buckets' own KES-compatible server; BUCKETS_KES_IMAGE (the
  * operator's environment) or spec.kms.kes.image point elsewhere: a registry
  * mirror, or MinIO's KES, which reads the same configuration and keys. */
-#define BC_KES_IMAGE "ghcr.io/storscale/buckets-kes:1.11.0"
+#define BC_KES_IMAGE "ghcr.io/storscale/buckets-kes:1.11.1"
 #define BC_KES_DEFAULT_KEY "buckets-default"
 
 typedef struct {
