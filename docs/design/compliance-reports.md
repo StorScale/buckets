@@ -1,6 +1,6 @@
 # Design: compliance reports (retention and encryption)
 
-Status: proposed, for review. Roadmap: Phase 4, "WORM compliance reports" and
+Status: agreed, being built. Roadmap: Phase 4, "WORM compliance reports" and
 "Encryption coverage reports". Phase 4 is done when "an auditor can get usage,
 access and retention reports from the console, and FIPS mode is documented and
 tested". The access review (1.4.0) is the access report. This adds retention
@@ -112,14 +112,14 @@ from `compliance.json`.
   CSV checked.
 - **Browser:** the page, its tabs and export.
 
-## Open questions for review
+## Decisions
 
-1. **Per-object counts from the scanner?** The alternative is settings only:
-   no counts, but always current and no scanner change. I recommend the
-   counts: "how much is unencrypted" is the question auditors ask.
-2. **Where in the console:** under Monitoring as proposed, or its own top-level
-   **Compliance** section, ready for usage and audit reports later?
-3. **Metrics too?** The same counts as Prometheus metrics (for example
-   `buckets_bucket_unencrypted_bytes`) would let an alert fire when
-   unencrypted data appears in a bucket that should have none. That's cheap
-   once counted; I'd add it.
+1. **Per-object counts from the scanner,** as above.
+2. **A top-level Compliance section** in the console, ready for usage and
+   audit reports later, with Retention and Encryption as its first pages.
+3. **Metrics too:** per bucket, `buckets_bucket_unencrypted_bytes` and
+   `_versions`, `buckets_bucket_encrypted_bytes{kind}`,
+   `buckets_bucket_retained_bytes{mode}` and
+   `buckets_bucket_legal_hold_versions`, from the last cycle. Like all
+   `buckets_*` families, `tests/integration/metrics-names.sh` leaves them out of
+   the comparison with MinIO: the compatibility promise allows new metrics.

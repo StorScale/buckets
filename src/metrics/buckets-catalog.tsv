@@ -1,7 +1,7 @@
 # Metrics of Buckets' own, for what MinIO doesn't have: same columns as
-# src/metrics/minio-catalog.tsv. Emitted only where the feature is on, so the
+# src/metrics/minio-catalog.tsv. Names start with buckets_, which the
 # metric-name comparison with MinIO (tests/integration/metrics-names.sh)
-# never sees them. Names start with buckets_.
+# leaves out: new metrics may be added (docs/compatibility.md).
 B	cluster	buckets_node_identity_sync_runs_total	counterMetric	"Identity syncs run on this server (the one leading pool 0, set 0)"
 B	node	buckets_node_identity_sync_runs_total	counterMetric	"Identity syncs run on this server (the one leading pool 0, set 0)"
 B	cluster	buckets_node_identity_sync_failures_total	counterMetric	"Identity syncs that could not learn about everyone: the provider failed, or what the sync turned off could not be read"
@@ -10,3 +10,8 @@ B	cluster	buckets_node_identity_sync_held_total	counterMetric	"Identity syncs th
 B	node	buckets_node_identity_sync_held_total	counterMetric	"Identity syncs that removed no one because more people left at once than BUCKETS_OPENID_REMOVE_MAX"
 B	cluster	buckets_node_identity_sync_actions_total	counterMetric	"What identity syncs did, by action: revoke (temporary credentials), disable, enable, delete (access keys)"
 B	node	buckets_node_identity_sync_actions_total	counterMetric	"What identity syncs did, by action: revoke (temporary credentials), disable, enable, delete (access keys)"
+B	bucket	buckets_bucket_unencrypted_bytes	gaugeMetric	"Bytes of the bucket's versions stored without encryption, at the scanner's last complete cycle"
+B	bucket	buckets_bucket_unencrypted_versions	gaugeMetric	"Versions of the bucket stored without encryption, at the scanner's last complete cycle"
+B	bucket	buckets_bucket_encrypted_bytes	gaugeMetric	"Bytes of the bucket's versions stored encrypted, by kind (sse-s3, sse-kms, sse-c), at the scanner's last complete cycle"
+B	bucket	buckets_bucket_retained_bytes	gaugeMetric	"Bytes of the bucket's versions under object-lock retention, by mode, at the scanner's last complete cycle"
+B	bucket	buckets_bucket_legal_hold_versions	gaugeMetric	"Versions of the bucket under legal hold, at the scanner's last complete cycle"

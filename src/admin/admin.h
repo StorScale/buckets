@@ -31,6 +31,8 @@ void buckets_admin_node_interface(const char *addr, char *out, size_t cap);
 bool buckets_admin_rtmetrics_peer(buckets_s3_server *s, const char *op, const buckets_query *q,
                                   buckets_http_response *resp);
 void buckets_admin_storage_info(s3_ctx *c);
+/* GET /minio/admin/v3/buckets/compliance (admin/compliance.c): the compliance reports' data. */
+void buckets_admin_compliance(s3_ctx *c);
 void buckets_admin_background_heal_status(s3_ctx *c);
 /* mc admin heal (heal.c); the peer side of a status request forwarded to
  * the node running a sequence; stopping every sequence at shutdown. */

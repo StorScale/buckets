@@ -2467,6 +2467,7 @@ static const route k_routes[] = {
     {"GET", "/get-bucket-quota", buckets_admin_get_bucket_quota, "GetBucketQuotaConfig"},
     {"PUT", "/set-bucket-quota", buckets_admin_set_bucket_quota, "PutBucketQuotaConfig"},
     {"GET", "/datausageinfo", buckets_admin_data_usage_info, "DataUsageInfo"},
+    {"GET", "/buckets/compliance", buckets_admin_compliance, "BucketsCompliance"}, /* Buckets' own */
     {"PUT", "/set-remote-target", buckets_admin_set_remote_target, "SetRemoteTarget"},
     {"GET", "/list-remote-targets", buckets_admin_list_remote_targets, "ListRemoteTargets"},
     {"DELETE", "/remove-remote-target", buckets_admin_remove_remote_target, "RemoveRemoteTarget"},
