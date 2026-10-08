@@ -11,7 +11,7 @@ Everything runs from one Compose file in [`examples/lakehouse`](../../examples/l
 
 | Component | Version | Role |
 |---|---|---|
-| Buckets | 1.17.0 | S3 storage for the warehouse; sign-in with Keycloak through STS |
+| Buckets | 1.17.1 | S3 storage for the warehouse; sign-in with Keycloak through STS |
 | Nessie | 0.108.8 | Iceberg REST catalog, with a git-like commit history |
 | Trino | 483 | SQL engine, Iceberg connector |
 | Apache Ranger | 2.9.0 | Access policies, column masks, row filters and audit for Trino |

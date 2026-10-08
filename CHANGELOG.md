@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.17.1] - 2026-10-08
+
 ### Fixed
 Found by running the MinIO comparison tests against MinIO `RELEASE.2025-10-15` built from source. Earlier releases had compared against an older binary that predates the format Buckets writes.
 - **Drives' device numbers:** server and storage info, and heal status, gave every drive's device major and minor as 0. They are now the device the drive is on, as MinIO reports.

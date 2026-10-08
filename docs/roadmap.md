@@ -10,7 +10,7 @@ The order below leads with what builds on work that already exists (MinIO on-dis
 
 A successor can't depend on what it replaces. MinIO no longer publishes its images or binaries, so Buckets now ships its own key server (`buckets-kes`) in place of MinIO's KES, and keeps mirrors of MinIO's last images only for adoption and rollback.
 
-**Where things stand (2026-10-08):** Buckets 1.17.0 is released, and the main repository is https://github.com/StorScale/buckets. Phases 0, 2, 3 and 4 are done. Every item of Phase 1 is done too.
+**Where things stand (2026-10-08):** Buckets 1.17.1 is released, and the main repository is https://github.com/StorScale/buckets. Phases 0, 2, 3 and 4 are done. Every item of Phase 1 is done too.
 
 - **Left in Phase 1:** its gate, the round trip in CI. The job (`adopt-roundtrip`) is built and waits for access to the cluster it runs on.
 - **Phase 2 is done (1.2.0 to 1.17.0):** guided sign-in setup (1.2.0) for Entra ID, Okta, Keycloak, other OpenID providers and LDAP, per-team roles (1.3.0), the access review (1.4.0), removing people who leave Entra ID (1.9.0), Keycloak and Okta (1.10.0), and SCIM for providers that push changes (1.17.0).
