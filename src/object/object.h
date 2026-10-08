@@ -436,6 +436,8 @@ typedef struct {
 
 #define BUCKETS_MPU_CKSUM_META "x-minio-multipart-checksum"
 #define BUCKETS_MPU_CKSUM_TYPE_META "x-minio-multipart-checksum-type"
+/* "<bucket>/<object>" in an upload's system metadata (Buckets' own; MinIO ignores it), not carried to the object */
+#define BUCKETS_MPU_KEY_META "x-minio-internal-buckets-upload-key"
 
 typedef struct {
   char *object;
@@ -475,6 +477,12 @@ buckets_obj_err buckets_obj_mpu_stat(buckets_objlayer *L, const char *bucket, co
 buckets_obj_err buckets_obj_mpu_list_uploads(buckets_objlayer *L, const char *bucket, const char *object,
                                              buckets_upload_info **uploads, size_t *n);
 void buckets_upload_info_free(buckets_upload_info *u, size_t n);
+/* Removes uploads, on the sets this node leads (MinIO's cleanupStaleUploads): every one started more than expiry_ns
+ * ago, and, when abort is given, any started at least check_ns ago (0: none) for which abort(ud, bucket, object,
+ * initiated_ns) says so. Uploads from before their key was recorded only expire. Returns how many were removed. */
+size_t buckets_obj_mpu_sweep(buckets_objlayer *L, int64_t now_ns, int64_t expiry_ns, int64_t check_ns,
+                             bool (*abort)(void *ud, const char *bucket, const char *object, int64_t initiated_ns),
+                             void *ud);
 
 /* ---- pools: decommission and rebalance ---- */
 /* The pools' command-line arguments (copied). */

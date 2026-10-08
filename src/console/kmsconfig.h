@@ -29,4 +29,9 @@ void buckets_console_kms_free(buckets_console_kms *k);
 void buckets_console_kms_handle(buckets_console_kms *k, const buckets_http_request *req, const char *sub,
                                 buckets_http_response *resp);
 
+/* GET /api/v1/declared-buckets: the cluster's Bucket resources (buckets-operator keeps what they declare, putting
+ * back changes made elsewhere) -> {"managed", "namespace", "buckets": [{"bucket", "resource", "lifecycle",
+ * "replication", "spec"}]}. Outside Kubernetes, {"managed": false, "buckets": []}. */
+void buckets_console_declared_buckets(buckets_console_kms *k, buckets_http_response *resp);
+
 #endif

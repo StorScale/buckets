@@ -136,11 +136,62 @@ static void test_marshal_roundtrip(void **state) {
   buckets_lifecycle_free(&lc);
 }
 
+/* AbortIncompleteMultipartUpload: kept, returned, validated (no tags), and the shortest matching rule found */
+static void test_abort_uploads(void **state) {
+  (void)state;
+  const char *xml = "<LifecycleConfiguration><Rule><ID>tmp</ID><Status>Enabled</Status><Filter><Prefix>tmp/</Prefix></Filter>"
+                    "<AbortIncompleteMultipartUpload><DaysAfterInitiation>3</DaysAfterInitiation></AbortIncompleteMultipartUpload>"
+                    "</Rule><Rule><ID>all</ID><Status>Enabled</Status><Filter></Filter><Expiration><Days>30</Days></Expiration>"
+                    "<AbortIncompleteMultipartUpload><DaysAfterInitiation>7</DaysAfterInitiation></AbortIncompleteMultipartUpload>"
+                    "</Rule><Rule><ID>off</ID><Status>Disabled</Status><Filter><Prefix>tmp/x</Prefix></Filter>"
+                    "<AbortIncompleteMultipartUpload><DaysAfterInitiation>1</DaysAfterInitiation></AbortIncompleteMultipartUpload>"
+                    "</Rule></LifecycleConfiguration>";
+  buckets_lifecycle lc;
+  parse_ok(xml, &lc); /* a rule that only aborts uploads is a rule */
+  assert_int_equal(buckets_lifecycle_abort_days(&lc, "tmp/x/a.bin"), 3); /* the disabled 1 doesn't count */
+  assert_int_equal(buckets_lifecycle_abort_days(&lc, "data/a.bin"), 7);
+  buckets_buf b = BUCKETS_BUF_INIT;
+  buckets_lifecycle_xml(&lc, false, &b);
+  assert_non_null(strstr(b.data, "<AbortIncompleteMultipartUpload><DaysAfterInitiation>3</DaysAfterInitiation>"
+                                 "</AbortIncompleteMultipartUpload></Rule>"));
+  buckets_buf_free(&b);
+  assert_int_equal(buckets_lifecycle_destroying_rules(&lc), 0);
+  buckets_lifecycle_free(&lc);
+
+  buckets_lc_error e;
+  const char *tagged = "<LifecycleConfiguration><Rule><ID>t</ID><Status>Enabled</Status><Filter><Tag><Key>k</Key><Value>v</Value></Tag>"
+                       "</Filter><AbortIncompleteMultipartUpload><DaysAfterInitiation>3</DaysAfterInitiation>"
+                       "</AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>";
+  assert_true(buckets_lifecycle_parse(tagged, strlen(tagged), true, &lc, &e));
+  assert_false(buckets_lifecycle_validate(&lc, false, NULL, NULL, &e));
+  assert_non_null(strstr(e.msg, "tags"));
+  buckets_lifecycle_free(&lc);
+  const char *zero = "<LifecycleConfiguration><Rule><ID>z</ID><Status>Enabled</Status><Filter></Filter><AbortIncompleteMultipartUpload>"
+                     "<DaysAfterInitiation>0</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>";
+  assert_false(buckets_lifecycle_parse(zero, strlen(zero), true, &lc, &e));
+  assert_int_equal(e.code, BUCKETS_LC_ERR_INVALID);
+}
+
+static void test_destroying_rules(void **state) {
+  (void)state;
+  const char *xml = "<LifecycleConfiguration><Rule><ID>v</ID><Status>Enabled</Status><Filter></Filter><NoncurrentVersionExpiration>"
+                    "<NoncurrentDays>1</NoncurrentDays></NoncurrentVersionExpiration></Rule><Rule><ID>a</ID><Status>Enabled</Status>"
+                    "<Filter></Filter><Expiration><Days>3</Days><ExpiredObjectAllVersions>true</ExpiredObjectAllVersions></Expiration>"
+                    "</Rule><Rule><ID>off</ID><Status>Disabled</Status><Filter></Filter><NoncurrentVersionExpiration>"
+                    "<NoncurrentDays>1</NoncurrentDays></NoncurrentVersionExpiration></Rule></LifecycleConfiguration>";
+  buckets_lifecycle lc;
+  parse_ok(xml, &lc);
+  assert_int_equal(buckets_lifecycle_destroying_rules(&lc), 2);
+  assert_int_equal(buckets_lifecycle_destroying_rules(NULL), 0);
+  buckets_lifecycle_free(&lc);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_expected_expiry),     cmocka_unit_test(test_days_rule),
       cmocka_unit_test(test_all_versions_and_noncurrent), cmocka_unit_test(test_delete_markers),
       cmocka_unit_test(test_tag_and_size_filters), cmocka_unit_test(test_marshal_roundtrip),
+      cmocka_unit_test(test_abort_uploads),        cmocka_unit_test(test_destroying_rules),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

@@ -57,6 +57,8 @@ typedef struct {
   bool nvt_set;
   int64_t nvt_days;
   char *nvt_class;
+  /* <AbortIncompleteMultipartUpload><DaysAfterInitiation>: S3's, which MinIO ignores; the scanner applies it */
+  int64_t abort_days;
 } buckets_lc_rule;
 
 typedef struct {
@@ -139,6 +141,12 @@ void buckets_lifecycle_eval_versions(const buckets_lifecycle *lc, bool lock_enab
 /* SetPredictionHeaders: "x-amz-expiration" (or "x-minio-transition") value
  * for obj, into value; returns the header name or NULL. */
 const char *buckets_lifecycle_prediction(const buckets_lifecycle *lc, const buckets_lc_obj *obj, char *value, size_t cap);
+/* Enabled rules that destroy data for good: noncurrent versions expired, or every version of an object (more of
+ * them than before is a ransomware alert's "protection removed"). */
+size_t buckets_lifecycle_destroying_rules(const buckets_lifecycle *lc);
+/* The fewest DaysAfterInitiation of the enabled AbortIncompleteMultipartUpload rules whose prefix object has (0:
+ * none): an upload for it is removed that long after it started. */
+int64_t buckets_lifecycle_abort_days(const buckets_lifecycle *lc, const char *object);
 /* ExpectedExpiryTime */
 int64_t buckets_lc_expected_expiry(int64_t mod_time_ns, int64_t days);
 

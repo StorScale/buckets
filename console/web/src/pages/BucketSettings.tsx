@@ -2,6 +2,8 @@ import { ReactNode, useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
   bucketDocs,
+  DeclaredBucket,
+  declaredBuckets,
   encryptExisting,
   getQuota,
   getVersioning,
@@ -17,6 +19,8 @@ import {
 } from "../api";
 import { ErrorBanner, formatBytes, Notice, Spinner } from "../components";
 import { TagEditor } from "./Browser";
+import LifecycleSection from "./Lifecycle";
+import ReplicationSection from "./Replication";
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
@@ -52,7 +56,8 @@ export default function BucketSettings() {
   const [quotaGiB, setQuotaGiB] = useState("");
   const [tags, setTags] = useState<Tag[]>([]);
   const [policy, setPolicy] = useState("");
-  const [lifecycle, setLifecycle] = useState("");
+  // the bucket's Bucket resource, when buckets-operator keeps it (what it declares can't be changed here)
+  const [declared, setDeclared] = useState<DeclaredBucket | null>(null);
   const [sse, setSse] = useState<{ alg: string; key: string }>({ alg: "", key: "" });
   // the encryption as saved: what encrypting existing objects applies
   const [savedSse, setSavedSse] = useState<{ alg: string; key: string }>({ alg: "", key: "" });
@@ -71,6 +76,12 @@ export default function BucketSettings() {
   };
 
   useEffect(() => {
+    declaredBuckets()
+      .then((d) => setDeclared(d.buckets.find((b) => b.bucket === bucket) ?? null))
+      .catch(() => setDeclared(null));
+  }, [bucket]);
+
+  useEffect(() => {
     Promise.all([kmsListKeys(), kmsStatus()])
       .then(([keys, st]) => setKmsKeys({ keys, defaultKey: st["default-key-id"] }))
       .catch(() => setKmsKeys(null));
@@ -79,12 +90,11 @@ export default function BucketSettings() {
   useEffect(() => {
     (async () => {
       try {
-        const [v, q, t, p, l, e, o] = await Promise.all([
+        const [v, q, t, p, e, o] = await Promise.all([
           getVersioning(bucket),
           getQuota(bucket).catch(() => ({ quota: 0 })),
           bucketDocs.tagging.get(bucket),
           bucketDocs.policy.get(bucket),
-          bucketDocs.lifecycle.get(bucket),
           bucketDocs.encryption.get(bucket),
           bucketDocs.objectLock.get(bucket),
         ]);
@@ -92,7 +102,6 @@ export default function BucketSettings() {
         setQuotaGiB(q.quota ? String(q.quota / 2 ** 30) : "");
         setTags(parseTags(t));
         setPolicy(p ? JSON.stringify(JSON.parse(p), null, 2) : "");
-        setLifecycle(l ?? "");
         if (e) {
           const d = new DOMParser().parseFromString(e, "application/xml");
           const cur = { alg: d.querySelector("SSEAlgorithm")?.textContent ?? "", key: d.querySelector("KMSMasterKeyID")?.textContent ?? "" };
@@ -350,19 +359,18 @@ export default function BucketSettings() {
       </Section>
 
       <Section title="Lifecycle">
-        <textarea
-          rows={10}
-          value={lifecycle}
-          onChange={(e) => setLifecycle(e.target.value)}
-          placeholder={'<LifecycleConfiguration><Rule><ID>expire-logs</ID><Status>Enabled</Status><Filter><Prefix>logs/</Prefix></Filter><Expiration><Days>30</Days></Expiration></Rule></LifecycleConfiguration>'}
-          data-testid="lifecycle"
+        <LifecycleSection bucket={bucket} versioned={versioning === "Enabled"} locked={lock.enabled} declared={declared} onSaved={(t) => ok(t)()} onError={fail} />
+      </Section>
+
+      <Section title="Replication">
+        <ReplicationSection
+          bucket={bucket}
+          versioned={versioning === "Enabled"}
+          declared={declared}
+          onVersioning={() => setVer("Enabled")}
+          onSaved={(t) => ok(t)()}
+          onError={fail}
         />
-        <button
-          data-testid="save-lifecycle"
-          onClick={() => (lifecycle.trim() ? bucketDocs.lifecycle.put(bucket, lifecycle) : bucketDocs.lifecycle.del(bucket)).then(ok("Lifecycle saved.")).catch(fail)}
-        >
-          Save lifecycle
-        </button>
       </Section>
     </div>
   );

@@ -43,6 +43,14 @@ void buckets_admin_incident_action(s3_ctx *c);
 /* The audit log viewer (admin/audit.c): GET buckets/audit, and the peer op that answers for one server. */
 void buckets_admin_audit(s3_ctx *c);
 bool buckets_admin_audit_peer(buckets_s3_server *s, const char *op, const buckets_query *q, buckets_http_response *resp);
+/* The lifecycle and replication editor (admin/lifecycle_preview.c, admin/replicate.c): POST
+ * buckets/lifecycle-preview, GET buckets/replication, POST buckets/replication-test, and the peer op that gives one
+ * server's replication counts. */
+void buckets_admin_lifecycle_preview(s3_ctx *c);
+void buckets_admin_replication(s3_ctx *c);
+void buckets_admin_replication_test(s3_ctx *c);
+bool buckets_admin_replication_peer(buckets_s3_server *s, const char *op, const buckets_query *q,
+                                    buckets_http_response *resp);
 void buckets_admin_background_heal_status(s3_ctx *c);
 /* mc admin heal (heal.c); the peer side of a status request forwarded to
  * the node running a sequence; stopping every sequence at shutdown. */
@@ -174,6 +182,8 @@ void buckets_admin_kms_create_key_v3(s3_ctx *c);
  * request itself when it fails), custom-coded errors, IAM store errors. */
 bool buckets_admin_authorize(s3_ctx *c, const char *action);
 /* The first allowed of several actions (validateAdminReq with many). */
+/* A signed admin request allowed every one of actions on bucket (S3 actions, such as s3:GetLifecycleConfiguration). */
+bool buckets_admin_authorize_bucket(s3_ctx *c, const char *bucket, const char *const *actions, size_t n);
 bool buckets_admin_authorize_any(s3_ctx *c, const char *const *actions, size_t n);
 void buckets_admin_custom_error(s3_ctx *c, int status, const char *code, const char *message);
 void buckets_admin_iam_error(s3_ctx *c, buckets_iam_err e, const char *detail);

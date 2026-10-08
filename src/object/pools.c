@@ -754,6 +754,17 @@ static int upload_cmp(const void *a, const void *b) {
   return x->initiated_ns < y->initiated_ns ? -1 : x->initiated_ns > y->initiated_ns;
 }
 
+size_t buckets_obj_mpu_sweep(buckets_objlayer *L, int64_t now_ns, int64_t expiry_ns, int64_t check_ns,
+                             bool (*abort)(void *ud, const char *bucket, const char *object, int64_t initiated_ns),
+                             void *ud) {
+  size_t removed = 0;
+  for (size_t p = 0; p < L->npools; p++)
+    for (size_t si = 0; si < L->pools[p]->nsets; si++)
+      if (buckets_objlayer_set_is_led_here(L, p, si))
+        removed += buckets_ep_mpu_sweep(L->pools[p], si, now_ns, expiry_ns, check_ns, abort, ud);
+  return removed;
+}
+
 buckets_obj_err buckets_obj_mpu_list_uploads(buckets_objlayer *L, const char *bucket, const char *object,
                                              buckets_upload_info **uploads, size_t *n) {
   if (!object || !*object) { /* no prefix: this node's upload cache */

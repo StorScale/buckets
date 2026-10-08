@@ -955,3 +955,95 @@ export const auditLog = (f: AuditFilter, cursor?: string, limit = 100) =>
   adminJson<AuditPage>("GET", "buckets/audit", {
     query: { ...(f as Record<string, string | undefined>), cursor, limit: String(limit) },
   });
+
+// ---- the lifecycle and replication editor (docs/design/lifecycle-replication-editor.md) ----
+
+export type LifecyclePreview = {
+  scanned: number;
+  complete: boolean; // false: it stopped at 1,000,000 versions or 30 seconds ("at least")
+  opensIncident: boolean;
+  actions: { rule: string; action: string; when: "next-run" | "7d" | "30d"; objects: number; bytes: number; examples: string[] }[];
+};
+// What a draft lifecycle configuration would do to the bucket now, and within 7 and 30 days; nothing is changed.
+export const lifecyclePreview = (bucket: string, xml: string) =>
+  adminJson<LifecyclePreview>("POST", "buckets/lifecycle-preview", { query: { bucket }, body: xml, headers: { "Content-Type": "application/xml" } });
+
+export const replicationDoc = {
+  get: (b: string) => getSub(b, "replication", ["ReplicationConfigurationNotFoundError"]),
+  put: (b: string, v: string) => putSub(b, "replication", v),
+  del: (b: string) => delSub(b, "replication"),
+};
+
+export type ReplicationTarget = {
+  arn: string;
+  endpoint: string;
+  secure: boolean;
+  bucket: string;
+  accessKey: string;
+  online: boolean;
+  lastOnline: number;
+  offlineCount: number;
+  latencyMs: number;
+  bandwidthLimit: number;
+  sync: boolean;
+  replicated: number;
+  failedLastHour: number;
+  failedSinceStart: number;
+};
+export type ReplicationBucket = {
+  bucket: string;
+  versioned: boolean;
+  configured: boolean;
+  pending: { objects: number; bytes: number };
+  targets: ReplicationTarget[];
+  rules: { id: string; status: string; arn: string }[];
+};
+export type ReplicationStatus = { siteReplication: boolean; servers: number; serversAnswering: number; buckets: ReplicationBucket[] };
+// One bucket's replication (bucket given), or every bucket that replicates.
+export const replicationStatus = (bucket?: string) =>
+  adminJson<ReplicationStatus>("GET", "buckets/replication", { query: bucket ? { bucket } : {} });
+
+export type NewTarget = {
+  endpoint: string; // https://host:port
+  bucket: string;
+  accessKey: string;
+  secretKey: string;
+  bandwidthLimit?: number; // bytes per second
+  storageClass?: string;
+};
+// madmin's BucketTarget, as SetRemoteTarget and Buckets' replication test take it
+function targetJson(source: string, t: NewTarget): string {
+  const u = new URL(t.endpoint.includes("://") ? t.endpoint : `https://${t.endpoint}`);
+  return JSON.stringify({
+    sourcebucket: source,
+    endpoint: u.host,
+    secure: u.protocol === "https:",
+    path: "",
+    api: "s3v4",
+    type: "replication",
+    targetbucket: t.bucket,
+    credentials: { accessKey: t.accessKey, secretKey: t.secretKey },
+    bandwidthlimit: t.bandwidthLimit ?? 0,
+    storageclass: t.storageClass ?? "",
+    healthCheckDuration: 0,
+  });
+}
+// The checks SetRemoteTarget makes of a target, without saving it.
+export const replicationTest = (bucket: string, t: NewTarget) =>
+  adminJson<{ ok: boolean; sourceVersioned: boolean }>("POST", "buckets/replication-test", { query: { bucket }, body: targetJson(bucket, t), encrypt: true });
+// Creates the remote target; returns its ARN.
+export const setRemoteTarget = (bucket: string, t: NewTarget) =>
+  adminJson<string>("PUT", "set-remote-target", { query: { bucket }, body: targetJson(bucket, t), encrypt: true });
+export const removeRemoteTarget = (bucket: string, arn: string) =>
+  call("DELETE", admin("remove-remote-target"), { query: { bucket, arn } }).then(() => undefined);
+// Copies every object to the target again (ResetBucketReplicationStart).
+export const replicationResync = (bucket: string, arn: string) =>
+  call("PUT", s3Path(bucket), { query: { "replication-reset": "", arn } }).then((r) => r.text());
+
+export const listTiers = () =>
+  adminJson<{ Name: string; Type: string }[] | null>("GET", "tier").then((t) => (t ?? []).map((x) => ({ name: x.Name, type: x.Type })));
+
+export type DeclaredBucket = { bucket: string; resource: string; lifecycle: boolean; replication: boolean; spec: Record<string, unknown> };
+// The cluster's Bucket resources, when the console runs under buckets-operator.
+export const declaredBuckets = async (): Promise<{ managed: boolean; namespace?: string; buckets: DeclaredBucket[] }> =>
+  (await call("GET", "/api/v1/declared-buckets")).json();

@@ -7,6 +7,8 @@ static const buckets_metric_def k_catalog_v2[] = {
     {"buckets_bucket_objects_deleted_total", BUCKETS_MT_COUNTER, "Objects deleted in the bucket through this server (each object of a DeleteObjects call, and each delete marker), since it started", ""},
     {"buckets_bucket_objects_overwritten_total", BUCKETS_MT_COUNTER, "Writes onto a key that had a current version, in the bucket through this server, since it started", ""},
     {"buckets_bucket_protection_changes_total", BUCKETS_MT_COUNTER, "Changes that weaken the bucket's protection made through this server, by change: versioning-suspended, noncurrent-expiry, retention-bypassed, bucket-deleted, public-write", ""},
+    {"buckets_bucket_replication_pending_bytes", BUCKETS_MT_GAUGE, "Bytes of the bucket queued on this server for replication, not yet sent", ""},
+    {"buckets_bucket_replication_pending_count", BUCKETS_MT_GAUGE, "Versions of the bucket queued on this server for replication, not yet sent", ""},
     {"buckets_bucket_retained_bytes", BUCKETS_MT_GAUGE, "Bytes of the bucket's versions under object-lock retention, by mode, at the scanner's last complete cycle", ""},
     {"buckets_bucket_unencrypted_bytes", BUCKETS_MT_GAUGE, "Bytes of the bucket's versions stored without encryption, at the scanner's last complete cycle", ""},
     {"buckets_bucket_unencrypted_versions", BUCKETS_MT_GAUGE, "Versions of the bucket stored without encryption, at the scanner's last complete cycle", ""},

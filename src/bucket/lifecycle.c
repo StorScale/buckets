@@ -352,6 +352,15 @@ static bool dec_rule(dec *x, size_t node, buckets_lc_rule *r) {
       }
       if (days <= 0) return fail(x->err, BUCKETS_LC_ERR_INVALID, "Days must be a positive integer with DelMarkerExpiration");
       r->dm_days = days;
+    } else if (NAME_IS(d, c, "AbortIncompleteMultipartUpload")) {
+      int64_t days = 0;
+      for (size_t k = d->nodes[c].first_child; k; k = d->nodes[k].next_sibling) {
+        if (NAME_IS(d, k, "DaysAfterInitiation") && !dec_int(x, k, &days)) return false;
+      }
+      if (days <= 0)
+        return fail(x->err, BUCKETS_LC_ERR_INVALID,
+                    "DaysAfterInitiation must be a positive integer with AbortIncompleteMultipartUpload");
+      r->abort_days = days;
     } else if (NAME_IS(d, c, "NoncurrentVersionExpiration")) {
       int64_t days = 0, newer = 0, max = 0;
       for (size_t k = d->nodes[c].first_child; k; k = d->nodes[k].next_sibling) {
@@ -535,7 +544,9 @@ static bool rule_valid(const buckets_lc_rule *r, buckets_lc_error *e) {
   if (r->nvt_set && (!r->nvt_class || !*r->nvt_class)) return fail(e, BUCKETS_LC_ERR_INVALID, ERR_NOT_WELL_FORMED);
   if ((!tag_empty(&r->filter) || r->filter.nand_tags) && r->dm_days)
     return fail(e, BUCKETS_LC_ERR_INVALID, "Rule with DelMarkerExpiration cannot have tags based filtering");
-  if (!r->exp_set && !r->tr_set && !r->nve_set && !r->nvt_set && !r->dm_days)
+  if ((!tag_empty(&r->filter) || r->filter.nand_tags) && r->abort_days)
+    return fail(e, BUCKETS_LC_ERR_INVALID, "Rule with AbortIncompleteMultipartUpload cannot have tags based filtering");
+  if (!r->exp_set && !r->tr_set && !r->nve_set && !r->nvt_set && !r->dm_days && !r->abort_days)
     return fail(e, BUCKETS_LC_ERR_INVALID, ERR_NOT_WELL_FORMED);
   return true;
 }
@@ -659,6 +670,11 @@ void buckets_lifecycle_xml(const buckets_lifecycle *lc, bool with_updated_at, bu
       buckets_xml_elem(out, "StorageClass", r->nvt_class);
       buckets_xml_close(out, "NoncurrentVersionTransition");
     }
+    if (r->abort_days) {
+      buckets_xml_open(out, "AbortIncompleteMultipartUpload");
+      xml_i64(out, "DaysAfterInitiation", r->abort_days);
+      buckets_xml_close(out, "AbortIncompleteMultipartUpload");
+    }
     buckets_xml_close(out, "Rule");
   }
   if (with_updated_at && lc->expiry_updated_ns) {
@@ -685,6 +701,27 @@ static const char *rule_prefix(const buckets_lc_rule *r) {
   if (r->filter.prefix && *r->filter.prefix) return r->filter.prefix;
   if (r->filter.and_prefix && *r->filter.and_prefix) return r->filter.and_prefix;
   return "";
+}
+
+size_t buckets_lifecycle_destroying_rules(const buckets_lifecycle *lc) {
+  size_t n = 0;
+  for (size_t i = 0; lc && i < lc->n; i++) {
+    const buckets_lc_rule *r = &lc->rules[i];
+    if (r->status && !strcmp(r->status, "Enabled") && (r->nve_set || (r->exp_all_set && r->exp_all))) n++;
+  }
+  return n;
+}
+
+int64_t buckets_lifecycle_abort_days(const buckets_lifecycle *lc, const char *object) {
+  int64_t best = 0;
+  for (size_t i = 0; lc && i < lc->n; i++) {
+    const buckets_lc_rule *r = &lc->rules[i];
+    if (!r->abort_days || !r->status || strcmp(r->status, "Enabled") != 0) continue;
+    const char *p = rule_prefix(r);
+    if (strncmp(object, p, strlen(p)) != 0) continue;
+    if (!best || r->abort_days < best) best = r->abort_days;
+  }
+  return best;
 }
 
 /* Filter.TestTags */

@@ -527,6 +527,8 @@ expect "the console's account" "$(jp deploy/kmsc-console '{.spec.template.spec.s
 ck() { "$BIN/kubectl" --server "https://127.0.0.1:$APORT" --token console-token --insecure-skip-tls-verify -n tenant "$@"; }
 expect "the console may not read the root credentials" "$(ck get secret kmsc-root -o name 2>&1 | grep -o Forbidden | head -1)" Forbidden
 expect "nor another cluster" "$(ck get bc store -o name 2>&1 | grep -o Forbidden | head -1)" Forbidden
+expect "the console lists Bucket resources (what they declare is read-only there)" "$(ck get buckets.buckets.io -o name 2>&1 | grep -c Forbidden)" 0
+expect "but may not change them" "$(ck create -f - -o name 2>&1 <<<'{"apiVersion":"buckets.io/v1alpha1","kind":"Bucket","metadata":{"name":"sneaky","namespace":"tenant"},"spec":{"cluster":"kmsc"}}' | grep -o Forbidden | head -1)" Forbidden
 expect "nor write status" "$(ck patch bc kmsc --subresource=status --type=merge -p '{"status":{"kms":{"test":{"phase":"Passed"}}}}' 2>&1 | grep -o Forbidden | head -1)" Forbidden
 settings='{"backend":"vault","vault":{"endpoint":"https://vault.example.com:8200","prefix":"buckets/kmsc","approle":{"id":"r","secret":"s"}}}'
 cand=$(printf '{"testId":"t1","settings":%s,"keyName":"buckets-default","createKey":true,"requiredKeys":[]}' "$settings")

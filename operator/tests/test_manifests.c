@@ -442,6 +442,11 @@ static void test_kes_spec(void **state) {
   assert_string_equal(yyjson_mut_get_str(yyjson_mut_arr_get_first(yyjson_mut_obj_get(r0, "resourceNames"))), "store");
   assert_int_equal(yyjson_mut_arr_size(yyjson_mut_obj_get(r1, "resourceNames")), 4);
   assert_string_equal(yyjson_mut_get_str(yyjson_mut_arr_get(yyjson_mut_obj_get(r1, "resourceNames"), 1)), "store-kms-candidate");
+  /* and read the Bucket resources, no more: what they declare is read-only in the console */
+  yyjson_mut_val *r2 = yyjson_mut_arr_get(yyjson_mut_obj_get(role, "rules"), 2);
+  assert_string_equal(yyjson_mut_get_str(yyjson_mut_arr_get_first(yyjson_mut_obj_get(r2, "resources"))), "buckets");
+  assert_int_equal(yyjson_mut_arr_size(yyjson_mut_obj_get(r2, "verbs")), 2);
+  assert_null(yyjson_mut_obj_get(r2, "resourceNames"));
   for (size_t k = 0; k < n; k++) {
     if (!strstr(o[k].path, "/deployments/store-console")) continue;
     yyjson_mut_val *cp = AT(yyjson_mut_doc_get_root(o[k].doc), "spec", "template", "spec");

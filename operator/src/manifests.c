@@ -1265,6 +1265,13 @@ static size_t console_rbac(const bc_spec *s, bc_object *o) {
   verbs = ADD_ARR(d, r, "verbs");
   yyjson_mut_arr_add_str(d, verbs, "get");
   yyjson_mut_arr_add_str(d, verbs, "update");
+  /* the Bucket resources, read-only: the console shows what they declare as not editable there */
+  r = yyjson_mut_arr_add_obj(d, rules);
+  yyjson_mut_arr_add_str(d, ADD_ARR(d, r, "apiGroups"), "buckets.io");
+  yyjson_mut_arr_add_str(d, ADD_ARR(d, r, "resources"), "buckets");
+  verbs = ADD_ARR(d, r, "verbs");
+  yyjson_mut_arr_add_str(d, verbs, "get");
+  yyjson_mut_arr_add_str(d, verbs, "list");
   o[k++] = (bc_object){path_of("/apis/rbac.authorization.k8s.io/v1", s, "roles", name), d};
 
   d = yyjson_mut_doc_new(NULL);

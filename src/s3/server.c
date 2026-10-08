@@ -910,6 +910,27 @@ static bool expire(buckets_s3_server *s, const char *bucket, const buckets_objec
   return !err;
 }
 
+void buckets_s3_lc_objs(const buckets_object_info *v, size_t n, bool enabled, bool suspended, int64_t now_ns,
+                        buckets_lc_obj *objs) {
+  for (size_t i = 0; i < n; i++) {
+    objs[i].name = v[i].name;
+    objs[i].user_tags = buckets_object_meta(&v[i], "X-Amz-Tagging");
+    objs[i].mod_time_ns = v[i].mod_time_ns;
+    objs[i].size = v[i].size;
+    /* ToObjectInfo: the null version of an unversioned object has no ID */
+    objs[i].version_id = strcmp(v[i].version_id, "null") == 0 && !enabled && !suspended ? "" : v[i].version_id;
+    objs[i].is_latest = i == 0;
+    objs[i].delete_marker = v[i].delete_marker;
+    objs[i].num_versions = n;
+    objs[i].successor_mod_time_ns = i ? v[i - 1].mod_time_ns : 0;
+    objs[i].locked = version_locked(&v[i], now_ns);
+    objs[i].transitioned = buckets_object_tier(&v[i], NULL, NULL) != NULL;
+    int64_t rexp;
+    buckets_object_restore_state(&v[i], &objs[i].restore_ongoing, &rexp);
+    objs[i].restore_expires_ns = rexp * 1000000000LL;
+  }
+}
+
 #define ILM_EXPIRY_UA "Internal: [ILM-Expiry]"
 
 /* applyExpiryOnNonTransitionedObjects' event: named after the version the
@@ -953,19 +974,7 @@ void buckets_s3_lifecycle_due(buckets_s3_server *s, const char *bucket, const bu
   int64_t now = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
   buckets_lc_obj *objs = buckets_xcalloc(n, sizeof(*objs));
   buckets_lc_event *ev = buckets_xcalloc(n, sizeof(*ev));
-  for (size_t i = 0; i < n; i++) {
-    objs[i].name = v[i].name;
-    objs[i].user_tags = buckets_object_meta(&v[i], "X-Amz-Tagging");
-    objs[i].mod_time_ns = v[i].mod_time_ns;
-    objs[i].size = v[i].size;
-    objs[i].version_id = strcmp(v[i].version_id, "null") == 0 && !enabled && !suspended ? "" : v[i].version_id;
-    objs[i].is_latest = i == 0;
-    objs[i].delete_marker = v[i].delete_marker;
-    objs[i].num_versions = n;
-    objs[i].successor_mod_time_ns = i ? v[i - 1].mod_time_ns : 0;
-    objs[i].locked = version_locked(&v[i], now);
-    objs[i].transitioned = buckets_object_tier(&v[i], NULL, NULL) != NULL;
-  }
+  buckets_s3_lc_objs(v, n, enabled, suspended, now, objs);
   buckets_lifecycle_eval_versions(&st->lifecycle, st->lock_enabled, objs, n, now, ev);
   for (size_t i = 0; i < n; i++)
     due[i] = ev[i].action == BUCKETS_LC_DELETE || ev[i].action == BUCKETS_LC_DELETE_VERSION ||
@@ -990,23 +999,7 @@ static void scanner_lifecycle(buckets_s3_server *s, const char *bucket, const bu
   int64_t now = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
   buckets_lc_obj *objs = buckets_xcalloc(n, sizeof(*objs));
   buckets_lc_event *ev = buckets_xcalloc(n, sizeof(*ev));
-  for (size_t i = 0; i < n; i++) {
-    objs[i].name = v[i].name;
-    objs[i].user_tags = buckets_object_meta(&v[i], "X-Amz-Tagging");
-    objs[i].mod_time_ns = v[i].mod_time_ns;
-    objs[i].size = v[i].size;
-    /* ToObjectInfo: the null version of an unversioned object has no ID */
-    objs[i].version_id = strcmp(v[i].version_id, "null") == 0 && !enabled && !suspended ? "" : v[i].version_id;
-    objs[i].is_latest = i == 0;
-    objs[i].delete_marker = v[i].delete_marker;
-    objs[i].num_versions = n;
-    objs[i].successor_mod_time_ns = i ? v[i - 1].mod_time_ns : 0;
-    objs[i].locked = version_locked(&v[i], now);
-    objs[i].transitioned = buckets_object_tier(&v[i], NULL, NULL) != NULL;
-    int64_t rexp;
-    buckets_object_restore_state(&v[i], &objs[i].restore_ongoing, &rexp);
-    objs[i].restore_expires_ns = rexp * 1000000000LL;
-  }
+  buckets_s3_lc_objs(v, n, enabled, suspended, now, objs);
   buckets_lifecycle_eval_versions(&st->lifecycle, st->lock_enabled, objs, n, now, ev);
   for (size_t i = 0; i < n; i++)
     if ((size_t)ev[i].action < BUCKETS_ARRAY_LEN(s->ilm_actions)) atomic_fetch_add(&s->ilm_actions[ev[i].action], 1);
@@ -1195,6 +1188,41 @@ static void *guard_main(void *arg) {
   return NULL;
 }
 
+/* An upload's bucket has a lifecycle rule that aborts it by now. */
+static bool upload_abort_due(void *ud, const char *bucket, const char *object, int64_t initiated_ns) {
+  buckets_s3_server *s = ud;
+  buckets_bucket_state *st = buckets_metasys_get(s->meta, bucket);
+  int64_t days = st->has_lifecycle ? buckets_lifecycle_abort_days(&st->lifecycle, object) : 0;
+  buckets_bucket_state_release(st);
+  return days && wall_ns() - initiated_ns >= days * 86400LL * 1000000000LL;
+}
+
+static int64_t api_duration(buckets_s3_server *s, const char *key, int64_t dflt) {
+  char *v = s->config ? buckets_config_sys_value(s->config, "api", "", key) : NULL;
+  int64_t ns = 0;
+  bool ok = v && buckets_go_duration_parse(v, &ns) && ns > 0;
+  free(v);
+  return ok ? ns : dflt;
+}
+
+/* Incomplete multipart uploads (MinIO's cleanupStaleUploads): every stale_uploads_cleanup_interval, the uploads of
+ * the sets this server leads that are older than stale_uploads_expiry go, and those a lifecycle rule
+ * (AbortIncompleteMultipartUpload) aborts sooner. */
+static void *uploads_main(void *arg) {
+  buckets_s3_server *s = arg;
+  const char *env = getenv("BUCKETS_UPLOADS_SWEEP_INTERVAL"); /* seconds, for tests */
+  for (;;) {
+    long ms = env ? strtol(env, NULL, 10) * 1000L : (long)(api_duration(s, "stale_uploads_cleanup_interval",
+                                                                           6 * 3600LL * 1000000000LL) / 1000000);
+    if (!bg_sleep(s, ms > 0 ? ms : 6 * 3600 * 1000L)) break;
+    if (!s->layer || !s->meta) continue;
+    int64_t expiry = api_duration(s, "stale_uploads_expiry", 24 * 3600LL * 1000000000LL);
+    size_t n = buckets_obj_mpu_sweep(s->layer, wall_ns(), expiry, 86400LL * 1000000000LL, upload_abort_due, s);
+    if (n) buckets_log_info("uploads: removed %zu incomplete multipart uploads", n);
+  }
+  return NULL;
+}
+
 static void *usage_main(void *arg) {
   buckets_s3_server *s = arg;
   const char *env = getenv("BUCKETS_USAGE_FLUSH_INTERVAL");
@@ -1249,6 +1277,7 @@ void buckets_s3_server_set_layer(buckets_s3_server *s, buckets_objlayer *layer) 
   }
   s->usage_thread_started = pthread_create(&s->usage_thread, NULL, usage_main, s) == 0;
   s->guard_thread_started = pthread_create(&s->guard_thread, NULL, guard_main, s) == 0;
+  s->uploads_thread_started = pthread_create(&s->uploads_thread, NULL, uploads_main, s) == 0;
 }
 
 void buckets_s3_server_stop(buckets_s3_server *s) {
@@ -1270,6 +1299,8 @@ void buckets_s3_server_stop(buckets_s3_server *s) {
   s->usage_thread_started = false;
   if (s->guard_thread_started) pthread_join(s->guard_thread, NULL);
   s->guard_thread_started = false;
+  if (s->uploads_thread_started) pthread_join(s->uploads_thread, NULL);
+  s->uploads_thread_started = false;
   buckets_sr_stop(s->sr);
   buckets_datamove_stop(s->datamove);
   buckets_batch_stop(s->batch);

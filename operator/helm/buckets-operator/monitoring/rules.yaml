@@ -189,6 +189,35 @@ groups:
           description: "Versioning suspended, a rule that expires old versions added, retention bypassed, a bucket deleted with its data, or a policy letting anyone write or delete. Often an admin's change; also what an attacker does first. Reports → Activity says which."
           runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketsprotectionremoved
 
+      - alert: BucketsReplicationTargetOffline
+        expr: max by (namespace, buckets_cluster, endpoint) (minio_node_replication_link_online{scope="node"} == 0)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.namespace }}/{{ $labels.buckets_cluster }}: replication target {{ $labels.endpoint }} is unreachable"
+          description: "New objects wait in the queue until it is back, and the copy there falls behind. Reports → Replication shows which buckets replicate to it."
+          runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketsreplicationtargetoffline
+
+      - alert: BucketsReplicationFailing
+        expr: sum by (namespace, buckets_cluster, bucket) (increase(minio_bucket_replication_total_failed_count{scope="bucket"}[15m])) > 0 and sum by (namespace, buckets_cluster, bucket) (increase(minio_bucket_replication_total_failed_count{scope="bucket"}[5m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.namespace }}/{{ $labels.buckets_cluster }}: replication of {{ $labels.bucket }} keeps failing"
+          description: "Objects of the bucket could not be copied to its target for 15 minutes: the target refuses them (credentials, versioning, a full disk) or drops the connection. Failed objects are retried; the bucket's Replication section says which target."
+          runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketsreplicationfailing
+
+      - alert: BucketsReplicationBacklog
+        expr: sum by (namespace, buckets_cluster, bucket) (buckets_bucket_replication_pending_count{scope="bucket"}) > 0 and sum by (namespace, buckets_cluster, bucket) (delta(buckets_bucket_replication_pending_count{scope="bucket"}[1h])) > 0
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.namespace }}/{{ $labels.buckets_cluster }}: replication of {{ $labels.bucket }} is falling behind"
+          description: "Objects have waited to be replicated for more than an hour and the queue is still growing: the link is too slow for the write rate, a bandwidth limit is too low, or the target is slow."
+          runbook_url: https://github.com/StorScale/buckets/blob/main/docs/monitoring.md#bucketsreplicationbacklog
+
       - alert: BucketsMetricsDown
         expr: max by (namespace, buckets_cluster, pod) (up{buckets_cluster!=""} == 0)
         for: 5m

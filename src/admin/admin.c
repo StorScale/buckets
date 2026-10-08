@@ -192,6 +192,17 @@ static bool admin_req(s3_ctx *c, const char *const *actions, size_t n) {
 
 static bool admin_req1(s3_ctx *c, const char *action) { return admin_req(c, &action, 1); }
 
+bool buckets_admin_authorize_bucket(s3_ctx *c, const char *bucket, const char *const *actions, size_t n) {
+  if (!admin_signed(c)) return false;
+  for (size_t i = 0; i < n; i++) {
+    if (!buckets_s3_allowed(c, actions[i], bucket, "", false)) {
+      buckets_admin_error(c, BUCKETS_ERR_ACCESS_DENIED);
+      return false;
+    }
+  }
+  return true;
+}
+
 /* Reads and madmin-decrypts the body with the requestor's secret key. */
 static yyjson_doc *read_encrypted(s3_ctx *c) {
   if (c->req->body_len > MAX_ECONFIG_JSON) {
@@ -2520,6 +2531,9 @@ static const route k_routes[] = {
     {"GET", "/buckets/incidents", buckets_admin_incidents, "BucketsIncidents"},
     {"POST", "/buckets/incidents", buckets_admin_incident_action, "BucketsIncidentAction"},
     {"GET", "/buckets/audit", buckets_admin_audit, "BucketsAudit"},
+    {"POST", "/buckets/lifecycle-preview", buckets_admin_lifecycle_preview, "BucketsLifecyclePreview"},
+    {"GET", "/buckets/replication", buckets_admin_replication, "BucketsReplication"},
+    {"POST", "/buckets/replication-test", buckets_admin_replication_test, "BucketsReplicationTest"},
     {"PUT", "/set-remote-target", buckets_admin_set_remote_target, "SetRemoteTarget"},
     {"GET", "/list-remote-targets", buckets_admin_list_remote_targets, "ListRemoteTargets"},
     {"DELETE", "/remove-remote-target", buckets_admin_remove_remote_target, "RemoveRemoteTarget"},
@@ -2616,6 +2630,8 @@ void buckets_admin_peer(buckets_s3_server *s, const buckets_http_request *req, c
     /* netperf, or its devnull */
   } else if (op && buckets_admin_rtmetrics_peer(s, op, q, resp)) {
     /* a node's realtime metrics */
+  } else if (op && buckets_admin_replication_peer(s, op, q, resp)) {
+    /* the replication editor: this node's counts */
   } else if (op && buckets_admin_audit_peer(s, op, q, resp)) {
     /* the audit log: this node's entries */
   } else if (op && buckets_ransomguard_peer(s, op, q, resp)) {

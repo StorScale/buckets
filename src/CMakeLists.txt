@@ -207,6 +207,7 @@ add_library(buckets STATIC
   admin/usage.c
   admin/incidents.c
   admin/audit.c
+  admin/lifecycle_preview.c
   admin/replicate.c
   admin/siterepl.c
   admin/tier.c
