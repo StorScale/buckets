@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.17.0] - 2026-10-08
+
 ### Added
 - **SCIM, for identity providers that push changes** ([docs/identity.md](docs/identity.md#scim), [the design](docs/design/scim.md)). Entra ID and Okta can tell Buckets as soon as someone is turned off, deleted or taken out of the app, instead of waiting for the hourly identity sync.
   - **The same removal as the sync:** temporary credentials go at once; access keys are turned off at once and deleted after the grace period; keys come back for someone turned on again in time. The safety limit holds mass removals. A push acts within seconds.
