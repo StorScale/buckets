@@ -75,8 +75,9 @@ API's answer is kept for people SCIM's groups don't name.
 Under **Identity → Sign-in → People who leave**, a new option, **Keep their roles current**, appears beside
 removal. It is on by default for new settings and off for existing ones until turned on. It shows what the
 provider app needs:
-- **Entra ID:** `User.Read.All` (already there for removal) for app roles, plus `GroupMember.Read.All` when the
-  claim is `groups`.
+- **Entra ID:** for app roles, `User.Read.All` (already there for removal), which is to be confirmed against
+  Graph's permissions reference while building; plus `GroupMember.Read.All` when the claim is `groups`. The
+  lookup checks the app can read them either way.
 - **Okta:** the read-only API token reads groups.
 - **Keycloak:** `view-users` reads role mappings and groups.
 
