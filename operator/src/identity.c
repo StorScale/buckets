@@ -94,6 +94,8 @@ static bool sync_settings(op_ctx *o, bc_spec *s, yyjson_val *settings, const cha
   buckets_buf_appendf(&b, "%s|%s|%s|%s|%s|%s|%s|%s|%ld|%ld|%ld", rm.provider, rm.tenant, rm.client_id,
                       rm.client_secret, rm.api_token, rm.url, rm.realm, rm.issuer, rm.delete_after_days,
                       rm.max_per_sync, rm.interval_minutes);
+  if (rm.scim || !rm.api) /* SCIM's settings change the hash only when SCIM is used: no restart for others */
+    buckets_buf_appendf(&b, "|scim:%d:%d:%s:%s", rm.api, rm.scim, rm.scim_sha256, rm.scim_previous);
   char hash[17];
   hash16(b.data, b.len, hash);
   memset(b.data, 0, b.len);
@@ -123,6 +125,10 @@ static bool sync_settings(op_ctx *o, bc_spec *s, yyjson_val *settings, const cha
   snprintf(s->identity.sync_client_id, sizeof(s->identity.sync_client_id), "%s", rm.client_id);
   s->identity.sync_days = rm.delete_after_days;
   s->identity.sync_max = rm.max_per_sync;
+  s->identity.sync_api = rm.api;
+  s->identity.sync_scim = rm.scim;
+  snprintf(s->identity.scim_sha256, sizeof(s->identity.scim_sha256), "%s", rm.scim_sha256);
+  snprintf(s->identity.scim_previous, sizeof(s->identity.scim_previous), "%s", rm.scim_previous);
   return true;
 }
 

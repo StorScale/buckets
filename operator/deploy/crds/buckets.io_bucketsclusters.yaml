@@ -319,6 +319,24 @@ spec:
                         annotations:
                           type: object
                           additionalProperties: {type: string}
+                scim:
+                  type: object
+                  description: "SCIM, for identity providers that push changes (docs/identity.md#scim). Turned on in the console's identity settings; this only exposes it."
+                  properties:
+                    ingress:
+                      type: object
+                      description: An Ingress routing only /minio/scim/ to the servers, so the identity provider can reach SCIM while S3 and the console stay private.
+                      required: [host]
+                      properties:
+                        host: {type: string}
+                        ingressClassName: {type: string}
+                        tlsSecret:
+                          type: object
+                          properties:
+                            name: {type: string}
+                        annotations:
+                          type: object
+                          additionalProperties: {type: string}
             status:
               type: object
               properties:

@@ -79,6 +79,8 @@ typedef struct buckets_s3_server {
   struct buckets_audit_store *audit_store; /* the audit log's local copy (audit/store.h), or NULL when off */
   pthread_t guard_thread; /* ransomware alerts' cluster view, on the leader (s3/ransomguard.h) */
   bool guard_thread_started;
+  _Atomic unsigned long long scim_people[3]; /* SCIM's people, at the last sync here: active, turned off, deleted */
+  _Atomic unsigned long long scim_requests[5][3]; /* SCIM requests (s3/scimhandlers.c): by op, by result */
   pthread_t uploads_thread; /* incomplete multipart uploads removed (MinIO's cleanupStaleUploads) */
   bool uploads_thread_started;
   _Atomic unsigned long long rw_incidents[3]; /* incidents opened here, by kind (buckets_rw_incident_kind) */

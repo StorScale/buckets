@@ -5,6 +5,13 @@
 #include <stdio.h>
 #include <string.h>
 
+static bool is_hex64(const char *v) {
+  size_t n = 0;
+  for (; v[n]; n++)
+    if (!((v[n] >= '0' && v[n] <= '9') || (v[n] >= 'a' && v[n] <= 'f'))) return false;
+  return n == 64;
+}
+
 const char *const buckets_idp_secret_fields[] = {"openid.clientSecret", "openid.removal.apiToken",
                                                  "ldap.lookupBindPassword", NULL};
 
@@ -188,7 +195,17 @@ static bool check_openid(yyjson_val *s, char *err, size_t errlen) {
   if (flag(s, "openid.removal.enabled")) {
     if (strcmp(p->name, "generic") == 0)
       return fail(err, errlen, "Removing people who leave works with Entra ID, Okta and Keycloak.");
-    if (strcmp(p->name, "okta") == 0 && !*str(s, "openid.removal.apiToken"))
+    const char *method = str(s, "openid.removal.method");
+    if (*method && strcmp(method, "api") && strcmp(method, "scim") && strcmp(method, "both"))
+      return fail(err, errlen, "Learn who left by asking the provider, by SCIM, or both.");
+    bool scim = !strcmp(method, "scim") || !strcmp(method, "both"), api = strcmp(method, "scim") != 0;
+    if (scim && strcmp(p->name, "keycloak") == 0)
+      return fail(err, errlen, "Keycloak has no SCIM client: ask Keycloak who has left instead.");
+    if (scim && !is_hex64(str(s, "openid.removal.scimTokenSha256")))
+      return fail(err, errlen, "Make a SCIM token first.");
+    if (*str(s, "openid.removal.scimPreviousSha256") && !is_hex64(str(s, "openid.removal.scimPreviousSha256")))
+      return fail(err, errlen, "The previous SCIM token's hash is not a SHA-256.");
+    if (api && strcmp(p->name, "okta") == 0 && !*str(s, "openid.removal.apiToken"))
       return fail(err, errlen, "Enter an Okta API token for checking who has left.");
     yyjson_val *days = at(s, "openid.removal.deleteAfterDays"), *max = at(s, "openid.removal.maxPerSync");
     if (days && (!yyjson_is_int(days) || yyjson_get_sint(days) < 1 || yyjson_get_sint(days) > 3650))
@@ -402,6 +419,11 @@ bool buckets_idp_removal_of(yyjson_val *s, buckets_idp_removal *out) {
   out->client_id = str(s, "openid.clientId");
   out->client_secret = str(s, "openid.clientSecret");
   out->api_token = str(s, "openid.removal.apiToken");
+  const char *method = str(s, "openid.removal.method");
+  out->scim = !strcmp(method, "scim") || !strcmp(method, "both");
+  out->api = strcmp(method, "scim") != 0;
+  snprintf(out->scim_sha256, sizeof(out->scim_sha256), "%s", str(s, "openid.removal.scimTokenSha256"));
+  snprintf(out->scim_previous, sizeof(out->scim_previous), "%s", str(s, "openid.removal.scimPreviousSha256"));
   out->realm = str(s, "openid.realm");
   /* the issuer the tokens carry: the discovery URL without its /.well-known part */
   char cfg[600];

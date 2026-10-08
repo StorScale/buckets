@@ -617,7 +617,7 @@ static void handle_apply(buckets_console_idp *m, yyjson_val *body, buckets_http_
   bool has_removal = buckets_idp_removal_of(settings, &rm);
   if (!c.raw || !want || strcmp(want, c.hash) != 0) {
     fail(resp, 409, "CandidateChanged", "The settings changed since they were tested: test them again.");
-  } else if (has_removal && !part_passed(tests, "removal")) {
+  } else if (has_removal && rm.api && !part_passed(tests, "removal")) { /* SCIM alone has nothing to ask */
     fail(resp, 409, "NotTested", "Look up a person with the removal settings (Test) before applying them.");
   } else if ((has_oidc && !part_passed(tests, "openid")) || (has_ldap && !part_passed(tests, "ldap"))) {
     fail(resp, 409, "NotTested",

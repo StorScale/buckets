@@ -120,6 +120,7 @@ add_library(buckets STATIC
   s3/sigv2.c
   s3/bucketname.c
   s3/server.c
+  s3/scimhandlers.c
   s3/objects.c
   s3/chunked.c
   s3/checksum.c
@@ -171,6 +172,7 @@ add_library(buckets STATIC
   iam/access.c
   iam/ldapidp.c
   iam/idsync.c
+  iam/scim.c
   iam/plugins.c
   crypto/jwt.c
   crypto/jwk.c
@@ -208,6 +210,7 @@ add_library(buckets STATIC
   admin/incidents.c
   admin/audit.c
   admin/lifecycle_preview.c
+  admin/scim.c
   admin/replicate.c
   admin/siterepl.c
   admin/tier.c

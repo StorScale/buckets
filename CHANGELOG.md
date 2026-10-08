@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **SCIM, for identity providers that push changes** ([docs/identity.md](docs/identity.md#scim), [the design](docs/design/scim.md)). Entra ID and Okta can tell Buckets as soon as someone is turned off, deleted or taken out of the app, instead of waiting for the hourly identity sync.
+  - **The same removal as the sync:** temporary credentials go at once; access keys are turned off at once and deleted after the grace period; keys come back for someone turned on again in time. The safety limit holds mass removals. A push acts within seconds.
+  - **SCIM only** (no API credentials), or **both** with the sync as a backstop. Someone SCIM never named is never removed.
+  - **People are matched by `externalId`,** the ID in their sign-in token (Entra's `oid`, which needs the objectId → externalId mapping; Okta's user ID as is). User names are never used to match.
+  - **A SCIM 2.0 endpoint** at `/minio/scim/v2/`, with a bearer token the console makes and shows once. The servers keep only its hash, and the previous token keeps working while a new one rolls out. Entra's patch forms and Okta's PUT are handled. Groups aren't provisioned.
+  - **The operator:** `spec.scim.ingress` makes an Ingress for `/minio/scim/` alone, so the provider can reach SCIM while S3 and the console stay private.
+  - **The console:** a SCIM choice under **People who leave**, guides for Entra ID and Okta, and the people SCIM has sent, with a check of whether you're matched.
+  - **For other tools:** changes are audited (`SCIMCreateUser`, `SCIMUpdateUser`, `SCIMDeleteUser`); there are metrics `buckets_scim_requests_total` and `buckets_scim_people`, and `GET /minio/admin/v3/buckets/scim`.
+
 ## [1.16.0] - 2026-10-07
 
 ### Added

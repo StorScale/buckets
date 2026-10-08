@@ -21,6 +21,8 @@ static const buckets_metric_def k_catalog_v2[] = {
     {"buckets_node_identity_sync_held_total", BUCKETS_MT_COUNTER, "Identity syncs that removed no one because more people left at once than BUCKETS_OPENID_REMOVE_MAX", ""},
     {"buckets_node_identity_sync_runs_total", BUCKETS_MT_COUNTER, "Identity syncs run on this server (the one leading pool 0, set 0)", ""},
     {"buckets_ransomware_incidents_total", BUCKETS_MT_COUNTER, "Ransomware alerts' incidents opened by this server while it led pool 0, set 0, by kind: mass-delete, mass-overwrite, protection-removed", ""},
+    {"buckets_scim_people", BUCKETS_MT_GAUGE, "People SCIM has named, by state (active, off, deleted), at this server's last identity sync (the one leading pool 0, set 0)", ""},
+    {"buckets_scim_requests_total", BUCKETS_MT_COUNTER, "SCIM requests this server answered, by op (read, create, update, delete, list) and result (ok, unauthorized, error)", ""},
     {"go_gc_duration_seconds", BUCKETS_MT_SUMMARY, "A summary of the wall-time pause (stop-the-world) duration in garbage collection cycles.", ""},
     {"go_gc_gogc_percent", BUCKETS_MT_GAUGE, "Heap size target percentage configured by the user, otherwise 100. This value is set by the GOGC environment variable, and the runtime/debug.SetGCPercent function. Sourced from /gc/gogc:percent.", ""},
     {"go_gc_gomemlimit_bytes", BUCKETS_MT_GAUGE, "Go runtime memory limit configured by the user, otherwise math.MaxInt64. This value is set by the GOMEMLIMIT environment variable, and the runtime/debug.SetMemoryLimit function. Sourced from /gc/gomemlimit:bytes.", ""},

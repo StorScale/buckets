@@ -51,6 +51,8 @@ void buckets_admin_replication(s3_ctx *c);
 void buckets_admin_replication_test(s3_ctx *c);
 bool buckets_admin_replication_peer(buckets_s3_server *s, const char *op, const buckets_query *q,
                                     buckets_http_response *resp);
+/* What SCIM has been told (admin/scim.c): GET buckets/scim. */
+void buckets_admin_scim(s3_ctx *c);
 void buckets_admin_background_heal_status(s3_ctx *c);
 /* mc admin heal (heal.c); the peer side of a status request forwarded to
  * the node running a sequence; stopping every sequence at shutdown. */

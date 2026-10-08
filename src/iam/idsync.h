@@ -9,7 +9,9 @@
  * back within it, the keys come back on. LDAP has its own sync (s3/server.c).
  *
  * Settings (environment):
- *   BUCKETS_OPENID_SYNC_PROVIDER     entra, keycloak or okta; unset: off
+ *   BUCKETS_OPENID_SYNC_PROVIDER     entra, keycloak, okta or scim (SCIM only: no provider API); unset: off
+ *   scim:     BUCKETS_OPENID_SYNC_TENANT_ID (Entra: people by tid and oid) or _ISSUER (by iss and sub)
+ *   BUCKETS_SCIM                     on: SCIM's records answer for the people they name, beside the API
  *   entra:    BUCKETS_OPENID_SYNC_TENANT_ID, _CLIENT_ID, _CLIENT_SECRET (an app with Graph's User.Read.All);
  *             people by the token's tid and oid
  *   keycloak: BUCKETS_OPENID_SYNC_URL (Keycloak's base URL), _REALM, _CLIENT_ID, _CLIENT_SECRET (a client
@@ -39,6 +41,7 @@ typedef struct {
   long interval_s;
   long long remove_after_s;
   long remove_max;
+  bool scim; /* SCIM's records (iam/scim.h) answer for the people they name: BUCKETS_SCIM=on, or provider scim */
 } buckets_idsync_settings;
 
 /* From the environment; false and why when set but not usable. Off (provider "") is fine. */

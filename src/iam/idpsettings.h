@@ -65,6 +65,9 @@ typedef struct {
   char url[512];    /* keycloak's base URL, https://<okta domain> */
   char issuer[700]; /* keycloak, okta: the tokens' iss */
   long delete_after_days, max_per_sync, interval_minutes;
+  bool api;  /* ask the provider's API (openid.removal.method api or both; the default) */
+  bool scim; /* take what SCIM pushes (scim or both) */
+  char scim_sha256[65], scim_previous[65]; /* the SCIM token's SHA-256, and the one it replaces while it rolls out */
 } buckets_idp_removal;
 bool buckets_idp_removal_of(yyjson_val *settings, buckets_idp_removal *out);
 

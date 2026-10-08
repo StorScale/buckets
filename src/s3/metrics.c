@@ -1016,8 +1016,20 @@ static void idsync_metrics(mctx *m) {
   ADD1(m, "buckets_node_identity_sync_actions_total", (double)s->idsync_deleted, "action", "delete");
 }
 
+/* SCIM (s3/scimhandlers.c): requests here, and the people it named at the last sync here */
+static void scim_metrics(mctx *m) {
+  if (!buckets_scim_enabled()) return;
+  for (int o = 0; o < 5; o++)
+    for (int r = 0; r < 3; r++)
+      ADD2(m, "buckets_scim_requests_total", (double)m->s->scim_requests[o][r], "op", buckets_scim_op_name(o), "result",
+           buckets_scim_result_name(r));
+  static const char *const states[] = {"active", "off", "deleted"};
+  for (int i = 0; i < 3; i++) ADD1(m, "buckets_scim_people", (double)m->s->scim_people[i], "state", states[i]);
+}
+
 static void iam_node_metrics(mctx *m) {
   idsync_metrics(m);
+  scim_metrics(m);
   ADD0(m, "buckets_node_fips_mode", buckets_fips_mode() ? 1 : 0); /* crypto/fips.h */
   for (int k = 0; k < 3; k++) /* opened by this server, when it led (s3/ransomguard.h) */
     ADD1(m, "buckets_ransomware_incidents_total", (double)m->s->rw_incidents[k], "kind",

@@ -194,8 +194,8 @@ Applying restarts the servers one at a time, as LDAP settings do. Each step is
 in the log of the server leading the first erasure set (`identity sync:`), and
 the counts are in its metrics (`buckets_node_identity_sync_*`). People are
 matched by the IDs in their sign-in tokens: Entra's `tid` and `oid`, and the
-issuer and `sub` for Keycloak and Okta. SCIM, for providers that push changes,
-is planned ([the design](design/identity-sync.md)).
+issuer and `sub` for Keycloak and Okta. Entra ID and Okta can also push changes
+through SCIM ([below](#scim)).
 
 Without the console, set `BUCKETS_OPENID_SYNC_PROVIDER` on the servers, and:
 
@@ -210,6 +210,99 @@ Without the console, set `BUCKETS_OPENID_SYNC_PROVIDER` on the servers, and:
 and `BUCKETS_OPENID_REMOVE_MAX` change the defaults. LDAP needs none of this:
 users removed from the directory lose their credentials at the hourly LDAP
 sync, as with MinIO.
+
+## SCIM
+
+With SCIM, Entra ID or Okta tells Buckets when someone is turned off, deleted or
+taken out of the app, instead of waiting for the next sync. Okta pushes changes
+at once; Entra ID pushes on its provisioning cycle, every 40 minutes, or at once
+with **Provision on demand**. The design is in [design/scim.md](design/scim.md).
+
+**What happens is the sync's:**
+- temporary credentials go at once;
+- access keys are turned off at once, and deleted after the grace period;
+- someone turned on again in time gets their keys back;
+- more people at once than the safety limit are held, and `BucketsIdentitySyncHeld` fires.
+
+A push is acted on within seconds by the server leading the first erasure set.
+SCIM never removes someone it hasn't named.
+
+**Two ways to use it**, chosen under **People who leave**:
+- **SCIM:** the provider tells Buckets; no API credentials are needed. For
+  organisations that won't let an app read their directory.
+- **Both:** pushed changes act within seconds, and the hourly sync is the
+  backstop for anything a push missed. For the people SCIM names, what it says
+  wins.
+
+Keycloak has no SCIM client; use the sync.
+
+### Set it up
+
+1. Under **Identity → Sign-in → People who leave**, choose **SCIM** or **Both**,
+   and **Make a token**. It is shown once: copy it now. The servers keep only its
+   SHA-256.
+2. Save and apply, as for the other settings.
+3. In the provider:
+   - **Entra ID:** in the enterprise app, **Provisioning → Automatic**. The
+     **Tenant URL** is `https://<host>/minio/scim/v2` and the **Secret Token** is
+     the token. Under **Mappings → Provision Microsoft Entra ID Users**, map
+     **objectId** to **externalId** (it is `mailNickname` by default), then turn
+     provisioning on.
+   - **Okta:** in the app integration, turn on **SCIM provisioning**. The
+     connector base URL is `https://<host>/minio/scim/v2`, the unique identifier
+     is `userName`, and authentication is **HTTP Header** with the token. Under
+     **To App**, turn on Create Users, Update User Attributes and Deactivate
+     Users. Okta's `externalId` is already the ID in its tokens.
+4. Back under **People who leave**, the console lists the people SCIM has sent.
+   It says whether you are among them, and warns if none of them match a sign-in
+   token, which usually means the Entra mapping is missing.
+
+People are matched by `externalId` only. That is the ID in their sign-in token:
+Entra's `oid`, or Okta's user ID, its tokens' `sub`. User names aren't used,
+because a new hire can be given a leaver's address. Groups aren't provisioned;
+turn group provisioning off.
+
+### Reaching it
+
+The provider's cloud calls `https://<host>/minio/scim/v2` on the servers.
+- With the operator, `spec.scim.ingress` (a host, an ingress class, a TLS
+  Secret) makes an Ingress that routes **only `/minio/scim/`**. You can open that
+  path to the provider while S3 and the console stay private.
+- Entra's provisioning agent and Okta's On-Prem Provisioning agent deliver SCIM
+  inside a network the cloud can't reach.
+
+```yaml
+spec:
+  scim:
+    ingress:
+      host: scim.buckets.example.com
+      ingressClassName: nginx
+      tlsSecret: {name: scim-tls}
+```
+
+### A new token
+
+**Make a new token** replaces the token. The old one keeps working until the
+next new one, so the provider can be updated without a gap.
+
+### Without the console
+
+Set these on the servers:
+- **SCIM beside the sync's settings:** `BUCKETS_SCIM=on`.
+- **SCIM only:** `BUCKETS_OPENID_SYNC_PROVIDER=scim`, with
+  `BUCKETS_OPENID_SYNC_TENANT_ID` (Entra) or `BUCKETS_OPENID_SYNC_ISSUER` (Okta).
+- **The token:** `BUCKETS_SCIM_TOKEN_SHA256` (the token's SHA-256 in hex, or
+  `_FILE`), and `BUCKETS_SCIM_TOKEN_SHA256_PREVIOUS` while a new one rolls out.
+
+### Watching it
+
+- **Changes** are in the audit log as `SCIMCreateUser`, `SCIMUpdateUser` and
+  `SCIMDeleteUser`, with the person's IDs. Refused tokens appear as
+  `SCIMUnauthorized`, and are logged with their source address.
+- **Metrics:** `buckets_scim_requests_total{op, result}` and
+  `buckets_scim_people{state}`.
+- **The admin API:** `GET /minio/admin/v3/buckets/scim` (`admin:ListUsers`)
+  returns what the console shows.
 
 ## Troubleshooting
 
