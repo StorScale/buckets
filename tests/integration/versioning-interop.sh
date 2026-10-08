@@ -34,7 +34,7 @@ start() {
   fail "$1 did not start"
 }
 stop() { kill "$PID"; wait "$PID" 2>/dev/null || true; PID=; }
-put() { curl -s -D - -o /dev/null "${S3[@]}" -X PUT --data-binary "$2" "$EP/vxb/$1" | tr -d '\r' |
+put() { printf '%s' "$2" | curl -s -D - -o /dev/null "${S3[@]}" -X PUT --data-binary @- "$EP/vxb/$1" | tr -d '\r' |
   sed -n 's/^[Xx]-[Aa]mz-[Vv]ersion-[Ii]d: //p'; }
 versioning() {
   curl -sf "${S3[@]}" -X PUT --data-binary "<VersioningConfiguration><Status>$1</Status></VersioningConfiguration>" \
@@ -64,7 +64,9 @@ put plain.txt "before versioning" >/dev/null
 versioning Enabled
 put a.txt one >/dev/null
 put a.txt two >/dev/null
-put big.bin "$(head -c 300000 /dev/zero | tr '\0' 'x')" >/dev/null
+put_file() { curl -s -D - -o /dev/null "${S3[@]}" -X PUT --data-binary @"$2" "$EP/vxb/$1" >/dev/null; }
+head -c 300000 /dev/zero | tr '\0' 'x' >"$WORK/big" # an argument this large is too long on Linux (128 KiB each)
+put_file big.bin "$WORK/big"
 put gone.txt soon >/dev/null
 curl -s -o /dev/null "${S3[@]}" -X DELETE "$EP/vxb/gone.txt"
 versioning Suspended

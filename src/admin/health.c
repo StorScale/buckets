@@ -24,6 +24,8 @@
 #include <sys/utsname.h>
 #include <time.h>
 #include <unistd.h>
+#include <ctype.h>
+#include <pwd.h>
 #include <yyjson.h>
 
 #ifdef __APPLE__
@@ -88,6 +90,110 @@ static yyjson_mut_val *node_common(yyjson_mut_doc *d, const char *addr, const ch
 
 /* ---- sections (this node) ------------------------------------------------------------------------ */
 
+#ifdef __linux__
+static int cpu_dir_cmp(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+
+/* Whether cpu (a number) is in a list such as "0-3,7" (/sys/devices/system/cpu/offline). */
+static bool cpu_in_range(const char *list, long cpu) {
+  for (const char *p = list; p && *p;) {
+    char *e;
+    long a = strtol(p, &e, 10), b = a;
+    if (e == p) break;
+    if (*e == '-') b = strtol(e + 1, &e, 10);
+    if (cpu >= a && cpu <= b) return true;
+    p = *e == ',' ? e + 1 : NULL;
+  }
+  return false;
+}
+
+/* madmin's CPUs.freq_stats (procfs SystemCpufreq): one entry per online CPU directory, in glob order; a CPU without
+ * cpufreq leaves its entry empty, as procfs does. Nothing (the key left out) where procfs would fail: no offline
+ * file, no CPUs, or a cpufreq without its string files. */
+static void add_freq_stats(yyjson_mut_doc *d, yyjson_mut_val *o) {
+  char *offline = read_file("/sys/devices/system/cpu/offline", 4096);
+  if (!offline) return;
+  trim(offline);
+  DIR *dir = opendir("/sys/devices/system/cpu");
+  char **cpus = NULL;
+  size_t n = 0;
+  struct dirent *de;
+  while (dir && (de = readdir(dir))) {
+    if (strncmp(de->d_name, "cpu", 3) != 0 || !isdigit((unsigned char)de->d_name[3])) continue;
+    if (cpu_in_range(offline, atol(de->d_name + 3))) continue;
+    cpus = buckets_xrealloc(cpus, (n + 1) * sizeof(*cpus));
+    cpus[n++] = buckets_xstrdup(de->d_name);
+  }
+  if (dir) closedir(dir);
+  free(offline);
+  if (!n) return;
+  qsort(cpus, n, sizeof(*cpus), cpu_dir_cmp);
+  static const char *const ufiles[] = {"cpuinfo_cur_freq", "cpuinfo_min_freq", "cpuinfo_max_freq",
+                                       "cpuinfo_transition_latency", "scaling_cur_freq", "scaling_min_freq",
+                                       "scaling_max_freq"};
+  static const char *const ukeys[] = {"CpuinfoCurrentFrequency", "CpuinfoMinimumFrequency", "CpuinfoMaximumFrequency",
+                                      "CpuinfoTransitionLatency", "ScalingCurrentFrequency", "ScalingMinimumFrequency",
+                                      "ScalingMaximumFrequency"};
+  static const char *const sfiles[] = {"scaling_available_governors", "scaling_driver", "scaling_governor",
+                                       "related_cpus", "scaling_setspeed"};
+  static const char *const skeys[] = {"AvailableGovernors", "Driver", "Governor", "RelatedCpus", "SetSpeed"};
+  yyjson_mut_val *arr = yyjson_mut_arr(d);
+  bool failed = false;
+  for (size_t i = 0; i < n && !failed; i++) {
+    char base[300], path[400];
+    snprintf(base, sizeof(base), "/sys/devices/system/cpu/%s/cpufreq", cpus[i]);
+    struct stat st;
+    bool has = stat(base, &st) == 0;
+    yyjson_mut_val *e = yyjson_mut_arr_add_obj(d, arr);
+    yyjson_mut_obj_add_strcpy(d, e, "Name", has ? cpus[i] + 3 : "");
+    for (size_t k = 0; k < BUCKETS_ARRAY_LEN(ufiles); k++) {
+      snprintf(path, sizeof(path), "%s/%s", base, ufiles[k]);
+      char *v = has ? read_file(path, 64) : NULL;
+      if (v) yyjson_mut_obj_add_uint(d, e, ukeys[k], strtoull(v, NULL, 10));
+      else yyjson_mut_obj_add_null(d, e, ukeys[k]);
+      free(v);
+    }
+    for (size_t k = 0; k < BUCKETS_ARRAY_LEN(sfiles); k++) {
+      snprintf(path, sizeof(path), "%s/%s", base, sfiles[k]);
+      char *v = has ? read_file(path, 4096) : NULL;
+      if (has && !v) failed = true; /* SysReadFile's error ends procfs' answer */
+      if (v) trim(v);
+      yyjson_mut_obj_add_strcpy(d, e, skeys[k], v ? v : "");
+      free(v);
+    }
+  }
+  for (size_t i = 0; i < n; i++) free(cpus[i]);
+  free(cpus);
+  if (!failed) yyjson_mut_obj_add_val(d, o, "freq_stats", arr);
+}
+#endif
+
+#ifdef __linux__
+/* ProcInfo.mem_maps (gopsutil's MemoryMapsWithContext, grouped): this process's smaps_rollup (smaps before 4.15)
+ * summed into one entry, in kB as the kernel gives them; the entry's path stays empty, as gopsutil leaves it. Left
+ * out when it can't be read, as madmin then stops filling in the process. */
+static void add_mem_maps(yyjson_mut_doc *d, yyjson_mut_val *o) {
+  char *t = read_file("/proc/self/smaps_rollup", 1 << 16);
+  if (!t) t = read_file("/proc/self/smaps", 1 << 24);
+  if (!t) return;
+  static const char *const keys[] = {"Rss", "Size", "Pss", "Shared_Clean", "Shared_Dirty", "Private_Clean",
+                                     "Private_Dirty", "Referenced", "Anonymous", "Swap"};
+  static const char *const names[] = {"rss", "size", "pss", "sharedClean", "sharedDirty", "privateClean",
+                                      "privateDirty", "referenced", "anonymous", "swap"};
+  uint64_t sum[10] = {0};
+  for (char *line = strtok(t, "\n"); line; line = strtok(NULL, "\n")) {
+    char *colon = strchr(line, ':');
+    if (!colon || strchr(line, ' ') < colon) continue; /* a mapping's header line, or VmFlags-like */
+    *colon = '\0';
+    for (size_t k = 0; k < 10; k++)
+      if (!strcmp(line, keys[k])) sum[k] += strtoull(colon + 1, NULL, 10);
+  }
+  free(t);
+  yyjson_mut_val *m = yyjson_mut_arr_add_obj(d, yyjson_mut_obj_add_arr(d, o, "mem_maps"));
+  yyjson_mut_obj_add_str(d, m, "path", "");
+  for (size_t k = 0; k < 10; k++) yyjson_mut_obj_add_uint(d, m, names[k], sum[k]);
+}
+#endif
+
 static yyjson_mut_val *sec_cpus(yyjson_mut_doc *d, const char *addr) {
 #ifdef __linux__
   yyjson_mut_val *o = node_common(d, addr, NULL);
@@ -145,6 +251,7 @@ static yyjson_mut_val *sec_cpus(yyjson_mut_doc *d, const char *addr) {
     blk = next ? next + 2 : NULL;
   }
   free(info);
+  add_freq_stats(d, o);
   return o;
 #else
   yyjson_mut_val *o = node_common(d, addr, NOT_LINUX);
@@ -529,8 +636,18 @@ static yyjson_mut_val *sec_procinfo(yyjson_mut_doc *d, const char *addr) {
   yyjson_mut_obj_add_uint(d, mem, "stack", stk * 1024);
   yyjson_mut_obj_add_uint(d, mem, "locked", lck * 1024);
   yyjson_mut_obj_add_uint(d, mem, "swap", swp * 1024);
+  add_mem_maps(d, o);
+  { /* gopsutil's MemoryPercent: RSS over the machine's MemTotal, as a float32 */
+    char *mi = read_file("/proc/meminfo", 1 << 14);
+    char *mt = mi ? strstr(mi, "MemTotal:") : NULL;
+    unsigned long long total = mt ? strtoull(mt + 9, NULL, 10) * 1024ULL : 0;
+    free(mi);
+    float pct = total ? 100.0f * (float)((uint64_t)rss * (uint64_t)pagesz) / (float)total : 0;
+    if (pct > 0) yyjson_mut_obj_add_real(d, o, "mem_percent", (double)pct);
+  }
   if (name) yyjson_mut_obj_add_strcpy(d, o, "name", name + 1);
-  if (nice) yyjson_mut_obj_add_int(d, o, "nice", nice);
+  /* gopsutil's Nice is the raw getpriority(2) value, 20 - nice: 20 for an ordinary process */
+  if (20 - nice) yyjson_mut_obj_add_int(d, o, "nice", 20 - nice);
   yyjson_mut_val *cs = yyjson_mut_obj_add_obj(d, o, "num_ctx_switches");
   yyjson_mut_obj_add_uint(d, cs, "voluntary", vol);
   yyjson_mut_obj_add_uint(d, cs, "involuntary", invol);
@@ -553,6 +670,12 @@ static yyjson_mut_val *sec_procinfo(yyjson_mut_doc *d, const char *addr) {
   for (size_t k = 0; k < BUCKETS_ARRAY_LEN(zeros); k++) yyjson_mut_obj_add_int(d, t, zeros[k], 0);
   yyjson_mut_val *u = yyjson_mut_obj_add_arr(d, o, "uids");
   for (int k = 0; k < 4; k++) yyjson_mut_arr_add_int(d, u, uids[k]);
+  { /* gopsutil's Username: the real user's name (left out when the user has none, as madmin stops there) */
+    struct passwd pw, *res = NULL;
+    char pbuf[4096];
+    if (getpwuid_r((uid_t)uids[0], &pw, pbuf, sizeof(pbuf), &res) == 0 && res && res->pw_name && *res->pw_name)
+      yyjson_mut_obj_add_strcpy(d, o, "username", res->pw_name);
+  }
   return o;
 #else
 #ifdef __APPLE__

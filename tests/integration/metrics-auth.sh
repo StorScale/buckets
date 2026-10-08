@@ -54,7 +54,11 @@ probe() { # label [token]
     out=$(curl -s -o "$WORK/body" -w '%{http_code}' ${h[@]+"${h[@]}"} "$EP/minio/$p")
     printf '%-18s %-26s %s %s\n' "$1" "$p" "$out" "$(python3 -c 'import json,sys
 try: print(json.load(open(sys.argv[1]))["Code"])
-except Exception: print(open(sys.argv[1]).read(40).strip().splitlines()[0] if open(sys.argv[1]).read(40).strip() else "")' "$WORK/body")"
+except Exception:
+    # the first line, past the buckets_* families (Buckets only; they sort first)
+    ls = [l for l in open(sys.argv[1], errors="replace").read().splitlines()
+          if l.strip() and not l.startswith(("# HELP buckets_", "# TYPE buckets_", "buckets_"))]
+    print(ls[0][:40].strip() if ls else "")' "$WORK/body")"
   done
 }
 run() { # kind

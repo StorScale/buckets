@@ -175,7 +175,9 @@ done
 # the order nodes start in; and whether a heal attempt fails depends on
 # whether it ran before the stopped node was back; a replication's upload
 # latency in whole milliseconds is 0 (and left out) on a fast enough machine.
-TIMING_FAMILIES='minio_cluster_iam_last_sync_duration_millis|minio_system_network_internode_dial_errors_total|minio_heal_objects_errors_total|minio_bucket_replication_latency_ms'
+# shown only while non-zero, which depends on the moment: I/O waiting on a drive, and bytes read from the drives
+# rather than the page cache
+TIMING_FAMILIES='minio_cluster_iam_last_sync_duration_millis|minio_system_network_internode_dial_errors_total|minio_heal_objects_errors_total|minio_bucket_replication_latency_ms|minio_system_drive_waiting_io|minio_system_process_io_read_bytes|minio_node_io_read_bytes'
 TIMING="^(\\(help\\) )?($TIMING_FAMILIES)[ :]"
 # Buckets' own families (buckets_*, src/metrics/buckets-catalog.tsv) are additions MinIO does not have; the
 # compatibility promise allows new metrics, so they are not compared either.

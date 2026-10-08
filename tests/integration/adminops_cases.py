@@ -594,6 +594,7 @@ for base, root in SERVERS:
         j = json.loads(b)
         for sv in j["servers"]:
             sv.pop("gc_stats", None)  # Go's collector
+            sv.pop("fips", None)  # Buckets' own addition (FIPS 140-3 mode, docs/fips.md): MinIO has none
             sv["minio_env_vars"] = {}
             sv["network"] = {}
             sv["endpoint"] = "<node>"
