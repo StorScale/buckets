@@ -11,6 +11,10 @@
 #include <string.h>
 #include <sys/resource.h>
 #include <sys/statvfs.h>
+#include <sys/stat.h>
+#ifdef __linux__
+#include <sys/sysmacros.h> /* major, minor (sys/types.h has them elsewhere) */
+#endif
 #include <ctype.h>
 #include <unistd.h>
 #include <yyjson.h>
@@ -188,8 +192,11 @@ static void add_drive(yyjson_mut_doc *d, yyjson_mut_val *arr, const buckets_objl
   if (hi) yyjson_mut_obj_add_bool(d, o, "healing", true);
   yyjson_mut_obj_add_str(d, o, "state", ok ? "ok" : "offline");
   if (slot >= 0 && *drv->drive_id) yyjson_mut_obj_add_strcpy(d, o, "uuid", drv->drive_id);
-  yyjson_mut_obj_add_uint(d, o, "major", 0);
-  yyjson_mut_obj_add_uint(d, o, "minor", 0);
+  /* DiskInfo's Major and Minor: the device the drive's path is on */
+  struct stat dst;
+  bool dev = ok && stat(ep->path, &dst) == 0;
+  yyjson_mut_obj_add_uint(d, o, "major", dev ? major(dst.st_dev) : 0);
+  yyjson_mut_obj_add_uint(d, o, "minor", dev ? minor(dst.st_dev) : 0);
   if (ok) {
     uint64_t total = (uint64_t)sv.f_blocks * sv.f_frsize, free_b = (uint64_t)sv.f_bfree * sv.f_frsize;
     uint64_t avail = (uint64_t)sv.f_bavail * sv.f_frsize;

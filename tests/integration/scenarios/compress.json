@@ -80,7 +80,11 @@
   "query": "attributes",
   "headers": {
    "X-Amz-Object-Attributes": "ETag,ObjectSize,ObjectParts,StorageClass,Checksum"
-  }
+  },
+  "mask": [
+   "(?<=<Part><PartNumber>)[0-9]+</PartNumber><Size>[0-9]+(?=</Size>)"
+  ],
+  "mask_why": "Parts' stored (compressed) sizes: MinIO compresses with S2's better mode on amd64 and its default mode elsewhere, which Buckets uses"
  },
  {
   "method": "PUT",
@@ -392,7 +396,11 @@
   "query": "attributes",
   "headers": {
    "X-Amz-Object-Attributes": "ETag,ObjectSize,ObjectParts,StorageClass,Checksum"
-  }
+  },
+  "mask": [
+   "(?<=<Part><PartNumber>)[0-9]+</PartNumber><Size>[0-9]+(?=</Size>)"
+  ],
+  "mask_why": "Parts' stored (compressed) sizes: MinIO compresses with S2's better mode on amd64 and its default mode elsewhere, which Buckets uses"
  },
  {
   "method": "PUT",
@@ -549,7 +557,11 @@
   "query": "attributes",
   "headers": {
    "X-Amz-Object-Attributes": "ETag,ObjectSize,ObjectParts,StorageClass,Checksum"
-  }
+  },
+  "mask": [
+   "(?<=<Part><PartNumber>)[0-9]+</PartNumber><Size>[0-9]+(?=</Size>)"
+  ],
+  "mask_why": "Parts' stored (compressed) sizes: MinIO compresses with S2's better mode on amd64 and its default mode elsewhere, which Buckets uses"
  },
  {
   "method": "GET",

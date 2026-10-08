@@ -6,6 +6,24 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+Found by running the MinIO comparison tests against MinIO `RELEASE.2025-10-15` built from source. Earlier releases had compared against an older binary that predates the format Buckets writes.
+- **Drives' device numbers:** server and storage info, and heal status, gave every drive's device major and minor as 0. They are now the device the drive is on, as MinIO reports.
+- **Health info** gained what MinIO 2025 reports:
+  - the CPUs' frequency statistics (`freq_stats`);
+  - the process's memory maps (`mem_maps`) and memory percentage;
+  - its user name;
+  - its nice value as MinIO gives it (20 for an ordinary process).
+- **HeadObject's audit entries** named the object layer's operation `GetObject`; they now say `GetObjectInfo`, as MinIO's do.
+- **The v3 metric `minio_system_process_virtual_memory_max_bytes`** was missing when the limit is unlimited; it is now reported, as MinIO 2025 does.
+- **The comparison tests themselves:**
+  - `versioning-interop` passed a body too large for one Linux command-line argument;
+  - `siterepl` called macOS's `md5`;
+  - the FTPS test's client neither reused the TLS session on data connections nor ended them cleanly, which MinIO rightly refuses;
+  - `metrics-auth` looked at the first line of each response, which Buckets' own metric families now fill;
+  - the Elasticsearch target test expected one order across documents, which MinIO sends in parallel;
+  - three cases (compressed part sizes, and S3 Select on JSON lines) depend on MinIO's CPU and are now notes ([docs/parity.md](docs/parity.md)).
+
 ## [1.17.0] - 2026-10-08
 
 ### Added

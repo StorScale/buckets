@@ -330,3 +330,15 @@ Known deviations from MinIO, kept on purpose:
   name the unexpected token without participle's list of expected ones;
 - decommission and rebalance keep every ETag (MinIO's own moves give SSE multipart objects new ones), and
   move versions as stored, re-encoded for the destination set, rather than through PutObject.
+
+Where MinIO's own answer depends on the CPU it runs on, Buckets answers as MinIO does without the
+CPU-specific path:
+- **Compression:** on amd64, MinIO compresses with S2's "better" mode, and elsewhere with its default mode,
+  which Buckets uses everywhere. Both read either. Only stored sizes differ, such as the compressed part sizes
+  `GetObjectAttributes` reports, and a little disk space.
+- **S3 Select on JSON lines:** on CPUs with AVX2 and CLMUL, MinIO parses with simdjson. There, integers stay
+  integers in CSV output (`100000000`, where MinIO elsewhere and Buckets write `1e+08`), `<`, `&` and `>` stay
+  unescaped in JSON output, and parse errors are worded by simdjson.
+
+The comparison tests (`MINIO_BIN`) run against MinIO `RELEASE.2025-10-15T17-29-55Z` built from source, and
+treat these as notes rather than failures.

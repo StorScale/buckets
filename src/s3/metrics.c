@@ -1770,7 +1770,8 @@ static void v3_system_process(m3ctx *m, const char *bucket) {
   SET0(m, "minio_system_process_syscall_read_total", (double)ps.syscr);
   SET0(m, "minio_system_process_syscall_write_total", (double)ps.syscw);
   SET0(m, "minio_system_process_file_descriptor_limit_total", (double)ps.max_fds);
-  if (ps.vm_max < 9.2e18) SET0(m, "minio_system_process_virtual_memory_max_bytes", ps.vm_max);
+  /* procfs' Limits().AddressSpace: "unlimited" is the largest uint64 (v2's Go collector says 2^63-1) */
+  SET0(m, "minio_system_process_virtual_memory_max_bytes", ps.vm_max >= 9.2e18 ? 18446744073709551615.0 : ps.vm_max);
   SET0(m, "minio_system_process_file_descriptor_open_total", (double)ps.open_fds);
 #endif
   if (m->s->lock_server) {

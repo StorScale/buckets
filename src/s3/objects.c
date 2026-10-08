@@ -1657,6 +1657,12 @@ static void get_object_impl(s3_ctx *c, bool head, buckets_obj_reader **lr) {
     err = BUCKETS_OBJ_OK;
   } else {
     err = buckets_obj_lookup(c->s->layer, c->bucket, c->object, version, lr, &oi);
+    /* HeadObject reads only the object's info: MinIO's audit tag is GetObjectInfo (GetObjectNInfo is GetObject's) */
+    for (size_t i = 0; head && i < c->tags.n; i++) {
+      if (strcmp(c->tags.keys[i], "GetObject") != 0) continue;
+      free(c->tags.keys[i]);
+      c->tags.keys[i] = buckets_xstrdup("GetObjectInfo");
+    }
   }
   if ((err == BUCKETS_OBJ_ERR_NO_SUCH_KEY || err == BUCKETS_OBJ_ERR_NO_SUCH_VERSION ||
        err == BUCKETS_OBJ_ERR_READ_QUORUM) &&

@@ -141,5 +141,7 @@ for i, st in enumerate(steps):
     print(line)
     if st.get("body_out", False) or status[0] not in "2" or st["method"] == "GET":
         nb = norm_body(body)
+        for pat in st.get("mask", []):  # values that legitimately differ, such as compressed sizes
+            nb = re.sub(pat, "(masked)", nb)
         if nb:
             print("   " + nb[:2000])

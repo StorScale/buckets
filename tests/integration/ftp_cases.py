@@ -93,8 +93,8 @@ class Ftp:
 
     def wrap_data(self):
         ctx = getattr(self, "ctx", None)
-        if self.data and ctx:
-            self.data = ctx.wrap_socket(self.data, server_hostname="127.0.0.1")
+        if self.data and ctx:  # resuming the control connection's TLS session, as FTPS clients do
+            self.data = ctx.wrap_socket(self.data, server_hostname="127.0.0.1", session=self.s.session)
 
     def pasv(self):
         r = self.cmd("PASV")
@@ -133,6 +133,12 @@ class Ftp:
         if self.data and self.log[-1].startswith("150"):
             self.wrap_data()
             self.data.sendall(payload)
+            if isinstance(self.data, ssl.SSLSocket):  # close_notify, as FTPS clients send: the server reads an end,
+                self.data.settimeout(1)               # not a reset (Go's TLS doesn't answer with its own, so no wait)
+                try:
+                    self.data.unwrap()
+                except (OSError, ssl.SSLError):
+                    pass
             self.data.close()
             self.data = None
             self.log.append(self.reply())

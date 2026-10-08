@@ -30,6 +30,7 @@ trap cleanup EXIT
 MC() { "$MC_BIN" "$@"; }
 ok() { pass=$((pass + 1)); }
 bad() { fail=$((fail + 1)); echo "FAIL [$CASE] $*"; }
+md5sum_() { if command -v md5 >/dev/null; then md5; else md5sum | cut -d" " -f1; fi; } # macOS, or Linux
 check() { # name got want
   if [[ "$2" == "$3" ]]; then ok; else bad "$1: got '$2' want '$3'"; fi
 }
@@ -300,7 +301,7 @@ run_handover() {
   MC admin replicate resync start s1 s3 >/dev/null 2>&1 || bad "resync s1 -> s3"
   wait_for 60 cat_eq s3/data/small small || bad "s3: small not resynced"
   wait_for 60 same_object s1/data/big s3/data/big || bad "s3: big not resynced"
-  check "s3 big data" "$(MC cat s3/data/big | md5)" "$(md5 <"$dir/big")"
+  check "s3 big data" "$(MC cat s3/data/big | md5sum_)" "$(md5sum_ <"$dir/big")"
   # new writes on a MinIO site keep flowing until the switch
   echo late >"$dir/late"
   MC cp "$dir/late" s2/data/late >/dev/null

@@ -235,7 +235,8 @@ for kind in minio buckets; do
   done
   stop
   mock_stop
-  # requests go to one target or the other in any order: each index's requests, in order
+  # requests go to one target or the other in any order: each index's requests, in order; within the namespace
+  # index, each document's (events are sent in parallel by MinIO 2025, so only a document's own order is kept)
   python3 - "$WORK/es.raw" >"$WORK/$kind.es.raw2" <<'PY'
 import json, sys
 recs = [json.loads(l) for l in open(sys.argv[1])]
@@ -248,6 +249,8 @@ for group in sorted({idx(r) for r in recs}):
         if idx(r) == group:
             r[0] = group or "(root)"
             lines.append(json.dumps(r))
+    if group:  # each document's requests in order; index-level ones (no document) first, in order
+        lines.sort(key=lambda l: json.loads(l)[2].split("/")[3] if json.loads(l)[2].count("/") >= 3 and "/_doc/" in json.loads(l)[2] else "")
     print("\n".join(sorted(lines) if not group else lines))  # both targets check the server at once
 PY
   python3 "$HERE/targets/normalize.py" <"$WORK/$kind.es.raw2" | sed -E 's/"User-Agent[^"]*"//' >"$WORK/$kind.es"
