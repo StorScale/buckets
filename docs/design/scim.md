@@ -1,6 +1,6 @@
 # Design: SCIM, for providers that push changes
 
-Status: proposed. Roadmap: Phase 2, "SCIM, for providers that push changes". It is Phase 2's last item; the rest
+Status: agreed, being built. Roadmap: Phase 2, "SCIM, for providers that push changes". It is Phase 2's last item; the rest
 of "Automatic provisioning and removal" was done by identity sync (1.9.0, 1.10.0;
 [identity-sync.md](identity-sync.md)).
 
@@ -134,11 +134,15 @@ The provider can store and read back the core User attributes (`userName`, `exte
 A change takes the cluster lock on that document, so two servers never lose each other's writes. MinIO doesn't
 read the directory, so a rollback loses only the records.
 
-**Settings**, on the servers, set by the operator from the identity Secret as the sync's are:
-- `BUCKETS_SCIM` (`on`)
-- `BUCKETS_SCIM_TOKEN_SHA256` (or `_FILE`), and `BUCKETS_SCIM_TOKEN_SHA256_PREVIOUS` for the overlap
-- `BUCKETS_OPENID_SYNC_PROVIDER=scim` for SCIM only, with `BUCKETS_SCIM_TENANT_ID` (Entra) or
-  `BUCKETS_SCIM_ISSUER` (Okta), to say which tokens' IDs `externalId` is
+**Settings**, on the servers, set by the operator from the identity settings as the sync's are:
+- `BUCKETS_SCIM=on`, beside an API provider (`BUCKETS_OPENID_SYNC_PROVIDER=entra` or `okta`);
+- or `BUCKETS_OPENID_SYNC_PROVIDER=scim` for SCIM only, with the sync's own `BUCKETS_OPENID_SYNC_TENANT_ID`
+  (Entra) or `BUCKETS_OPENID_SYNC_ISSUER` (Okta) saying whose tokens' IDs `externalId` holds;
+- `BUCKETS_SCIM_TOKEN_SHA256` (or `_FILE`), and `BUCKETS_SCIM_TOKEN_SHA256_PREVIOUS` for the overlap;
+- `BUCKETS_SCIM_POLL`: how often, in seconds, the syncing server looks for SCIM's changes (5).
+
+In the console's identity settings: `openid.removal.method` (`api`, `scim` or `both`), `scimTokenSha256` and
+`scimPreviousSha256`.
 
 **The console:** **Identity → Sign-in → People who leave** gets a **Provisioning (SCIM)** part. It turns SCIM on,
 makes a token and shows it once with the URL, gives a step-by-step guide for Entra and for Okta, and has a
@@ -170,8 +174,9 @@ makes a token and shows it once with the URL, gives a step-by-step guide for Ent
   - everyone unassigned at once hits the safety limit;
   - a wrong token is refused and counted;
   - SCIM only and SCIM with sync both work.
-- **Compliance:** Microsoft's SCIM Validator, run by hand against the dev cluster through the SCIM-only Ingress
-  before release. Its results go in the docs.
+- **Compliance:** Microsoft's SCIM Validator, run by hand against a cluster it can reach through the SCIM-only
+  Ingress. `buckets-dev` is internal only, so this waits for a reachable cluster. Meanwhile the integration test
+  plays Entra's and Okta's request sequences, including their quirks.
 - **Browser:** turning SCIM on, the token shown once, the guide, the test, and the list of people.
 
 ## Open questions, with a recommendation each
@@ -185,3 +190,10 @@ makes a token and shows it once with the URL, gives a step-by-step guide for Ent
    fetched roles change the same way.
 4. **The safety limit for pushed removals: the sync's, or none?** A provider can be misconfigured as easily as it
    can fail. **Recommended: the sync's limit and grace period,** one set of rules for both.
+
+## Decisions
+
+1. **On `bucketsd`,** at `/minio/scim/v2/`, with a SCIM-only Ingress from the operator.
+2. **Matched by `externalId` only.**
+3. **Groups later,** with "roles kept current".
+4. **The sync's safety limit and grace period** apply to pushed removals too.

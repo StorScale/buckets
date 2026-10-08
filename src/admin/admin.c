@@ -2534,6 +2534,7 @@ static const route k_routes[] = {
     {"POST", "/buckets/lifecycle-preview", buckets_admin_lifecycle_preview, "BucketsLifecyclePreview"},
     {"GET", "/buckets/replication", buckets_admin_replication, "BucketsReplication"},
     {"POST", "/buckets/replication-test", buckets_admin_replication_test, "BucketsReplicationTest"},
+    {"GET", "/buckets/scim", buckets_admin_scim, "BucketsSCIM"},
     {"PUT", "/set-remote-target", buckets_admin_set_remote_target, "SetRemoteTarget"},
     {"GET", "/list-remote-targets", buckets_admin_list_remote_targets, "ListRemoteTargets"},
     {"DELETE", "/remove-remote-target", buckets_admin_remove_remote_target, "RemoveRemoteTarget"},

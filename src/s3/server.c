@@ -32,6 +32,7 @@
 #include "iam/ldapidp.h"
 #include "object/sysconfig.h"
 #include "iam/idsync.h"
+#include "iam/scim.h"
 #include "iam/plugins.h"
 #include "bucket/metadata.h"
 #include "bucket/metasys.h"
@@ -304,10 +305,36 @@ static buckets_idsync_state state_of_person(const buckets_idsync_answers *a, con
   return BUCKETS_IDSYNC_UNKNOWN;
 }
 
-static void idsync_run(buckets_s3_server *s, const buckets_idsync_settings *st, buckets_idsync_client *client) {
+/* SCIM's records (iam/scim.h), when SCIM is on: NULL when they can't be read (nothing is done on them then). */
+static bool scim_load(buckets_objlayer *L, buckets_scim_store *out) {
+  buckets_buf b = BUCKETS_BUF_INIT;
+  buckets_obj_err e = buckets_sysconfig_read(L, BUCKETS_SCIM_PATH, &b, NULL);
+  bool ok = (!e || e == BUCKETS_OBJ_ERR_NO_SUCH_KEY) && buckets_scim_store_parse(b.data, b.len, out);
+  buckets_buf_free(&b);
+  if (!ok) memset(out, 0, sizeof(*out));
+  return ok;
+}
+
+/* pushed_only: a run for SCIM's changes, asking the provider's API about no one. */
+static void idsync_run(buckets_s3_server *s, const buckets_idsync_settings *st, buckets_idsync_client *client,
+                       bool pushed_only) {
   buckets_objlayer *L = atomic_load(&s->layer);
   if (!L || !buckets_iam_ready(s->iam) || !buckets_objlayer_set_is_led_here(L, 0, 0)) return; /* one server syncs */
   s->idsync_runs++;
+  buckets_scim_store scim = {0};
+  bool scim_ok = !st->scim || scim_load(L, &scim);
+  if (!scim_ok) buckets_log_warn("identity sync: SCIM's records can't be read; nothing done for SCIM's people");
+  if (st->scim && scim_ok) { /* counts for the metrics */
+    size_t a = 0, d = 0, g = 0;
+    for (size_t i = 0; i < scim.n; i++) {
+      if (scim.u[i].deleted) g++;
+      else if (scim.u[i].active) a++;
+      else d++;
+    }
+    s->scim_people[0] = a;
+    s->scim_people[1] = d;
+    s->scim_people[2] = g;
+  }
   /* the provider's people with credentials */
   buckets_iam_ident **all = NULL;
   size_t nall = 0;
@@ -359,7 +386,11 @@ static void idsync_run(buckets_s3_server *s, const buckets_idsync_settings *st, 
   buckets_idsync_state *states = buckets_xcalloc(np + 1, sizeof(*states));
   size_t unknown = 0;
   char err[512] = "";
+  bool api = strcmp(st->provider, "scim") != 0 && !pushed_only;
   for (size_t k = 0; k < np && state_ok; k++) {
+    /* SCIM's record, when it names them: pushed, so newer than the API's answer */
+    states[k] = st->scim && scim_ok ? buckets_scim_state_of(&scim, people[k]) : BUCKETS_IDSYNC_UNKNOWN;
+    if (states[k] != BUCKETS_IDSYNC_UNKNOWN || !api) continue; /* someone SCIM never named: left alone */
     states[k] = buckets_idsync_client_lookup(client, people[k], NULL, err, sizeof(err));
     if (states[k] == BUCKETS_IDSYNC_UNKNOWN && unknown++ == 0) buckets_log_warn("identity sync: %s", err);
   }
@@ -437,6 +468,7 @@ static void idsync_run(buckets_s3_server *s, const buckets_idsync_settings *st, 
     buckets_idsync_plan_free(&plan);
   }
   if (failed) s->idsync_failures++;
+  buckets_scim_store_free(&scim);
   free(states);
   free(people);
   free(creds);
@@ -486,13 +518,39 @@ static void *idsync_main(void *arg) {
   buckets_idsync_client *client = buckets_idsync_client_new(&st);
   memset(st.client_secret, 0, sizeof(st.client_secret));
   memset(st.api_token, 0, sizeof(st.api_token));
-  if (strcmp(st.provider, "entra") == 0)
-    buckets_log_info("identity sync: asking Entra tenant %s about people with credentials every %lds", st.tenant,
-                     st.interval_s);
+  if (strcmp(st.provider, "scim") == 0)
+    buckets_log_info("identity sync: acting on what SCIM pushes (people by %s %s)", *st.tenant ? "Entra tenant" : "issuer",
+                     *st.tenant ? st.tenant : st.issuer);
+  else if (strcmp(st.provider, "entra") == 0)
+    buckets_log_info("identity sync: asking Entra tenant %s about people with credentials every %lds%s", st.tenant,
+                     st.interval_s, st.scim ? ", and acting on what SCIM pushes" : "");
   else
-    buckets_log_info("identity sync: asking %s (%s) about people with credentials every %lds",
-                     strcmp(st.provider, "okta") == 0 ? "Okta" : "Keycloak", st.issuer, st.interval_s);
-  while (bg_sleep(s, st.interval_s * 1000L)) idsync_run(s, &st, client);
+    buckets_log_info("identity sync: asking %s (%s) about people with credentials every %lds%s",
+                     strcmp(st.provider, "okta") == 0 ? "Okta" : "Keycloak", st.issuer, st.interval_s,
+                     st.scim ? ", and acting on what SCIM pushes" : "");
+  /* SCIM's changes are looked for every few seconds (the store's revision); the full sync every interval */
+  const char *pe = getenv("BUCKETS_SCIM_POLL");
+  long poll_s = pe && atol(pe) > 0 ? atol(pe) : 5;
+  long step_s = st.scim && poll_s < st.interval_s ? poll_s : st.interval_s;
+  long since = 0;
+  long long seen_rev = -1;
+  while (bg_sleep(s, step_s * 1000L)) {
+    since += step_s;
+    if (since >= st.interval_s) { /* every interval, SCIM only too: keys past the grace period go */
+      since = 0;
+      idsync_run(s, &st, client, false);
+      continue;
+    }
+    buckets_objlayer *L = atomic_load(&s->layer);
+    if (!st.scim || !L || !buckets_objlayer_set_is_led_here(L, 0, 0)) continue;
+    buckets_scim_store sc;
+    if (!scim_load(L, &sc)) continue;
+    long long rev = sc.rev;
+    buckets_scim_store_free(&sc);
+    if (rev == seen_rev) continue;
+    seen_rev = rev;
+    idsync_run(s, &st, client, true);
+  }
   buckets_idsync_client_free(client);
   return NULL;
 }
@@ -2564,6 +2622,15 @@ void buckets_s3_handle(const buckets_http_request *req, buckets_http_response *r
     goto done;
   }
   if (buckets_s3_metrics_handle(&c)) goto done;
+  if (buckets_str_has_prefix(req->path, BUCKETS_SCIM_PREFIX "/") || buckets_str_eq_c(req->path, BUCKETS_SCIM_PREFIX)) {
+    if (buckets_s3_audit_wanted(s)) { /* every SCIM change is audited (SCIMCreateUser, ...) */
+      c.audited = true;
+      buckets_audit_tags_set(&c.tags);
+    }
+    buckets_scim_handle(&c);
+    if (c.audited && c.op_name) buckets_s3_audit(&c, -1, 0, 0, (uint64_t)resp->body.len);
+    goto done;
+  }
   if (buckets_str_has_prefix(req->path, "/minio/")) {
     err = BUCKETS_ERR_NOT_IMPLEMENTED; /* other MinIO APIs come later */
     goto fail;

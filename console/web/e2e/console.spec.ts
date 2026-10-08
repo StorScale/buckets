@@ -774,7 +774,7 @@ test.describe("KMS and sign-in setup", () => {
       cluster: { spec: { kms?: { kes?: { keyName?: string } } } };
       secrets: Record<
         string,
-        Record<string, { settings?: { vault?: { approle?: { secret?: string; id?: string } } }; vault?: { approle?: { secret?: string; id?: string } }; openid?: { clientSecret?: string; removal?: { enabled: boolean; deleteAfterDays?: number; maxPerSync?: number; intervalMinutes?: number; apiToken?: string } } }>
+        Record<string, { settings?: { vault?: { approle?: { secret?: string; id?: string } } }; vault?: { approle?: { secret?: string; id?: string } }; openid?: { clientSecret?: string; removal?: { enabled: boolean; deleteAfterDays?: number; maxPerSync?: number; intervalMinutes?: number; apiToken?: string; method?: string; scimTokenSha256?: string; scimPreviousSha256?: string } } }>
       >;
     };
 
@@ -924,6 +924,53 @@ test.describe("KMS and sign-in setup", () => {
     await expect(page.getByTestId("removal")).toContainText("realm-management: view-users");
     await page.getByTestId("oidc-provider-generic").click();
     await expect(page.getByTestId("removal")).toHaveCount(0);
+  });
+
+  test("sign-in: people who leave through SCIM, with a token shown once", async ({ page }) => {
+    test.skip(!!process.env.CONSOLE_URL, "needs the mock Kubernetes API of the local setup");
+    await login(page);
+    await page.goto("/identity/sign-in");
+    await page.getByTestId("oidc-on").getByRole("radio", { name: "On" }).click();
+    await page.getByTestId("oidc-provider-entra").click();
+    await page.getByTestId("removal-on").check();
+    await page.getByTestId("removal-method-scim").check();
+    // SCIM's guide instead of the API's: the attribute mapping, and no lookup
+    await expect(page.getByTestId("scim-setup")).toContainText("objectId");
+    await expect(page.getByTestId("removal")).not.toContainText("User.Read.All");
+    await expect(page.getByTestId("removal-test")).toHaveCount(0);
+    await expect(page.getByTestId("scim-url")).toContainText("/minio/scim/v2");
+    await page.getByTestId("oidc-tenant").fill("11111111-2222-3333-4444-555555555555");
+    await page.getByTestId("oidc-client-id").fill("app-1");
+    await page.getByTestId("oidc-client-secret").fill("s3cr3t");
+    await expect(page.getByTestId("signin-missing")).toContainText("a SCIM token");
+    await page.getByTestId("scim-make-token").click();
+    const token = (await page.getByTestId("scim-token").locator(".mono").textContent())!.trim();
+    expect(token).toMatch(/^[0-9a-f]{64}$/);
+    await expect(page.getByTestId("signin-missing")).toHaveCount(0);
+    await page.getByTestId("signin-save").click();
+    await expect(page.getByTestId("signin-save")).toHaveText("Saved");
+    // only the hash is kept, and SCIM alone needs no lookup before apply
+    const sha = createHash("sha256").update(token).digest("hex");
+    let st = await kubeState(page);
+    expect(st.secrets["store-identity-candidate"]["settings.json"].openid?.removal).toEqual({ enabled: true, method: "scim", scimTokenSha256: sha });
+    expect(JSON.stringify(st.secrets)).not.toContain(token);
+    await expect(page.getByTestId("apply-card")).not.toContainText("Look up a person");
+    await expect(page.getByTestId("apply-card")).toContainText("set up provisioning in Entra ID");
+    await expect(page.getByTestId("scim-off")).toContainText("once the settings are applied");
+    // after a reload the token isn't shown again; a new one keeps the old working meanwhile
+    await page.reload();
+    await expect(page.getByTestId("scim-token-state")).toContainText("not shown again");
+    await page.getByTestId("scim-make-token").click();
+    await page.getByTestId("signin-save").click();
+    await expect(page.getByTestId("signin-save")).toHaveText("Saved");
+    st = await kubeState(page);
+    const rm = st.secrets["store-identity-candidate"]["settings.json"].openid?.removal as { scimTokenSha256?: string; scimPreviousSha256?: string };
+    expect(rm.scimPreviousSha256).toBe(sha);
+    expect(rm.scimTokenSha256).not.toBe(sha);
+    // Keycloak has no SCIM client: no choice offered
+    await page.getByTestId("oidc-provider-keycloak").click();
+    await page.getByTestId("removal-on").check();
+    await expect(page.getByTestId("removal-method")).toHaveCount(0);
   });
 
   test("settings the server refuses are explained before any test", async ({ page }) => {

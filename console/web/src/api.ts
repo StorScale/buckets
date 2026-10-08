@@ -436,7 +436,17 @@ export type OidcSettings = {
   rolePolicy?: string;
   claimUserinfo?: boolean;
   // people who leave lose their access (Entra ID for now; docs/design/identity-sync.md)
-  removal?: { enabled: boolean; deleteAfterDays?: number; maxPerSync?: number; intervalMinutes?: number; apiToken?: string };
+  removal?: {
+    enabled: boolean;
+    deleteAfterDays?: number;
+    maxPerSync?: number;
+    intervalMinutes?: number;
+    apiToken?: string;
+    // how the servers learn who left: asking the provider ("api", the default), SCIM pushes, or both
+    method?: "api" | "scim" | "both";
+    scimTokenSha256?: string; // the SCIM token's SHA-256: the token itself is shown once, kept nowhere
+    scimPreviousSha256?: string; // the token it replaces, still accepted while the provider is updated
+  };
 };
 export type LdapSettings = {
   preset: "ad" | "openldap" | "custom";
@@ -1047,3 +1057,15 @@ export type DeclaredBucket = { bucket: string; resource: string; lifecycle: bool
 // The cluster's Bucket resources, when the console runs under buckets-operator.
 export const declaredBuckets = async (): Promise<{ managed: boolean; namespace?: string; buckets: DeclaredBucket[] }> =>
   (await call("GET", "/api/v1/declared-buckets")).json();
+
+// ---- SCIM (docs/design/scim.md) ----
+export type ScimPerson = { id: string; externalId: string; userName: string; displayName: string; active: boolean; deleted: boolean; modified: number; credentials: number };
+export type ScimStatus = {
+  enabled: boolean;
+  provider: string;
+  people: ScimPerson[];
+  holders: number; // people with credentials from the provider
+  matched: number; // of those, how many SCIM names
+  me: { person?: string; named?: boolean; state?: string };
+};
+export const scimStatus = () => adminJson<ScimStatus>("GET", "buckets/scim");

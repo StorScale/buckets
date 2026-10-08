@@ -170,9 +170,10 @@ static void test_console(void **state) {
   bc_objects_free(o, n);
   char **stale;
   size_t ns = bc_console_stale(&s, &stale);
-  assert_int_equal(ns, 6);
+  assert_int_equal(ns, 7);
   assert_string_equal(stale[0], "/apis/apps/v1/namespaces/data/deployments/store-console");
   assert_string_equal(stale[4], "/api/v1/namespaces/data/serviceaccounts/store-console");
+  assert_string_equal(stale[6], "/apis/networking.k8s.io/v1/namespaces/data/ingresses/store-scim"); /* no SCIM Ingress */
   for (size_t i = 0; i < ns; i++) free(stale[i]);
   free(stale);
   yyjson_doc_free(d);
@@ -212,7 +213,9 @@ static void test_console(void **state) {
   assert_string_equal(yyjson_mut_get_str(yyjson_mut_obj_get(yyjson_mut_arr_get_first(AT(ing, "spec", "rules")), "host")), "console.example.com");
   bc_objects_free(o, n);
   ns = bc_console_stale(&s, &stale);
-  assert_int_equal(ns, 0);
+  assert_int_equal(ns, 1); /* only the SCIM Ingress, which this cluster doesn't have */
+  assert_non_null(strstr(stale[0], "ingresses/store-scim"));
+  free(stale[0]);
   free(stale);
   yyjson_mut_doc *sec = bc_console_secret(&s, "p", "s");
   assert_string_equal(yyjson_mut_get_str(AT(yyjson_mut_doc_get_root(sec), "stringData", "passphrase")), "p");
@@ -967,8 +970,44 @@ static void test_fips(void **state) {
   yyjson_doc_free(d);
 }
 
+/* spec.scim.ingress: only /minio/scim/, to the servers' Service */
+static void test_scim_ingress(void **state) {
+  (void)state;
+  const char *spec = "{\"apiVersion\":\"buckets.io/v1alpha1\",\"kind\":\"BucketsCluster\",\"metadata\":{\"name\":\"store\","
+                     "\"namespace\":\"data\",\"uid\":\"u-1\"},\"spec\":{\"pools\":[{\"servers\":4,\"volumesPerServer\":1}],"
+                     "\"scim\":{\"ingress\":{\"host\":\"scim.example.com\",\"ingressClassName\":\"nginx\","
+                     "\"tlsSecret\":{\"name\":\"scim-tls\"}}}}}";
+  bc_spec s;
+  yyjson_doc *d = parse(spec, &s, true);
+  bc_object *o;
+  size_t n = bc_desired(&s, &o);
+  yyjson_mut_val *ing = NULL;
+  for (size_t k = 0; k < n; k++)
+    if (!strcmp(o[k].path, "/apis/networking.k8s.io/v1/namespaces/data/ingresses/store-scim")) ing = yyjson_mut_doc_get_root(o[k].doc);
+  assert_non_null(ing);
+  yyjson_mut_val *rule = yyjson_mut_arr_get_first(yyjson_mut_obj_get(yyjson_mut_obj_get(ing, "spec"), "rules"));
+  assert_string_equal(yyjson_mut_get_str(yyjson_mut_obj_get(rule, "host")), "scim.example.com");
+  yyjson_mut_val *paths = yyjson_mut_obj_get(yyjson_mut_obj_get(rule, "http"), "paths");
+  assert_int_equal(yyjson_mut_arr_size(paths), 1);
+  yyjson_mut_val *p0 = yyjson_mut_arr_get_first(paths);
+  assert_string_equal(yyjson_mut_get_str(yyjson_mut_obj_get(p0, "path")), "/minio/scim/");
+  yyjson_mut_val *svc = yyjson_mut_obj_get(yyjson_mut_obj_get(p0, "backend"), "service");
+  assert_string_equal(yyjson_mut_get_str(yyjson_mut_obj_get(svc, "name")), "store");
+  assert_int_equal(yyjson_mut_get_int(yyjson_mut_obj_get(yyjson_mut_obj_get(svc, "port"), "number")), 9000);
+  bc_objects_free(o, n);
+  char **stale;
+  size_t ns = bc_console_stale(&s, &stale);
+  for (size_t i = 0; i < ns; i++) {
+    assert_null(strstr(stale[i], "store-scim")); /* wanted: not removed */
+    free(stale[i]);
+  }
+  free(stale);
+  yyjson_doc_free(d);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
+      cmocka_unit_test(test_scim_ingress),
       cmocka_unit_test(test_volumes_and_topology), cmocka_unit_test(test_desired_objects), cmocka_unit_test(test_tls),
       cmocka_unit_test(test_root_secret_not_owned), cmocka_unit_test(test_invalid),
       cmocka_unit_test(test_console), cmocka_unit_test(test_console_tls), cmocka_unit_test(test_console_env),

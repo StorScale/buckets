@@ -137,6 +137,11 @@ buckets_s3_error buckets_s3_obj_error(buckets_obj_err e);
 /* Reads a (small) request body into c->doc and checks its payload hash and
  * Content-MD5. Object uploads verify inside the object layer instead. */
 buckets_s3_error buckets_s3_read_doc(s3_ctx *c);
+/* SCIM 2.0 (s3/scimhandlers.c): the endpoint under /minio/scim/v2/, and whether it is on. */
+void buckets_scim_handle(s3_ctx *c);
+bool buckets_scim_enabled(void);
+const char *buckets_scim_op_name(int i);
+const char *buckets_scim_result_name(int i);
 /* validateLengthAndChecksum + read: Content-MD5 or x-amz-checksum-* required and verified. */
 buckets_s3_error buckets_s3_read_checked_doc(s3_ctx *c);
 

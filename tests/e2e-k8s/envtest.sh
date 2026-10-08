@@ -671,6 +671,27 @@ k -n tenant create secret generic idc-identity --from-literal=settings.json="$id
 until_true '[[ $(syncenv BUCKETS_OPENID_SYNC_PROVIDER) == keycloak ]]' || true
 expect "Keycloak: the sync's settings" "$(syncenv BUCKETS_OPENID_SYNC_URL) $(syncenv BUCKETS_OPENID_SYNC_REALM) $(syncenv BUCKETS_OPENID_SYNC_ISSUER) $(syncenv BUCKETS_OPENID_SYNC_CLIENT_ID) $(syncenv BUCKETS_OPENID_SYNC_INTERVAL)" \
   "https://kc.example.com corp https://kc.example.com/realms/corp buckets 3600"
+# SCIM only (iam/scim.h): no API credentials; the token's hash; people by the tenant
+idsettings='{"openid":{"provider":"entra","tenantId":"t-1","clientId":"app","clientSecret":"s","removal":{"enabled":true,"method":"scim","scimTokenSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}'
+k -n tenant create secret generic idc-identity --from-literal=settings.json="$idsettings" --dry-run=client -o yaml | k apply -f - >/dev/null
+until_true '[[ $(syncenv BUCKETS_OPENID_SYNC_PROVIDER) == scim ]]' || true
+expect "SCIM only: the servers' settings" "$(syncenv BUCKETS_OPENID_SYNC_PROVIDER) $(syncenv BUCKETS_OPENID_SYNC_TENANT_ID) $(syncenv BUCKETS_SCIM) $(syncenv BUCKETS_SCIM_TOKEN_SHA256)" \
+  "scim t-1 on aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+expect "SCIM only: no API credentials" "$(syncenv BUCKETS_OPENID_SYNC_CLIENT_ID)$(jp sts/idc-pool-0 '{.spec.template.spec.containers[0].env[?(@.name=="BUCKETS_OPENID_SYNC_CLIENT_SECRET")].name}')" ""
+# SCIM beside the API, a new token rolling out
+idsettings='{"openid":{"provider":"entra","tenantId":"t-1","clientId":"app","clientSecret":"s","removal":{"enabled":true,"method":"both","scimTokenSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","scimPreviousSha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}'
+k -n tenant create secret generic idc-identity --from-literal=settings.json="$idsettings" --dry-run=client -o yaml | k apply -f - >/dev/null
+until_true '[[ $(syncenv BUCKETS_OPENID_SYNC_PROVIDER) == entra ]]' || true
+expect "SCIM and the API: both" "$(syncenv BUCKETS_OPENID_SYNC_PROVIDER) $(syncenv BUCKETS_OPENID_SYNC_CLIENT_ID) $(syncenv BUCKETS_SCIM) $(syncenv BUCKETS_SCIM_TOKEN_SHA256_PREVIOUS)" \
+  "entra app on bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+# spec.scim.ingress: only /minio/scim/, to the servers
+k -n tenant patch bc idc --type=merge -p '{"spec":{"scim":{"ingress":{"host":"scim.example.com","ingressClassName":"nginx"}}}}' >/dev/null
+until_true 'k -n tenant get ingress idc-scim'
+expect "the SCIM Ingress routes only /minio/scim/ to the servers" \
+  "$(jp ingress/idc-scim '{.spec.rules[0].host} {.spec.rules[0].http.paths[*].path} {.spec.rules[0].http.paths[0].backend.service.name}')" "scim.example.com /minio/scim/ idc"
+k -n tenant patch bc idc --type=json -p '[{"op":"remove","path":"/spec/scim"}]' >/dev/null
+until_true '! k -n tenant get ingress idc-scim'
+expect "and goes when unset" "$(k -n tenant get ingress idc-scim -o name 2>/dev/null || echo gone)" gone
 idsettings='{"openid":{"provider":"entra","tenantId":"t-1","clientId":"app","clientSecret":"s","removal":{"enabled":false}}}'
 k -n tenant create secret generic idc-identity --from-literal=settings.json="$idsettings" --dry-run=client -o yaml | k apply -f - >/dev/null
 until_true '[[ -z $(syncenv BUCKETS_OPENID_SYNC_PROVIDER) ]]' || true

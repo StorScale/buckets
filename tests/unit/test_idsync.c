@@ -110,7 +110,7 @@ static void test_settings_providers(void **state) {
   assert_string_equal(s.api_token, "00abc");
   setenv("BUCKETS_OPENID_SYNC_PROVIDER", "ping", 1);
   assert_false(buckets_idsync_settings_from_env(&s, err, sizeof(err)));
-  assert_non_null(strstr(err, "entra, keycloak or okta"));
+  assert_non_null(strstr(err, "entra, keycloak, okta or scim"));
   const char *vars[] = {"BUCKETS_OPENID_SYNC_PROVIDER",  "BUCKETS_OPENID_SYNC_URL",
                         "BUCKETS_OPENID_SYNC_CLIENT_ID", "BUCKETS_OPENID_SYNC_CLIENT_SECRET",
                         "BUCKETS_OPENID_SYNC_REALM",     "BUCKETS_OPENID_SYNC_API_TOKEN",
@@ -127,7 +127,7 @@ static void test_settings(void **state) {
   assert_string_equal(s.provider, ""); /* off */
   setenv("BUCKETS_OPENID_SYNC_PROVIDER", "ping", 1);
   assert_false(buckets_idsync_settings_from_env(&s, err, sizeof(err)));
-  assert_non_null(strstr(err, "entra, keycloak or okta"));
+  assert_non_null(strstr(err, "entra, keycloak, okta or scim"));
   setenv("BUCKETS_OPENID_SYNC_PROVIDER", "entra", 1);
   assert_false(buckets_idsync_settings_from_env(&s, err, sizeof(err)));
   assert_non_null(strstr(err, "TENANT_ID"));
@@ -257,8 +257,40 @@ static void test_held_json(void **state) {
   buckets_buf_free(&b);
 }
 
+/* SCIM only: no API; people by Entra's tid and oid, or by an issuer and sub */
+static void test_scim_settings(void **state) {
+  (void)state;
+  buckets_idsync_settings s;
+  char err[256] = "";
+  setenv("BUCKETS_OPENID_SYNC_PROVIDER", "scim", 1);
+  assert_false(buckets_idsync_settings_from_env(&s, err, sizeof(err)));
+  assert_non_null(strstr(err, "TENANT_ID"));
+  setenv("BUCKETS_OPENID_SYNC_TENANT_ID", "t-1", 1);
+  assert_true(buckets_idsync_settings_from_env(&s, err, sizeof(err)));
+  assert_true(s.scim);
+  assert_string_equal(buckets_idsync_person_of(&s, "t-1", "oid-9", NULL, NULL), "oid-9");
+  assert_null(buckets_idsync_person_of(&s, "t-2", "oid-9", NULL, NULL));
+  unsetenv("BUCKETS_OPENID_SYNC_TENANT_ID");
+  setenv("BUCKETS_OPENID_SYNC_ISSUER", "https://example.okta.com/oauth2/default", 1);
+  assert_true(buckets_idsync_settings_from_env(&s, err, sizeof(err)));
+  assert_string_equal(buckets_idsync_person_of(&s, NULL, NULL, "https://example.okta.com/oauth2/default/", "00u1"), "00u1");
+  /* beside an API provider, with BUCKETS_SCIM */
+  setenv("BUCKETS_OPENID_SYNC_PROVIDER", "okta", 1);
+  setenv("BUCKETS_OPENID_SYNC_URL", "https://example.okta.com", 1);
+  setenv("BUCKETS_OPENID_SYNC_API_TOKEN", "00abc", 1);
+  assert_true(buckets_idsync_settings_from_env(&s, err, sizeof(err)));
+  assert_false(s.scim);
+  setenv("BUCKETS_SCIM", "on", 1);
+  assert_true(buckets_idsync_settings_from_env(&s, err, sizeof(err)));
+  assert_true(s.scim);
+  const char *vars[] = {"BUCKETS_OPENID_SYNC_PROVIDER", "BUCKETS_OPENID_SYNC_URL", "BUCKETS_OPENID_SYNC_API_TOKEN",
+                        "BUCKETS_OPENID_SYNC_ISSUER", "BUCKETS_SCIM"};
+  for (size_t i = 0; i < sizeof(vars) / sizeof(vars[0]); i++) unsetenv(vars[i]);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
+      cmocka_unit_test(test_scim_settings),
       cmocka_unit_test(test_graph_state), cmocka_unit_test(test_settings),
       cmocka_unit_test(test_plan),        cmocka_unit_test(test_safety_limit),
       cmocka_unit_test(test_held_json),   cmocka_unit_test(test_keycloak_okta_state),

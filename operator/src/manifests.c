@@ -152,6 +152,11 @@ bool bc_parse(yyjson_val *obj, const char *cluster_domain, bc_spec *out, char *e
   out->console.ingress_class = str_at(ing, "ingressClassName");
   out->console.ingress_tls_secret = str_at(yyjson_obj_get(ing, "tlsSecret"), "name");
   out->console.annotations = yyjson_obj_get(ing, "annotations");
+  yyjson_val *sing = yyjson_obj_get(yyjson_obj_get(spec, "scim"), "ingress");
+  out->scim.ingress_host = str_at(sing, "host");
+  out->scim.ingress_class = str_at(sing, "ingressClassName");
+  out->scim.ingress_tls_secret = str_at(yyjson_obj_get(sing, "tlsSecret"), "name");
+  out->scim.annotations = yyjson_obj_get(sing, "annotations");
   out->console.resources = yyjson_obj_get(con, "resources");
   out->console.env = yyjson_obj_get(con, "env");
   out->console.node_selector = yyjson_obj_get(con, "nodeSelector");
@@ -494,19 +499,27 @@ static bc_object statefulset(const bc_spec *s, size_t pi, const char *volumes, c
     char sn[160], n[24];
     bc_identity_sync_secret_name(s, sn, sizeof(sn));
     const char *pv = s->identity.sync_provider;
-    env_value(d, env, "BUCKETS_OPENID_SYNC_PROVIDER", pv);
+    bool api = s->identity.sync_api || !s->identity.sync_scim;
+    /* SCIM alone: no API to ask; people by Entra's tenant or the tokens' issuer (iam/scim.h) */
+    env_value(d, env, "BUCKETS_OPENID_SYNC_PROVIDER", api ? pv : "scim");
     if (strcmp(pv, "entra") == 0) env_value(d, env, "BUCKETS_OPENID_SYNC_TENANT_ID", s->identity.sync_tenant);
-    if (strcmp(pv, "okta") != 0) {
+    if (api && strcmp(pv, "okta") != 0) {
       env_value(d, env, "BUCKETS_OPENID_SYNC_CLIENT_ID", s->identity.sync_client_id);
       env_secret(d, env, "BUCKETS_OPENID_SYNC_CLIENT_SECRET", sn, "clientSecret");
-    } else {
+    } else if (api) {
       env_secret(d, env, "BUCKETS_OPENID_SYNC_API_TOKEN", sn, "apiToken");
     }
     if (strcmp(pv, "entra") != 0) {
-      env_value(d, env, "BUCKETS_OPENID_SYNC_URL", s->identity.sync_url);
+      if (api) env_value(d, env, "BUCKETS_OPENID_SYNC_URL", s->identity.sync_url);
       env_value(d, env, "BUCKETS_OPENID_SYNC_ISSUER", s->identity.sync_issuer);
     }
-    if (strcmp(pv, "keycloak") == 0) env_value(d, env, "BUCKETS_OPENID_SYNC_REALM", s->identity.sync_realm);
+    if (api && strcmp(pv, "keycloak") == 0) env_value(d, env, "BUCKETS_OPENID_SYNC_REALM", s->identity.sync_realm);
+    if (s->identity.sync_scim) {
+      env_value(d, env, "BUCKETS_SCIM", "on");
+      env_value(d, env, "BUCKETS_SCIM_TOKEN_SHA256", s->identity.scim_sha256);
+      if (s->identity.scim_previous[0])
+        env_value(d, env, "BUCKETS_SCIM_TOKEN_SHA256_PREVIOUS", s->identity.scim_previous);
+    }
     snprintf(n, sizeof(n), "%ld", s->identity.sync_interval_s);
     env_value(d, env, "BUCKETS_OPENID_SYNC_INTERVAL", n);
     snprintf(n, sizeof(n), "%ld", s->identity.sync_days);
@@ -852,10 +865,45 @@ static bc_object console_ingress(const bc_spec *s) {
   return (bc_object){path_of("/apis/networking.k8s.io/v1", s, "ingresses", name), d};
 }
 
+void bc_scim_ingress_name(const bc_spec *s, char *out, size_t cap) { snprintf(out, cap, "%s-scim", s->name); }
+
+/* Only /minio/scim/ to the servers' Service: the provider reaches SCIM, and nothing else. */
+static bc_object scim_ingress(const bc_spec *s) {
+  mdoc *d = yyjson_mut_doc_new(NULL);
+  char name[128];
+  bc_scim_ingress_name(s, name, sizeof(name));
+  mval *root = object(d, "networking.k8s.io/v1", "Ingress", s, name, NULL);
+  mval *ann = NULL;
+  if (s->scim.annotations) {
+    ann = yyjson_val_mut_copy(d, s->scim.annotations);
+    yyjson_mut_obj_add_val(d, yyjson_mut_obj_get(root, "metadata"), "annotations", ann);
+  }
+  if (s->tls_secret && !yyjson_mut_obj_get(ann, "nginx.ingress.kubernetes.io/backend-protocol")) {
+    if (!ann) ann = ADD_OBJ(d, yyjson_mut_obj_get(root, "metadata"), "annotations");
+    ADD_STR(d, ann, "nginx.ingress.kubernetes.io/backend-protocol", "HTTPS");
+  }
+  mval *spec = ADD_OBJ(d, root, "spec");
+  if (s->scim.ingress_class) ADD_STR(d, spec, "ingressClassName", s->scim.ingress_class);
+  if (s->scim.ingress_tls_secret) {
+    mval *t = yyjson_mut_arr_add_obj(d, ADD_ARR(d, spec, "tls"));
+    yyjson_mut_arr_add_str(d, ADD_ARR(d, t, "hosts"), s->scim.ingress_host);
+    ADD_STR(d, t, "secretName", s->scim.ingress_tls_secret);
+  }
+  mval *rule = yyjson_mut_arr_add_obj(d, ADD_ARR(d, spec, "rules"));
+  ADD_STR(d, rule, "host", s->scim.ingress_host);
+  mval *path = yyjson_mut_arr_add_obj(d, ADD_ARR(d, ADD_OBJ(d, rule, "http"), "paths"));
+  ADD_STR(d, path, "path", "/minio/scim/");
+  ADD_STR(d, path, "pathType", "Prefix");
+  mval *svc = ADD_OBJ(d, ADD_OBJ(d, path, "backend"), "service");
+  ADD_STR(d, svc, "name", s->name);
+  ADD_INT(d, ADD_OBJ(d, svc, "port"), "number", s->service_port ? s->service_port : BC_S3_PORT);
+  return (bc_object){path_of("/apis/networking.k8s.io/v1", s, "ingresses", name), d};
+}
+
 size_t bc_console_stale(const bc_spec *s, char ***paths) {
   char name[128];
   bc_console_secret_name(s, name, sizeof(name));
-  char **p = buckets_xcalloc(6, sizeof(char *));
+  char **p = buckets_xcalloc(7, sizeof(char *));
   size_t n = 0;
   if (!s->console.enabled) {
     p[n++] = path_of("/apis/apps/v1", s, "deployments", name);
@@ -865,6 +913,11 @@ size_t bc_console_stale(const bc_spec *s, char ***paths) {
     p[n++] = path_of("/api/v1", s, "serviceaccounts", name);
   }
   if (!s->console.enabled || !s->console.ingress_host) p[n++] = path_of("/apis/networking.k8s.io/v1", s, "ingresses", name);
+  if (!s->scim.ingress_host) {
+    char sn[160];
+    bc_scim_ingress_name(s, sn, sizeof(sn));
+    p[n++] = path_of("/apis/networking.k8s.io/v1", s, "ingresses", sn);
+  }
   *paths = p;
   return n;
 }
@@ -884,7 +937,7 @@ yyjson_mut_doc *bc_console_secret(const bc_spec *s, const char *passphrase, cons
 static size_t console_rbac(const bc_spec *s, bc_object *o);
 
 size_t bc_desired(const bc_spec *s, bc_object **out) {
-  size_t n = 2 + 2 * s->npools + 6 + 5, k = 0;
+  size_t n = 2 + 2 * s->npools + 6 + 5 + 1, k = 0;
   bc_object *o = buckets_xcalloc(n, sizeof(*o));
   char *vols = bc_volumes(s);
   char topo[17];
@@ -900,6 +953,7 @@ size_t bc_desired(const bc_spec *s, bc_object **out) {
     o[k++] = console_deployment(s);
     if (s->console.ingress_host) o[k++] = console_ingress(s);
   }
+  if (s->scim.ingress_host) o[k++] = scim_ingress(s);
   free(vols);
   *out = o;
   return k;

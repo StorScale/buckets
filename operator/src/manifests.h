@@ -85,6 +85,11 @@ typedef struct {
     const char *interval; /* "30s" */
     yyjson_val *labels;   /* extra ServiceMonitor labels */
   } monitoring;
+  /* spec.scim.ingress (docs/design/scim.md): host NULL, none */
+  struct {
+    const char *ingress_host, *ingress_class, *ingress_tls_secret;
+    yyjson_val *annotations;
+  } scim;
   /* The identity settings the operator applied (identity.c), not from the
    * spec: ldap_hash is set while LDAP sign-in is configured, and is on the
    * servers' pod template, so changing LDAP (read at startup) restarts them. */
@@ -95,6 +100,8 @@ typedef struct {
     char sync_hash[17];
     char sync_provider[16], sync_tenant[64], sync_client_id[128], sync_url[512], sync_realm[128], sync_issuer[700];
     long sync_days, sync_max, sync_interval_s;
+    bool sync_api, sync_scim; /* ask the provider's API; take what SCIM pushes (iam/scim.h) */
+    char scim_sha256[65], scim_previous[65];
   } identity;
   /* spec.kms.kes: a KES server the operator runs for the cluster, its key
    * store settings in Secret <name>-kms (settings.json, written by the
@@ -167,6 +174,9 @@ void bc_objects_free(bc_object *o, size_t n);
 /* The console's objects (paths only) to delete when it is disabled, or its
  * Ingress when that is not wanted. Caller frees each and the array. */
 size_t bc_console_stale(const bc_spec *s, char ***paths);
+/* spec.scim.ingress: an Ingress <name>-scim routing only /minio/scim/ to the servers (docs/design/scim.md), so the
+ * identity provider can reach SCIM without S3 or the console being open to it. */
+void bc_scim_ingress_name(const bc_spec *s, char *out, size_t cap);
 /* The console's cookie-key Secret (<name>-console), owned by the cluster. */
 void bc_console_secret_name(const bc_spec *s, char *out, size_t cap);
 yyjson_mut_doc *bc_console_secret(const bc_spec *s, const char *passphrase, const char *salt);

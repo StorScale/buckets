@@ -6,6 +6,8 @@ import {
   identityConfig,
   identityLdapTest,
   identityRemovalTest,
+  ScimStatus,
+  scimStatus,
   identitySaveCandidate,
   IdentitySettings,
   identityTestSignIn,
@@ -56,7 +58,9 @@ function missing(s: IdentitySettings, saved: Set<string>): string[] {
     if (o.provider === "generic" && !/^https?:\/\//.test(o.configUrl ?? "")) m.push("the discovery URL");
     if (!o.clientId) m.push("the client ID");
     if (!o.clientSecret && !saved.has("openid.clientSecret")) m.push("the client secret");
-    if (o.provider === "okta" && o.removal?.enabled && !o.removal.apiToken && !saved.has("openid.removal.apiToken")) m.push("an Okta API token");
+    const method = o.removal?.method ?? "api";
+    if (o.provider === "okta" && o.removal?.enabled && method !== "scim" && !o.removal.apiToken && !saved.has("openid.removal.apiToken")) m.push("an Okta API token");
+    if (o.removal?.enabled && method !== "api" && !o.removal.scimTokenSha256) m.push("a SCIM token");
   }
   const l = s.ldap;
   if (l) {
@@ -131,7 +135,8 @@ export default function SignInSetup() {
   const fresh = !dirty && !!cfg.candidateHash; // the draft is the saved candidate
   const test = fresh ? cfg.test : undefined;
   const needOidc = !!draft.openid, needLdap = !!draft.ldap;
-  const needRemoval = !!draft.openid && draft.openid.provider !== "generic" && !!draft.openid.removal?.enabled;
+  // SCIM alone asks the provider nothing: there's no lookup to test
+  const needRemoval = !!draft.openid && draft.openid.provider !== "generic" && !!draft.openid.removal?.enabled && draft.openid.removal.method !== "scim";
   const ready = fresh && (!needOidc || test?.openid?.passed) && (!needLdap || test?.ldap?.passed) && (!needRemoval || test?.removal?.passed);
 
   const save = async () => {
@@ -246,6 +251,9 @@ export default function SignInSetup() {
           )}
           {needLdap && <li className={test?.ldap?.passed ? "done" : ""}>Look up a directory user (above).</li>}
           {needRemoval && <li className={test?.removal?.passed ? "done" : ""}>Look up a person (People who leave, above).</li>}
+          {draft.openid?.removal?.enabled && draft.openid.removal.method && draft.openid.removal.method !== "api" && (
+            <li>After applying, set up provisioning in {draft.openid.provider === "okta" ? "Okta" : "Entra ID"} (People who leave, above).</li>
+          )}
           <li className={applied ? "done" : ""}>
             Apply. The servers take the settings at once{needLdap ? "; LDAP is read when they start, so they restart one at a time" : ""}, then the console.{" "}
             <button className="primary" onClick={apply} disabled={!ready || busy !== "" || applied} data-testid="signin-apply">
@@ -312,6 +320,8 @@ function Removal({ o, saved, onChange, enabled, result, onDone }: { o: OidcSetti
   const set = (v: Partial<NonNullable<OidcSettings["removal"]>>) => onChange({ ...o, removal: { ...r, ...v } });
   const num = (s: string) => (s.trim() === "" ? undefined : Number(s));
   const p = REMOVAL[o.provider as keyof typeof REMOVAL];
+  const scimOffered = o.provider === "entra" || o.provider === "okta"; /* Keycloak has no SCIM client */
+  const method = scimOffered ? (r.method ?? "api") : "api";
   const [user, setUser] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>();
@@ -340,13 +350,32 @@ function Removal({ o, saved, onChange, enabled, result, onDone }: { o: OidcSetti
       </label>
       {r.enabled && (
         <>
+          {scimOffered && (
+            <div className="segmented" role="radiogroup" data-testid="removal-method">
+              {(
+                [
+                  ["api", `Ask ${p.asks}`],
+                  ["scim", "SCIM: the provider tells Buckets"],
+                  ["both", "Both"],
+                ] as const
+              ).map(([m, label]) => (
+                <label key={m} className={method === m ? "selected" : ""}>
+                  <input type="radio" name="removal-method" checked={method === m} onChange={() => set({ method: m })} data-testid={`removal-method-${m}`} />
+                  {label}
+                </label>
+              ))}
+            </div>
+          )}
+          {method !== "api" && <ScimSetup o={o} r={r} set={set} />}
+          {method !== "scim" && (
           <ol className="steps-list">
             {p.steps.map((s, i) => (
               <li key={i}>{s}</li>
             ))}
           </ol>
+          )}
           <div className="form-grid">
-            {o.provider === "okta" && (
+            {o.provider === "okta" && method !== "scim" && (
               <Field label="Okta API token">
                 <Secret value={r.apiToken} field="openid.removal.apiToken" saved={saved} onChange={(v) => set({ apiToken: v })} testId="removal-api-token" />
               </Field>
@@ -361,6 +390,8 @@ function Removal({ o, saved, onChange, enabled, result, onDone }: { o: OidcSetti
               <input type="number" min={1} value={r.maxPerSync ?? ""} placeholder="10" onChange={(e) => set({ maxPerSync: num(e.target.value) })} data-testid="removal-max" />
             </Field>
           </div>
+          {method !== "scim" && (
+          <>
           <h3>Look up a person</h3>
           <p className="muted">{enabled ? `Asks ${p.asks} about someone with the saved settings, as the sync will.` : "Save the settings first (below)."}</p>
           <div className="inline-form">
@@ -388,7 +419,163 @@ function Removal({ o, saved, onChange, enabled, result, onDone }: { o: OidcSetti
               )}
             </div>
           )}
+          </>
+          )}
+          {method !== "api" && <ScimPeople />}
         </>
+      )}
+    </div>
+  );
+}
+
+// ---- SCIM (docs/design/scim.md) --------------------------------------------------------
+
+const hex = (b: ArrayBuffer) => Array.from(new Uint8Array(b), (x) => x.toString(16).padStart(2, "0")).join("");
+
+const SCIM_GUIDE: Record<string, ReactNode[]> = {
+  entra: [
+    <>
+      In the Entra admin center, open the enterprise application people sign in to Buckets with, then <strong>Provisioning</strong>. Set <strong>Provisioning Mode</strong> to{" "}
+      <strong>Automatic</strong>.
+    </>,
+    <>
+      <strong>Tenant URL:</strong> the URL below. <strong>Secret Token:</strong> the token below. Choose <strong>Test Connection</strong>.
+    </>,
+    <>
+      Under <strong>Mappings → Provision Microsoft Entra ID Users</strong>, change the target attribute <strong>externalId</strong> to come from <strong>objectId</strong> (it is mailNickname by
+      default). Buckets matches people by the ID in their sign-in token, which is objectId.
+    </>,
+    <>
+      Turn <strong>Provisioning Status</strong> on, and scope it to the people assigned to the app. Groups are not provisioned: turn group provisioning off.
+    </>,
+  ],
+  okta: [
+    <>
+      In the Okta Admin Console, open the app integration people sign in to Buckets with. Under <strong>General</strong>, turn on <strong>SCIM provisioning</strong>.
+    </>,
+    <>
+      Under <strong>Provisioning → Integration</strong>: <strong>SCIM connector base URL:</strong> the URL below; <strong>Unique identifier field:</strong> userName;{" "}
+      <strong>Supported actions:</strong> Push New Users and Push Profile Updates; <strong>Authentication Mode:</strong> HTTP Header, with the token below. Choose{" "}
+      <strong>Test Connector Configuration</strong>.
+    </>,
+    <>
+      Under <strong>Provisioning → To App</strong>, turn on <strong>Create Users</strong>, <strong>Update User Attributes</strong> and <strong>Deactivate Users</strong>. Okta sends its user ID as externalId,
+      which is the ID in its sign-in tokens: nothing to map.
+    </>,
+  ],
+};
+
+function ScimSetup({ o, r, set }: { o: OidcSettings; r: NonNullable<OidcSettings["removal"]>; set: (v: Partial<NonNullable<OidcSettings["removal"]>>) => void }) {
+  const [token, setToken] = useState<string | null>(null);
+  const make = async () => {
+    const raw = crypto.getRandomValues(new Uint8Array(32));
+    const t = hex(raw.buffer);
+    const sha = hex(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(t)));
+    // the token in use keeps working while the provider is given the new one
+    set({ scimTokenSha256: sha, scimPreviousSha256: r.scimTokenSha256 || undefined });
+    setToken(t);
+  };
+  return (
+    <div data-testid="scim-setup">
+      <p className="muted">
+        The provider tells Buckets as people are turned off, deleted or unassigned, through SCIM. Their access goes as it would at a sync: temporary credentials at once, access keys off at once
+        and deleted after the days below, with the same limit on how many at once. SCIM never removes anyone it hasn't named.
+      </p>
+      <ol className="steps-list">
+        {(SCIM_GUIDE[o.provider] ?? []).map((s, i) => (
+          <li key={i}>{s}</li>
+        ))}
+      </ol>
+      <div className="form-grid">
+        <label>
+          <span className="field-label">URL</span>
+          <span className="mono" data-testid="scim-url">
+            https://&lt;the servers' S3 host, or spec.scim.ingress.host&gt;/minio/scim/v2
+          </span>
+          <span className="field-help">The provider's cloud must reach it. The BucketsCluster's spec.scim.ingress opens only this path.</span>
+        </label>
+        <label>
+          <span className="field-label">Token</span>
+          {token ? (
+            <span data-testid="scim-token">
+              <Copy text={token} />
+            </span>
+          ) : (
+            <span className="muted" data-testid="scim-token-state">
+              {r.scimTokenSha256 ? "Made, and not shown again." : "None yet."}
+            </span>
+          )}
+          <span className="field-help">
+            {token ? "Shown once: paste it into the provider now. The servers keep only its hash." : r.scimTokenSha256 ? "Make a new one to replace it; the old one works until the next." : ""}
+          </span>
+        </label>
+      </div>
+      <button type="button" onClick={() => make()} data-testid="scim-make-token">
+        {r.scimTokenSha256 ? "Make a new token" : "Make a token"}
+      </button>
+    </div>
+  );
+}
+
+// What SCIM has sent, once the settings are applied; and whether the signed-in person is matched.
+function ScimPeople() {
+  const [st, setSt] = useState<ScimStatus | null>(null);
+  const [error, setError] = useState<unknown>();
+  const load = () =>
+    scimStatus()
+      .then(setSt)
+      .catch(setError);
+  useEffect(() => {
+    load();
+  }, []);
+  if (error) return null; // not applied yet, or no permission
+  if (!st) return <Spinner />;
+  if (!st.enabled) return <p className="muted" data-testid="scim-off">SCIM is on once the settings are applied.</p>;
+  const shown = st.people.filter((p) => !p.deleted);
+  return (
+    <div data-testid="scim-people">
+      <h3>People SCIM has sent</h3>
+      <p className="muted">
+        {shown.length} {shown.length === 1 ? "person" : "people"}; {st.matched} of the {st.holders} with Buckets credentials are named by SCIM.
+      </p>
+      {st.holders > 0 && st.matched === 0 && shown.length > 0 && (
+        <p className="banner warn" data-testid="scim-mapping">
+          None of the people SCIM sent match a sign-in token. In Entra ID, map objectId to externalId (step 3 above).
+        </p>
+      )}
+      <p data-testid="scim-me">
+        {st.me.person
+          ? st.me.named
+            ? `You are named by SCIM (${st.me.state}).`
+            : "You aren't named by SCIM yet: the provider sends people on its next cycle, or provision yourself on demand."
+          : "Sign in with the provider to check yourself."}{" "}
+        <button type="button" className="link" onClick={() => load()}>
+          Check again
+        </button>
+      </p>
+      {shown.length > 0 && (
+        <table data-testid="scim-people-table">
+          <thead>
+            <tr>
+              <th>Person</th>
+              <th>externalId</th>
+              <th>State</th>
+              <th>Credentials</th>
+            </tr>
+          </thead>
+          <tbody>
+            {shown.map((p) => (
+              <tr key={p.id}>
+                <td>{p.displayName || p.userName}</td>
+                <td className="mono">{p.externalId}</td>
+                <td>
+                  <span className={`pill ${p.active ? "ok" : "warn"}`}>{p.active ? "active" : "off"}</span>
+                </td>
+                <td>{p.credentials}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       )}
     </div>
   );

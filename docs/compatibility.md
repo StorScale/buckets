@@ -41,6 +41,7 @@ lost, never data:
 - **An upload's object**, recorded in the upload's metadata (`x-minio-internal-buckets-upload-key`) so the rule
   above can find it. The finished object doesn't keep it.
 - **The audit log's local copy**, in `.buckets-audit` at each drive's root, which no bucket name can be.
+- **SCIM's records**, in `.minio.sys/buckets/scim/users.json`. MinIO has no SCIM endpoint.
 
 ## What is not promised
 

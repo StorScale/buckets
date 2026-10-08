@@ -41,18 +41,27 @@ bool buckets_idsync_settings_from_env(buckets_idsync_settings *s, char *err, siz
   memset(s, 0, sizeof(*s));
   const char *p = env("BUCKETS_OPENID_SYNC_PROVIDER");
   if (!p) return true;
-  if (strcmp(p, "entra") != 0 && strcmp(p, "keycloak") != 0 && strcmp(p, "okta") != 0) {
-    snprintf(err, errlen, "BUCKETS_OPENID_SYNC_PROVIDER %s: entra, keycloak or okta", p);
+  if (strcmp(p, "entra") != 0 && strcmp(p, "keycloak") != 0 && strcmp(p, "okta") != 0 && strcmp(p, "scim") != 0) {
+    snprintf(err, errlen, "BUCKETS_OPENID_SYNC_PROVIDER %s: entra, keycloak, okta or scim", p);
     return false;
   }
   snprintf(s->provider, sizeof(s->provider), "%s", p);
+  const char *sc = env("BUCKETS_SCIM");
+  s->scim = provider_is(s, "scim") || (sc && (!strcmp(sc, "on") || !strcmp(sc, "true") || !strcmp(sc, "1")));
 #define NEED(field, name) copy(s->field, sizeof(s->field), env(name), name, err, errlen)
   const char *u = env("BUCKETS_OPENID_SYNC_URL");
   if (u && strlen(u) < sizeof(s->url)) { /* without trailing slashes, for building URLs and the issuer */
     snprintf(s->url, sizeof(s->url), "%s", u);
     for (size_t n = strlen(s->url); n && s->url[n - 1] == '/';) s->url[--n] = '\0';
   }
-  if (provider_is(s, "entra")) {
+  if (provider_is(s, "scim")) { /* nothing to ask: whose tokens SCIM's externalIds are */
+    const char *t = env("BUCKETS_OPENID_SYNC_TENANT_ID");
+    if (t ? !NEED(tenant, "BUCKETS_OPENID_SYNC_TENANT_ID") : !NEED(issuer, "BUCKETS_OPENID_SYNC_ISSUER")) {
+      snprintf(err, errlen, "BUCKETS_OPENID_SYNC_PROVIDER scim needs BUCKETS_OPENID_SYNC_TENANT_ID (Entra ID) or "
+                            "BUCKETS_OPENID_SYNC_ISSUER (the tokens' issuer, such as Okta's)");
+      return false;
+    }
+  } else if (provider_is(s, "entra")) {
     if (!NEED(tenant, "BUCKETS_OPENID_SYNC_TENANT_ID") || !NEED(client_id, "BUCKETS_OPENID_SYNC_CLIENT_ID") ||
         !NEED(client_secret, "BUCKETS_OPENID_SYNC_CLIENT_SECRET"))
       return false;
@@ -117,7 +126,8 @@ bool buckets_idsync_settings_from_env(buckets_idsync_settings *s, char *err, siz
 
 const char *buckets_idsync_person_of(const buckets_idsync_settings *s, const char *tid, const char *oid,
                                      const char *iss, const char *sub) {
-  if (provider_is(s, "entra")) return tid && oid && *oid && strcmp(tid, s->tenant) == 0 ? oid : NULL;
+  if (provider_is(s, "entra") || (provider_is(s, "scim") && *s->tenant))
+    return tid && oid && *oid && strcmp(tid, s->tenant) == 0 ? oid : NULL;
   if (!*s->provider) return NULL;
   /* Keycloak and Okta: the token's subject, from this issuer (a trailing slash aside) */
   if (!iss || !sub || !*sub) return NULL;
