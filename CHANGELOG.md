@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.16.0] - 2026-10-07
+
 ### Added
 - **A lifecycle and replication editor** in each bucket's settings ([docs/lifecycle-replication.md](docs/lifecycle-replication.md), [the design](docs/design/lifecycle-replication-editor.md)), instead of XML and `mc` commands.
   - **Lifecycle:** rules shown in plain words and edited in a form: which objects, deletion, moving to a tier, old versions, delete markers and incomplete uploads. Deleting every version must be confirmed. **Preview** shows how many versions and how much data the draft would delete or move on the next run, within 7 days and within 30 days, without acting (`POST buckets/lifecycle-preview`). Warnings before saving say when a rule will open a ransomware alert, when object lock keeps versions anyway, and when a rule does nothing. XML the form can't show stays as XML.
