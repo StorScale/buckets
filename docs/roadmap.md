@@ -1,6 +1,6 @@
 # Buckets Roadmap
 
-As of 2026-10-07 · Russell Myers
+As of 2026-10-10 · Russell Myers
 
 ## Summary
 
@@ -110,6 +110,14 @@ A C server in a distroless image should use less memory than the Go original, wh
 - Publish the method and the raw results with each comparison.
 - Market footprint or speed only where the numbers show a clear difference.
 
+## Under consideration for 2.0: elastic pools
+
+Not agreed or scheduled: written down to be weighed. Today a pool's drives are fixed when it is created, as in MinIO, so storage grows only by a whole new pool, and a drive leaves only by failing. An elastic pool would place objects through a map of placement groups instead, so drives could be added or drained one at a time, with drives of any size filled by weight.
+
+- [ ] **Elastic pools** ([the design](design/elastic-pools.md)): add or drain single drives and servers, with a preview of what moves; moves throttled and resumable; failure domains kept.
+- It leaves MinIO's on-disk format: an elastic pool cannot be rolled back to MinIO. Existing pools stay MinIO pools, and a cluster moves only by choosing to decommission them into an elastic pool, so the 1.x promise holds for everyone else.
+- The largest new pieces are agreement on the map between servers, and moving data safely while it is read and written.
+
 ## Already delivered
 
 The roadmap builds on what exists: MinIO's exact on-disk format, 220 of 222 MinIO API handlers, the operator, and a console deployed apart from storage. This week's work, deployed to the shared dev cluster:
@@ -166,6 +174,7 @@ The roadmap builds on what exists: MinIO's exact on-disk format, 220 of 222 MinI
 - **Keys are the data.** Losing a key store or deleting a key makes objects unreadable. The console refuses to delete keys in use, but backups of the key store are the operator's responsibility, as the migration guide says.
 - **AGPL licensing.** Buckets inherits MinIO's AGPL-3.0. Confirm how that affects internal use and any hosted offering before positioning beyond internal use.
 - **Scope versus team size.** Five phases is a lot for a small team; Phases 0 to 2 are the core, and 3 and 4 can slip.
+- **Elastic pools would end MinIO compatibility for the clusters that use them.** Weigh what single-drive growth is worth against the rollback promise before committing to 2.0.
 - **Identity-provider differences.** Entra ID is proven; Okta and Keycloak send roles in different claims and need their own tests.
 - Who owns the roadmap, and who are the first users outside this team?
 - Should FIPS mode come before Phase 3, if a regulated customer needs it?

@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 792" width="760" height="792" role="img" aria-label="Buckets roadmap: five phases and their gates" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif" font-size="13">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 848" width="760" height="848" role="img" aria-label="Buckets roadmap: five phases and their gates" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif" font-size="13">
 <title>Buckets roadmap: lead with MinIO migration and identity; operations and compliance follow</title>
-<rect width="760" height="792" fill="#ffffff"/>
+<rect width="760" height="848" fill="#ffffff"/>
 <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#9aa2b1"/></marker></defs>
 <text x="24" y="30" font-size="15" font-weight="600" fill="#1d2330">Lead with MinIO migration and identity; operations and compliance follow</text>
 <text x="24" y="52" font-size="11.5" fill="#5f6778">Phases run in order and each gate must pass first. Highlighted: the core, Phases 1 and 2.</text>
@@ -57,4 +57,6 @@
 <text x="338" y="678" fill="#1d2330"><tspan fill="#1f8a4c">✓</tspan> Lifecycle and replication editor (1.16.0)</text>
 <rect x="24" y="724" width="712" height="44" rx="8" fill="none" stroke="#9aa2b1" stroke-width="1.25" stroke-dasharray="5 4"/>
 <text x="40" y="751" fill="#5f6778">Held until benchmarks exist: memory footprint claims (cluster throughput now measured)</text>
+<rect x="24" y="780" width="712" height="44" rx="8" fill="none" stroke="#9aa2b1" stroke-width="1.25" stroke-dasharray="5 4"/>
+<text x="40" y="807" fill="#5f6778">Under consideration for 2.0: elastic pools, drives added or drained one at a time</text>
 </svg>
