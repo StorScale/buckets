@@ -29,10 +29,21 @@ typedef struct {
   long long created, modified; /* unix seconds */
 } buckets_scim_user;
 
+/* A group (roles kept current, docs/design/roles-current.md): its members are users' Buckets IDs. */
+typedef struct {
+  char id[40];
+  char *display_name, *external_id;
+  char **members;
+  size_t nmembers;
+  long long created, modified;
+} buckets_scim_group;
+
 typedef struct {
   long long rev; /* bumped by every change: the sync runs when it moves */
   buckets_scim_user *u;
   size_t n;
+  buckets_scim_group *g;
+  size_t ng;
 } buckets_scim_store;
 
 void buckets_scim_user_free(buckets_scim_user *u);
@@ -66,6 +77,22 @@ typedef struct {
 } buckets_scim_filter;
 bool buckets_scim_filter_parse(const char *s, buckets_scim_filter *out);
 bool buckets_scim_filter_match(const buckets_scim_filter *f, const buckets_scim_user *u);
+
+/* Groups: from a POST or PUT body (displayName required; members' value are user IDs), a PatchOp (members added,
+ * removed, by a filter such as members[value eq "id"], or replaced; displayName and externalId; Entra's and Okta's
+ * forms), the resource as JSON, and lookups. */
+void buckets_scim_group_free(buckets_scim_group *g);
+bool buckets_scim_group_from_json(yyjson_val *body, buckets_scim_group *out, int *status, char *err, size_t errlen);
+bool buckets_scim_group_patch(buckets_scim_group *g, yyjson_val *body, int *status, char *err, size_t errlen);
+void buckets_scim_group_json(const buckets_scim_group *g, const char *base, buckets_buf *out);
+buckets_scim_group *buckets_scim_find_group(buckets_scim_store *s, const char *id);
+/* A group filter: displayName or externalId eq "value"; "" every group. */
+bool buckets_scim_group_filter_match(const buckets_scim_filter *f, const buckets_scim_group *g);
+/* The groups a person (by their token's ID: a user record's externalId) is a member of, as their token would name
+ * them: each group's externalId (Entra: the group's object ID) when by_external, else its displayName (Okta).
+ * Sorted, malloc'd; free with buckets_scim_values_free. */
+size_t buckets_scim_values_of(const buckets_scim_store *s, const char *person, bool by_external, char ***out);
+void buckets_scim_values_free(char **v, size_t n);
 
 /* The User resource, as JSON; base is the endpoint's URL for meta.location ("" leaves it out). */
 void buckets_scim_user_json(const buckets_scim_user *u, const char *base, buckets_buf *out);

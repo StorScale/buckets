@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Roles kept current** ([docs/identity.md](docs/identity.md#roles-kept-current), [design](docs/design/roles-current.md)). A person's access keys and sessions carry the roles of the sign-in they were made at, so someone moved out of a role kept it through a script's key. With **Keep their roles current**, each identity sync reads each person's roles or groups now, from Entra ID (app roles or groups), Keycloak (realm roles, client roles or groups), Okta (groups) or SCIM, and updates their credentials in place:
+  - the same key, secret, expiry and session policy, in the form MinIO reads after a rollback;
+  - someone left with no roles keeps their keys, which allow nothing until a role is given back;
+  - more people losing roles at once than `BUCKETS_OPENID_REMOVE_MAX` are held, as leavers are; roles given are not;
+  - logged, in the audit log as `IdentitySyncRoles`, and counted as `buckets_node_identity_sync_actions_total{action="roles"}`.
+
+  On for settings made now, off for settings saved before until turned on. Entra ID's app roles need the `Application.Read.All` permission. **Look up a person** shows their roles now and the policies they name. The operator passes the setting on (`openid.removal.roles`, `rolesFrom`).
+- **SCIM groups:** `/Groups` takes groups and their members from Entra ID and Okta (create, replace, patch in both providers' forms, delete), in place of "not supported". Where SCIM is the only source, they are the roles kept current. The console's SCIM guides gain the steps.
+
 ## [1.17.1] - 2026-10-08
 
 ### Fixed

@@ -121,6 +121,24 @@ bool buckets_idsync_settings_from_env(buckets_idsync_settings *s, char *err, siz
     snprintf(err, errlen, "BUCKETS_OPENID_REMOVE_MAX %s: a count", rm);
     return false;
   }
+  /* roles kept current (docs/design/roles-current.md) */
+  const char *ro = env("BUCKETS_OPENID_SYNC_ROLES");
+  s->roles = ro && (!strcmp(ro, "on") || !strcmp(ro, "true") || !strcmp(ro, "1"));
+  const char *from = env("BUCKETS_OPENID_SYNC_ROLES_FROM");
+  const char *dflt = provider_is(s, "entra") ? "app-roles" : provider_is(s, "keycloak") ? "realm-roles" : "groups";
+  snprintf(s->roles_from, sizeof(s->roles_from), "%s", from ? from : dflt);
+  static const char *const ok_from[][2] = {{"entra", "app-roles"}, {"entra", "groups"},        {"keycloak", "realm-roles"},
+                                           {"keycloak", "client-roles"}, {"keycloak", "groups"}, {"okta", "groups"},
+                                           {"scim", "groups"}};
+  bool known = false;
+  for (size_t i = 0; i < sizeof(ok_from) / sizeof(ok_from[0]); i++)
+    known |= provider_is(s, ok_from[i][0]) && !strcmp(s->roles_from, ok_from[i][1]);
+  if (s->roles && !known) {
+    snprintf(err, errlen, "BUCKETS_OPENID_SYNC_ROLES_FROM %s: not a source of roles for %s", s->roles_from, s->provider);
+    return false;
+  }
+  const char *app = env("BUCKETS_OPENID_SYNC_APP_ID"); /* the sign-in app (Entra) or client (Keycloak) */
+  snprintf(s->app_id, sizeof(s->app_id), "%s", app ? app : s->client_id);
   return true;
 }
 
@@ -335,11 +353,21 @@ void buckets_idsync_held_free(buckets_idsync_held *h, size_t n) {
 
 /* ---- the provider's API ------------------------------------------------------------------------- */
 
+typedef struct {
+  char *principal, *value;
+} role_grant;
+
 struct buckets_idsync_client {
   buckets_idsync_settings s;
   pthread_mutex_t mu;
   char *token;
   long long token_until;
+  /* Entra app roles: who holds which of the sign-in app's roles (users and groups), for a minute */
+  role_grant *grants;
+  size_t ngrants;
+  bool group_grants;
+  long long grants_until;
+  char *kc_client; /* Keycloak: the sign-in client's ID (UUID), for its roles */
 };
 
 buckets_idsync_client *buckets_idsync_client_new(const buckets_idsync_settings *s) {
@@ -354,6 +382,12 @@ void buckets_idsync_client_free(buckets_idsync_client *c) {
   memset(c->s.client_secret, 0, sizeof(c->s.client_secret));
   memset(c->s.api_token, 0, sizeof(c->s.api_token));
   free(c->token);
+  for (size_t i = 0; i < c->ngrants; i++) {
+    free(c->grants[i].principal);
+    free(c->grants[i].value);
+  }
+  free(c->grants);
+  free(c->kc_client);
   pthread_mutex_destroy(&c->mu);
   free(c);
 }
@@ -515,4 +549,340 @@ buckets_idsync_state buckets_idsync_client_lookup(buckets_idsync_client *c, cons
   }
   pthread_mutex_unlock(&c->mu);
   return st;
+}
+
+/* ---- roles kept current (docs/design/roles-current.md) ----------------------------------------- */
+
+typedef struct {
+  char **v;
+  size_t n;
+} strs;
+
+static void strs_add(strs *a, const char *v) {
+  if (!v || !*v) return;
+  for (size_t i = 0; i < a->n; i++)
+    if (!strcmp(a->v[i], v)) return;
+  a->v = buckets_xrealloc(a->v, (a->n + 1) * sizeof(*a->v));
+  a->v[a->n++] = buckets_xstrdup(v);
+}
+
+static void strs_free(strs *a) {
+  for (size_t i = 0; i < a->n; i++) free(a->v[i]);
+  free(a->v);
+  memset(a, 0, sizeof(*a));
+}
+
+void buckets_idsync_values_free(char **v, size_t n) {
+  for (size_t i = 0; i < n; i++) free(v[i]);
+  free(v);
+}
+
+/* Every page of a GET (Graph's @odata.nextLink followed); each page's root to fn. false (and err) on an error. */
+static bool get_pages(buckets_idsync_client *c, const char *first, bool (*fn)(void *ud, yyjson_val *root), void *ud,
+                      int *status, char *err, size_t errlen) {
+  char *path = buckets_xstrdup(first);
+  bool ok = true;
+  for (int pages = 0; path && pages < 1000; pages++) {
+    buckets_http_result r;
+    if (!client_get(c, path, &r, err, errlen)) {
+      ok = false;
+      break;
+    }
+    *status = r.status;
+    yyjson_doc *d = r.status == 200 ? yyjson_read(r.body.data ? r.body.data : "", r.body.len, 0) : NULL;
+    if (!d) {
+      snprintf(err, errlen, "%s answered %d for %s: %.200s", provider_title(&c->s), r.status, path,
+               r.body.data ? r.body.data : "");
+      buckets_http_result_free(&r);
+      ok = false;
+      break;
+    }
+    ok = fn(ud, yyjson_doc_get_root(d));
+    const char *next = yyjson_get_str(yyjson_obj_get(yyjson_doc_get_root(d), "@odata.nextLink"));
+    free(path);
+    path = NULL;
+    size_t gl = strlen(c->s.graph_url);
+    if (ok && next && provider_is(&c->s, "entra") && !strncmp(next, c->s.graph_url, gl)) path = buckets_xstrdup(next + gl);
+    else if (ok && next && provider_is(&c->s, "entra") && !strncmp(next, "https://graph.microsoft.com", 27))
+      path = buckets_xstrdup(next + 27);
+    yyjson_doc_free(d);
+    buckets_http_result_free(&r);
+    if (!ok) break;
+  }
+  free(path);
+  return ok;
+}
+
+typedef struct {
+  strs *out;
+  const char *key;      /* a field of each element ("id", "name", "path"), or NULL for Okta's profile.name */
+  const char *odata;    /* only elements of this @odata.type, or NULL */
+  role_grant **grants;  /* app role assignments: principal and role ID */
+  size_t *ngrants;
+  bool *groups;
+} collect_ctx;
+
+static yyjson_val *items_of(yyjson_val *root) { return yyjson_is_arr(root) ? root : yyjson_obj_get(root, "value"); }
+
+static bool collect(void *ud, yyjson_val *root) {
+  collect_ctx *x = ud;
+  size_t i, n;
+  yyjson_val *e;
+  yyjson_arr_foreach(items_of(root), i, n, e) {
+    if (x->odata && strcmp(yyjson_get_str(yyjson_obj_get(e, "@odata.type")) ? yyjson_get_str(yyjson_obj_get(e, "@odata.type")) : "", x->odata))
+      continue;
+    if (x->grants) { /* appRoleAssignedTo: principalId, principalType, appRoleId */
+      const char *pid = yyjson_get_str(yyjson_obj_get(e, "principalId")), *rid = yyjson_get_str(yyjson_obj_get(e, "appRoleId"));
+      const char *pt = yyjson_get_str(yyjson_obj_get(e, "principalType"));
+      if (!pid || !rid) continue;
+      *x->grants = buckets_xrealloc(*x->grants, (*x->ngrants + 1) * sizeof(**x->grants));
+      (*x->grants)[(*x->ngrants)++] = (role_grant){buckets_xstrdup(pid), buckets_xstrdup(rid)};
+      if (pt && !strcmp(pt, "Group")) *x->groups = true;
+      continue;
+    }
+    const char *v = x->key ? yyjson_get_str(yyjson_obj_get(e, x->key))
+                           : yyjson_get_str(yyjson_obj_get(yyjson_obj_get(e, "profile"), "name"));
+    strs_add(x->out, v);
+  }
+  return true;
+}
+
+/* Entra: the sign-in app's roles and who holds them, refreshed after a minute. */
+static bool entra_grants(buckets_idsync_client *c, int *status, char *err, size_t errlen) {
+  long long now = (long long)time(NULL);
+  if (c->grants_until > now) return true;
+  buckets_buf p = BUCKETS_BUF_INIT;
+  buckets_buf_append_c(&p, "/v1.0/servicePrincipals(appId='");
+  buckets_url_encode(&p, c->s.app_id, false);
+  buckets_buf_append_c(&p, "')?$select=id,appRoles");
+  buckets_http_result r;
+  bool ok = client_get(c, p.data, &r, err, errlen);
+  buckets_buf_free(&p);
+  if (!ok) return false;
+  *status = r.status;
+  yyjson_doc *d = r.status == 200 ? yyjson_read(r.body.data ? r.body.data : "", r.body.len, 0) : NULL;
+  if (!d) {
+    snprintf(err, errlen, "Microsoft Graph answered %d for the sign-in app %s (needs Application.Read.All): %.200s", r.status,
+             c->s.app_id, r.body.data ? r.body.data : "");
+    buckets_http_result_free(&r);
+    return false;
+  }
+  yyjson_val *sp = yyjson_doc_get_root(d);
+  char spid[64];
+  snprintf(spid, sizeof(spid), "%s", yyjson_get_str(yyjson_obj_get(sp, "id")) ? yyjson_get_str(yyjson_obj_get(sp, "id")) : "");
+  /* role IDs to values */
+  strs ids = {0}, vals = {0};
+  size_t i, n;
+  yyjson_val *ar;
+  yyjson_arr_foreach(yyjson_obj_get(sp, "appRoles"), i, n, ar) {
+    const char *id = yyjson_get_str(yyjson_obj_get(ar, "id")), *v = yyjson_get_str(yyjson_obj_get(ar, "value"));
+    if (!id || !v || !*v || !yyjson_get_bool(yyjson_obj_get(ar, "isEnabled"))) continue;
+    ids.v = buckets_xrealloc(ids.v, (ids.n + 1) * sizeof(char *));
+    ids.v[ids.n++] = buckets_xstrdup(id);
+    vals.v = buckets_xrealloc(vals.v, (vals.n + 1) * sizeof(char *));
+    vals.v[vals.n++] = buckets_xstrdup(v);
+  }
+  yyjson_doc_free(d);
+  buckets_http_result_free(&r);
+  role_grant *g = NULL;
+  size_t ng = 0;
+  bool groups = false;
+  buckets_buf q = BUCKETS_BUF_INIT;
+  buckets_buf_append_c(&q, "/v1.0/servicePrincipals/");
+  buckets_url_encode(&q, spid, false);
+  buckets_buf_append_c(&q, "/appRoleAssignedTo?$select=principalId,principalType,appRoleId&$top=999");
+  collect_ctx x = {.grants = &g, .ngrants = &ng, .groups = &groups};
+  ok = get_pages(c, q.data, collect, &x, status, err, errlen);
+  buckets_buf_free(&q);
+  if (ok) { /* role IDs become their values; the default access (no value) drops out */
+    size_t k = 0;
+    for (size_t j = 0; j < ng; j++) {
+      const char *val = NULL;
+      for (size_t m = 0; m < ids.n && !val; m++)
+        if (!strcmp(ids.v[m], g[j].value)) val = vals.v[m];
+      if (!val) {
+        free(g[j].principal);
+        free(g[j].value);
+        continue;
+      }
+      free(g[j].value);
+      g[k] = (role_grant){g[j].principal, buckets_xstrdup(val)};
+      k++;
+    }
+    ng = k;
+    for (size_t j = 0; j < c->ngrants; j++) {
+      free(c->grants[j].principal);
+      free(c->grants[j].value);
+    }
+    free(c->grants);
+    c->grants = g;
+    c->ngrants = ng;
+    c->group_grants = groups;
+    c->grants_until = now + 60;
+  } else {
+    for (size_t j = 0; j < ng; j++) {
+      free(g[j].principal);
+      free(g[j].value);
+    }
+    free(g);
+  }
+  strs_free(&ids);
+  strs_free(&vals);
+  return ok;
+}
+
+static bool values_once(buckets_idsync_client *c, const char *id, strs *out, int *status, char *err, size_t errlen) {
+  buckets_buf p = BUCKETS_BUF_INIT;
+  collect_ctx x = {.out = out};
+  bool ok = false;
+  const char *from = c->s.roles_from;
+  if (provider_is(&c->s, "entra") && !strcmp(from, "groups")) {
+    buckets_buf_append_c(&p, "/v1.0/users/");
+    buckets_url_encode(&p, id, false);
+    buckets_buf_append_c(&p, "/transitiveMemberOf?$select=id&$top=999");
+    x.key = "id";
+    x.odata = "#microsoft.graph.group";
+    ok = get_pages(c, p.data, collect, &x, status, err, errlen);
+  } else if (provider_is(&c->s, "entra")) { /* app roles: their own, and their direct groups' */
+    ok = entra_grants(c, status, err, errlen);
+    for (size_t i = 0; ok && i < c->ngrants; i++)
+      if (!strcmp(c->grants[i].principal, id)) strs_add(out, c->grants[i].value);
+    if (ok && c->group_grants) {
+      strs groups = {0};
+      buckets_buf_append_c(&p, "/v1.0/users/");
+      buckets_url_encode(&p, id, false);
+      buckets_buf_append_c(&p, "/memberOf?$select=id&$top=999");
+      collect_ctx gx = {.out = &groups, .key = "id", .odata = "#microsoft.graph.group"};
+      ok = get_pages(c, p.data, collect, &gx, status, err, errlen);
+      for (size_t g = 0; ok && g < groups.n; g++)
+        for (size_t i = 0; i < c->ngrants; i++)
+          if (!strcmp(c->grants[i].principal, groups.v[g])) strs_add(out, c->grants[i].value);
+      strs_free(&groups);
+    }
+  } else if (provider_is(&c->s, "okta")) {
+    buckets_buf_append_c(&p, "/api/v1/users/");
+    buckets_url_encode(&p, id, false);
+    buckets_buf_append_c(&p, "/groups");
+    ok = get_pages(c, p.data, collect, &x, status, err, errlen);
+  } else if (provider_is(&c->s, "keycloak")) {
+    buckets_buf base = BUCKETS_BUF_INIT;
+    buckets_buf_append_c(&base, "/admin/realms/");
+    buckets_url_encode(&base, c->s.realm, false);
+    buckets_buf_append_c(&base, "/users/");
+    buckets_url_encode(&base, id, false);
+    if (!strcmp(from, "groups")) {
+      buckets_buf_appendf(&p, "%s/groups?briefRepresentation=true", base.data);
+      x.key = "path"; /* the group membership mapper's "full group path", Keycloak's default */
+      ok = get_pages(c, p.data, collect, &x, status, err, errlen);
+    } else if (!strcmp(from, "client-roles")) {
+      if (!c->kc_client) { /* the sign-in client's ID (UUID) */
+        buckets_buf q = BUCKETS_BUF_INIT;
+        buckets_buf_append_c(&q, "/admin/realms/");
+        buckets_url_encode(&q, c->s.realm, false);
+        buckets_buf_append_c(&q, "/clients?clientId=");
+        buckets_url_encode(&q, c->s.app_id, false);
+        strs uuid = {0};
+        collect_ctx ux = {.out = &uuid, .key = "id"};
+        ok = get_pages(c, q.data, collect, &ux, status, err, errlen);
+        if (ok && uuid.n) c->kc_client = buckets_xstrdup(uuid.v[0]);
+        else if (ok) {
+          snprintf(err, errlen, "Keycloak has no client %s in realm %s", c->s.app_id, c->s.realm);
+          ok = false;
+        }
+        strs_free(&uuid);
+        buckets_buf_free(&q);
+        if (!ok) {
+          buckets_buf_free(&base);
+          buckets_buf_free(&p);
+          return false;
+        }
+      }
+      buckets_buf_appendf(&p, "%s/role-mappings/clients/", base.data);
+      buckets_url_encode(&p, c->kc_client, false);
+      buckets_buf_append_c(&p, "/composite");
+      x.key = "name";
+      ok = get_pages(c, p.data, collect, &x, status, err, errlen);
+    } else {
+      buckets_buf_appendf(&p, "%s/role-mappings/realm/composite", base.data);
+      x.key = "name";
+      ok = get_pages(c, p.data, collect, &x, status, err, errlen);
+    }
+    buckets_buf_free(&base);
+  } else {
+    snprintf(err, errlen, "no roles to ask %s for", c->s.provider);
+  }
+  buckets_buf_free(&p);
+  return ok;
+}
+
+static int cmp_strp(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+
+void buckets_idsync_client_begin(buckets_idsync_client *c) {
+  pthread_mutex_lock(&c->mu);
+  c->grants_until = 0;
+  pthread_mutex_unlock(&c->mu);
+}
+
+bool buckets_idsync_client_values(buckets_idsync_client *c, const char *id, char ***values, size_t *n, char *err,
+                                  size_t errlen) {
+  *values = NULL;
+  *n = 0;
+  strs out = {0};
+  bool ok = false;
+  pthread_mutex_lock(&c->mu);
+  for (int attempt = 0; attempt < 2; attempt++) {
+    strs_free(&out);
+    int status = 0;
+    if (!client_token(c, attempt > 0, err, errlen)) break;
+    ok = values_once(c, id, &out, &status, err, errlen);
+    if (ok || status != 401 || provider_is(&c->s, "okta")) break; /* 401: a stale token; once more */
+    c->grants_until = 0;
+  }
+  pthread_mutex_unlock(&c->mu);
+  if (!ok) {
+    strs_free(&out);
+    return false;
+  }
+  if (out.n) qsort(out.v, out.n, sizeof(char *), cmp_strp);
+  *values = out.v;
+  *n = out.n;
+  return true;
+}
+
+/* ---- which role changes go ahead --------------------------------------------------------------- */
+
+static bool csv_has(const char *csv, const char *v, size_t vl) {
+  for (const char *p = csv; p && *p;) {
+    const char *e = strchr(p, ',');
+    size_t l = e ? (size_t)(e - p) : strlen(p);
+    if (l == vl && !strncmp(p, v, vl)) return true;
+    p = e ? e + 1 : NULL;
+  }
+  return false;
+}
+
+/* Whether every value of a is in b. */
+static bool csv_within(const char *a, const char *b) {
+  for (const char *p = a; p && *p;) {
+    const char *e = strchr(p, ',');
+    size_t l = e ? (size_t)(e - p) : strlen(p);
+    if (l && !csv_has(b, p, l)) return false;
+    p = e ? e + 1 : NULL;
+  }
+  return true;
+}
+
+bool buckets_idsync_csv_same(const char *a, const char *b) { return csv_within(a, b) && csv_within(b, a); }
+
+bool buckets_idsync_roles_decide(buckets_idsync_role_change *ch, size_t n, long remove_max) {
+  size_t removing = 0;
+  for (size_t i = 0; i < n; i++) {
+    ch[i].removes = !csv_within(ch[i].old_csv, ch[i].new_csv);
+    ch[i].apply = !buckets_idsync_csv_same(ch[i].old_csv, ch[i].new_csv);
+    if (ch[i].apply && ch[i].removes) removing++;
+  }
+  bool held = removing > (size_t)remove_max;
+  for (size_t i = 0; held && i < n; i++)
+    if (ch[i].removes) ch[i].apply = false; /* additions still go ahead */
+  return held;
 }

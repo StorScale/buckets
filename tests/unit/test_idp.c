@@ -243,6 +243,31 @@ static void test_removal(void **state) {
   expect_error("{\"openid\":{\"provider\":\"entra\",\"tenantId\":\"t\",\"clientId\":\"a\",\"clientSecret\":\"b\","
                "\"removal\":{\"enabled\":true,\"maxPerSync\":\"ten\"}}}",
                "most people removed");
+  /* roles kept current: off unless turned on; read from what the claim carries */
+  d = J(entra);
+  assert_true(buckets_idp_removal_of(yyjson_doc_get_root(d), &rm));
+  assert_false(rm.roles);
+  assert_string_equal(rm.roles_from, "app-roles");
+  yyjson_doc_free(d);
+  d = J("{\"openid\":{\"provider\":\"entra\",\"tenantId\":\"t\",\"clientId\":\"a\",\"clientSecret\":\"b\","
+        "\"claimName\":\"groups\",\"removal\":{\"enabled\":true,\"roles\":true}}}");
+  assert_true(buckets_idp_check(yyjson_doc_get_root(d), err, sizeof(err)));
+  assert_true(buckets_idp_removal_of(yyjson_doc_get_root(d), &rm));
+  assert_true(rm.roles);
+  assert_string_equal(rm.roles_from, "groups");
+  yyjson_doc_free(d);
+  d = J("{\"openid\":{\"provider\":\"keycloak\",\"url\":\"https://kc\",\"realm\":\"r\",\"clientId\":\"a\","
+        "\"clientSecret\":\"b\",\"removal\":{\"enabled\":true,\"roles\":true,\"rolesFrom\":\"client-roles\"}}}");
+  assert_true(buckets_idp_check(yyjson_doc_get_root(d), err, sizeof(err)));
+  assert_true(buckets_idp_removal_of(yyjson_doc_get_root(d), &rm));
+  assert_string_equal(rm.roles_from, "client-roles");
+  yyjson_doc_free(d);
+  expect_error("{\"openid\":{\"provider\":\"okta\",\"domain\":\"x.okta.com\",\"clientId\":\"a\",\"clientSecret\":\"b\","
+               "\"removal\":{\"enabled\":true,\"apiToken\":\"t\",\"roles\":true,\"rolesFrom\":\"app-roles\"}}}",
+               "Roles come from");
+  expect_error("{\"openid\":{\"provider\":\"entra\",\"tenantId\":\"t\",\"clientId\":\"a\",\"clientSecret\":\"b\","
+               "\"rolePolicy\":\"readonly\",\"removal\":{\"enabled\":true,\"roles\":true}}}",
+               "role policy");
 }
 
 /* bucketsd's own parser reads every line back as written: values with spaces

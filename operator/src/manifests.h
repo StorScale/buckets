@@ -102,6 +102,8 @@ typedef struct {
     long sync_days, sync_max, sync_interval_s;
     bool sync_api, sync_scim; /* ask the provider's API; take what SCIM pushes (iam/scim.h) */
     char scim_sha256[65], scim_previous[65];
+    bool sync_roles;          /* roles kept current (docs/design/roles-current.md) */
+    char sync_roles_from[16]; /* app-roles, groups, realm-roles, client-roles */
   } identity;
   /* spec.kms.kes: a KES server the operator runs for the cluster, its key
    * store settings in Secret <name>-kms (settings.json, written by the

@@ -447,7 +447,8 @@ static void handle_ldap_test(buckets_console_idp *m, yyjson_val *body, const buc
 
 /* Removing people who leave: one person looked up in Microsoft Graph with the saved settings, which shows the
  * app may read the directory (Graph's User.Read.All). Recorded as the "removal" test. */
-static void handle_removal_test(buckets_console_idp *m, yyjson_val *body, buckets_http_response *resp) {
+static void handle_removal_test(buckets_console_idp *m, yyjson_val *body, const buckets_console_idp_session *sess,
+                                buckets_http_response *resp) {
   const char *user = yyjson_get_str(yyjson_obj_get(body, "user"));
   if (!user || !*user) {
     fail(resp, 400, "InvalidRequest", "Enter a person's sign-in name or ID.");
@@ -470,6 +471,9 @@ static void handle_removal_test(buckets_console_idp *m, yyjson_val *body, bucket
   snprintf(st.realm, sizeof(st.realm), "%s", rm.realm);
   snprintf(st.url, sizeof(st.url), "%s", rm.url);
   snprintf(st.issuer, sizeof(st.issuer), "%s", rm.issuer);
+  st.roles = rm.roles; /* and their roles now, as the sync will keep them (docs/design/roles-current.md) */
+  snprintf(st.roles_from, sizeof(st.roles_from), "%s", rm.roles_from);
+  snprintf(st.app_id, sizeof(st.app_id), "%s", rm.client_id);
   /* Microsoft's endpoints, unless a test points them elsewhere (as the servers' sync allows) */
   const char *login = getenv("BUCKETS_OPENID_SYNC_LOGIN_URL"), *graph = getenv("BUCKETS_OPENID_SYNC_GRAPH_URL");
   snprintf(st.login_url, sizeof(st.login_url), "%s", login && *login ? login : "https://login.microsoftonline.com");
@@ -482,6 +486,10 @@ static void handle_removal_test(buckets_console_idp *m, yyjson_val *body, bucket
   buckets_idsync_person who;
   char err[1024] = "";
   buckets_idsync_state state = buckets_idsync_client_lookup(client, user, &who, err, sizeof(err));
+  char **values = NULL, rerr[1024] = "";
+  size_t nvalues = 0;
+  bool asked = rm.roles && (state == BUCKETS_IDSYNC_ACTIVE || state == BUCKETS_IDSYNC_DISABLED) &&
+               buckets_idsync_client_values(client, who.id, &values, &nvalues, rerr, sizeof(rerr));
   buckets_idsync_client_free(client);
   const char *need = strcmp(rm.provider, "entra") == 0
                          ? "The app needs Microsoft Graph's User.Read.All application permission, with admin consent."
@@ -499,6 +507,20 @@ static void handle_removal_test(buckets_console_idp *m, yyjson_val *body, bucket
     yyjson_mut_obj_add_strcpy(d, o, "id", who.id);
     yyjson_mut_obj_add_strcpy(d, o, "displayName", who.display_name);
     yyjson_mut_obj_add_strcpy(d, o, "userPrincipalName", who.upn);
+    if (asked) {
+      yyjson_mut_val *roles = yyjson_mut_obj_add_arr(d, o, "roles");
+      for (size_t i = 0; i < nvalues; i++) yyjson_mut_arr_add_strcpy(d, roles, values[i]);
+      match_policies(sess, d, roles, yyjson_mut_obj_add_arr(d, o, "policies"), yyjson_mut_obj_add_arr(d, o, "unmatched"));
+    } else if (rm.roles) {
+      /* the person was found, so removal works; their roles cannot be read */
+      char msg[1400];
+      snprintf(msg, sizeof(msg), "%s. %s", rerr,
+               strcmp(rm.provider, "entra") == 0 && strcmp(rm.roles_from, "app-roles") == 0
+                   ? "App roles also need Microsoft Graph's Application.Read.All application permission, with admin "
+                     "consent."
+                   : "The roles need the same permission as above.");
+      yyjson_mut_obj_add_strcpy(d, o, "rolesError", msg);
+    }
   } else if (state == BUCKETS_IDSYNC_GONE) {
     yyjson_mut_obj_add_str(d, o, "error",
                            "No one by that name in the directory. The directory can be read: try someone who exists.");
@@ -507,6 +529,7 @@ static void handle_removal_test(buckets_console_idp *m, yyjson_val *body, bucket
     snprintf(msg, sizeof(msg), "%s. %s", err, need);
     yyjson_mut_obj_add_strcpy(d, o, "error", msg);
   }
+  buckets_idsync_values_free(values, nvalues);
   yyjson_mut_obj_add_bool(d, o, "passed", passed);
   /* as the LDAP test: a person not found must not take back a passed test of these settings */
   yyjson_val *prev = tests_of(&c);
@@ -667,7 +690,7 @@ void buckets_console_idp_handle(buckets_console_idp *m, const buckets_http_reque
   yyjson_val *body = yyjson_doc_get_root(bd);
   if (buckets_str_eq_c(req->method, "PUT") && strcmp(sub, "/candidate") == 0) handle_candidate(m, body, resp);
   else if (buckets_str_eq_c(req->method, "POST") && strcmp(sub, "/ldap-test") == 0) handle_ldap_test(m, body, sess, resp);
-  else if (buckets_str_eq_c(req->method, "POST") && strcmp(sub, "/removal-test") == 0) handle_removal_test(m, body, resp);
+  else if (buckets_str_eq_c(req->method, "POST") && strcmp(sub, "/removal-test") == 0) handle_removal_test(m, body, sess, resp);
   else if (buckets_str_eq_c(req->method, "POST") && strcmp(sub, "/apply") == 0) handle_apply(m, body, resp);
   else fail(resp, 404, "NotFound", "unknown identity settings API");
   yyjson_doc_free(bd);

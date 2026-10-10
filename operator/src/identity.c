@@ -96,6 +96,7 @@ static bool sync_settings(op_ctx *o, bc_spec *s, yyjson_val *settings, const cha
                       rm.max_per_sync, rm.interval_minutes);
   if (rm.scim || !rm.api) /* SCIM's settings change the hash only when SCIM is used: no restart for others */
     buckets_buf_appendf(&b, "|scim:%d:%d:%s:%s", rm.api, rm.scim, rm.scim_sha256, rm.scim_previous);
+  if (rm.roles) buckets_buf_appendf(&b, "|roles:%s", rm.roles_from); /* only when on: no restart for others */
   char hash[17];
   hash16(b.data, b.len, hash);
   memset(b.data, 0, b.len);
@@ -129,6 +130,8 @@ static bool sync_settings(op_ctx *o, bc_spec *s, yyjson_val *settings, const cha
   s->identity.sync_scim = rm.scim;
   snprintf(s->identity.scim_sha256, sizeof(s->identity.scim_sha256), "%s", rm.scim_sha256);
   snprintf(s->identity.scim_previous, sizeof(s->identity.scim_previous), "%s", rm.scim_previous);
+  s->identity.sync_roles = rm.roles;
+  snprintf(s->identity.sync_roles_from, sizeof(s->identity.sync_roles_from), "%s", rm.roles_from);
   return true;
 }
 

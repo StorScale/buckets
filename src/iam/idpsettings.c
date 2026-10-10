@@ -215,6 +215,16 @@ static bool check_openid(yyjson_val *s, char *err, size_t errlen) {
     yyjson_val *every = at(s, "openid.removal.intervalMinutes");
     if (every && (!yyjson_is_int(every) || yyjson_get_sint(every) < 1 || yyjson_get_sint(every) > 1440))
       return fail(err, errlen, "Check every 1 to 1440 minutes.");
+    const char *from = str(s, "openid.removal.rolesFrom");
+    if (flag(s, "openid.removal.roles") && *rp)
+      return fail(err, errlen, "Roles are kept current from the provider's claim, and a role policy gives no claim.");
+    static const char *const ok_from[][2] = {{"entra", "app-roles"},       {"entra", "groups"},
+                                             {"keycloak", "realm-roles"},  {"keycloak", "client-roles"},
+                                             {"keycloak", "groups"},       {"okta", "groups"}};
+    bool known = !*from || (scim && !api && strcmp(from, "groups") == 0);
+    for (size_t i = 0; i < sizeof(ok_from) / sizeof(ok_from[0]); i++)
+      known |= strcmp(p->name, ok_from[i][0]) == 0 && strcmp(from, ok_from[i][1]) == 0;
+    if (!known) return fail(err, errlen, "Roles come from app roles or groups (Entra ID), groups (Okta), or realm roles, client roles or groups (Keycloak).");
   }
   const char *ru = str(s, "openid.redirectUri");
   if (*ru) {
@@ -445,6 +455,17 @@ bool buckets_idp_removal_of(yyjson_val *s, buckets_idp_removal *out) {
   out->max_per_sync = yyjson_is_int(max) ? (long)yyjson_get_sint(max) : 10;
   yyjson_val *every = at(s, "openid.removal.intervalMinutes");
   out->interval_minutes = yyjson_is_int(every) ? (long)yyjson_get_sint(every) : 60;
+  /* roles kept current: off unless set, so settings saved before keep what they did; read as the claim is */
+  out->roles = flag(s, "openid.removal.roles");
+  const char *from = str(s, "openid.removal.rolesFrom");
+  if (!*from) {
+    const char *claim = claim_of(s, p);
+    if (strcmp(p->name, "entra") == 0) from = strcmp(claim, "groups") == 0 ? "groups" : "app-roles";
+    else if (strcmp(p->name, "keycloak") == 0) from = strcmp(claim, "groups") == 0 ? "groups" : "realm-roles";
+    else from = "groups";
+  }
+  if (out->scim && !out->api) from = "groups"; /* SCIM alone: the groups it pushes */
+  snprintf(out->roles_from, sizeof(out->roles_from), "%s", from);
   return true;
 }
 

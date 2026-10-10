@@ -68,6 +68,8 @@ typedef struct {
   bool api;  /* ask the provider's API (openid.removal.method api or both; the default) */
   bool scim; /* take what SCIM pushes (scim or both) */
   char scim_sha256[65], scim_previous[65]; /* the SCIM token's SHA-256, and the one it replaces while it rolls out */
+  bool roles;          /* roles kept current (openid.removal.roles; docs/design/roles-current.md) */
+  char roles_from[16]; /* where: app-roles, groups, realm-roles, client-roles (openid.removal.rolesFrom) */
 } buckets_idp_removal;
 bool buckets_idp_removal_of(yyjson_val *settings, buckets_idp_removal *out);
 

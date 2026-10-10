@@ -185,10 +185,93 @@ static void test_json_out(void **state) {
   buckets_buf_free(&b);
 }
 
+static void group_patch(buckets_scim_group *g, const char *body, bool ok) {
+  yyjson_doc *d = doc(body);
+  int st = 0;
+  char err[200];
+  assert_int_equal(buckets_scim_group_patch(g, yyjson_doc_get_root(d), &st, err, sizeof(err)), ok);
+  yyjson_doc_free(d);
+}
+
+/* Groups as Entra ID and Okta push them, and the values a person's token would carry. */
+static void test_groups(void **state) {
+  (void)state;
+  const char *j = "{\"schemas\":[\"urn:ietf:params:scim:schemas:core:2.0:Group\"],\"displayName\":\"Readers\","
+                  "\"externalId\":\"g-obj-1\",\"members\":[{\"value\":\"a\"}]}";
+  yyjson_doc *d = doc(j);
+  buckets_scim_group g = {0};
+  int st = 0;
+  char err[200];
+  assert_true(buckets_scim_group_from_json(yyjson_doc_get_root(d), &g, &st, err, sizeof(err)));
+  yyjson_doc_free(d);
+  assert_string_equal(g.display_name, "Readers");
+  assert_int_equal(g.nmembers, 1);
+  /* Entra: add with a value array, remove by path filter */
+  group_patch(&g,
+              "{\"schemas\":[\"urn:ietf:params:scim:api:messages:2.0:PatchOp\"],\"Operations\":[{\"op\":\"Add\","
+              "\"path\":\"members\",\"value\":[{\"value\":\"b\"},{\"value\":\"a\"}]}]}",
+              true);
+  assert_int_equal(g.nmembers, 2); /* a is not added twice */
+  group_patch(&g,
+              "{\"schemas\":[\"urn:ietf:params:scim:api:messages:2.0:PatchOp\"],\"Operations\":[{\"op\":\"Remove\","
+              "\"path\":\"members[value eq \\\"a\\\"]\"}]}",
+              true);
+  assert_int_equal(g.nmembers, 1);
+  assert_string_equal(g.members[0], "b");
+  /* Okta: replace without a path, the new name and members in the value */
+  group_patch(&g,
+              "{\"schemas\":[\"urn:ietf:params:scim:api:messages:2.0:PatchOp\"],\"Operations\":[{\"op\":\"replace\","
+              "\"value\":{\"displayName\":\"Readers EU\",\"members\":[{\"value\":\"c\"},{\"value\":\"d\"}]}}]}",
+              true);
+  assert_string_equal(g.display_name, "Readers EU");
+  assert_int_equal(g.nmembers, 2);
+  /* remove with a value list */
+  group_patch(&g,
+              "{\"schemas\":[\"urn:ietf:params:scim:api:messages:2.0:PatchOp\"],\"Operations\":[{\"op\":\"remove\","
+              "\"path\":\"members\",\"value\":[{\"value\":\"c\"}]}]}",
+              true);
+  assert_int_equal(g.nmembers, 1);
+  assert_string_equal(g.members[0], "d");
+  group_patch(&g, "{\"Operations\":[{\"op\":\"move\",\"path\":\"members\"}]}", false);
+
+  /* values: members are users' Buckets IDs; the person is named by their token's ID (the user's externalId) */
+  const char *sj = "{\"rev\":1,\"users\":[{\"id\":\"d\",\"externalId\":\"oid-d\",\"userName\":\"dee\",\"active\":true,"
+                   "\"modified\":1}]}";
+  buckets_scim_store s;
+  assert_true(buckets_scim_store_parse(sj, strlen(sj), &s));
+  free(s.g);
+  s.g = calloc(2, sizeof(*s.g));
+  s.g[0] = g;
+  s.g[1] = (buckets_scim_group){.id = "g2"};
+  s.g[1].display_name = strdup("Admins");
+  s.ng = 2;
+  char **v = NULL;
+  assert_int_equal(buckets_scim_values_of(&s, "oid-d", true, &v), 1);
+  assert_string_equal(v[0], "g-obj-1");
+  buckets_scim_values_free(v, 1);
+  assert_int_equal(buckets_scim_values_of(&s, "oid-d", false, &v), 1);
+  assert_string_equal(v[0], "Readers EU");
+  buckets_scim_values_free(v, 1);
+  assert_int_equal(buckets_scim_values_of(&s, "nobody", false, &v), 0);
+  buckets_scim_values_free(v, 0);
+  /* groups survive the store's round trip */
+  buckets_buf b = BUCKETS_BUF_INIT;
+  buckets_scim_store_json(&s, &b);
+  buckets_scim_store s2;
+  assert_true(buckets_scim_store_parse(b.data, b.len, &s2));
+  assert_int_equal(s2.ng, 2);
+  assert_string_equal(s2.g[0].external_id, "g-obj-1");
+  assert_int_equal(s2.g[0].nmembers, 1);
+  buckets_buf_free(&b);
+  buckets_scim_store_free(&s2);
+  buckets_scim_store_free(&s);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_entra),           cmocka_unit_test(test_okta),     cmocka_unit_test(test_filters),
       cmocka_unit_test(test_store_and_state), cmocka_unit_test(test_json_out),
+      cmocka_unit_test(test_groups),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

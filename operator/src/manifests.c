@@ -526,6 +526,10 @@ static bc_object statefulset(const bc_spec *s, size_t pi, const char *volumes, c
     env_value(d, env, "BUCKETS_OPENID_REMOVE_AFTER", n);
     snprintf(n, sizeof(n), "%ld", s->identity.sync_max);
     env_value(d, env, "BUCKETS_OPENID_REMOVE_MAX", n);
+    if (s->identity.sync_roles) {
+      env_value(d, env, "BUCKETS_OPENID_SYNC_ROLES", "on");
+      env_value(d, env, "BUCKETS_OPENID_SYNC_ROLES_FROM", s->identity.sync_roles_from);
+    }
   }
   if (s->kes.active) {
     char ep[512], idn[128];

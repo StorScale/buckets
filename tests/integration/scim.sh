@@ -3,7 +3,7 @@
 #   - SCIM only: Entra's provisioning sequence (look up, create, turn off with its "Replace"/"False" patch, turn on,
 #     delete) and Okta's PUT turn the people's access keys off and on within seconds; a deleted person's keys go
 #     after the grace period; someone SCIM never named is left alone; everyone unassigned at once is held by the
-#     safety limit; a wrong token is refused and counted; Groups are not supported; changes are audited; the admin
+#     safety limit; a wrong token is refused and counted; pushed groups keep roles current; changes are audited; the admin
 #     API's view (buckets/scim) shows the people and who is matched.
 #   - SCIM beside Entra's API: what SCIM says wins for the people it names, Graph answers for the rest, and the
 #     previous token still works while a new one rolls out.
@@ -103,7 +103,7 @@ stop_all() { for n in 1 2 3 4; do kill "${PIDS[$n]}"; wait "${PIDS[$n]}" 2>/dev/
 ready() { [[ $(curl -s -o /dev/null -w "%{http_code}" "$(ep "$1")/minio/health/cluster") == 200 ]]; }
 all_ready() { ready 1 && ready 2 && ready 3 && ready 4; }
 SCIM_ONLY=(BUCKETS_OPENID_SYNC_PROVIDER=scim BUCKETS_OPENID_SYNC_TENANT_ID=$TENANT BUCKETS_SCIM_TOKEN_SHA256=$TOKEN_SHA
-  BUCKETS_OPENID_SYNC_INTERVAL=3)
+  BUCKETS_OPENID_SYNC_INTERVAL=3 BUCKETS_OPENID_SYNC_ROLES=on)
 for n in 1 2 3 4; do start "$n" "${SCIM_ONLY[@]}"; done
 until_true all_ready 300
 R=(--aws-sigv4 "aws:amz:us-east-1:s3" --user $AKR:$SKR)
@@ -136,6 +136,7 @@ sign_in() {
 }
 sts_code() { curl -s -o /dev/null -w '%{http_code}' --aws-sigv4 "aws:amz:us-east-1:s3" --user "$1:$2" -H "X-Amz-Security-Token: $3" "$(ep 1)/docs/a.txt"; }
 key_code() { curl -s -o /dev/null -w '%{http_code}' --aws-sigv4 "aws:amz:us-east-1:s3" --user "$1:${1}secret123" "$(ep 2)/docs/a.txt"; }
+key_write() { echo x | curl -s -o /dev/null -w '%{http_code}' --aws-sigv4 "aws:amz:us-east-1:s3" --user "$1:${1}secret123" -X PUT --data-binary @- "$(ep 3)/docs/$1.txt"; }
 new_key() { mc admin accesskey create "$1" --access-key "$2" --secret-key "${2}secret123" >/dev/null; }
 key_status() { mc admin accesskey info rootalias "$1" --json 2>/dev/null | sed -n 's/.*"accountStatus":"\([a-z]*\)".*/\1/p'; }
 user_json() { printf '{"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"%s","externalId":"%s","active":true,"displayName":"%s","emails":[{"primary":true,"type":"work","value":"%s"}]}' "$1" "$2" "$1" "$1"; }
@@ -146,7 +147,7 @@ echo "== discovery and the token"
 expect "ServiceProviderConfig, from any server" "$(scim 3 GET /ServiceProviderConfig | body | q "(d['patch']['supported'], d['bulk']['supported'], d['filter']['supported'])")" "(True, False, True)"
 expect "a wrong token is refused" "$(scim 2 GET /Users '' wrong-token | status)" 401
 expect "no token at all" "$(curl -s -o /dev/null -w '%{http_code}' "$(ep 2)/minio/scim/v2/Users")" 401
-expect "Groups are not supported" "$(scim 1 GET /Groups | status)" 501
+expect "no groups yet" "$(scim 1 GET /Groups | body | q "d['totalResults']")" 0
 expect "the refusal is counted" \
   "$(curl -s "$(ep 2)/minio/v2/metrics/node" | awk '/^buckets_scim_requests_total.*result="unauthorized"/ {s += $2} END {print s}')" 2
 
@@ -183,6 +184,23 @@ scim 1 PATCH "/Users/$ANN_ID" '{"schemas":["urn:ietf:params:scim:api:messages:2.
 until_true "[[ \$(key_status KEYANN0001) == on ]]" 100 || true
 expect "ann's key back on" "$(key_code KEYANN0001)" 200
 
+echo "== groups pushed: roles follow (roles kept current), people SCIM never named untouched"
+expect "ann's key writes, as readwrite" "$(key_write KEYANN0001)" 200
+# everyone SCIM names is in a group from the start: in no group means no roles, as their tokens would say
+W=$(scim 1 POST /Groups "{\"schemas\":[\"urn:ietf:params:scim:schemas:core:2.0:Group\"],\"displayName\":\"Writers\",\"externalId\":\"readwrite\",\"members\":[{\"value\":\"$BOB_ID\"},{\"value\":\"$CAT_ID\"}]}" | body | q "d['id']")
+G=$(scim 1 POST /Groups "{\"schemas\":[\"urn:ietf:params:scim:schemas:core:2.0:Group\"],\"displayName\":\"Readers\",\"externalId\":\"readonly\",\"members\":[{\"value\":\"$ANN_ID\"}]}" | body | q "d['id']")
+expect "the group, by its displayName" "$(scim 4 GET '/Groups?filter=displayName+eq+%22readers%22' | body | q "(d['totalResults'], d['Resources'][0]['members'][0]['value'] == '$ANN_ID')")" "(1, True)"
+until_true "[[ \$(key_write KEYANN0001) == 403 ]]" 100 || true
+expect "ann, in Readers (readonly), may no longer write" "$(key_write KEYANN0001)" 403
+expect "but reads" "$(key_code KEYANN0001)" 200
+expect "zed, never named by SCIM, keeps his roles" "$(key_write KEYZED0001)" 200
+expect "Entra's member removal is taken" "$(scim 2 PATCH "/Groups/$G" "{\"schemas\":[\"urn:ietf:params:scim:api:messages:2.0:PatchOp\"],\"Operations\":[{\"op\":\"Remove\",\"path\":\"members[value eq \\\"$ANN_ID\\\"]\"}]}" | status)" 200
+until_true "[[ \$(key_code KEYANN0001) == 403 ]]" 100 || true
+expect "ann, in no group now, has no roles: her key reads nothing" "$(key_code KEYANN0001)" 403
+scim 3 PATCH "/Groups/$G" "{\"schemas\":[\"urn:ietf:params:scim:api:messages:2.0:PatchOp\"],\"Operations\":[{\"op\":\"Add\",\"path\":\"members\",\"value\":[{\"value\":\"$ANN_ID\"}]}]}" >/dev/null
+until_true "[[ \$(key_code KEYANN0001) == 200 ]]" 100 || true
+expect "added back (Okta's and Entra's add): she reads again" "$(key_code KEYANN0001)" 200
+
 echo "== Okta's way, a PUT with active false: bob's key goes"
 expect "the PUT is taken" "$(scim 2 PUT "/Users/$BOB_ID" '{"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"bob@contoso.com","externalId":"o-bob","active":false}' | body | q "d['active']")" False
 until_true "[[ \$(key_status KEYBOB0001) == off ]]" 100 || true
@@ -198,13 +216,17 @@ expect "and deleted after the grace period (8s here)" "$(key_status KEYCAT0001)"
 
 echo "== everyone unassigned at once is held by the safety limit"
 for p in dee eve fay; do
-  scim 1 POST /Users "$(user_json $p@contoso.com o-$p)" >/dev/null
+  id=$(scim 1 POST /Users "$(user_json $p@contoso.com o-$p)" | body | q "d['id']")
+  scim 2 PATCH "/Groups/$W" "{\"schemas\":[\"urn:ietf:params:scim:api:messages:2.0:PatchOp\"],\"Operations\":[{\"op\":\"add\",\"value\":{\"members\":[{\"value\":\"$id\"}]}}]}" >/dev/null
   sign_in "$p" "o-$p"; new_key "$p" "KEY${p^^}0001"
 done
-for p in dee eve fay; do
-  id=$(scim 4 GET "/Users?filter=externalId+eq+%22o-$p%22" | body | q "d['Resources'][0]['id']")
-  scim 4 PATCH "/Users/$id" "$(entra_off False)" >/dev/null
-done
+for p in DEE EVE FAY; do until_true "[[ \$(key_code KEY${p}0001) == 200 ]]" 100 || true; done
+# their IDs first, then the three changes together, so one look at SCIM's changes sees all three
+ids=()
+for p in dee eve fay; do ids+=("$(scim 4 GET "/Users?filter=externalId+eq+%22o-$p%22" | body | q "d['Resources'][0]['id']")"); done
+offs=()
+for id in "${ids[@]}"; do scim 4 PATCH "/Users/$id" "$(entra_off False)" >/dev/null & offs+=($!); done
+wait "${offs[@]}"
 until_true "cat $WORK/log* | grep -q 'more than BUCKETS_OPENID_REMOVE_MAX'" 100 || true
 expect "three at once, more than 2: held, and logged" "$(cat "$WORK"/log* | grep -c 'more than BUCKETS_OPENID_REMOVE_MAX' | awk '{print ($1 > 0)}')" 1
 expect "their keys still work" "$(key_code KEYDEE0001) $(key_code KEYEVE0001) $(key_code KEYFAY0001)" "200 200 200"

@@ -211,6 +211,51 @@ and `BUCKETS_OPENID_REMOVE_MAX` change the defaults. LDAP needs none of this:
 users removed from the directory lose their credentials at the hourly LDAP
 sync, as with MinIO.
 
+### Roles kept current
+
+A sign-in token's roles or groups are copied into every credential the person
+makes: their temporary credentials, and their access keys, which can live for
+years. So someone moved out of a role in the provider would keep it through a
+script's key. With **Keep their roles current** (beside **People who leave**),
+each sync also reads what each person holds now, and where it differs, their
+credentials follow:
+
+- **Access keys and sessions are updated in place:** the same key and secret,
+  expiry and session policy, now carrying the new roles. Scripts keep working
+  with what the person is allowed now. The stored form is MinIO's, so MinIO
+  reads it after a rollback.
+- **Someone left with no roles** keeps their credentials, which then allow
+  nothing until a role is given back. Leaving is what removes access.
+- **More people losing roles at once than the limit** (the same limit as for
+  leaving): no roles are taken that run, and `BucketsIdentitySyncHeld` fires.
+  Roles given are not held.
+- **The provider can't answer for someone:** their credentials are left as they
+  are.
+- Each change is in the log (`identity sync: roles of <person> changed`), in
+  the audit log (`IdentitySyncRoles`), and counted in
+  `buckets_node_identity_sync_actions_total{action="roles"}`.
+
+It is on for settings made now, and off for settings saved before 1.18.0 until
+turned on, since it changes what existing keys allow. **Roles come from** says
+what the token's claim carries:
+
+| Provider | Roles come from | Read with |
+| --- | --- | --- |
+| Entra ID | App roles (`roles` claim) | **Application.Read.All** as well as User.Read.All: the app's role assignments, to people and to the groups they are direct members of, as Entra issues the claim. Reading each user's own assignments would need Directory.Read.All instead. |
+| Entra ID | Groups (`groups` claim) | User.Read.All: their groups, nested ones included, by object ID |
+| Keycloak | Realm roles, the client's roles, or groups | view-users |
+| Okta | Groups | the API token |
+
+**Look up a person** then also shows their roles now and the Buckets policies
+those name.
+
+Without the console: `BUCKETS_OPENID_SYNC_ROLES=on`, and
+`BUCKETS_OPENID_SYNC_ROLES_FROM` (`app-roles`, `groups`, `realm-roles` or
+`client-roles`; Entra ID's default is `app-roles`, Keycloak's `realm-roles`,
+Okta's `groups`). Entra's app roles are those of the sign-in app
+(`BUCKETS_OPENID_SYNC_CLIENT_ID`) unless `BUCKETS_OPENID_SYNC_APP_ID` names
+another, as do Keycloak's client roles.
+
 ## SCIM
 
 With SCIM, Entra ID or Okta tells Buckets when someone is turned off, deleted or
@@ -259,8 +304,20 @@ Keycloak has no SCIM client; use the sync.
 
 People are matched by `externalId` only. That is the ID in their sign-in token:
 Entra's `oid`, or Okta's user ID, its tokens' `sub`. User names aren't used,
-because a new hire can be given a leaver's address. Groups aren't provisioned;
-turn group provisioning off.
+because a new hire can be given a leaver's address.
+
+**Groups** keep roles current ([above](#roles-kept-current)) where SCIM is the
+only source. Provision them only then; otherwise turn group provisioning off.
+- **Entra ID:** under **Mappings → Provision Microsoft Entra ID Groups**, turn
+  it on and map **objectId** to **externalId**, as the `groups` claim names
+  groups by object ID. Assign the groups to the app.
+- **Okta:** under **Push Groups**, push the groups whose names are Buckets
+  policies or teams. Okta's groups claim names groups by name.
+
+Under **SCIM** alone, a person's roles are then the groups SCIM says they are
+in; someone in no group has none. Push the groups before turning roles on, or
+the safety limit holds everything back. With **Both**, the provider's API is
+asked instead.
 
 ### Reaching it
 
