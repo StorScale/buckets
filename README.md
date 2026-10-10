@@ -4,7 +4,7 @@
 
 S3-compatible object storage written in C, built to run natively on Kubernetes. It is a rewrite of MinIO's last public release (`RELEASE.2025-10-15T17-29-55Z`; the upstream project was archived in April 2026).
 
-**Status: 1.18.0. All build phases are done:** Buckets implements 220 of MinIO's 222 API handlers (the other two are dropped on purpose) in MinIO's exact on-disk format, on anything from one drive to multi-pool clusters of nodes:
+**Status: 1.18.1. All build phases are done:** Buckets implements 220 of MinIO's 222 API handlers (the other two are dropped on purpose) in MinIO's exact on-disk format, on anything from one drive to multi-pool clusters of nodes:
 - erasure coding, bitrot protection and healing; survives drive and node loss
 - IAM, STS, and sign-in with LDAP or OpenID Connect (Microsoft Entra ID with app roles is in use)
 - versioning, object lock, lifecycle, SSE with KMS, compression, replication, tiering, batch jobs, S3 Select, SFTP/FTP
@@ -59,7 +59,7 @@ Or run the published image, without building anything. Every release's images ar
 ```bash
 docker run -p 9000:9000 -v buckets-data:/data \
   -e BUCKETS_ROOT_USER=admin -e BUCKETS_ROOT_PASSWORD=change-me-now \
-  ghcr.io/storscale/bucketsd:1.18.0
+  ghcr.io/storscale/bucketsd:1.18.1
 ```
 
 Several drives form erasure sets, and each ellipsis argument is a server pool:
@@ -83,7 +83,7 @@ The operator runs `BucketsCluster` objects as StatefulSets (one per pool), with 
 
 ```bash
 helm install buckets-operator oci://ghcr.io/storscale/charts/buckets-operator \
-  --version 1.18.0 -n buckets-system --create-namespace
+  --version 1.18.1 -n buckets-system --create-namespace
 kubectl apply -f operator/examples/cluster.yaml     # 4 servers x 4 drives
 kubectl get bucketsclusters                          # SERVERS 4/4, PHASE Ready
 ```

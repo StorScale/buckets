@@ -13,8 +13,8 @@
 #define BC_KIND "BucketsCluster"
 #define BC_S3_PORT 9000
 #define BC_CONSOLE_PORT 9090
-#define BC_SERVER_IMAGE "ghcr.io/storscale/bucketsd:1.18.0"
-#define BC_CONSOLE_IMAGE "ghcr.io/storscale/buckets-console:1.18.0"
+#define BC_SERVER_IMAGE "ghcr.io/storscale/bucketsd:1.18.1"
+#define BC_CONSOLE_IMAGE "ghcr.io/storscale/buckets-console:1.18.1"
 /* spec.fips: the images built for FIPS mode (docs/fips.md), the default images' tags with this suffix */
 #define BC_FIPS_TAG "-fips"
 #define BC_FIPS_DIR "/run/buckets-fips"
@@ -23,7 +23,7 @@
 /* buckets-kes, Buckets' own KES-compatible server; BUCKETS_KES_IMAGE (the
  * operator's environment) or spec.kms.kes.image point elsewhere: a registry
  * mirror, or MinIO's KES, which reads the same configuration and keys. */
-#define BC_KES_IMAGE "ghcr.io/storscale/buckets-kes:1.18.0"
+#define BC_KES_IMAGE "ghcr.io/storscale/buckets-kes:1.18.1"
 #define BC_KES_DEFAULT_KEY "buckets-default"
 
 typedef struct {
