@@ -127,6 +127,7 @@ sign_in() { # name oid -> AK SK TK, and an mc alias
 }
 key_read() { curl -s -o /dev/null -w '%{http_code}' --aws-sigv4 "aws:amz:us-east-1:s3" --user "$1:${1}secret123" "$EP/docs/a.txt"; }
 key_write() { echo x | curl -s -o /dev/null -w '%{http_code}' --aws-sigv4 "aws:amz:us-east-1:s3" --user "$1:${1}secret123" -X PUT --data-binary @- "$EP/docs/$1.txt"; }
+sts_read() { curl -s -o /dev/null -w '%{http_code}' --aws-sigv4 "aws:amz:us-east-1:s3" --user "$1:$2" -H "X-Amz-Security-Token: $3" "$EP/docs/a.txt"; }
 sts_write() { echo x | curl -s -o /dev/null -w '%{http_code}' --aws-sigv4 "aws:amz:us-east-1:s3" --user "$1:$2" -H "X-Amz-Security-Token: $3" -X PUT --data-binary @- "$EP/docs/sts.txt"; }
 new_key() { mc admin accesskey create "$1" --access-key "$2" --secret-key "${2}secret123" >/dev/null; }
 
@@ -144,14 +145,16 @@ control '{"grants": [["o-ann","r-ro"],["o-bob","r-rw"],["o-cat","r-rw"],["o-dan"
 until_true "[[ \$(key_write KEYANN0001) == 403 ]]" 100 || true
 expect "ann's key may no longer write" "$(key_write KEYANN0001)" 403
 expect "but still reads" "$(key_read KEYANN0001)" 200
-expect "her console session follows too" "$(sts_write "${ANN[@]}")" 403
+expect "her console session follows too, with the token it holds: no writes" "$(sts_write "${ANN[@]}")" 403
+expect "but reads" "$(sts_read "${ANN[@]}")" 200
 expect "bob is untouched" "$(key_write KEYBOB0001)" 200
-expect "logged, with what changed" "$(grep -c 'identity sync: roles of o-ann changed: \[readwrite\] -> \[readonly\]; 2 credentials updated' "$WORK/log")" 1
+expect "logged, with what changed" "$(grep -c 'identity sync: roles of o-ann changed: \[readwrite\] -> \[readonly\]; 1 credentials updated' "$WORK/log")" 1
 
 echo "== ann loses every role: her credentials allow nothing, not the roles in their tokens"
 control '{"grants": [["o-bob","r-rw"],["o-cat","r-rw"],["o-dan","r-rw"]]}'
 until_true "[[ \$(key_read KEYANN0001) == 403 ]]" 100 || true
 expect "ann's key reads nothing" "$(key_read KEYANN0001)" 403
+expect "her session, whose token still names readwrite, ends" "$(sts_read "${ANN[@]}")" 403
 expect "and is still there, still on" "$(mc admin accesskey info rootalias KEYANN0001 --json | sed -n 's/.*"accountStatus":"\([a-z]*\)".*/\1/p')" on
 
 echo "== a role given through a group she belongs to counts"

@@ -2445,12 +2445,14 @@ buckets_iam_err buckets_iam_set_person_policies(buckets_iam *iam, const char *pa
   if (need_ready(iam)) return BUCKETS_IAM_ERR_NOT_INITIALIZED;
   if (!parent || !*parent || !csv) return BUCKETS_IAM_ERR_INVALID_ARGUMENT;
   char *claim = iam->oidc.claim_name ? iam->oidc.claim_name(iam->oidc.ud) : NULL;
+  char **revoke = NULL;
+  size_t nrevoke = 0;
   pthread_mutex_lock(&iam->write_mu);
   buckets_iam_err e = BUCKETS_IAM_OK;
-  /* the mapping each sign-in writes, which every credential of theirs is checked against first */
+  /* the mapping each sign-in writes, which every credential of theirs is checked against first: temporary
+   * credentials take the new roles from it at their next request, with the token their client holds */
   if (*csv) e = store_mapping(iam, parent, BUCKETS_IAM_STS, false, csv);
   else delete_mapping(iam, parent, BUCKETS_IAM_STS, false);
-  /* and each credential's claim, which they fall back to without a mapping */
   for (int t = 0; !e && claim && *claim && t < 2; t++) {
     buckets_iam_ident **l = NULL;
     size_t n = 0;
@@ -2458,17 +2460,36 @@ buckets_iam_err buckets_iam_set_person_policies(buckets_iam *iam, const char *pa
     for (size_t i = 0; i < n; i++) {
       const char *have = buckets_iam_ident_claim(l[i], claim);
       bool from_role = buckets_iam_ident_claim(l[i], "roleArn") != NULL;
+      bool sts = l[i]->type == BUCKETS_IAM_STS;
       if (!e && !from_role && l[i]->claims && (!have || strcmp(have, csv) != 0) &&
-          !(l[i]->type == BUCKETS_IAM_STS && buckets_iam_ident_is_expired(l[i]))) {
-        buckets_iam_err ce = reclaim(iam, l[i], claim, csv);
-        if (ce) e = ce;
-        else (*updated)++;
+          !(sts && buckets_iam_ident_is_expired(l[i]))) {
+        if (sts) {
+          /* never re-signed: their client presents the token, which must match. With no roles left there is no
+           * mapping, and they would fall back to their token's old claim: they end instead, as a new sign-in
+           * would give nothing */
+          if (!*csv) {
+            revoke = buckets_xrealloc(revoke, (nrevoke + 1) * sizeof(*revoke));
+            revoke[nrevoke++] = buckets_xstrdup(l[i]->access_key);
+          }
+        } else {
+          /* access keys: their token is never presented, only kept, so it is signed again with the new claim,
+           * which MinIO reads after a rollback */
+          buckets_iam_err ce = reclaim(iam, l[i], claim, csv);
+          if (ce) e = ce;
+          else (*updated)++;
+        }
       }
       buckets_iam_ident_release(l[i]);
     }
     free(l);
   }
   pthread_mutex_unlock(&iam->write_mu);
+  if (!e && nrevoke) {
+    buckets_iam_delete_users(iam, revoke, nrevoke);
+    *updated += nrevoke;
+  }
+  for (size_t i = 0; i < nrevoke; i++) free(revoke[i]);
+  free(revoke);
   free(claim);
   return e;
 }

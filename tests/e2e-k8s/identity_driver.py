@@ -3,12 +3,12 @@
 drives the console's Sign-in page API, and signs in at Keycloak by filling in
 its real login form.
 
-  python3 identity_driver.py oidc|teams|removal|removal-key|removal-expect on|off|ldap|ldap-signin
+  python3 identity_driver.py oidc|teams|removal|removal-key|removal-expect on|off|roles-session|roles-expect rw|ro|ldap|ldap-signin
 
 Environment: CONSOLE (the console's URL), ROOT_USER, ROOT_PASSWORD, KEYCLOAK
 (its base URL), LDAP_ADDR (host:port). Prints "ok <what>" or "FAIL <what>: ..."
 lines, and exits 1 when anything failed."""
-import html, http.cookiejar, json, os, re, sys, time, urllib.error, urllib.parse, urllib.request
+import datetime, hashlib, hmac, html, http.cookiejar, json, os, re, sys, time, urllib.error, urllib.parse, urllib.request
 
 C, KC = os.environ["CONSOLE"], os.environ["KEYCLOAK"]
 failed = 0
@@ -154,7 +154,7 @@ def removal():
     """Removal on, checked every minute: saved, the sign-in tested again (a new candidate), kcleaver looked up, applied."""
     b = Browser()
     expect("root signs in to the console", b.login_root(), 204)
-    settings = dict(KC_SETTINGS, removal={"enabled": True, "intervalMinutes": 1})
+    settings = dict(KC_SETTINGS, removal={"enabled": True, "intervalMinutes": 1, "roles": True})
     st, _ = b.api("PUT", "/api/v1/identity-config/candidate", {"settings": {"openid": settings}})
     expect("removal settings saved", st, 200)
     st, url, page = b.keycloak(C + "/api/v1/login/oidc?test=1", "kcuser", "kcpass123")
@@ -163,6 +163,11 @@ def removal():
     expect("kcleaver looked up in Keycloak, through the client's service account",
            (st, r.get("passed"), r.get("state"), r.get("userPrincipalName")), (200, True, "active", "kcleaver"))
     if not r.get("passed"):
+        print("     lookup:", r)
+    # roles kept current: Keycloak's realm roles now (its own default roles among them), and the policy they name
+    expect("and their realm roles now, readwrite naming a policy",
+           ("readwrite" in (r.get("roles") or []), r.get("policies")), (True, ["readwrite"]))
+    if "roles" not in r:
         print("     lookup:", r)
     cfg = b.api("GET", "/api/v1/identity-config")[1]
     st, r = b.api("POST", "/api/v1/identity-config/apply", {"candidateHash": cfg.get("candidateHash")})
@@ -177,12 +182,13 @@ def removal_key():
     expect("kcleaver signs in", b.api("GET", "/api/v1/session")[1].get("accessKey"), "kcleaver")
     st, text = b.req("PUT", C + "/api/v1/admin/add-service-account", body={"name": "kcleaver-tool"},
                      headers={"X-Console-Encrypt": "1", "X-Console-Decrypt": "1"})[0::2]
-    key = (json.loads(text).get("credentials") or {}).get("accessKey") if st == 200 else None
+    creds = (json.loads(text).get("credentials") or {}) if st == 200 else {}
+    key = creds.get("accessKey")
     expect("and makes an access key", bool(key), True)
     if not key:
         print("     add-service-account:", st, text[:300])
     cookies = [{"name": c.name, "value": c.value, "domain": c.domain, "path": c.path} for c in b.jar]
-    json.dump({"key": key, "cookies": cookies}, open(STATE, "w"))
+    json.dump({"key": key, "secret": creds.get("secretKey"), "cookies": cookies}, open(STATE, "w"))
 
 
 def removal_expect(want):
@@ -204,6 +210,65 @@ def removal_expect(want):
                                                    c["domain"].startswith("."), c["path"], True, False, None, False, None, None, {}))
         st, _ = b.api("GET", "/api/v1/s3/")
         expect("and their console session no longer reaches the servers", st in (401, 403), True)
+
+
+def s3(method, path, key, secret, body=b""):
+    """One S3 request to the servers, signed (SigV4) with an access key: its status."""
+    u = urllib.parse.urlparse(os.environ["S3"] + path)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    amz, day = now.strftime("%Y%m%dT%H%M%SZ"), now.strftime("%Y%m%d")
+    h = {"host": u.netloc, "x-amz-content-sha256": hashlib.sha256(body).hexdigest(), "x-amz-date": amz}
+    names = ";".join(sorted(h))
+    canon = "\n".join([method, urllib.parse.quote(u.path), "", "".join(f"{k}:{h[k]}\n" for k in sorted(h)), names,
+                       h["x-amz-content-sha256"]])
+    scope = f"{day}/us-east-1/s3/aws4_request"
+    sts = "\n".join(["AWS4-HMAC-SHA256", amz, scope, hashlib.sha256(canon.encode()).hexdigest()])
+    k = ("AWS4" + secret).encode()
+    for part in (day, "us-east-1", "s3", "aws4_request"):
+        k = hmac.new(k, part.encode(), hashlib.sha256).digest()
+    sig = hmac.new(k, sts.encode(), hashlib.sha256).hexdigest()
+    h["Authorization"] = f"AWS4-HMAC-SHA256 Credential={key}/{scope}, SignedHeaders={names}, Signature={sig}"
+    try:
+        return urllib.request.urlopen(urllib.request.Request(u.geturl(), data=body or None, method=method, headers=h),
+                                      timeout=30).status
+    except urllib.error.HTTPError as e:
+        return e.code
+
+
+ROLES = "/tmp/roles.json"  # kcleaver's console session for the roles steps
+
+
+def roles_session():
+    """kcleaver signs in again (a disable ended the last session), and writes with both the key and the session."""
+    s = json.load(open(STATE))
+    root = Browser()
+    root.login_root()
+    root.req("PUT", C + "/api/v1/s3/roles-test")
+    b = Browser()
+    b.keycloak(C + "/api/v1/login/oidc", "kcleaver", "kcleave123")
+    expect("kcleaver signs in again", b.api("GET", "/api/v1/session")[1].get("accessKey"), "kcleaver")
+    expect("as readwrite, the access key writes", s3("PUT", "/roles-test/by-key.txt", s["key"], s["secret"], b"k"), 200)
+    expect("and the session writes", b.req("PUT", C + "/api/v1/s3/roles-test/by-session.txt", body="s")[0], 200)
+    cookies = [{"name": c.name, "value": c.value, "domain": c.domain, "path": c.path} for c in b.jar]
+    json.dump({"cookies": cookies}, open(ROLES, "w"))
+
+
+def roles_expect(want):
+    """After kcleaver's realm roles change in Keycloak: within the sync's minute or two, their access key and their
+    console session both follow, without signing in again. ro: they read but no longer write; rw: they write again."""
+    s, r = json.load(open(STATE)), json.load(open(ROLES))
+    b = Browser()
+    for c in r["cookies"]:
+        b.jar.set_cookie(http.cookiejar.Cookie(0, c["name"], c["value"], None, False, c["domain"], bool(c["domain"]),
+                                               c["domain"].startswith("."), c["path"], True, False, None, False, None, None, {}))
+    code = 403 if want == "ro" else 200
+    wait("the sync", lambda: s3("PUT", "/roles-test/by-key.txt", s["key"], s["secret"], b"k") == code, secs=300)
+    expect(f"the access key, made as readwrite, now {'may not' if want == 'ro' else 'may'} write",
+           s3("PUT", "/roles-test/by-key.txt", s["key"], s["secret"], b"k"), code)
+    expect("it still reads", s3("GET", "/roles-test/by-key.txt", s["key"], s["secret"]), 200)
+    expect(f"the console session, signed in as readwrite, {'may not' if want == 'ro' else 'may'} write either",
+           b.req("PUT", C + "/api/v1/s3/roles-test/by-session.txt", body="s")[0], code)
+    expect("and reads", b.req("GET", C + "/api/v1/s3/roles-test/by-session.txt")[0], 200)
 
 
 def teams():
@@ -284,6 +349,8 @@ def ldap_signin():
 
 if sys.argv[1] == "removal-expect":
     removal_expect(sys.argv[2])
+elif sys.argv[1] == "roles-expect":
+    roles_expect(sys.argv[2])
 else:
-    {"oidc": oidc, "teams": teams, "removal": removal, "removal-key": removal_key, "ldap": ldap, "ldap-signin": ldap_signin}[sys.argv[1]]()
+    {"oidc": oidc, "teams": teams, "removal": removal, "removal-key": removal_key, "roles-session": roles_session, "ldap": ldap, "ldap-signin": ldap_signin}[sys.argv[1]]()
 sys.exit(1 if failed else 0)

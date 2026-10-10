@@ -6,6 +6,9 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **Roles kept current cut off sessions** (1.18.0). When a person's roles changed, their temporary credentials (console sessions, and any STS client) were signed again with a new session token, so the token their client held no longer matched and every request was refused until the roles changed back or they signed in again. Temporary credentials now keep their token and take the new roles from the person's policy mapping at their next request. Someone left with no roles has their temporary credentials ended, since their tokens' claims would otherwise give the old roles back. Found by a new cluster test against a real Keycloak (`tests/e2e-k8s/identity.sh`).
+
 ## [1.18.0] - 2026-10-10
 
 ### Added

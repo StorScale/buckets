@@ -42,10 +42,12 @@ Where they differ from what a credential carries, the credential is updated.
 - **Access keys:** their token is signed again with the new value of the policy claim. Everything else stays:
   the key's ID, secret, expiry, its own session policy (which can only narrow it), and its status. The stored
   form is the one MinIO writes, so MinIO reads it after a rollback.
-- **Temporary credentials:** the same, so a console session gets the new access at its next request, not after
-  it expires.
-- **Someone left with no roles at all** keeps their credentials, which then allow nothing. A role given back
-  makes them work again. Removal stays a matter of leaving, decided as today.
+- **Temporary credentials** are not signed again: their client presents the token, which must match the stored
+  one, so a new token would cut them off (as 1.18.0 did). They are checked against the person's
+  policy mapping first, which the sync updates, so a console session gets the new access at its next request.
+- **Someone left with no roles at all** keeps their access keys, which then allow nothing. A role given back
+  makes them work again. Their temporary credentials end instead: with no mapping they would fall back to their
+  token's old claim. Removal stays a matter of leaving, decided as today.
 
 **Logged and audited:** "roles of <person> changed: +team-data-rw −team-ops-admin; 3 access keys and 1 session
 updated". The audit log entry is `IdentitySyncRoles`. The access review shows the current roles, since that

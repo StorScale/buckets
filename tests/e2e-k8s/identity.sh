@@ -5,7 +5,9 @@
 # taken up by the console without a restart, and a real sign-in; a team made
 # on the Teams page, reached by a Keycloak user whose only role names it; people
 # who leave Keycloak: removal set up and tested, a person's access key turned
-# off when they are disabled there, and back on when they return; then LDAP
+# off when they are disabled there, and back on when they return; roles kept
+# current: the person moved from readwrite to readonly in Keycloak, and their
+# access key and console session following within a sync; then LDAP
 # added, looked up, tested again, applied (the servers restart one at a time
 # for it) and offered by the console.
 #
@@ -133,6 +135,7 @@ kca create "clients/$CID/protocol-mappers/models" -r buckets -s name=roles -s pr
   -s 'config."access.token.claim"=true' -s 'config."multivalued"=true' -s 'config."jsonType.label"=String' >/dev/null
 kca create roles -r buckets -s name=readwrite >/dev/null
 kca create roles -r buckets -s name=consoleAdmin >/dev/null
+kca create roles -r buckets -s name=readonly >/dev/null
 kca create users -r buckets -s username=kcuser -s enabled=true -s email=kcuser@example.org -s emailVerified=true \
   -s firstName=KC -s lastName=User >/dev/null
 kca set-password -r buckets --username kcuser --new-password kcpass123 >/dev/null
@@ -192,6 +195,7 @@ spec:
         - {name: CONSOLE, value: "http://idp-console.$NS.svc.cluster.local:9090"}
         - {name: KEYCLOAK, value: "http://keycloak.$NS.svc.cluster.local:8080"}
         - {name: LDAP_ADDR, value: "openldap.$NS.svc.cluster.local:389"}
+        - {name: S3, value: "http://idp.$NS.svc.cluster.local:9000"}
       envFrom: [{secretRef: {name: driver-env}}]
       volumeMounts: [{name: driver, mountPath: /driver}]
   volumes: [{name: driver, configMap: {name: identity-driver}}]
@@ -226,6 +230,18 @@ kca update "users/$LID" -r buckets -s enabled=true >/dev/null
 echo "   kcleaver enabled again"
 drive removal-expect on
 echo "   the sync's log: $(k logs -l buckets.io/cluster=idp --tail=-1 2>/dev/null | grep -o 'identity sync: [a-z]* access key [A-Z0-9]*' | sort | uniq -c | tr -s ' ' | tr '\n' ';')"
+
+echo "== roles kept current: kcleaver moved from readwrite to readonly in Keycloak, then back"
+drive roles-session
+kca remove-roles -r buckets --uusername kcleaver --rolename readwrite >/dev/null
+kca add-roles -r buckets --uusername kcleaver --rolename readonly >/dev/null
+echo "   kcleaver: readwrite taken, readonly given, in Keycloak"
+drive roles-expect ro
+kca remove-roles -r buckets --uusername kcleaver --rolename readonly >/dev/null
+kca add-roles -r buckets --uusername kcleaver --rolename readwrite >/dev/null
+echo "   kcleaver: readwrite given back"
+drive roles-expect rw
+echo "   the sync's log: $(k logs -l buckets.io/cluster=idp --tail=-1 2>/dev/null | grep -o 'identity sync: roles of [^;]*' | sed 's/"[,}].*//' | sort -u | tr '\n' ';')"
 
 echo "== LDAP added: looked up, tested again, applied"
 before=$(k get pods -l buckets.io/cluster=idp -o jsonpath='{range .items[*]}{.metadata.uid}{" "}{end}')
