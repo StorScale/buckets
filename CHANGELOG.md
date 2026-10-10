@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.18.0] - 2026-10-10
+
 ### Added
 - **Roles kept current** ([docs/identity.md](docs/identity.md#roles-kept-current), [design](docs/design/roles-current.md)). A person's access keys and sessions carry the roles of the sign-in they were made at, so someone moved out of a role kept it through a script's key. With **Keep their roles current**, each identity sync reads each person's roles or groups now, from Entra ID (app roles or groups), Keycloak (realm roles, client roles or groups), Okta (groups) or SCIM, and updates their credentials in place:
   - the same key, secret, expiry and session policy, in the form MinIO reads after a rollback;
