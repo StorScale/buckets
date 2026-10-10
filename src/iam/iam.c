@@ -2390,6 +2390,89 @@ static buckets_iam_err store_temp(buckets_iam *iam, buckets_iam_ident *id, const
   return e;
 }
 
+/* ---- a person's roles (identity sync, iam/idsync.h) ------------------------------------- */
+
+char *buckets_iam_person_policies(buckets_iam *iam, const char *parent) {
+  pthread_rwlock_rdlock(&iam->lock);
+  const mapped_policy *m = buckets_strmap_get(&iam->c.pol[BUCKETS_IAM_STS], parent);
+  char *r = buckets_xstrdup(m && m->policies ? m->policies : "");
+  pthread_rwlock_unlock(&iam->lock);
+  return r;
+}
+
+/* One credential's policy claim re-signed as csv, everything else kept. */
+static buckets_iam_err reclaim(buckets_iam *iam, const buckets_iam_ident *cur, const char *claim, const char *csv) {
+  buckets_iam_ident *id = ident_new();
+  id->type = cur->type;
+  id->access_key = buckets_xstrdup(cur->access_key);
+  id->secret_key = buckets_xstrdup(cur->secret_key);
+  id->parent = dupnz(cur->parent);
+  id->groups = strv_dup((const char *const *)cur->groups, cur->ngroups);
+  id->ngroups = cur->ngroups;
+  id->name = dupnz(cur->name);
+  id->description = dupnz(cur->description);
+  id->claims_field = dupnz(cur->claims_field);
+  memcpy(id->status, cur->status, sizeof(id->status));
+  id->expiration = cur->expiration;
+  yyjson_mut_doc *claims = yyjson_doc_mut_copy(cur->claims, NULL);
+  yyjson_mut_val *root = yyjson_mut_doc_get_root(claims);
+  yyjson_mut_obj_remove_key(root, claim);
+  yyjson_mut_obj_add_strcpy(claims, root, claim, csv);
+  char kb[128];
+  bool sts = cur->type == BUCKETS_IAM_STS;
+  bool ok = sign_token(id, claims, sts ? sts_key(iam->root->secret_key, kb) : id->secret_key, iam->root->secret_key);
+  yyjson_mut_doc_free(claims);
+  buckets_iam_err e = BUCKETS_IAM_OK;
+  if (!ok) e = BUCKETS_IAM_ERR_INVALID_ARGUMENT;
+  else {
+    id->updated = now_time();
+    if (!save_identity(iam, id, sts ? BUCKETS_IAM_STS : BUCKETS_IAM_SVC)) e = BUCKETS_IAM_ERR_STORAGE;
+  }
+  if (!e) {
+    pthread_rwlock_wrlock(&iam->lock);
+    buckets_iam_ident_release(buckets_strmap_put(sts ? &iam->c.sts : &iam->c.users, id->access_key, ident_ref(id)));
+    touch(iam);
+    pthread_rwlock_unlock(&iam->lock);
+    notify(iam, sts ? "sts" : "svc", id->access_key);
+  }
+  buckets_iam_ident_release(id);
+  return e;
+}
+
+buckets_iam_err buckets_iam_set_person_policies(buckets_iam *iam, const char *parent, const char *csv,
+                                                size_t *updated) {
+  *updated = 0;
+  if (need_ready(iam)) return BUCKETS_IAM_ERR_NOT_INITIALIZED;
+  if (!parent || !*parent || !csv) return BUCKETS_IAM_ERR_INVALID_ARGUMENT;
+  char *claim = iam->oidc.claim_name ? iam->oidc.claim_name(iam->oidc.ud) : NULL;
+  pthread_mutex_lock(&iam->write_mu);
+  buckets_iam_err e = BUCKETS_IAM_OK;
+  /* the mapping each sign-in writes, which every credential of theirs is checked against first */
+  if (*csv) e = store_mapping(iam, parent, BUCKETS_IAM_STS, false, csv);
+  else delete_mapping(iam, parent, BUCKETS_IAM_STS, false);
+  /* and each credential's claim, which they fall back to without a mapping */
+  for (int t = 0; !e && claim && *claim && t < 2; t++) {
+    buckets_iam_ident **l = NULL;
+    size_t n = 0;
+    buckets_iam_list_derived(iam, parent, t ? BUCKETS_IAM_SVC : BUCKETS_IAM_STS, &l, &n);
+    for (size_t i = 0; i < n; i++) {
+      const char *have = buckets_iam_ident_claim(l[i], claim);
+      bool from_role = buckets_iam_ident_claim(l[i], "roleArn") != NULL;
+      if (!e && !from_role && l[i]->claims && (!have || strcmp(have, csv) != 0) &&
+          !(l[i]->type == BUCKETS_IAM_STS && buckets_iam_ident_is_expired(l[i]))) {
+        buckets_iam_err ce = reclaim(iam, l[i], claim, csv);
+        if (ce) e = ce;
+        else (*updated)++;
+      }
+      buckets_iam_ident_release(l[i]);
+    }
+    free(l);
+  }
+  pthread_mutex_unlock(&iam->write_mu);
+  free(claim);
+  return e;
+}
+
 /* ---- policy entities ------------------------------------------------------------------ */
 
 static void add_sorted(yyjson_mut_doc *d, yyjson_mut_val *o, const char *key, strset *s) {

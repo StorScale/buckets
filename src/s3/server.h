@@ -58,7 +58,7 @@ typedef struct buckets_s3_server {
   _Atomic bool idsync_on; /* set up (the metrics are shown) */
   _Atomic long long idsync_remove_after_s; /* its grace period, for "deleted on" */
   _Atomic unsigned long long idsync_runs, idsync_failures, idsync_held, idsync_revoked, idsync_disabled,
-      idsync_enabled, idsync_deleted;
+      idsync_enabled, idsync_deleted, idsync_roles;
   char host_id[65];   /* x-amz-id-2 */
   struct buckets_notifier *notifier; /* event notification targets and listeners */
   struct buckets_logger *logger;     /* audit and server log targets */

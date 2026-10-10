@@ -1,6 +1,6 @@
 # Design: keeping roles current
 
-Status: proposed. Roadmap: Phase 2, "Automatic provisioning and removal". This is step 2 of
+Status: built (unreleased). Roadmap: Phase 2, "Automatic provisioning and removal". This is step 2 of
 [identity-sync.md](identity-sync.md), "Roles kept current", and it brings the groups that
 [scim.md](scim.md) left for later.
 
@@ -32,7 +32,7 @@ Where they differ from what a credential carries, the credential is updated.
 
 | Provider | Claim | Asked |
 | --- | --- | --- |
-| Entra ID | `roles` (app roles) | `GET /users/{oid}/appRoleAssignments`, for the sign-in app's service principal, mapped to the roles' `value`s |
+| Entra ID | `roles` (app roles) | Once per sync, the sign-in app's roles and who holds them: `GET /servicePrincipals(appId='{client}')` (`appRoles`) and `.../appRoleAssignedTo` (users and groups). Then for each person, their own assignments and those of groups they're a direct member of (`GET /users/{oid}/memberOf`), as Entra issues the claim. |
 | Entra ID | `groups` | `GET /users/{oid}/transitiveMemberOf/microsoft.graph.group?$select=id` (group IDs, as the token has them) |
 | Okta | `groups` | `GET /api/v1/users/{id}/groups`, by profile name, filtered by the authorization server's groups claim filter where one is set in the settings |
 | Keycloak | realm or client roles, or groups | `role-mappings/realm/composite`, `role-mappings/clients/{id}/composite`, or `groups`, per the claim's mapper as set in the sign-in settings |
@@ -75,9 +75,10 @@ API's answer is kept for people SCIM's groups don't name.
 Under **Identity → Sign-in → People who leave**, a new option, **Keep their roles current**, appears beside
 removal. It is on by default for new settings and off for existing ones until turned on. It shows what the
 provider app needs:
-- **Entra ID:** for app roles, `User.Read.All` (already there for removal), which is to be confirmed against
-  Graph's permissions reference while building; plus `GroupMember.Read.All` when the claim is `groups`. The
-  lookup checks the app can read them either way.
+- **Entra ID:** `User.Read.All` (already there for removal) reads memberships, for both the `groups` claim and
+  app roles given through groups. App roles also need **`Application.Read.All`**, which reads app registrations
+  and who is assigned to them. Asking each user instead (`/users/{id}/appRoleAssignments`) would need
+  `Directory.Read.All`, Graph's least privilege for that call, and that reads the whole directory.
 - **Okta:** the read-only API token reads groups.
 - **Keycloak:** `view-users` reads role mappings and groups.
 
@@ -88,12 +89,14 @@ For SCIM, the Entra and Okta guides gain the step to provision groups.
 ## Code
 
 - **`src/iam/idsync.{c,h}`:**
-  - `lookup` returns the person's current values beside their state;
-  - the plan gains `UPDATE_ROLES` actions, with the safety count.
-- **`src/iam/iam.c`:** re-signing a credential's token with a changed claim (`buckets_iam_set_claim`), for
-  access keys and temporary credentials.
+  - `buckets_idsync_client_values`: the person's current values, per `roles_from`;
+  - `buckets_idsync_roles_decide`: which changes go ahead, with the safety count.
+- **`src/iam/iam.c`:** `buckets_iam_set_person_policies` stores the person's mapping and re-signs the claim of each
+  of their access keys and temporary credentials that differs.
+- **`src/s3/server.c`:** `idsync_roles`, in each sync run.
 - **`src/iam/scim.{c,h}`, `src/s3/scimhandlers.c`:** Groups: the resource, members' patch forms, and the store
-  (`buckets/scim/groups.json`).
+  (beside the users, in the same file and revision).
+- **Settings and operator:** `openid.removal.roles` and `rolesFrom`, to `BUCKETS_OPENID_SYNC_ROLES` and `_ROLES_FROM`.
 - **Console:** the option, the permissions it needs, the lookup's roles, and SCIM's group steps.
 
 ## Tests
@@ -122,3 +125,12 @@ For SCIM, the Entra and Okta guides gain the step to provision groups.
    ones until an admin turns it on,** with the console saying so.
 4. **SCIM groups now?** **Recommended: yes,** for Okta's group names and Entra's group IDs, since without them
    SCIM alone can't keep roles current.
+
+## Decisions
+
+1. **Credentials are updated in place,** access keys and sessions alike.
+2. **Someone left with no roles keeps their credentials,** which then allow nothing.
+3. **On for new settings, off for existing ones** until an admin turns it on.
+4. **SCIM groups now,** for Okta's group names and Entra's group IDs.
+5. **Entra app roles are read from the app's side** (`appRoleAssignedTo`, `Application.Read.All`), not each user's
+   (`Directory.Read.All`), checked against Microsoft's permission reference.

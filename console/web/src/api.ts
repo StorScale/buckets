@@ -446,6 +446,9 @@ export type OidcSettings = {
     method?: "api" | "scim" | "both";
     scimTokenSha256?: string; // the SCIM token's SHA-256: the token itself is shown once, kept nowhere
     scimPreviousSha256?: string; // the token it replaces, still accepted while the provider is updated
+    // roles kept current (docs/design/roles-current.md): on for new settings, off for those saved before
+    roles?: boolean;
+    rolesFrom?: "app-roles" | "groups" | "realm-roles" | "client-roles";
   };
 };
 export type LdapSettings = {
@@ -463,7 +466,7 @@ export type LdapSettings = {
 export type IdentitySettings = { openid?: OidcSettings | null; ldap?: LdapSettings | null; secretsSet?: string[] };
 export type OidcTest = { passed: boolean; error?: string; user?: string; claimName?: string; roles?: string[]; policies?: string[]; unmatched?: string[]; at?: number };
 export type LdapTest = { passed: boolean; error?: string; note?: string; dn?: string; groups?: string[]; policies?: string[]; at?: number };
-export type RemovalTest = { passed: boolean; error?: string; user?: string; state?: "active" | "disabled"; id?: string; displayName?: string; userPrincipalName?: string; at?: number };
+export type RemovalTest = { passed: boolean; error?: string; user?: string; state?: "active" | "disabled"; id?: string; displayName?: string; userPrincipalName?: string; roles?: string[]; policies?: string[]; unmatched?: string[]; rolesError?: string; at?: number };
 export type IdentityConfig = {
   managed: boolean;
   cluster?: string;

@@ -322,6 +322,155 @@ static bool do_delete(s3_ctx *c, buckets_scim_store *st, yyjson_val *body, const
   return true;
 }
 
+/* ---- groups (roles kept current, docs/design/roles-current.md) ---- */
+
+static void group_reply(s3_ctx *c, int status, const buckets_scim_group *g) {
+  char base[600];
+  base_url(c, base, sizeof(base));
+  buckets_buf b = BUCKETS_BUF_INIT;
+  buckets_scim_group_json(g, base, &b);
+  if (status == 201) {
+    char loc[800];
+    snprintf(loc, sizeof(loc), "%s/Groups/%s", base, g->id);
+    buckets_http_resp_header(c->resp, "Location", loc);
+  }
+  reply(c, status, &b);
+  buckets_buf_free(&b);
+}
+
+static void list_groups(s3_ctx *c) {
+  buckets_scim_filter f;
+  if (!buckets_scim_filter_parse(buckets_query_get(&c->q, "filter"), &f) || !strcmp(f.attr, "userName")) {
+    scim_error(c, 400, "invalidFilter", "Filters are displayName eq \"...\" or externalId eq \"...\"");
+    return;
+  }
+  const char *si = buckets_query_get(&c->q, "startIndex"), *ct = buckets_query_get(&c->q, "count");
+  long start = si && atol(si) > 0 ? atol(si) : 1, count = ct ? atol(ct) : 100;
+  if (count < 0) count = 0;
+  if (count > MAX_PAGE) count = MAX_PAGE;
+  buckets_scim_store st;
+  if (!load(c, &st)) {
+    scim_error(c, 500, NULL, "The groups could not be read");
+    return;
+  }
+  char base[600];
+  base_url(c, base, sizeof(base));
+  size_t total = 0, shown = 0;
+  buckets_buf res = BUCKETS_BUF_INIT;
+  for (size_t i = 0; i < st.ng; i++) {
+    if (!buckets_scim_group_filter_match(&f, &st.g[i])) continue;
+    total++;
+    if ((long)total < start || (long)shown >= count) continue;
+    if (shown++) buckets_buf_append_char(&res, ',');
+    buckets_scim_group_json(&st.g[i], base, &res);
+  }
+  buckets_buf b = BUCKETS_BUF_INIT;
+  buckets_buf_appendf(&b,
+                      "{\"schemas\":[\"urn:ietf:params:scim:api:messages:2.0:ListResponse\"],\"totalResults\":%zu,"
+                      "\"startIndex\":%ld,\"itemsPerPage\":%zu,\"Resources\":[",
+                      total, start, shown);
+  if (res.len) buckets_buf_append(&b, res.data, res.len);
+  buckets_buf_append_c(&b, "]}");
+  reply(c, 200, &b);
+  buckets_buf_free(&b);
+  buckets_buf_free(&res);
+  buckets_scim_store_free(&st);
+}
+
+static void audit_group(const buckets_scim_group *g) {
+  buckets_audit_tag("scimGroupId", g->id);
+  if (g->display_name) buckets_audit_tag("displayName", g->display_name);
+  if (g->external_id) buckets_audit_tag("externalId", g->external_id);
+  char n[24];
+  snprintf(n, sizeof(n), "%zu", g->nmembers);
+  buckets_audit_tag("members", n);
+}
+
+static bool do_group_create(s3_ctx *c, buckets_scim_store *st, yyjson_val *body, const char *id) {
+  (void)id;
+  buckets_scim_group g;
+  int status;
+  char err[200];
+  if (!buckets_scim_group_from_json(body, &g, &status, err, sizeof(err))) {
+    scim_error(c, status, "invalidValue", err);
+    return false;
+  }
+  for (size_t i = 0; i < st->ng; i++) {
+    if (st->g[i].display_name && !strcasecmp(st->g[i].display_name, g.display_name)) {
+      buckets_scim_group_free(&g);
+      scim_error(c, 409, "uniqueness", "A group with this displayName exists");
+      return false;
+    }
+  }
+  char uuid[BUCKETS_UUID_STR_LEN + 1];
+  buckets_uuid_v4(uuid);
+  snprintf(g.id, sizeof(g.id), "%s", uuid);
+  g.created = g.modified = (long long)time(NULL);
+  st->g = buckets_xrealloc(st->g, (st->ng + 1) * sizeof(*st->g));
+  st->g[st->ng++] = g;
+  audit_group(&g);
+  buckets_log_info("scim: group %s created, %zu members", g.display_name, g.nmembers);
+  group_reply(c, 201, &st->g[st->ng - 1]);
+  return true;
+}
+
+static bool do_group_replace(s3_ctx *c, buckets_scim_store *st, yyjson_val *body, const char *id) {
+  buckets_scim_group *cur = buckets_scim_find_group(st, id);
+  if (!cur) {
+    scim_error(c, 404, NULL, "No such group");
+    return false;
+  }
+  buckets_scim_group g;
+  int status;
+  char err[200];
+  if (!buckets_scim_group_from_json(body, &g, &status, err, sizeof(err))) {
+    scim_error(c, status, "invalidValue", err);
+    return false;
+  }
+  snprintf(g.id, sizeof(g.id), "%s", cur->id);
+  g.created = cur->created;
+  g.modified = (long long)time(NULL);
+  buckets_scim_group_free(cur);
+  *cur = g;
+  audit_group(cur);
+  group_reply(c, 200, cur);
+  return true;
+}
+
+static bool do_group_patch(s3_ctx *c, buckets_scim_store *st, yyjson_val *body, const char *id) {
+  buckets_scim_group *cur = buckets_scim_find_group(st, id);
+  if (!cur) {
+    scim_error(c, 404, NULL, "No such group");
+    return false;
+  }
+  int status;
+  char err[200];
+  if (!buckets_scim_group_patch(cur, body, &status, err, sizeof(err))) {
+    scim_error(c, status, "invalidValue", err);
+    return false;
+  }
+  cur->modified = (long long)time(NULL);
+  audit_group(cur);
+  /* Entra expects 204 to a group patch; the group itself is fine for Okta too */
+  group_reply(c, 200, cur);
+  return true;
+}
+
+static bool do_group_delete(s3_ctx *c, buckets_scim_store *st, yyjson_val *body, const char *id) {
+  (void)body;
+  for (size_t i = 0; i < st->ng; i++) {
+    if (strcmp(st->g[i].id, id) != 0) continue;
+    audit_group(&st->g[i]);
+    buckets_log_info("scim: group %s deleted", st->g[i].display_name ? st->g[i].display_name : id);
+    buckets_scim_group_free(&st->g[i]);
+    st->g[i] = st->g[--st->ng];
+    reply(c, 204, NULL);
+    return true;
+  }
+  scim_error(c, 404, NULL, "No such group");
+  return false;
+}
+
 void buckets_scim_handle(s3_ctx *c) {
   const buckets_http_request *req = c->req;
   buckets_s3_server *s = c->s;
@@ -359,8 +508,46 @@ void buckets_scim_handle(s3_ctx *c) {
   } else if (get && !strcasecmp(sub, "/Schemas")) {
     buckets_scim_schemas(&b);
     reply(c, 200, &b);
-  } else if (!strncasecmp(sub, "/Groups", 7)) {
-    scim_error(c, 501, NULL, "Groups are not supported: assign people to the app");
+  } else if (!strcasecmp(sub, "/Groups")) {
+    if (get) {
+      op = OP_LIST;
+      c->op_name = "SCIMListGroups";
+      list_groups(c);
+    } else if (buckets_str_eq_c(m, "POST")) {
+      op = OP_CREATE;
+      c->op_name = "SCIMCreateGroup";
+      yyjson_doc *d = body_json(c);
+      if (d) change(c, do_group_create, yyjson_doc_get_root(d), NULL);
+      yyjson_doc_free(d);
+    } else {
+      scim_error(c, 405, NULL, "Method not allowed");
+    }
+  } else if (!strncasecmp(sub, "/Groups/", 8) && sub[8] && !strchr(sub + 8, '/')) {
+    const char *id = sub + 8;
+    if (get) {
+      c->op_name = "SCIMGetGroup";
+      buckets_scim_store st;
+      if (!load(c, &st)) {
+        scim_error(c, 500, NULL, "The groups could not be read");
+      } else {
+        buckets_scim_group *g = buckets_scim_find_group(&st, id);
+        if (g) group_reply(c, 200, g);
+        else scim_error(c, 404, NULL, "No such group");
+        buckets_scim_store_free(&st);
+      }
+    } else if (buckets_str_eq_c(m, "DELETE")) {
+      op = OP_DELETE;
+      c->op_name = "SCIMDeleteGroup";
+      change(c, do_group_delete, NULL, id);
+    } else if (buckets_str_eq_c(m, "PUT") || buckets_str_eq_c(m, "PATCH")) {
+      op = OP_UPDATE;
+      c->op_name = "SCIMUpdateGroup";
+      yyjson_doc *d = body_json(c);
+      if (d) change(c, buckets_str_eq_c(m, "PUT") ? do_group_replace : do_group_patch, yyjson_doc_get_root(d), id);
+      yyjson_doc_free(d);
+    } else {
+      scim_error(c, 405, NULL, "Method not allowed");
+    }
   } else if (!strcasecmp(sub, "/Users")) {
     if (get) {
       op = OP_LIST;

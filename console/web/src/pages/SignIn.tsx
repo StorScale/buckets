@@ -345,7 +345,13 @@ function Removal({ o, saved, onChange, enabled, result, onDone }: { o: OidcSetti
         deleted after the days below. If they come back before then, their keys come back on.
       </p>
       <label className="check">
-        <input type="checkbox" checked={r.enabled} onChange={(e) => set({ enabled: e.target.checked })} data-testid="removal-on" />
+        <input
+          type="checkbox"
+          checked={r.enabled}
+          // roles kept current is on for removal turned on now; settings saved before keep it off until it is chosen
+          onChange={(e) => set(e.target.checked && r.roles === undefined ? { enabled: true, roles: true } : { enabled: e.target.checked })}
+          data-testid="removal-on"
+        />
         Remove the access of people who leave
       </label>
       {r.enabled && (
@@ -366,6 +372,7 @@ function Removal({ o, saved, onChange, enabled, result, onDone }: { o: OidcSetti
               ))}
             </div>
           )}
+          <Roles o={o} r={r} set={set} method={method} />
           {method !== "api" && <ScimSetup o={o} r={r} set={set} />}
           {method !== "scim" && (
           <ol className="steps-list">
@@ -413,15 +420,90 @@ function Removal({ o, saved, onChange, enabled, result, onDone }: { o: OidcSetti
                   <dd className="mono">{result.id}</dd>
                   <dt>{p.where}</dt>
                   <dd>{result.state === "active" ? "active" : "disabled: the sync would remove their access"}</dd>
+                  {result.roles && (
+                    <>
+                      <dt>Roles now</dt>
+                      <dd className="mono" data-testid="removal-roles">{result.roles.length ? result.roles.join(", ") : "none: their credentials would allow nothing"}</dd>
+                      <dt>Buckets policies</dt>
+                      <dd className="mono">
+                        {result.policies?.length ? result.policies.join(", ") : "none"}
+                        {!!result.unmatched?.length && <span className="muted"> (no policy named {result.unmatched.join(", ")})</span>}
+                      </dd>
+                    </>
+                  )}
                 </dl>
               ) : (
                 <p>{result.error}</p>
               )}
+              {result.passed && result.rolesError && <p data-testid="removal-roles-error">Their roles cannot be read: {result.rolesError}</p>}
             </div>
           )}
           </>
           )}
           {method !== "api" && <ScimPeople />}
+        </>
+      )}
+    </div>
+  );
+}
+
+// ---- roles kept current (docs/design/roles-current.md) ---------------------------------
+
+const ROLE_SOURCES: Record<string, [NonNullable<NonNullable<OidcSettings["removal"]>["rolesFrom"]>, string][]> = {
+  entra: [
+    ["app-roles", "App roles (the roles claim)"],
+    ["groups", "Groups (the groups claim)"],
+  ],
+  keycloak: [
+    ["realm-roles", "Realm roles"],
+    ["client-roles", "The client's roles"],
+    ["groups", "Groups"],
+  ],
+  okta: [["groups", "Groups"]],
+};
+
+function Roles({ o, r, set, method }: { o: OidcSettings; r: NonNullable<OidcSettings["removal"]>; set: (v: Partial<NonNullable<OidcSettings["removal"]>>) => void; method: string }) {
+  if (o.rolePolicy) return null; /* everyone gets the same role: nothing to keep current */
+  const sources = ROLE_SOURCES[o.provider] ?? [];
+  const scimOnly = method === "scim";
+  const from = scimOnly ? "groups" : (r.rolesFrom ?? (o.provider === "entra" ? (o.claimName === "groups" ? "groups" : "app-roles") : o.provider === "keycloak" ? (o.claimName === "groups" ? "groups" : "realm-roles") : "groups"));
+  const need =
+    scimOnly
+      ? "The provider pushes groups and their members by SCIM (the steps below)."
+      : o.provider === "entra"
+        ? from === "app-roles"
+          ? "Also add Microsoft Graph → Application permissions → Application.Read.All, with admin consent: it reads who is assigned the app's roles. User.Read.All reads the groups they are given through."
+          : "User.Read.All (below) reads their groups."
+        : o.provider === "keycloak"
+          ? "view-users (below) reads their roles and groups."
+          : "The API token (below) reads their groups.";
+  return (
+    <div data-testid="roles">
+      <label className="check">
+        <input type="checkbox" checked={!!r.roles} onChange={(e) => set({ roles: e.target.checked })} data-testid="roles-on" />
+        Keep their roles current
+      </label>
+      <p className="muted">
+        Each sync also reads what each person holds now, and their access keys and sessions follow: someone moved out of a role loses it on keys made before. Someone left with no roles keeps
+        their keys, which then allow nothing.
+        {r.roles === false || (r.roles === undefined && r.enabled) ? " Turning this on changes what existing access keys allow." : ""}
+      </p>
+      {r.roles && (
+        <>
+          {!scimOnly && sources.length > 1 && (
+            <Field label="Roles come from" help="What the sign-in token's claim carries.">
+              <select value={from} onChange={(e) => set({ rolesFrom: e.target.value as typeof from })} data-testid="roles-from">
+                {sources.map(([v, l]) => (
+                  <option key={v} value={v}>
+                    {l}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          )}
+          <p className="muted" data-testid="roles-need">
+            {need}
+          </p>
         </>
       )}
     </div>
@@ -446,7 +528,11 @@ const SCIM_GUIDE: Record<string, ReactNode[]> = {
       default). Buckets matches people by the ID in their sign-in token, which is objectId.
     </>,
     <>
-      Turn <strong>Provisioning Status</strong> on, and scope it to the people assigned to the app. Groups are not provisioned: turn group provisioning off.
+      Turn <strong>Provisioning Status</strong> on, and scope it to the people assigned to the app.
+    </>,
+    <>
+      If roles are kept current: under <strong>Mappings → Provision Microsoft Entra ID Groups</strong>, turn it on and map <strong>externalId</strong> from <strong>objectId</strong>, as the groups
+      claim names them. Assign the groups to the app. Otherwise turn group provisioning off.
     </>,
   ],
   okta: [
@@ -461,6 +547,9 @@ const SCIM_GUIDE: Record<string, ReactNode[]> = {
     <>
       Under <strong>Provisioning → To App</strong>, turn on <strong>Create Users</strong>, <strong>Update User Attributes</strong> and <strong>Deactivate Users</strong>. Okta sends its user ID as externalId,
       which is the ID in its sign-in tokens: nothing to map.
+    </>,
+    <>
+      If roles are kept current: under <strong>Push Groups</strong>, push the groups whose names are Buckets policies or teams. Okta sends each group's name, as its groups claim does.
     </>,
   ],
 };

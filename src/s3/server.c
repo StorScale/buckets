@@ -315,6 +315,74 @@ static bool scim_load(buckets_objlayer *L, buckets_scim_store *out) {
   return ok;
 }
 
+/* Roles kept current (docs/design/roles-current.md): for each active person, what the provider says they hold now,
+ * mapped to the policies that exist as at sign-in, against what their sign-ins map them to. */
+static void idsync_roles(buckets_s3_server *s, const buckets_idsync_settings *st, buckets_idsync_client *client,
+                         const buckets_idsync_answers *ans, const char *const *pp_person, const char *const *pp_parent,
+                         size_t npp, const buckets_scim_store *scim, bool api, bool *failed) {
+  /* SCIM's groups (pushed): only once the provider pushes groups at all, or everyone would be left with none */
+  bool scim_groups = st->scim && scim && scim->ng > 0;
+  bool by_external = *st->tenant != '\0'; /* Entra's tokens name groups by object ID: the groups' externalId */
+  if (!api && !scim_groups) return;
+  buckets_idsync_role_change *ch = buckets_xcalloc(npp + 1, sizeof(*ch));
+  char **olds = buckets_xcalloc(npp + 1, sizeof(char *)), **news = buckets_xcalloc(npp + 1, sizeof(char *));
+  size_t n = 0, errors = 0;
+  if (api) buckets_idsync_client_begin(client); /* who holds which app role: asked again each sync */
+  for (size_t i = 0; i < npp; i++) {
+    if (state_of_person(ans, pp_person[i]) != BUCKETS_IDSYNC_ACTIVE) continue; /* leaving is removal's */
+    char **v = NULL, err[512] = "";
+    size_t nv = scim_groups ? buckets_scim_values_of(scim, pp_person[i], by_external, &v) : 0;
+    if (!nv && !(scim_groups && !api)) { /* in no SCIM group: the API answers, where there is one */
+      buckets_scim_values_free(v, nv);
+      v = NULL;
+      if (!api) continue;
+      if (!buckets_idsync_client_values(client, pp_person[i], &v, &nv, err, sizeof(err))) {
+        if (errors++ == 0) buckets_log_warn("identity sync: roles: %s", err);
+        continue;
+      }
+    }
+    buckets_buf csv = BUCKETS_BUF_INIT;
+    for (size_t k = 0; k < nv; k++) buckets_buf_appendf(&csv, "%s%s", k ? "," : "", v[k]);
+    buckets_idsync_values_free(v, nv);
+    news[n] = buckets_iam_existing_policies(s->iam, csv.data ? csv.data : "");
+    olds[n] = buckets_iam_person_policies(s->iam, pp_parent[i]);
+    buckets_buf_free(&csv);
+    ch[n] = (buckets_idsync_role_change){pp_person[i], pp_parent[i], olds[n], news[n], false, false};
+    n++;
+  }
+  if (errors) *failed = true;
+  if (buckets_idsync_roles_decide(ch, n, st->remove_max)) {
+    s->idsync_held++;
+    buckets_log_warn("identity sync: roles would be taken from more people at once than BUCKETS_OPENID_REMOVE_MAX (%ld);"
+                     " none taken. Raise the limit if this is right.",
+                     st->remove_max);
+  }
+  for (size_t i = 0; i < n; i++) {
+    if (!ch[i].apply) continue;
+    size_t updated = 0;
+    buckets_iam_err e = buckets_iam_set_person_policies(s->iam, ch[i].parent, ch[i].new_csv, &updated);
+    if (e) {
+      buckets_log_warn("identity sync: roles of %s: %s", ch[i].person, buckets_iam_strerror(e));
+      continue;
+    }
+    s->idsync_roles++;
+    buckets_log_info("identity sync: roles of %s changed: [%s] -> [%s]; %zu credentials updated", ch[i].person,
+                     ch[i].old_csv, ch[i].new_csv, updated);
+    char nb[24];
+    snprintf(nb, sizeof(nb), "%zu", updated);
+    const char *keys[] = {"person", "policiesBefore", "policiesNow", "credentials"};
+    const char *vals[] = {ch[i].person, ch[i].old_csv, ch[i].new_csv, nb};
+    buckets_s3_audit_internal(s, "IdentitySyncRoles", "IdentitySyncRoles", "", "", "", NULL, keys, vals, 4);
+  }
+  for (size_t i = 0; i < n; i++) {
+    free(olds[i]);
+    free(news[i]);
+  }
+  free(olds);
+  free(news);
+  free(ch);
+}
+
 /* pushed_only: a run for SCIM's changes, asking the provider's API about no one. */
 static void idsync_run(buckets_s3_server *s, const buckets_idsync_settings *st, buckets_idsync_client *client,
                        bool pushed_only) {
@@ -351,6 +419,9 @@ static void idsync_run(buckets_s3_server *s, const buckets_idsync_settings *st, 
   size_t nc = 0;
   const char **people = buckets_xcalloc(nall + 1, sizeof(char *));
   size_t np = 0;
+  /* each person and the parent their credentials share (a person signed in through two issuers has two) */
+  const char **pp_person = buckets_xcalloc(nall + 1, sizeof(char *)), **pp_parent = buckets_xcalloc(nall + 1, sizeof(char *));
+  size_t npp = 0;
   for (size_t i = 0; i < nall; i++) {
     const char *person = idsync_person(st, all[i]);
     if (!person || (all[i]->type == BUCKETS_IAM_STS && buckets_iam_ident_is_expired(all[i]))) continue;
@@ -359,6 +430,13 @@ static void idsync_run(buckets_s3_server *s, const buckets_idsync_settings *st, 
     bool seen = false;
     for (size_t k = 0; k < np && !seen; k++) seen = strcmp(people[k], person) == 0;
     if (!seen) people[np++] = person;
+    const char *parent = all[i]->parent ? all[i]->parent : "";
+    bool pseen = !*parent;
+    for (size_t k = 0; k < npp && !pseen; k++) pseen = !strcmp(pp_person[k], person) && !strcmp(pp_parent[k], parent);
+    if (!pseen) {
+      pp_person[npp] = person;
+      pp_parent[npp++] = parent;
+    }
   }
   /* what the sync turned off before */
   buckets_buf hb = BUCKETS_BUF_INIT;
@@ -466,8 +544,12 @@ static void idsync_run(buckets_s3_server *s, const buckets_idsync_settings *st, 
       buckets_buf_free(&out);
     }
     buckets_idsync_plan_free(&plan);
+    if (st->roles && (api || st->scim))
+      idsync_roles(s, st, client, &ans, pp_person, pp_parent, npp, scim_ok ? &scim : NULL, api, &failed);
   }
   if (failed) s->idsync_failures++;
+  free(pp_person);
+  free(pp_parent);
   buckets_scim_store_free(&scim);
   free(states);
   free(people);

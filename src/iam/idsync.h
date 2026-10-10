@@ -12,6 +12,7 @@
  *   BUCKETS_OPENID_SYNC_PROVIDER     entra, keycloak, okta or scim (SCIM only: no provider API); unset: off
  *   scim:     BUCKETS_OPENID_SYNC_TENANT_ID (Entra: people by tid and oid) or _ISSUER (by iss and sub)
  *   BUCKETS_SCIM                     on: SCIM's records answer for the people they name, beside the API
+ *   BUCKETS_OPENID_SYNC_ROLES        on: also keep each person's roles current (_ROLES_FROM, _APP_ID below)
  *   entra:    BUCKETS_OPENID_SYNC_TENANT_ID, _CLIENT_ID, _CLIENT_SECRET (an app with Graph's User.Read.All);
  *             people by the token's tid and oid
  *   keycloak: BUCKETS_OPENID_SYNC_URL (Keycloak's base URL), _REALM, _CLIENT_ID, _CLIENT_SECRET (a client
@@ -42,6 +43,13 @@ typedef struct {
   long long remove_after_s;
   long remove_max;
   bool scim; /* SCIM's records (iam/scim.h) answer for the people they name: BUCKETS_SCIM=on, or provider scim */
+  /* roles kept current (docs/design/roles-current.md): BUCKETS_OPENID_SYNC_ROLES=on; where the token's policy
+   * claim comes from (BUCKETS_OPENID_SYNC_ROLES_FROM: app-roles or groups for Entra; realm-roles, client-roles or
+   * groups for Keycloak; groups for Okta and SCIM); the sign-in app or client whose roles count
+   * (BUCKETS_OPENID_SYNC_APP_ID; the sync's own client ID by default) */
+  bool roles;
+  char roles_from[16];
+  char app_id[128];
 } buckets_idsync_settings;
 
 /* From the environment; false and why when set but not usable. Off (provider "") is fine. */
@@ -143,5 +151,26 @@ typedef struct {
  * their ID and names. */
 buckets_idsync_state buckets_idsync_client_lookup(buckets_idsync_client *c, const char *id,
                                                   buckets_idsync_person *who, char *err, size_t errlen);
+/* Roles kept current: the person's values for the token's policy claim now, from settings.roles_from (Entra's app
+ * roles: their own and their direct groups', or group IDs; Okta's group names; Keycloak's realm or client roles,
+ * or group paths), sorted. false (and err) when the provider couldn't answer: nothing is changed then. */
+bool buckets_idsync_client_values(buckets_idsync_client *c, const char *id, char ***values, size_t *n, char *err,
+                                  size_t errlen);
+void buckets_idsync_values_free(char **v, size_t n);
+/* A sync run starts: what is cached for values (who holds which Entra app role) is asked again. */
+void buckets_idsync_client_begin(buckets_idsync_client *c);
+
+/* One person's roles: the policies their sign-ins map to now and what the provider says now (comma-separated). */
+typedef struct {
+  const char *person, *parent;
+  const char *old_csv, *new_csv;
+  bool removes; /* set: something of old_csv isn't in new_csv */
+  bool apply;   /* set: the change goes ahead */
+} buckets_idsync_role_change;
+/* Which changes go ahead: every one that changes something, unless more than remove_max people would lose a role;
+ * then only those that add without removing. Returns whether some were held. */
+bool buckets_idsync_roles_decide(buckets_idsync_role_change *ch, size_t n, long remove_max);
+/* Two comma-separated lists with the same values, in any order. */
+bool buckets_idsync_csv_same(const char *a, const char *b);
 
 #endif

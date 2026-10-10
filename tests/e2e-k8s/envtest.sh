@@ -652,6 +652,7 @@ syncenv() { jp sts/idc-pool-0 "{.spec.template.spec.containers[0].env[?(@.name==
 until_true '[[ $(syncenv BUCKETS_OPENID_SYNC_TENANT_ID) == t-1 ]]' || true
 expect "the servers get the sync's settings" "$(syncenv BUCKETS_OPENID_SYNC_PROVIDER) $(syncenv BUCKETS_OPENID_SYNC_TENANT_ID) $(syncenv BUCKETS_OPENID_SYNC_CLIENT_ID) $(syncenv BUCKETS_OPENID_REMOVE_AFTER) $(syncenv BUCKETS_OPENID_REMOVE_MAX)" \
   "entra t-1 app 14 10"
+expect "roles kept current: off unless turned on" "$(syncenv BUCKETS_OPENID_SYNC_ROLES)" ""
 expect "the client secret from a Secret" "$(jp sts/idc-pool-0 '{.spec.template.spec.containers[0].env[?(@.name=="BUCKETS_OPENID_SYNC_CLIENT_SECRET")].valueFrom.secretKeyRef.name}')" idc-identity-sync
 expect "which holds it" "$(jp secret/idc-identity-sync '{.data.clientSecret}' | base64 -d)" s
 expect "owned by the cluster" "$(jp secret/idc-identity-sync '{.metadata.ownerReferences[0].name}')" idc
@@ -666,9 +667,10 @@ expect "Okta: the sync's settings" "$(syncenv BUCKETS_OPENID_SYNC_URL) $(syncenv
 expect "Okta: the API token from the Secret" "$(jp sts/idc-pool-0 '{.spec.template.spec.containers[0].env[?(@.name=="BUCKETS_OPENID_SYNC_API_TOKEN")].valueFrom.secretKeyRef.key}')/$(jp secret/idc-identity-sync '{.data.apiToken}' | base64 -d)" apiToken/00tok
 expect "Okta: no client secret or tenant for the sync" "$(syncenv BUCKETS_OPENID_SYNC_TENANT_ID)$(jp sts/idc-pool-0 '{.spec.template.spec.containers[0].env[?(@.name=="BUCKETS_OPENID_SYNC_CLIENT_SECRET")].name}')" ""
 # Keycloak: the realm and the client's service account
-idsettings='{"openid":{"provider":"keycloak","url":"https://kc.example.com","realm":"corp","clientId":"buckets","clientSecret":"s","removal":{"enabled":true}}}'
+idsettings='{"openid":{"provider":"keycloak","url":"https://kc.example.com","realm":"corp","clientId":"buckets","clientSecret":"s","removal":{"enabled":true,"roles":true,"rolesFrom":"client-roles"}}}'
 k -n tenant create secret generic idc-identity --from-literal=settings.json="$idsettings" --dry-run=client -o yaml | k apply -f - >/dev/null
 until_true '[[ $(syncenv BUCKETS_OPENID_SYNC_PROVIDER) == keycloak ]]' || true
+expect "Keycloak: roles kept current, from the client's roles" "$(syncenv BUCKETS_OPENID_SYNC_ROLES) $(syncenv BUCKETS_OPENID_SYNC_ROLES_FROM)" "on client-roles"
 expect "Keycloak: the sync's settings" "$(syncenv BUCKETS_OPENID_SYNC_URL) $(syncenv BUCKETS_OPENID_SYNC_REALM) $(syncenv BUCKETS_OPENID_SYNC_ISSUER) $(syncenv BUCKETS_OPENID_SYNC_CLIENT_ID) $(syncenv BUCKETS_OPENID_SYNC_INTERVAL)" \
   "https://kc.example.com corp https://kc.example.com/realms/corp buckets 3600"
 # SCIM only (iam/scim.h): no API credentials; the token's hash; people by the tenant

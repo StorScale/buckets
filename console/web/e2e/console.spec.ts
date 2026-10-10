@@ -895,6 +895,15 @@ test.describe("KMS and sign-in setup", () => {
     // what the app needs in Entra ID
     await expect(page.getByTestId("removal")).toContainText("User.Read.All");
     await expect(page.getByTestId("removal")).toContainText("Grant admin consent");
+    // roles kept current: on for new settings; Entra's app roles need Application.Read.All, its groups don't
+    await expect(page.getByTestId("roles-on")).toBeChecked();
+    await expect(page.getByTestId("roles-need")).toContainText("Application.Read.All");
+    await page.getByTestId("roles-from").selectOption("groups");
+    await expect(page.getByTestId("roles-need")).not.toContainText("Application.Read.All");
+    await page.getByTestId("roles-from").selectOption("app-roles");
+    await page.getByTestId("roles-on").uncheck();
+    await expect(page.getByTestId("roles")).toContainText("Turning this on changes what existing access keys allow");
+    await page.getByTestId("roles-on").check();
     await page.getByTestId("removal-days").fill("14");
     await page.getByTestId("oidc-tenant").fill("11111111-2222-3333-4444-555555555555");
     await page.getByTestId("oidc-client-id").fill("app-1");
@@ -907,7 +916,7 @@ test.describe("KMS and sign-in setup", () => {
     await page.getByTestId("removal-test-user").fill("alice@example.com");
     await expect(page.getByTestId("removal-test")).toBeEnabled();
     const st = await kubeState(page);
-    expect(st.secrets["store-identity-candidate"]["settings.json"].openid?.removal).toEqual({ enabled: true, deleteAfterDays: 14 });
+    expect(st.secrets["store-identity-candidate"]["settings.json"].openid?.removal).toEqual({ enabled: true, roles: true, rolesFrom: "app-roles", deleteAfterDays: 14 });
     // Okta: the section asks for an API token, and Save waits for one
     await page.getByTestId("oidc-provider-okta").click();
     await page.getByTestId("removal-on").check();
@@ -922,6 +931,7 @@ test.describe("KMS and sign-in setup", () => {
     await page.getByTestId("oidc-provider-keycloak").click();
     await page.getByTestId("removal-on").check();
     await expect(page.getByTestId("removal")).toContainText("realm-management: view-users");
+    await expect(page.getByTestId("roles-from")).toContainText("The client's roles");
     await page.getByTestId("oidc-provider-generic").click();
     await expect(page.getByTestId("removal")).toHaveCount(0);
   });
@@ -936,6 +946,8 @@ test.describe("KMS and sign-in setup", () => {
     await page.getByTestId("removal-method-scim").check();
     // SCIM's guide instead of the API's: the attribute mapping, and no lookup
     await expect(page.getByTestId("scim-setup")).toContainText("objectId");
+    await expect(page.getByTestId("scim-setup")).toContainText("Provision Microsoft Entra ID Groups"); // roles kept current: groups pushed too
+    await expect(page.getByTestId("roles-need")).toContainText("pushes groups");
     await expect(page.getByTestId("removal")).not.toContainText("User.Read.All");
     await expect(page.getByTestId("removal-test")).toHaveCount(0);
     await expect(page.getByTestId("scim-url")).toContainText("/minio/scim/v2");
@@ -952,7 +964,7 @@ test.describe("KMS and sign-in setup", () => {
     // only the hash is kept, and SCIM alone needs no lookup before apply
     const sha = createHash("sha256").update(token).digest("hex");
     let st = await kubeState(page);
-    expect(st.secrets["store-identity-candidate"]["settings.json"].openid?.removal).toEqual({ enabled: true, method: "scim", scimTokenSha256: sha });
+    expect(st.secrets["store-identity-candidate"]["settings.json"].openid?.removal).toEqual({ enabled: true, roles: true, method: "scim", scimTokenSha256: sha });
     expect(JSON.stringify(st.secrets)).not.toContain(token);
     await expect(page.getByTestId("apply-card")).not.toContainText("Look up a person");
     await expect(page.getByTestId("apply-card")).toContainText("set up provisioning in Entra ID");

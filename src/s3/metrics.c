@@ -1014,6 +1014,7 @@ static void idsync_metrics(mctx *m) {
   ADD1(m, "buckets_node_identity_sync_actions_total", (double)s->idsync_disabled, "action", "disable");
   ADD1(m, "buckets_node_identity_sync_actions_total", (double)s->idsync_enabled, "action", "enable");
   ADD1(m, "buckets_node_identity_sync_actions_total", (double)s->idsync_deleted, "action", "delete");
+  ADD1(m, "buckets_node_identity_sync_actions_total", (double)s->idsync_roles, "action", "roles");
 }
 
 /* SCIM (s3/scimhandlers.c): requests here, and the people it named at the last sync here */

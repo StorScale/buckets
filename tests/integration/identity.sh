@@ -93,6 +93,10 @@ class H(http.server.BaseHTTPRequestHandler):
             return self.reply(404, {"errorCode": "E0000007", "errorSummary": "Not found: Resource not found: %s (User)" % who})
         if self.headers.get("Authorization") == "Bearer tok-noperm-app":
             return self.reply(403, {"error": {"code": "Authorization_RequestDenied", "message": "Insufficient privileges to complete the operation."}})
+        if u.path.startswith("/v1.0/servicePrincipals"):                 # no Application.Read.All: app roles can't be read
+            return self.reply(403, {"error": {"code": "Authorization_RequestDenied", "message": "Insufficient privileges to complete the operation."}})
+        if u.path == "/v1.0/users/o-alice/transitiveMemberOf":               # her groups, as the groups claim has them
+            return self.reply(200, {"value": [{"@odata.type": "#microsoft.graph.group", "id": "readwrite"}, {"@odata.type": "#microsoft.graph.group", "id": "g-nopolicy"}, {"@odata.type": "#microsoft.graph.directoryRole", "id": "dr-1"}]})
         who = urllib.parse.unquote(u.path[len("/v1.0/users/"):])
         for upn, (oid, name, on) in USERS.items():
             if who in (upn, oid):
@@ -242,6 +246,16 @@ check "a person found" "$(api -d '{"user":"alice@example.com"}' "$C/api/v1/ident
 check "a disabled one shows as such" "$(api -d '{"user":"dave@example.com"}' "$C/api/v1/identity-config/removal-test" | jq_ 'd["passed"], d["state"]')" "True disabled"
 check "no one by that name" "$(api -d '{"user":"zed@example.com"}' "$C/api/v1/identity-config/removal-test" | jq_ 'd["passed"], d["error"].startswith("No one by that name")')" \
   "False True"
+check "roles not kept current: none shown" "$(api -d '{"user":"alice@example.com"}' "$C/api/v1/identity-config/removal-test" | jq_ '"roles" in d, "rolesError" in d')" "False False"
+api -X PUT -d '{"settings":{"openid":'"${ENTRA/\"enabled\":true/\"enabled\":true,\"roles\":true,\"rolesFrom\":\"groups\"}"'}}' "$C/api/v1/identity-config/candidate" >/dev/null
+check "roles kept current: her groups now, and the policies they name" \
+  "$(api -d '{"user":"alice@example.com"}' "$C/api/v1/identity-config/removal-test" | jq_ 'd["passed"], ",".join(d["roles"]), ",".join(d["policies"]), ",".join(d["unmatched"])')" \
+  "True g-nopolicy,readwrite readwrite g-nopolicy"
+api -X PUT -d '{"settings":{"openid":'"${ENTRA/\"enabled\":true/\"enabled\":true,\"roles\":true}"'}}' "$C/api/v1/identity-config/candidate" >/dev/null
+check "app roles without Application.Read.All: found, but told what reading roles needs" \
+  "$(api -d '{"user":"alice@example.com"}' "$C/api/v1/identity-config/removal-test" | jq_ 'd["passed"], "roles" in d, "Application.Read.All" in d["rolesError"]')" "True False True"
+api -X PUT -d '{"settings":{"openid":'"$ENTRA"'}}' "$C/api/v1/identity-config/candidate" >/dev/null
+api -d '{"user":"alice@example.com"}' "$C/api/v1/identity-config/removal-test" >/dev/null
 check "which does not take back the pass" "$(api "$C/api/v1/identity-config" | jq_ 'd["test"]["removal"]["passed"]')" True
 check "then the sign-in test is what is missing" "$(api -d '{"candidateHash":"'"$HASH"'"}' "$C/api/v1/identity-config/apply" | jq_ 'd["message"]')" \
   "Sign in once with the OpenID settings (Test sign-in) before applying them."

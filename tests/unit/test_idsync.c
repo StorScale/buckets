@@ -288,9 +288,34 @@ static void test_scim_settings(void **state) {
   for (size_t i = 0; i < sizeof(vars) / sizeof(vars[0]); i++) unsetenv(vars[i]);
 }
 
+static void test_roles_decide(void **state) {
+  (void)state;
+  assert_true(buckets_idsync_csv_same("a,b", "b,a"));
+  assert_true(buckets_idsync_csv_same("", ""));
+  assert_false(buckets_idsync_csv_same("a", "a,b"));
+  assert_false(buckets_idsync_csv_same("a,b", "a"));
+  buckets_idsync_role_change ch[] = {
+      {"p1", "p1", "rw", "ro", false, false},    /* removes */
+      {"p2", "p2", "rw", "", false, false},      /* removes everything */
+      {"p3", "p3", "ro", "ro,rw", false, false}, /* adds only */
+      {"p4", "p4", "ro", "ro", false, false},    /* the same */
+  };
+  assert_false(buckets_idsync_roles_decide(ch, 4, 2));
+  assert_true(ch[0].removes && ch[0].apply);
+  assert_true(ch[1].removes && ch[1].apply);
+  assert_true(!ch[2].removes && ch[2].apply);
+  assert_false(ch[3].apply);
+  /* more people would lose a role than allowed: only additions go ahead */
+  assert_true(buckets_idsync_roles_decide(ch, 4, 1));
+  assert_false(ch[0].apply);
+  assert_false(ch[1].apply);
+  assert_true(ch[2].apply);
+  assert_false(ch[3].apply);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
-      cmocka_unit_test(test_scim_settings),
+      cmocka_unit_test(test_scim_settings), cmocka_unit_test(test_roles_decide),
       cmocka_unit_test(test_graph_state), cmocka_unit_test(test_settings),
       cmocka_unit_test(test_plan),        cmocka_unit_test(test_safety_limit),
       cmocka_unit_test(test_held_json),   cmocka_unit_test(test_keycloak_okta_state),
