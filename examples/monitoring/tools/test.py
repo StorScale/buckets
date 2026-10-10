@@ -115,7 +115,7 @@ def main():
     mode = os.stat("/drive3").st_mode & 0o7777
     os.chmod("/drive3", 0)
     offline = wait(lambda: (value("max(minio_cluster_drive_offline_total)") or 0) >= 1, 180)
-    check("an emptied drive shows up as offline", offline,
+    check("an unreadable drive shows up as offline", offline,
           f"drives online {value('max(minio_cluster_drive_online_total)'):.0f}, offline "
           f"{value('max(minio_cluster_drive_offline_total)'):.0f}")
     started = wait(lambda: (lambda a: a if {"BucketsDriveOffline", "BucketsErasureSetDegraded"} <= set(a) else None)(alerts()), 180)
