@@ -4,16 +4,15 @@
      metrics-only user, which can read no data;
   2. the Helm chart's alert rules load, with no errors;
   3. the four Grafana dashboards' queries return data from Prometheus;
-  4. a failed drive (here, emptied under load, as a replaced disk looks) shows
-     up: Buckets reports it offline and the erasure set degraded, and the
-     alerts for both start.
+  4. a failed drive (here, made unreadable under load, as a dying disk looks)
+     shows up: Buckets reports it offline and the erasure set degraded, and the
+     alerts for both start; readable again, it comes back online.
 
-Buckets should also format the empty drive back into its slot and heal it,
-but under write load that still loses a race at times (writes that reach the
-drive before Buckets notices it changed make it look like a drive holding
-data), so this doesn't check it yet.
+An emptied drive (a disk swapped for a new one) is no good for this: Buckets
+formats it back into its slot within one drive check, often before Prometheus
+scrapes, so whether it is ever seen offline is a matter of timing. An
+unreadable drive stays offline until it is fixed.
 """
-import glob
 import json
 import os
 import re
@@ -112,9 +111,9 @@ def main():
     check("the dashboards' queries return data", total - len(empty) >= total * 0.75,
           f"{total - len(empty)} of {total} queries; empty: {'; '.join(sorted(set(empty)))}")
 
-    # 4. A failed drive.
-    for p in glob.glob("/drive3/*") + glob.glob("/drive3/.*"):
-        os.system(f"rm -rf '{p}'")
+    # 4. A failed drive: unreadable, as a dying disk looks, until it is fixed.
+    mode = os.stat("/drive3").st_mode & 0o7777
+    os.chmod("/drive3", 0)
     offline = wait(lambda: (value("max(minio_cluster_drive_offline_total)") or 0) >= 1, 180)
     check("an emptied drive shows up as offline", offline,
           f"drives online {value('max(minio_cluster_drive_online_total)'):.0f}, offline "
@@ -122,6 +121,12 @@ def main():
     started = wait(lambda: (lambda a: a if {"BucketsDriveOffline", "BucketsErasureSetDegraded"} <= set(a) else None)(alerts()), 180)
     check("the drive-offline and degraded-set alerts start", started,
           ", ".join(f"{k} {v}" for k, v in sorted((started or alerts()).items())) or "no alerts")
+    os.chmod("/drive3", mode)
+    back = wait(lambda: (value("max(minio_cluster_drive_offline_total)") or 0) == 0
+                and (value("max(minio_cluster_drive_online_total)") or 0) == 4, 180)
+    check("readable again, it comes back online", back,
+          f"drives online {value('max(minio_cluster_drive_online_total)'):.0f}, offline "
+          f"{value('max(minio_cluster_drive_offline_total)'):.0f}")
 
     finish()
 
