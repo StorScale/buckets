@@ -353,6 +353,67 @@ static void test_sts(void **state) {
   buckets_iam_free(iam);
 }
 
+static char *policy_claim(void *ud) {
+  (void)ud;
+  return strdup("policy");
+}
+
+/* Roles kept current (iam/idsync.h): a person's temporary credential follows their new roles with the token its
+ * client already holds; their access key's claim is re-signed; with no roles left, the temporary credential ends
+ * and the key allows nothing. */
+static void test_person_policies(void **state) {
+  fixture *f = *state;
+  buckets_iam *iam = buckets_iam_new(ROOT_AK, ROOT_SK);
+  assert_true(buckets_iam_start(iam, f->layer));
+  buckets_iam_openid_hooks hooks = {.claim_name = policy_claim};
+  buckets_iam_set_openid_hooks(iam, &hooks);
+  const char *who = "oidc-ann";
+  size_t n = 0;
+  assert_int_equal(buckets_iam_set_person_policies(iam, who, "readwrite", &n), BUCKETS_IAM_OK); /* a sign-in */
+  long long exp = (long long)time(NULL) + 3600;
+  char claims[256];
+  snprintf(claims, sizeof(claims), "{\"exp\":%lld,\"parent\":\"%s\",\"policy\":\"readwrite\"}", exp, who);
+  buckets_iam_ident *t;
+  assert_int_equal(buckets_iam_set_temp_user(iam, "STSANN0001", "stsannsecret", who, NULL, 0,
+                                             (buckets_iam_time){exp, 0}, claims, NULL, &t),
+                   BUCKETS_IAM_OK);
+  char token[2048];
+  snprintf(token, sizeof(token), "%s", t->session_token);
+  buckets_iam_ident_release(t);
+  char err[256];
+  buckets_iam_svc_opts o = {.parent = who, .access_key = "ANNKEY0001", .secret_key = "annkeysecret01",
+                            .claims_json = "{\"policy\":\"readwrite\"}"};
+  assert_int_equal(buckets_iam_add_svc(iam, &o, NULL, err, sizeof(err)), BUCKETS_IAM_OK);
+  assert_true(allowed(iam, "STSANN0001", token, "s3:PutObject", "b1b", "k"));
+  assert_true(allowed(iam, "ANNKEY0001", NULL, "s3:PutObject", "b1b", "k"));
+
+  /* moved to readonly: one access key re-signed; the session keeps its token and reads, but no longer writes */
+  assert_int_equal(buckets_iam_set_person_policies(iam, who, "readonly", &n), BUCKETS_IAM_OK);
+  assert_int_equal(n, 1);
+  assert_true(allowed(iam, "STSANN0001", token, "s3:GetObject", "b1b", "k"));
+  assert_false(allowed(iam, "STSANN0001", token, "s3:PutObject", "b1b", "k"));
+  assert_true(allowed(iam, "ANNKEY0001", NULL, "s3:GetObject", "b1b", "k"));
+  assert_false(allowed(iam, "ANNKEY0001", NULL, "s3:PutObject", "b1b", "k"));
+  buckets_iam_ident *k;
+  assert_int_equal(buckets_iam_get_key(iam, "ANNKEY0001", &k), BUCKETS_IAM_KEY_OK);
+  assert_string_equal(buckets_iam_ident_claim(k, "policy"), "readonly");
+  assert_string_equal(k->secret_key, "annkeysecret01");
+  buckets_iam_ident_release(k);
+  assert_int_equal(buckets_iam_get_key(iam, "STSANN0001", &k), BUCKETS_IAM_KEY_OK);
+  assert_string_equal(k->session_token, token); /* the client's token still matches */
+  buckets_iam_ident_release(k);
+
+  /* no roles left: the session ends (its token's claim would give readwrite back), the key allows nothing */
+  assert_int_equal(buckets_iam_set_person_policies(iam, who, "", &n), BUCKETS_IAM_OK);
+  assert_int_equal(n, 2);
+  assert_int_equal(buckets_iam_get_key(iam, "STSANN0001", &k), BUCKETS_IAM_KEY_UNKNOWN);
+  assert_false(allowed(iam, "ANNKEY0001", NULL, "s3:GetObject", "b1b", "k"));
+  /* a role given back: the key works again */
+  assert_int_equal(buckets_iam_set_person_policies(iam, who, "readonly", &n), BUCKETS_IAM_OK);
+  assert_true(allowed(iam, "ANNKEY0001", NULL, "s3:GetObject", "b1b", "k"));
+  buckets_iam_free(iam);
+}
+
 /* Files exactly as MinIO writes them load. */
 static void test_minio_format(void **state) {
   fixture *f = *state;
@@ -380,6 +441,7 @@ static void test_minio_format(void **state) {
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_jwt_reference),
+      cmocka_unit_test_setup_teardown(test_person_policies, setup, teardown),
       cmocka_unit_test(test_jwt_roundtrip),
       cmocka_unit_test(test_strmap),
       cmocka_unit_test(test_time_rfc3339),

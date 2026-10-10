@@ -256,9 +256,11 @@ buckets_iam_err buckets_iam_policy_update_sts(buckets_iam *iam, const char *name
                                               char **effective);
 /* A person's roles (identity sync, iam/idsync.h), by the parent their OpenID credentials share: the policies
  * their sign-ins mapped them to ("" when none), and setting them. Setting writes that mapping, which each of
- * their credentials is checked against first, and re-signs each access key's and temporary credential's policy
- * claim to match, which they fall back to without a mapping: so "" leaves them none rather than the old ones.
- * Keys, secrets, expiry, status and session policies stay. *updated: credentials re-signed. */
+ * their credentials is checked against first, so temporary credentials follow it at once with the token their
+ * client holds. Each access key's policy claim, which they fall back to without a mapping, is re-signed to match:
+ * keys, secrets, expiry, status and session policies stay. With "" their temporary credentials end instead,
+ * since their tokens' claims would give the old roles back. *updated: access keys re-signed and temporary
+ * credentials ended. */
 char *buckets_iam_person_policies(buckets_iam *iam, const char *parent);
 buckets_iam_err buckets_iam_set_person_policies(buckets_iam *iam, const char *parent, const char *csv,
                                                 size_t *updated);

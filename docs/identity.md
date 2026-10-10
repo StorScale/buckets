@@ -220,12 +220,15 @@ script's key. With **Keep their roles current** (beside **People who leave**),
 each sync also reads what each person holds now, and where it differs, their
 credentials follow:
 
-- **Access keys and sessions are updated in place:** the same key and secret,
-  expiry and session policy, now carrying the new roles. Scripts keep working
-  with what the person is allowed now. The stored form is MinIO's, so MinIO
-  reads it after a rollback.
-- **Someone left with no roles** keeps their credentials, which then allow
-  nothing until a role is given back. Leaving is what removes access.
+- **Access keys are updated in place:** the same key and secret, expiry and
+  session policy, now carrying the new roles. Scripts keep working with what
+  the person is allowed now. The stored form is MinIO's, so MinIO reads it
+  after a rollback.
+- **Sessions** (console sessions and other temporary credentials) follow at
+  their next request, with the credentials they already hold.
+- **Someone left with no roles** keeps their access keys, which then allow
+  nothing until a role is given back; their sessions end, and signing in again
+  gives nothing. Leaving is what removes access.
 - **More people losing roles at once than the limit** (the same limit as for
   leaving): no roles are taken that run, and `BucketsIdentitySyncHeld` fires.
   Roles given are not held.
