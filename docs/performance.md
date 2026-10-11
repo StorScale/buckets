@@ -68,6 +68,39 @@ A development cluster on OpenStack (16-vCPU VMs, Cinder network volumes shared w
 
   With both, 64 KiB GETs went from about 2,000 to 3,850 op/s and 1 MiB GETs from 384 to 604 MiB/s.
 
+## Memory
+
+Both benchmarks measure memory as well as throughput:
+- `tests/bench/warp.sh` reads the server's RSS idle before each case, its peak (`VmHWM`), and RSS again once the load has stopped and the server has been quiet for `MEM_SETTLE` seconds (10 by default).
+- `tests/bench/cluster.sh` reads each server pod's memory from its node's kubelet (cAdvisor, through the API server's node proxy, so no metrics server is needed): idle after a minute of quiet, sampled every 2 s during the load, and idle again a minute after it. RSS is the memory the server itself holds; the working set adds page cache that can't be dropped at once, and is what Kubernetes compares with memory limits.
+
+Neither server had a memory limit, so each sized itself from the node's memory.
+
+**One server, 4 drives** (`warp.sh`): a Linux VM with 8 vCPUs and 31 GiB, glibc 2.39, Buckets 1.18.1 (release build) against MinIO `RELEASE.2025-10-15T17-29-55Z`, 15 s per phase, a fresh server for each case. RSS in MiB, idle / peak / after:
+
+| Case | Buckets | MinIO |
+|---|---|---|
+| 10 MiB × 16 clients | 11 / 534 / 459 | 119 / 889 / 713 |
+| 1 MiB × 32 clients | 11 / 330 / 325 | 118 / 1241 / 1051 |
+| 64 KiB × 32 clients | 12 / 253 / 195 | 118 / 497 / 497 |
+
+**Four servers × 2 drives on Kubernetes** (`cluster.sh`): the cluster above (16-vCPU nodes), Buckets 1.18.1 against MinIO `RELEASE.2024-10-13` (the release the lakehouse runs; the cluster can pull no newer MinIO image), 20 s per phase, the three cases one after another. Per server pod, MiB, the mean of the four with the largest in brackets:
+
+| Server | RSS idle | RSS peak | RSS after load | Working set idle | Working set peak |
+|---|---|---|---|---|---|
+| MinIO | 80 (82) | 652 (708) | 647 (710) | 82 (84) | 870 (932) |
+| Buckets | 9 (11) | 992 (1091) | 989 (1079) | 27 (31) | 1354 (1434) |
+| MinIO again | 82 (88) | 719 (993) | 701 (941) | 85 (90) | 993 (1280) |
+
+- **Idle,** Buckets uses about a tenth of MinIO's memory: 9–12 MiB of RSS against 80–120 MiB, in both setups.
+- **Under load on one server,** Buckets peaks lower than MinIO in every case, by 40% to 73%.
+- **Under load in the cluster,** Buckets peaks *higher*: about 990 MiB per server against MinIO's 650–720 MiB, and its working set reaches 1.35 GiB. Why the distributed setup costs Buckets more is not yet known.
+- **After the load,** neither server gives much back. Buckets' retained memory is almost all free: on one server after 10 MiB PUTs and GETs, glibc's `malloc_stats` showed 2.5 MiB in use of 575 MiB taken from the system, spread over 78 malloc arenas. The freed buffers stay cached there. Fixing glibc's mmap threshold (`glibc.malloc.mmap_threshold`) does return them, but it cut GET throughput by 40–75%. `malloc_trim(0)` once the load had stopped returned about half.
+
+So the footprint claim holds at idle, and on a single server. It doesn't hold yet under load in a cluster.
+
+Peaks move between runs: in the cluster the two MinIO rounds' peaks differed by up to 375 MiB on one server (618 and 993 MiB), so treat peak differences under about a third as noise. Idle figures varied by a few MiB.
+
 ## What moved the numbers
 
 The starting point was PUT at 0.80–1.03 s per 256 MiB (2.6–3.3× MinIO) and GET within 2×. In order of impact:

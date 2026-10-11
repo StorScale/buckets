@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Memory in the benchmarks** ([docs/performance.md](docs/performance.md#memory)). `tests/bench/cluster.sh` reads each server pod's memory from its kubelet (idle, peak under load, and idle after), and `tests/bench/warp.sh` reads the server's RSS the same way. First results: idle, Buckets uses about a tenth of MinIO's memory; on one server it also peaks lower under load; in a four-server cluster it peaks higher than MinIO and keeps the memory afterwards, as free buffers cached by malloc.
+
+### Fixed
+- `tests/bench/cluster.sh` applies the CRDs server-side and installs the chart without them, as the cluster tests do, so it no longer fails where the CRDs were last applied server-side.
+
 ## [1.18.1] - 2026-10-10
 
 ### Fixed

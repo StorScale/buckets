@@ -106,7 +106,8 @@ Done when: an auditor can get usage, access and retention reports from the conso
 A C server in a distroless image should use less memory than the Go original, which matters for edge and small-node deployments. That is a hypothesis, not a claim, until it is measured.
 
 - [x] **Throughput and latency on Kubernetes.** `tests/bench/cluster.sh` load-tests MinIO and Buckets on the same volumes and nodes. Profiling it on the shared cluster found two round trips on every read, fixed in 1.1.1; since then Buckets leads MinIO on every GET case there (64 KiB: 3,850 against 2,800 op/s) and on small PUTs. See `docs/performance.md`.
-- [ ] **Memory** at idle and under load, against MinIO `RELEASE.2025-10-15T17-29-55Z` on the same hardware. Not measured yet.
+- [x] **Memory measured** at idle and under load: `tests/bench/warp.sh` on one server against MinIO `RELEASE.2025-10-15T17-29-55Z`, `tests/bench/cluster.sh` on the shared cluster. Idle, Buckets uses about a tenth of MinIO's memory (9–12 MiB against 80–120 MiB per server), and on one server it peaks 40–73% lower under load. In the cluster it peaks higher (about 990 MiB per server against 650–720) and keeps it afterwards, almost all as free buffers cached by glibc's malloc. See `docs/performance.md`.
+- [ ] **Memory under load in a cluster:** find why distributed load costs Buckets more than MinIO, and give freed buffers back once a server is quiet, without losing throughput. The footprint claim waits for this.
 - Publish the method and the raw results with each comparison.
 - Market footprint or speed only where the numbers show a clear difference.
 
