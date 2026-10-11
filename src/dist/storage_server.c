@@ -7,6 +7,7 @@
 
 #include "core/query.h"
 #include "dist/internode.h"
+#include "dist/rpcstats.h"
 
 struct buckets_storage_server {
   buckets_drive **drives;
@@ -48,6 +49,7 @@ void buckets_storage_server_handle(const buckets_http_request *req, buckets_http
     fail(resp, 403, BUCKETS_DRIVE_ERR_IO);
     return;
   }
+  int64_t t0 = buckets_rpcstats_now_ns();
   const size_t pl = strlen(BUCKETS_INTERNODE_PREFIX "storage/");
   char op[32];
   snprintf(op, sizeof(op), "%.*s", (int)(req->path.n > pl ? req->path.n - pl : 0), req->path.p + pl);
@@ -147,4 +149,5 @@ void buckets_storage_server_handle(const buckets_http_request *req, buckets_http
   }
   buckets_buf_free(&body);
   buckets_query_free(&q);
+  if (resp->status != 400) buckets_rpcstats_add(BUCKETS_RPC_SERVED, "storage", op, buckets_rpcstats_now_ns() - t0);
 }

@@ -10,6 +10,7 @@
 
 #include "core/log.h"
 #include "dist/internode.h"
+#include "dist/rpcstats.h"
 
 #define OFFLINE_BACKOFF_MS 1000
 #define WRITE_BUFFER (4u * 1024 * 1024)
@@ -79,7 +80,10 @@ static buckets_drive_err call(buckets_drive *d, const char *op, args *a, const v
   buckets_internode_sign("POST", target.data, auth);
   buckets_http_kv h[] = {{BUCKETS_INTERNODE_AUTH, auth}};
   buckets_http_result res;
-  if (!buckets_http_client_do(r->peer, "POST", target.data, h, 1, body, blen, &res)) {
+  int64_t t0 = buckets_rpcstats_now_ns();
+  bool sent = buckets_http_client_do(r->peer, "POST", target.data, h, 1, body, blen, &res);
+  buckets_rpcstats_add(BUCKETS_RPC_CALLED, "storage", op, buckets_rpcstats_now_ns() - t0);
+  if (!sent) {
     atomic_store(&r->offline_until_ms, now_ms() + OFFLINE_BACKOFF_MS);
     if (!atomic_exchange(&r->logged_offline, true)) buckets_log_warn("drive %s is offline", d->root);
     buckets_buf_free(&target);

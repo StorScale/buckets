@@ -40,3 +40,9 @@ for p in json.loads(raw):
         err = "  errors %d: %s" % (p["errors"], p.get("first_error", "")[:60])
     print("%-8s %7d KiB x%3s %-4s %8.1f MiB/s %8.1f op/s  p50 %7.1f ms  p99 %7.1f ms%s"
           % (kind, int(size) // 1024, conc, p["op"], p["mib_per_s"], p["ops_per_s"], p["p50_ms"], p["p99_ms"], err))
+    # s3bench -metrics: internode calls per request, and what they cost
+    for name, o in sorted((p.get("internode") or {}).items(), key=lambda kv: -kv[1]["calls"]):
+        if o["calls_per_request"] < 0.05:
+            continue
+        print("    %-22s %6.2f per request  wait %7.2f ms  handled in %7.2f ms"
+              % (name, o["calls_per_request"], o["wait_ms_per_call"], o["served_ms_per_call"]))

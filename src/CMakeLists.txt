@@ -137,6 +137,7 @@ add_library(buckets STATIC
   dist/dsync.c
   dist/peer.c
   dist/peerstream.c
+  dist/rpcstats.c
   dist/endpoint.c
   object/erasure.c
   object/nslock.c

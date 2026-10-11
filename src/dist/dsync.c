@@ -15,6 +15,7 @@
 #include "core/query.h"
 #include "core/uuid.h"
 #include "dist/internode.h"
+#include "dist/rpcstats.h"
 
 #define VALIDITY_MS 60000
 #define REFRESH_MS 10000
@@ -244,6 +245,7 @@ void buckets_lock_server_handle(const buckets_http_request *req, buckets_http_re
     resp->status = 403;
     return;
   }
+  int64_t t0 = buckets_rpcstats_now_ns();
   const size_t pl = strlen(BUCKETS_INTERNODE_PREFIX "lock/");
   char op[16];
   snprintf(op, sizeof(op), "%.*s", (int)(req->path.n > pl ? req->path.n - pl : 0), req->path.p + pl);
@@ -272,6 +274,7 @@ void buckets_lock_server_handle(const buckets_http_request *req, buckets_http_re
   else resp->status = 400;
   if (resp->status == 200 && !ok) resp->status = 409;
   buckets_query_free(&q);
+  if (resp->status != 400) buckets_rpcstats_add(BUCKETS_RPC_SERVED, "lock", op, buckets_rpcstats_now_ns() - t0);
 }
 
 /* ---- client -------------------------------------------------------------------- */
@@ -338,7 +341,10 @@ static void fan_one(void *ctx, size_t i) {
   buckets_internode_sign("POST", t.data, auth);
   buckets_http_kv h[] = {{BUCKETS_INTERNODE_AUTH, auth}};
   buckets_http_result r;
-  if (buckets_http_client_do(d->peers[p], "POST", t.data, h, 1, NULL, 0, &r)) {
+  int64_t t0 = buckets_rpcstats_now_ns();
+  bool sent = buckets_http_client_do(d->peers[p], "POST", t.data, h, 1, NULL, 0, &r);
+  buckets_rpcstats_add(BUCKETS_RPC_CALLED, "lock", f->op, buckets_rpcstats_now_ns() - t0);
+  if (sent) {
     f->ok[i] = r.status == 200;
     buckets_http_result_free(&r);
   } else {
