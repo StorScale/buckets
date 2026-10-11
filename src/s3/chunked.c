@@ -24,8 +24,8 @@ struct buckets_chunked {
   uint8_t in[64 * 1024]; /* raw body read-ahead */
   size_t in_pos, in_len;
 
-  uint8_t *chunk; /* current verified chunk */
-  size_t chunk_len, chunk_pos;
+  uint8_t *chunk; /* current verified chunk, sized to the largest so far */
+  size_t chunk_cap, chunk_len, chunk_pos;
   bool done;
   buckets_s3_error err;
 
@@ -55,7 +55,6 @@ buckets_chunked *buckets_chunked_new(const buckets_http_request *req, buckets_st
     ch->sig = *sig;
     memcpy(ch->prev_sig, sig->seed_signature, 65);
   }
-  ch->chunk = buckets_xmalloc(MAX_CHUNK);
   return ch;
 }
 
@@ -228,6 +227,11 @@ static bool next_chunk(buckets_chunked *ch) {
     static const char key[] = ";chunk-signature=";
     if (strncmp(line + i, key, sizeof(key) - 1) != 0) return fail(ch, BUCKETS_ERR_MALFORMED_CHUNKED_ENCODING);
     provided = line + i + sizeof(key) - 1;
+  }
+  if (size > ch->chunk_cap || !ch->chunk) { /* clients send equal chunks (minio-go: 64 KiB), so this happens once */
+    free(ch->chunk);
+    ch->chunk_cap = size ? size : 1;
+    ch->chunk = buckets_xmalloc(ch->chunk_cap);
   }
   if (size && !read_exact(ch, ch->chunk, size)) return fail(ch, BUCKETS_ERR_INCOMPLETE_BODY);
   ch->chunk_len = size;

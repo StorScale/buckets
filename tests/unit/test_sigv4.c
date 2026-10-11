@@ -12,6 +12,7 @@
 #include <string.h>
 
 #include "core/timefmt.h"
+#include "s3/chunked.h"
 #include "s3/sigv2.h"
 #include "s3/sigv4.h"
 
@@ -268,12 +269,53 @@ static void test_sigv2_examples(void **state) {
   assert_int_equal(buckets_sigv2_verify_presigned(&late, &req, &res), BUCKETS_ERR_EXPIRED_PRESIGN_REQUEST);
 }
 
+/* aws-chunked, unsigned with a trailer: chunks of growing and shrinking sizes decode intact (the decoder's buffer
+ * grows to the largest chunk), and an empty body decodes to nothing. */
+static void test_chunked_sizes(void **state) {
+  (void)state;
+  static const size_t sizes[] = {3, 100000, 5, 70000};
+  buckets_buf body = BUCKETS_BUF_INIT, want = BUCKETS_BUF_INIT;
+  for (size_t i = 0; i < sizeof(sizes) / sizeof(*sizes); i++) {
+    buckets_buf_appendf(&body, "%zx\r\n", sizes[i]);
+    for (size_t j = 0; j < sizes[i]; j++) {
+      char c = (char)('a' + (i * 7 + j) % 26);
+      buckets_buf_append_char(&body, c);
+      buckets_buf_append_char(&want, c);
+    }
+    buckets_buf_append_c(&body, "\r\n");
+  }
+  buckets_buf_append_c(&body, "0\r\nx-amz-checksum-crc32:AAAAAA==\r\n\r\n");
+  buckets_http_request req = {.body = {body.data, body.len}, .body_fd = -1, .body_len = (int64_t)body.len};
+  buckets_chunked *ch = buckets_chunked_new(&req, buckets_str_c("STREAMING-UNSIGNED-PAYLOAD-TRAILER"), NULL);
+  assert_non_null(ch);
+  buckets_buf got = BUCKETS_BUF_INIT;
+  char tmp[4096];
+  long n;
+  while ((n = buckets_chunked_read(ch, tmp, sizeof(tmp))) > 0) buckets_buf_append(&got, tmp, (size_t)n);
+  assert_int_equal(n, 0);
+  assert_int_equal(got.len, want.len);
+  assert_memory_equal(got.data, want.data, want.len);
+  assert_string_equal(buckets_chunked_trailer(ch, "x-amz-checksum-crc32"), "AAAAAA==");
+  buckets_chunked_free(ch);
+
+  const char empty[] = "0\r\n\r\n";
+  buckets_http_request ereq = {.body = {empty, sizeof(empty) - 1}, .body_fd = -1, .body_len = sizeof(empty) - 1};
+  ch = buckets_chunked_new(&ereq, buckets_str_c("STREAMING-UNSIGNED-PAYLOAD-TRAILER"), NULL);
+  assert_non_null(ch);
+  assert_int_equal(buckets_chunked_read(ch, tmp, sizeof(tmp)), 0);
+  buckets_chunked_free(ch);
+  buckets_buf_free(&body);
+  buckets_buf_free(&want);
+  buckets_buf_free(&got);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_suite_get_vanilla),      cmocka_unit_test(test_s3_get_object),
       cmocka_unit_test(test_s3_get_bucket_lifecycle), cmocka_unit_test(test_s3_list_objects),
       cmocka_unit_test(test_s3_presigned),            cmocka_unit_test(test_rejections),
       cmocka_unit_test(test_canonical_uri_and_query), cmocka_unit_test(test_sigv2_examples),
+      cmocka_unit_test(test_chunked_sizes),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

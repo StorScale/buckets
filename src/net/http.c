@@ -216,6 +216,7 @@ const char *buckets_http_status_text(int status) {
 #define PIPE_HIGH (8u * 1024 * 1024) /* pause reading the socket above this */
 #define PIPE_LOW (2u * 1024 * 1024)  /* and resume below this */
 #define DISCARD_LIMIT (4LL * 1024 * 1024)
+#define IN_KEEP (128u * 1024) /* a connection's input buffer kept between requests */
 
 typedef struct buckets_body_pipe {
   pthread_mutex_t mu;
@@ -842,7 +843,9 @@ static bool conn_process(conn *c) {
   while (c->in.len > 0 && !c->fill_inflight && !conn_writing(c) && !c->closing) {
     llhttp_errno_t err = llhttp_execute(&c->parser, c->in.data, c->in.len);
     if (err == HPE_OK) {
-      buckets_buf_reset(&c->in);
+      /* All parsed. A buffer grown for a large body isn't kept for the connection's idle life. */
+      if (c->in.cap > IN_KEEP) buckets_buf_free(&c->in);
+      else buckets_buf_reset(&c->in);
       break;
     }
     if (err == HPE_PAUSED) {
