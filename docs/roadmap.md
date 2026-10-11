@@ -10,7 +10,7 @@ The order below leads with what builds on work that already exists (MinIO on-dis
 
 A successor can't depend on what it replaces. MinIO no longer publishes its images or binaries, so Buckets now ships its own key server (`buckets-kes`) in place of MinIO's KES, and keeps mirrors of MinIO's last images only for adoption and rollback.
 
-**Where things stand (2026-10-10):** Buckets 1.18.1 is released, and the main repository is https://github.com/StorScale/buckets. Phases 0, 2, 3 and 4 are done. Every item of Phase 1 is done too.
+**Where things stand (2026-10-11):** Buckets 1.19.0 is released, and the main repository is https://github.com/StorScale/buckets. Phases 0, 2, 3 and 4 are done. Every item of Phase 1 is done too.
 
 - **Left in Phase 1:** its gate, the round trip in CI. The job (`adopt-roundtrip`) is built and waits for access to the cluster it runs on.
 - **Phase 2 is done (1.2.0 to 1.18.0):** guided sign-in setup (1.2.0) for Entra ID, Okta, Keycloak, other OpenID providers and LDAP, per-team roles (1.3.0), the access review (1.4.0), removing people who leave Entra ID (1.9.0), Keycloak and Okta (1.10.0), SCIM for providers that push changes (1.17.0), and roles kept current (1.18.0).
@@ -107,7 +107,7 @@ A C server in a distroless image should use less memory than the Go original, wh
 
 - [x] **Throughput and latency on Kubernetes.** `tests/bench/cluster.sh` load-tests MinIO and Buckets on the same volumes and nodes. Profiling it on the shared cluster found two round trips on every read, fixed in 1.1.1; since then Buckets leads MinIO on small GETs in every run there (64 KiB: about 3,750 against 3,100–3,400 op/s) and on small PUTs; on 1 MiB and 10 MiB GETs the two trade places from run to run. See `docs/performance.md`.
 - [x] **Memory measured** at idle and under load: `tests/bench/warp.sh` on one server against MinIO `RELEASE.2025-10-15T17-29-55Z`, `tests/bench/cluster.sh` on the shared cluster. Idle, Buckets uses about a seventh of MinIO's memory (9–15 MiB against 75–120 MiB per server). See `docs/performance.md`.
-- [x] **Memory under load in a cluster** (Unreleased). Buckets 1.18.1 peaked higher than MinIO in the cluster (1,000–1,100 MiB per server against 650–730), though lower on one server. The cause was glibc's malloc, which after the first large freed buffer kept every buffer in its arenas and gave little back. `bucketsd` now fixes glibc's thresholds, and two buffers (aws-chunked uploads, idle connections) no longer start or stay large: Buckets peaks at about half of MinIO's memory in the cluster (360–390 MiB against 670–700) and a third or less on one server, with the same throughput.
+- [x] **Memory under load in a cluster** (1.19.0). Buckets 1.18.1 peaked higher than MinIO in the cluster (1,000–1,100 MiB per server against 650–730), though lower on one server. The cause was glibc's malloc, which after the first large freed buffer kept every buffer in its arenas and gave little back. `bucketsd` now fixes glibc's thresholds, and two buffers (aws-chunked uploads, idle connections) no longer start or stay large: Buckets peaks at about half of MinIO's memory in the cluster (360–390 MiB against 670–700) and a third or less on one server, with the same throughput.
 - Publish the method and the raw results with each comparison.
 - Market footprint or speed only where the numbers show a clear difference.
 
@@ -125,6 +125,7 @@ The roadmap builds on what exists: MinIO's exact on-disk format, 220 of 222 MinI
 
 | Date | Change | What it gives |
 | --- | --- | --- |
+| 2026-10-11 | 1.19.0: memory under load | A four-server cluster under load peaks at 360–390 MiB per server, about half of MinIO, instead of 1,000–1,100; the benchmarks measure memory beside throughput |
 | 2026-10-10 | 1.18.1: sessions kept through role changes | Console sessions and other temporary credentials take a person's new roles without being cut off; a cluster test against a real Keycloak moves a user between roles |
 | 2026-10-10 | 1.18.0: roles kept current | Access keys and sessions follow each person's current roles or groups in Entra ID, Keycloak, Okta or SCIM, updated in place; SCIM groups |
 | 2026-10-08 | 1.17.0: SCIM | Entra ID and Okta push who left, acted on within seconds through identity sync's removal; SCIM alone or beside the sync; an Ingress for SCIM alone |

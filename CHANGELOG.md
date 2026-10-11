@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.19.0] - 2026-10-11
+
 ### Added
 - **Memory in the benchmarks** ([docs/performance.md](docs/performance.md#memory)). `tests/bench/cluster.sh` reads each server pod's memory from its kubelet (idle, peak under load, and idle after), and `tests/bench/warp.sh` reads the server's RSS the same way. Idle, Buckets uses about a seventh of MinIO's memory (9–15 MiB against 75–120 MiB per server).
 
