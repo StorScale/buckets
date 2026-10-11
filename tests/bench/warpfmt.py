@@ -44,5 +44,6 @@ for p in json.loads(raw):
     for name, o in sorted((p.get("internode") or {}).items(), key=lambda kv: -kv[1]["calls"]):
         if o["calls_per_request"] < 0.05:
             continue
-        print("    %-22s %6.2f per request  wait %7.2f ms  handled in %7.2f ms"
-              % (name, o["calls_per_request"], o["wait_ms_per_call"], o["served_ms_per_call"]))
+        print("    %-22s %6.2f per request  wait %7.2f ms  queued %7.2f ms  handled in %7.2f ms"
+              % (name, o["calls_per_request"], o["wait_ms_per_call"], o.get("queued_ms_per_call", 0),
+                 o["served_ms_per_call"]))

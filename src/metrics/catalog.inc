@@ -22,6 +22,7 @@ static const buckets_metric_def k_catalog_v2[] = {
     {"buckets_node_identity_sync_runs_total", BUCKETS_MT_COUNTER, "Identity syncs run on this server (the one leading pool 0, set 0)", ""},
     {"buckets_node_internode_call_seconds_total", BUCKETS_MT_COUNTER, "Time this server waited for its internode calls' answers, by operation", ""},
     {"buckets_node_internode_calls_total", BUCKETS_MT_COUNTER, "Internode calls this server made to other servers, by operation (storage/<drive call>, lock/<lock call>)", ""},
+    {"buckets_node_internode_queued_seconds_total", BUCKETS_MT_COUNTER, "Time internode calls to this server waited for a thread before it handled them, by operation", ""},
     {"buckets_node_internode_served_seconds_total", BUCKETS_MT_COUNTER, "Time this server spent handling internode calls, by operation: a call's wait less this is the network's and the queues' share", ""},
     {"buckets_node_internode_served_total", BUCKETS_MT_COUNTER, "Internode calls this server handled for other servers, by operation", ""},
     {"buckets_ransomware_incidents_total", BUCKETS_MT_COUNTER, "Ransomware alerts' incidents opened by this server while it led pool 0, set 0, by kind: mass-delete, mass-overwrite, protection-removed", ""},

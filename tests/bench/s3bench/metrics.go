@@ -21,9 +21,11 @@ type rpcOp struct {
 	WaitS    float64 `json:"wait_s"`
 	Served   float64 `json:"served"`
 	ServedS  float64 `json:"served_s"`
+	QueuedS  float64 `json:"queued_s"`
 	PerReq   float64 `json:"calls_per_request"`
 	WaitMs   float64 `json:"wait_ms_per_call"`
 	ServedMs float64 `json:"served_ms_per_call"`
+	QueuedMs float64 `json:"queued_ms_per_call"`
 }
 
 var rpcFields = map[string]func(o *rpcOp) *float64{
@@ -31,6 +33,7 @@ var rpcFields = map[string]func(o *rpcOp) *float64{
 	"buckets_node_internode_call_seconds_total":   func(o *rpcOp) *float64 { return &o.WaitS },
 	"buckets_node_internode_served_total":         func(o *rpcOp) *float64 { return &o.Served },
 	"buckets_node_internode_served_seconds_total": func(o *rpcOp) *float64 { return &o.ServedS },
+	"buckets_node_internode_queued_seconds_total": func(o *rpcOp) *float64 { return &o.QueuedS },
 }
 
 // A token for the metrics endpoints, as `mc admin prometheus generate` makes one.
@@ -94,7 +97,8 @@ func diffRPC(before, after map[string]*rpcOp, requests int64) map[string]*rpcOp 
 		if b == nil {
 			b = &rpcOp{}
 		}
-		o := &rpcOp{Calls: a.Calls - b.Calls, WaitS: a.WaitS - b.WaitS, Served: a.Served - b.Served, ServedS: a.ServedS - b.ServedS}
+		o := &rpcOp{Calls: a.Calls - b.Calls, WaitS: a.WaitS - b.WaitS, Served: a.Served - b.Served, ServedS: a.ServedS - b.ServedS,
+			QueuedS: a.QueuedS - b.QueuedS}
 		if o.Calls == 0 && o.Served == 0 {
 			continue
 		}
@@ -106,6 +110,7 @@ func diffRPC(before, after map[string]*rpcOp, requests int64) map[string]*rpcOp 
 		}
 		if o.Served > 0 {
 			o.ServedMs = o.ServedS / o.Served * 1000
+			o.QueuedMs = o.QueuedS / o.Served * 1000
 		}
 		d[name] = o
 	}

@@ -41,3 +41,5 @@ B	cluster	buckets_node_internode_served_total	counterMetric	"Internode calls thi
 B	node	buckets_node_internode_served_total	counterMetric	"Internode calls this server handled for other servers, by operation"
 B	cluster	buckets_node_internode_served_seconds_total	counterMetric	"Time this server spent handling internode calls, by operation: a call's wait less this is the network's and the queues' share"
 B	node	buckets_node_internode_served_seconds_total	counterMetric	"Time this server spent handling internode calls, by operation: a call's wait less this is the network's and the queues' share"
+B	cluster	buckets_node_internode_queued_seconds_total	counterMetric	"Time internode calls to this server waited for a thread before it handled them, by operation"
+B	node	buckets_node_internode_queued_seconds_total	counterMetric	"Time internode calls to this server waited for a thread before it handled them, by operation"

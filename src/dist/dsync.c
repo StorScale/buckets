@@ -274,7 +274,10 @@ void buckets_lock_server_handle(const buckets_http_request *req, buckets_http_re
   else resp->status = 400;
   if (resp->status == 200 && !ok) resp->status = 409;
   buckets_query_free(&q);
-  if (resp->status != 400) buckets_rpcstats_add(BUCKETS_RPC_SERVED, "lock", op, buckets_rpcstats_now_ns() - t0);
+  if (resp->status != 400) {
+    buckets_rpcstats_add(BUCKETS_RPC_SERVED, "lock", op, buckets_rpcstats_now_ns() - t0);
+    buckets_rpcstats_add(BUCKETS_RPC_QUEUED, "lock", op, req->dispatched_ns ? t0 - req->dispatched_ns : 0);
+  }
 }
 
 /* ---- client -------------------------------------------------------------------- */

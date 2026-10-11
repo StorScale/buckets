@@ -775,6 +775,9 @@ static void dispatch_request_mode(conn *c, bool streamed) {
   rq->body_len = c->body_fd >= 0 ? c->body_len : (int64_t)c->body.len;
   rq->keep_alive = llhttp_should_keep_alive(&c->parser) && !srv->shutting_down;
   rq->remote_addr = c->remote;
+  struct timespec now;
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  rq->dispatched_ns = (int64_t)now.tv_sec * 1000000000 + now.tv_nsec;
   rq->secure = c->tls != NULL;
   if (c->tls && !c->peer_loaded) {
     c->npeer_certs = buckets_tls_peer_chain(c->tls, &c->peer_certs);

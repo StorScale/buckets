@@ -1027,10 +1027,14 @@ static void rpc_served(void *ud, const buckets_rpcstat *st) {
   ADD1((mctx *)ud, "buckets_node_internode_served_total", (double)st->calls, "op", st->op);
   ADD1((mctx *)ud, "buckets_node_internode_served_seconds_total", (double)st->ns / 1e9, "op", st->op);
 }
+static void rpc_queued(void *ud, const buckets_rpcstat *st) {
+  ADD1((mctx *)ud, "buckets_node_internode_queued_seconds_total", (double)st->ns / 1e9, "op", st->op);
+}
 static void rpc_metrics(mctx *m) {
   if (!m->s->cluster || !m->s->cluster->distributed) return;
   buckets_rpcstats_each(BUCKETS_RPC_CALLED, rpc_called, m);
   buckets_rpcstats_each(BUCKETS_RPC_SERVED, rpc_served, m);
+  buckets_rpcstats_each(BUCKETS_RPC_QUEUED, rpc_queued, m);
 }
 
 /* SCIM (s3/scimhandlers.c): requests here, and the people it named at the last sync here */

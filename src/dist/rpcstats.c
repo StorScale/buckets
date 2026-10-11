@@ -20,7 +20,8 @@ typedef struct {
   pthread_mutex_t mu;
 } table;
 
-static table tables[2] = {{.mu = PTHREAD_MUTEX_INITIALIZER}, {.mu = PTHREAD_MUTEX_INITIALIZER}};
+static table tables[3] = {{.mu = PTHREAD_MUTEX_INITIALIZER}, {.mu = PTHREAD_MUTEX_INITIALIZER},
+                          {.mu = PTHREAD_MUTEX_INITIALIZER}};
 
 int64_t buckets_rpcstats_now_ns(void) {
   struct timespec ts;
