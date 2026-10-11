@@ -68,6 +68,35 @@ A development cluster on OpenStack (16-vCPU VMs, Cinder network volumes shared w
 
   With both, 64 KiB GETs went from about 2,000 to 3,850 op/s and 1 MiB GETs from 384 to 604 MiB/s.
 
+### Calls between servers
+
+Each server counts the internode calls it makes and handles, by operation (`storage/read_at`, `lock/lock`, ...):
+- `buckets_node_internode_calls_total` and `buckets_node_internode_call_seconds_total`: the calls it made, and the time it waited for their answers;
+- `buckets_node_internode_served_total` and `buckets_node_internode_served_seconds_total`: the calls it handled, and the time it took;
+- `buckets_node_internode_queued_seconds_total`: the time those calls waited for a thread first.
+
+A call's wait less its peer's queueing and handling is the network's share. `s3bench -metrics host:port,...` reads them before and after each phase and reports the calls per request, and `cluster.sh` lists them for Buckets' rounds:
+
+```
+Buckets     1024 KiB x 32 GET     595.0 MiB/s    595.0 op/s  p50    44.5 ms  p99   118.4 ms
+    storage/read_all         6.45 per request  wait    3.05 ms  queued    0.07 ms  handled in    0.03 ms
+    lock/lock                3.12 per request  wait    3.13 ms  queued    0.07 ms  handled in    0.01 ms
+    storage/read_at          3.00 per request  wait   11.87 ms  queued    0.07 ms  handled in    0.08 ms
+```
+
+On the cluster above (4 servers × 2 drives, EC 4+4), they showed:
+- **The links between nodes are full.** Ping between server pods takes 0.5 ms, and a call is queued for 0.07 ms and handled in 0.01–0.1 ms, but under 32 clients the caller waits 2–3.5 ms for a lock or metadata read, and 10–12 ms for a 256 KiB shard. With 4 clients the same calls take 0.6–1 ms. Traffic between two nodes tops out at about 220 MiB/s on this cluster: with the client on its server's node, 1 MiB GETs to one server reached 984 MiB/s, and 220 MiB/s from another node. Small calls queue behind shard data on full links. (Turning off TCP slow start after idle in the servers' network namespaces changed nothing.)
+- **So the bytes between servers set GET throughput.** A GET read the data shards wherever they were: with 2 of 8 drives on each server, 3 of its 4 shards came over the network. It now reads the shards on its own drives first, data or parity, and rebuilds the data shards it skipped, as MinIO does: 2 of 4 come over the network. On one cluster, its image switched back and forth:
+
+| GET | Before (two runs) | Local shards first (two runs) |
+|---|---|---|
+| 10 MiB × 16 clients | 530, 530 MiB/s | 667, 652 MiB/s (+25%) |
+| 1 MiB × 32 clients | 530, 518 MiB/s | 596, 625 MiB/s (+17%) |
+| 64 KiB × 32 clients | 3557, 3581 op/s | 3602, 3586 op/s (inline: no shard reads) |
+
+  On one machine, where the CPU rather than the network is the limit, rebuilding costs some throughput (10 MiB GETs on four local servers: about 1,300 MiB/s rather than 1,600).
+- **The rest is round trips.** A PUT makes these calls to each other server's drives, one after another: `stat_vol` (the bucket), `create`, `append` (every 4 MiB), `fsync`, then under the lock `read_all` and `rename_data`, then `delete` (the staging directory). MinIO streams each shard in one call and renames it in another, which reads the old metadata and removes the staging directory on the drive's own server. A 10 MiB GET reads each remote shard block by block (10 calls per drive). See [Known headroom](#known-headroom).
+
 ## Memory
 
 Both benchmarks measure memory as well as throughput:
@@ -155,3 +184,4 @@ The starting point was PUT at 0.80–1.03 s per 256 MiB (2.6–3.3× MinIO) and 
 
 - **Single-stream PUT:** bound by MD5, as it is for MinIO. The only ways around it would change the ETag's meaning, which S3 clients rely on.
 - **AVX2:** the x86 paths use SSSE3 (128-bit). AVX2 versions would roughly double RS and HighwayHash throughput on x86 servers.
+- **Round trips between servers** ([Calls between servers](#calls-between-servers)): a PUT makes about seven calls, one after another, to each remote drive, where MinIO's design needs two; large GETs read remote shards block by block rather than as one stream; listing a remote drive stats each entry with a call of its own.
