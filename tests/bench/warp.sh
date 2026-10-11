@@ -4,7 +4,10 @@
 # with WARP set, MinIO's warp itself (warp put, then warp get of 64 objects).
 #   S3BENCH=/path/to/s3bench [MINIO_BIN=/path/to/minio] tests/bench/warp.sh [bucketsd]
 #   WARP=/path/to/warp [MINIO_BIN=/path/to/minio] tests/bench/warp.sh [bucketsd]
-# Env: DRIVES (default "d{1...4}"), DURATION (default 15s), CASES ("size:clients ...").
+# Env: DRIVES (default "d{1...4}"), DURATION (default 15s), CASES ("size:clients ..."),
+# MEM_SETTLE (seconds of quiet before each idle memory reading, default 10).
+# Each run also reports the server's memory (RSS): idle before the load, its
+# peak (VmHWM), and after the load.
 set -u
 BIN=${1:-build-rel/src/bucketsd}
 : "${WARP:=}"
@@ -13,8 +16,11 @@ PORT=${PORT:-19580}
 DRIVES=${DRIVES:-"d{1...4}"}
 DURATION=${DURATION:-15s}
 CASES=${CASES:-"10485760:16 1048576:32 65536:32"}
+MEM_SETTLE=${MEM_SETTLE:-10}
 AK=benchuser
 SK=benchsecret1
+
+mem() { awk -v k="$2:" '$1 == k {print $2}' "/proc/$1/status"; } # pid field -> KiB
 
 run() { # kind binary size clients
   local W; W=$(mktemp -d "${TMPDIR:-/tmp}/buckets-warp-XXXXXX")
@@ -27,6 +33,8 @@ run() { # kind binary size clients
   fi
   local pid=$!
   for _ in $(seq 200); do curl -sf "http://127.0.0.1:$PORT/minio/health/ready" >/dev/null && break; sleep 0.1; done
+  sleep "$MEM_SETTLE"
+  local idle; idle=$(mem "$pid" VmRSS)
   local out
   if [[ -n $WARP ]]; then
     local w=(--host "127.0.0.1:$PORT" --access-key $AK --secret-key $SK --obj.size "$3" --concurrent "$4"
@@ -35,9 +43,12 @@ run() { # kind binary size clients
   else
     out=$("$S3BENCH" -endpoint "127.0.0.1:$PORT" -access $AK -secret $SK -size "$3" -concurrent "$4" -duration "$DURATION")
   fi
+  local peak after; peak=$(mem "$pid" VmHWM)
+  sleep "$MEM_SETTLE"; after=$(mem "$pid" VmRSS)
   kill "$pid"; wait "$pid" 2>/dev/null; rm -rf "$W" "$W.log"
-  [[ -n "${RESULTS:-}" ]] && echo "$1 $3 $4 $out" >>"$RESULTS"
+  [[ -n "${RESULTS:-}" ]] && echo "$1 $3 $4 $out {\"idle_kib\": $idle, \"peak_kib\": $peak, \"after_kib\": $after}" >>"$RESULTS"
   python3 "$(dirname "$0")/warpfmt.py" "$1" "$3" "$4" "$out"
+  printf '%-8s memory: RSS idle %d MiB, peak %d MiB, after %d MiB\n' "$1" $((idle / 1024)) $((peak / 1024)) $((after / 1024))
 }
 
 echo "drives $DRIVES, $DURATION per phase, $([[ -n $WARP ]] && echo warp || echo s3bench)"

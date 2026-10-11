@@ -5,6 +5,9 @@
 # client pod, adopted in place by Buckets (scripts/adopt-minio.sh) and tested
 # again, then rolled back (scripts/rollback-to-minio.sh) and tested a third
 # time, so the second MinIO round shows how far the storage itself drifted.
+# Each round also measures the servers' memory, from each node's kubelet
+# (cAdvisor, through the API server's node proxy): idle before the load, the
+# peak during it, and idle again after it.
 #
 #   S3BENCH=/path/to/s3bench MINIO_IMAGE=<mirror>/minio:RELEASE.2024-10-13T13-34-11Z \
 #     REGISTRY=ghcr.io/storscale BUCKETS_TAG=1.1.0 tests/bench/cluster.sh
@@ -18,10 +21,11 @@
 # NS           a namespace it creates and deletes (default buckets-bench)
 # CASES        "size:clients ..." (default "10485760:16 1048576:32 65536:32")
 # DURATION     per phase (default 15s)
+# MEM_SETTLE   seconds of quiet before each idle measurement (default 60)
 # DRIVE_SIZE   per drive (default 20Gi); STORAGE_CLASS (default: the cluster's)
 # AVOID_NODES  node names the pods must not run on
 # KEEP=1       leaves the namespace
-# Results: a table at the end, and one JSON line per run in $RESULTS if set.
+# Results: tables at the end, and one JSON line per run in $RESULTS if set.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 NS=${NS:-buckets-bench}
@@ -29,6 +33,7 @@ T=minio
 CASES=${CASES:-"10485760:16 1048576:32 65536:32"}
 DURATION=${DURATION:-15s}
 DRIVE_SIZE=${DRIVE_SIZE:-20Gi}
+MEM_SETTLE=${MEM_SETTLE:-60}
 for v in S3BENCH MINIO_IMAGE REGISTRY BUCKETS_TAG; do
   [[ -n ${!v:-} ]] || { sed -n '2,/^set -euo/p' "$0" | sed 's/^# \{0,1\}//;$d'; echo; echo "set $v"; exit 2; }
 done
@@ -129,9 +134,30 @@ k exec bench -- chmod 755 /s3bench
 echo "   servers on: $(k get pods -l v1.min.io/tenant=$T -o jsonpath='{range .items[*]}{.spec.nodeName}{" "}{end}')"
 echo "   client on:  $(k get pod bench -o jsonpath='{.spec.nodeName}')"
 
+# the servers' pods ($T-pool-*) now, one line each: "pod rss working_set", in bytes
+mem_now() {
+  local n
+  for n in $(k get pods -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.nodeName}{"\n"}{end}' |
+    awk -v p="$T-pool-" 'index($1, p) == 1 {print $2}' | sort -u); do
+    kc get --raw "/api/v1/nodes/$n/proxy/metrics/cadvisor" | python3 "$ROOT/tests/bench/memstats.py" cadvisor "$NS" "$T-pool-"
+  done
+}
+mem_idle() { # file: MEM_SETTLE seconds of quiet, then three samples 5 s apart, the median of each pod
+  local i
+  sleep "$MEM_SETTLE"
+  for i in 1 2 3; do mem_now; [[ $i == 3 ]] || sleep 5; done | python3 "$ROOT/tests/bench/memstats.py" median >"$1"
+}
+mem_watch() { # samples every 2 s into $WORK/mem-peak while $WORK/watching exists
+  while [[ -e $WORK/watching ]]; do mem_now >>"$WORK/mem-peak" || true; sleep 2; done
+}
+
 round() { # label
-  local c size clients out
+  local c size clients out watcher
   echo "== $1"
+  mem_idle "$WORK/mem-before"
+  : >"$WORK/mem-peak"
+  touch "$WORK/watching"
+  mem_watch & watcher=$!
   for c in $CASES; do
     size=${c%%:*} clients=${c##*:}
     out=$(k exec bench -- /s3bench -endpoint "$T.$NS.svc.cluster.local:9000" -access "$AK" -secret "$SK" \
@@ -139,15 +165,21 @@ round() { # label
     echo "{\"server\": \"$1\", \"size\": $size, \"clients\": $clients, \"phases\": $out}" >>"$OUT"
     python3 "$ROOT/tests/bench/warpfmt.py" "$1" "$size" "$clients" "$out" | sed 's/^/   /'
   done
+  rm -f "$WORK/watching"
+  wait "$watcher"
+  mem_idle "$WORK/mem-after"
+  python3 "$ROOT/tests/bench/memstats.py" round "$1" "$WORK/mem-before" "$WORK/mem-peak" "$WORK/mem-after" >>"$OUT"
+  tail -1 "$OUT" | python3 "$ROOT/tests/bench/memstats.py" show | sed 's/^/   /'
 }
 
+[[ -n $(mem_now) ]] || { echo "the kubelets' cAdvisor metrics can't be read through the node proxy"; exit 1; }
 round "MinIO"
 
 echo "== Buckets adopts the tenant in place (same volumes)"
-kc apply -f "$ROOT/operator/deploy/crds/" >/dev/null
+kc apply --server-side --force-conflicts -f "$ROOT/operator/deploy/crds/" >/dev/null
 helm ${KUBECONTEXT:+--kube-context $KUBECONTEXT} -n "$NS" install bench-operator "$ROOT/operator/helm/buckets-operator" \
   --set image.repository="$REGISTRY/buckets-operator" --set image.tag="$BUCKETS_TAG" --set watchNamespace="$NS" \
-  --set replicaCount=1 ${AFF:+--set-json affinity="$AFF"} --wait --timeout 5m >/dev/null
+  --set replicaCount=1 ${AFF:+--set-json affinity="$AFF"} --skip-crds --wait --timeout 5m >/dev/null
 "$ROOT/scripts/adopt-minio.sh" -n "$NS" -t "$T" ${KUBECONTEXT:+--context $KUBECONTEXT} --state "$WORK/state" \
   --image "$REGISTRY/bucketsd:$BUCKETS_TAG" --apply > "$WORK/adopt.log" 2>&1 || { cat "$WORK/adopt.log"; exit 1; }
 echo "   servers on: $(k get pods -l buckets.io/cluster=$T -o jsonpath='{range .items[*]}{.spec.nodeName}{" "}{end}')"
@@ -163,6 +195,8 @@ echo "== summary (MiB/s; ops/s for objects under 1 MiB)"
 python3 - "$OUT" <<'PY'
 import json, sys
 rows = [json.loads(l) for l in open(sys.argv[1])]
+mem = [r for r in rows if "memory" in r]
+rows = [r for r in rows if "memory" not in r]
 servers = list(dict.fromkeys(r["server"] for r in rows))
 cases = list(dict.fromkeys((r["size"], r["clients"]) for r in rows))
 def val(r, op):
@@ -178,4 +212,12 @@ for c in cases:
     byserver = {r["server"]: r for r in rows if (r["size"], r["clients"]) == c}
     cells = [val(byserver[s], op) if s in byserver else "-" for op in ("PUT", "GET") for s in servers]
     print(f"| {size(c[0])} x {c[1]} clients | " + " | ".join(cells) + " |")
+print("\nMemory per server pod, MiB: the mean of the four, the largest in brackets")
+print("| Server | RSS idle | RSS peak | RSS after load | Working set idle | Working set peak |")
+print("|---|---|---|---|---|---|")
+for r in mem:
+    def cell(key):
+        v = [m[key] / (1 << 20) for m in r["memory"].values()]
+        return "%.0f (%.0f)" % (sum(v) / len(v), max(v)) if v else "-"
+    print(f"| {r['server']} | " + " | ".join(cell(k) for k in ("idle_rss", "peak_rss", "after_rss", "idle_ws", "peak_ws")) + " |")
 PY

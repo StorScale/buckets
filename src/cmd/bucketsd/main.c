@@ -16,6 +16,9 @@
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
 #endif
+#ifdef __GLIBC__
+#include <malloc.h>
+#endif
 
 #include "crypto/fips.h"
 #include "config/config.h"
@@ -55,6 +58,8 @@
 /* MinIO's limits: 5 TiB per PUT (globalMaxObjectSize); 1 MiB stays in memory. */
 #define MAX_BODY_BYTES (5LL * 1024 * 1024 * 1024 * 1024)
 #define MEM_BODY_BYTES (1u * 1024 * 1024)
+#define MALLOC_MMAP_THRESHOLD (4 * 1024 * 1024)
+#define MALLOC_TRIM_THRESHOLD (8 * 1024 * 1024)
 
 static buckets_loop *g_loop;
 static volatile sig_atomic_t g_signal;
@@ -566,7 +571,21 @@ static void exe_path(const char *argv0, char *out, size_t cap) {
   snprintf(out, cap, "%s", argv0);
 }
 
+/* glibc's malloc raises its mmap threshold whenever a large buffer is freed (up to 32 MiB), and its trim threshold
+ * with it (up to 64 MiB). After the first large requests, every buffer then comes from malloc's arenas, which keep
+ * what is freed: under distributed load a server took three times the memory it had in use, and kept it.
+ * Fixed thresholds let the arenas give freed memory back. GLIBC_TUNABLES's malloc settings, if any, win. */
+static void malloc_setup(void) {
+#ifdef __GLIBC__
+  const char *t = getenv("GLIBC_TUNABLES");
+  if (t && strstr(t, "glibc.malloc.")) return;
+  mallopt(M_MMAP_THRESHOLD, MALLOC_MMAP_THRESHOLD);
+  mallopt(M_TRIM_THRESHOLD, MALLOC_TRIM_THRESHOLD);
+#endif
+}
+
 int main(int argc, char **argv) {
+  malloc_setup();
   static char self_exe[4096];
   exe_path(argv[0], self_exe, sizeof(self_exe));
   /* MINIO_CONFIG_ENV_FILE (the MinIO Operator's config.env): its settings
