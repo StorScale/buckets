@@ -7,9 +7,10 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
-- **Memory in the benchmarks** ([docs/performance.md](docs/performance.md#memory)). `tests/bench/cluster.sh` reads each server pod's memory from its kubelet (idle, peak under load, and idle after), and `tests/bench/warp.sh` reads the server's RSS the same way. First results: idle, Buckets uses about a tenth of MinIO's memory; on one server it also peaks lower under load; in a four-server cluster it peaks higher than MinIO and keeps the memory afterwards, as free buffers cached by malloc.
+- **Memory in the benchmarks** ([docs/performance.md](docs/performance.md#memory)). `tests/bench/cluster.sh` reads each server pod's memory from its kubelet (idle, peak under load, and idle after), and `tests/bench/warp.sh` reads the server's RSS the same way. Idle, Buckets uses about a seventh of MinIO's memory (9–15 MiB against 75–120 MiB per server).
 
 ### Fixed
+- **Memory under load in a cluster** ([docs/performance.md](docs/performance.md#why-the-cluster-cost-more-and-the-fix)). A four-server cluster under load took 1,000–1,100 MiB per server, more than MinIO's 650–730, and kept it after the load. Almost all of it was free: glibc's malloc raises its mmap and trim thresholds each time a large buffer is freed, after which every buffer came from its arenas, which keep what is freed. `bucketsd` now fixes them at 4 MiB and 8 MiB when it starts (unless `GLIBC_TUNABLES` names a malloc setting), the aws-chunked decoder no longer allocates 16 MiB per upload, and idle connections no longer keep a large request's input buffer. Peaks fell to 360–390 MiB per server in the cluster, about half of MinIO's, with the same throughput.
 - `tests/bench/cluster.sh` applies the CRDs server-side and installs the chart without them, as the cluster tests do, so it no longer fails where the CRDs were last applied server-side.
 
 ## [1.18.1] - 2026-10-10

@@ -76,30 +76,58 @@ Both benchmarks measure memory as well as throughput:
 
 Neither server had a memory limit, so each sized itself from the node's memory.
 
-**One server, 4 drives** (`warp.sh`): a Linux VM with 8 vCPUs and 31 GiB, glibc 2.39, Buckets 1.18.1 (release build) against MinIO `RELEASE.2025-10-15T17-29-55Z`, 15 s per phase, a fresh server for each case. RSS in MiB, idle / peak / after:
+**Four servers × 2 drives on Kubernetes** (`cluster.sh`): the cluster above (16-vCPU nodes), against MinIO `RELEASE.2024-10-13` (the release the lakehouse runs; the cluster can pull no newer MinIO image), 20 s per phase, the three cases one after another. Per server pod, MiB, the mean of the four, with the largest in brackets; each row is one run of `cluster.sh`, and MinIO's row is from the same run:
 
-| Case | Buckets | MinIO |
-|---|---|---|
-| 10 MiB × 16 clients | 11 / 534 / 459 | 119 / 889 / 713 |
-| 1 MiB × 32 clients | 11 / 330 / 325 | 118 / 1241 / 1051 |
-| 64 KiB × 32 clients | 12 / 253 / 195 | 118 / 497 / 497 |
-
-**Four servers × 2 drives on Kubernetes** (`cluster.sh`): the cluster above (16-vCPU nodes), Buckets 1.18.1 against MinIO `RELEASE.2024-10-13` (the release the lakehouse runs; the cluster can pull no newer MinIO image), 20 s per phase, the three cases one after another. Per server pod, MiB, the mean of the four with the largest in brackets:
-
-| Server | RSS idle | RSS peak | RSS after load | Working set idle | Working set peak |
+| Server | RSS idle | RSS peak | RSS after load | Working set peak | MinIO RSS peak |
 |---|---|---|---|---|---|
-| MinIO | 80 (82) | 652 (708) | 647 (710) | 82 (84) | 870 (932) |
-| Buckets | 9 (11) | 992 (1091) | 989 (1079) | 27 (31) | 1354 (1434) |
-| MinIO again | 82 (88) | 719 (993) | 701 (941) | 85 (90) | 993 (1280) |
+| Buckets 1.18.1 | 9 (11) | 992 (1091) | 989 (1079) | 1354 (1434) | 652 (708) |
+| Buckets 1.18.1, again | 11 (14) | 1107 (1306) | 1111 (1310) | 1513 (1711) | 731 (836) |
+| Buckets, malloc fixed | 12 (15) | 387 (437) | 370 (378) | 774 (780) | 670 (984) |
+| Buckets, malloc fixed, again | 11 (13) | 362 (423) | 368 (420) | 764 (818) | 698 (798) |
 
-- **Idle,** Buckets uses about a tenth of MinIO's memory: 9–12 MiB of RSS against 80–120 MiB, in both setups.
-- **Under load on one server,** Buckets peaks lower than MinIO in every case, by 40% to 73%.
-- **Under load in the cluster,** Buckets peaks *higher*: about 990 MiB per server against MinIO's 650–720 MiB, and its working set reaches 1.35 GiB. Why the distributed setup costs Buckets more is not yet known.
-- **After the load,** neither server gives much back. Buckets' retained memory is almost all free: on one server after 10 MiB PUTs and GETs, glibc's `malloc_stats` showed 2.5 MiB in use of 575 MiB taken from the system, spread over 78 malloc arenas. The freed buffers stay cached there. Fixing glibc's mmap threshold (`glibc.malloc.mmap_threshold`) does return them, but it cut GET throughput by 40–75%. `malloc_trim(0)` once the load had stopped returned about half.
+MinIO idled at 75–81 MiB of RSS in every run. Throughput didn't move with the fix (GET, MiB/s for 10 MiB and 1 MiB objects, op/s for 64 KiB; single runs here swing by about 15%):
 
-So the footprint claim holds at idle, and on a single server. It doesn't hold yet under load in a cluster.
+| | 10 MiB × 16 | 1 MiB × 32 | 64 KiB × 32 |
+|---|---|---|---|
+| Buckets 1.18.1 (two runs) | 650, 595 | 638, 538 | 3751, 3743 |
+| Buckets, malloc fixed (two runs) | 612, 546 | 529, 618 | 3746, 3759 |
+| MinIO (four runs) | 531, 503, 614, 644 | 575, 680, 734, 588 | 3365, 3397, 3164, 3326 |
 
-Peaks move between runs: in the cluster the two MinIO rounds' peaks differed by up to 375 MiB on one server (618 and 993 MiB), so treat peak differences under about a third as noise. Idle figures varied by a few MiB.
+**One server, 4 drives** (`warp.sh`): a Linux VM with 8 vCPUs and 31 GiB, glibc 2.39, against MinIO `RELEASE.2025-10-15T17-29-55Z`, 15 s per phase, a fresh server for each case. RSS in MiB, idle / peak / after:
+
+| Case | Buckets, malloc fixed | Buckets 1.18.1 | MinIO |
+|---|---|---|---|
+| 10 MiB × 16 clients | 11 / 353 / 181 | 11 / 534 / 459 | 117 / 813 / 733 |
+| 1 MiB × 32 clients | 11 / 279 / 199 | 11 / 330 / 325 | 119 / 1078 / 984 |
+| 64 KiB × 32 clients | 11 / 165 / 94 | 12 / 253 / 195 | 117 / 497 / 476 |
+
+- **Idle,** Buckets uses about a seventh of MinIO's memory: 9–15 MiB of RSS against 75–120 MiB.
+- **Under load,** Buckets now peaks at about half of MinIO's RSS in the cluster, and at a third or less on one server.
+- **After the load,** Buckets keeps about what it peaked at in the cluster, and half to two thirds of it on one server; MinIO keeps nearly all of its peak in both.
+
+Peaks move between runs: one MinIO pod's peak differed by 375 MiB between the two MinIO rounds of one cluster run (618 and 993 MiB), so treat peak differences under about a third as noise. Idle figures varied by a few MiB.
+
+### Why the cluster cost more, and the fix
+
+Before the fix, Buckets peaked *higher* than MinIO in the cluster (about 1,000–1,100 MiB per server against 650–730), though lower on one server. Four servers on one machine, with the load spread over them as the cluster's Service spreads it, reproduced it, and two tools showed where the memory was:
+- glibc's `mallinfo2`, sampled every 200 ms: each server's peak **in use** was about 300 MiB, while malloc had taken 950–1,140 MiB from the system. After the load, 2.5–106 MiB was in use, and nearly all the rest stayed taken.
+- A heap tracker (an `LD_PRELOAD` that records every live allocation of 64 KiB or more with its stack): the large buffers were request bodies (the streamed-body pipe, up to 16 MiB), the aws-chunked decoder (16 MiB per upload), remote drive writers (up to 4 MiB each), and connections' input buffers (2 MiB each, kept while the connection idled).
+
+The cause was glibc's malloc. Each time a buffer larger than its mmap threshold is freed, glibc raises the threshold to that size (up to 32 MiB), and its trim threshold to twice that. The first 16 MiB upload buffer to be freed moved every later buffer up to 16 MiB from `mmap` into malloc's arenas, and the arenas (up to eight per CPU) keep what is freed rather than give it back. The distributed path allocates more large buffers than a single server does, so it fragmented more of them.
+
+`bucketsd` now fixes glibc's thresholds when it starts: 4 MiB for `mmap`, 8 MiB for trimming. Naming any malloc setting in `GLIBC_TUNABLES` (for example `GLIBC_TUNABLES=glibc.malloc.mmap_threshold=…`) leaves glibc's own behaviour, and that setting, in place. Choosing the values, on four servers on one machine, four alternating runs each:
+
+| glibc thresholds | Peak RSS | RSS after | 10 MiB PUT / GET | 1 MiB PUT / GET | 64 KiB PUT / GET |
+|---|---|---|---|---|---|
+| glibc's own (rising) | 781 | 708–714 | 272 / 1731 | 83 / 902 | 15 / 106 |
+| mmap 4 MiB, trim 8 MiB | 341 | 210–244 | 274 / 1827 | 87 / 1071 | 16 / 112 |
+| mmap 32 MiB, trim 8 MiB | 369 | 232–260 | 256 / 1780 | 84 / 980 | 16 / 118 |
+
+(MiB per server; throughput in MiB/s across the four servers.) Fixing only the mmap threshold, and leaving trimming at glibc's default of 128 KiB, also brought memory down, but cost 30% of 10 MiB GETs: the arenas shrank and regrew between requests.
+
+Two buffers no longer start or stay large:
+- **The aws-chunked decoder** allocated MinIO's largest chunk (16 MiB) for every upload. It now grows to the largest chunk the client sends (64 KiB from minio-go).
+- **A connection's input buffer,** grown to 2 MiB by a large request body, was kept for the connection's idle life. It is freed once everything in it is parsed, and connections between requests keep at most 128 KiB.
 
 ## What moved the numbers
 

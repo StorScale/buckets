@@ -1,6 +1,6 @@
 # Buckets Roadmap
 
-As of 2026-10-10 · Russell Myers
+As of 2026-10-11 · Russell Myers
 
 ## Summary
 
@@ -103,11 +103,11 @@ Done when: an auditor can get usage, access and retention reports from the conso
 
 ## Held until benchmarks exist: footprint and performance
 
-A C server in a distroless image should use less memory than the Go original, which matters for edge and small-node deployments. That is a hypothesis, not a claim, until it is measured.
+A C server in a distroless image should use less memory than the Go original, which matters for edge and small-node deployments. Measured now on both: about a seventh of MinIO's memory idle, and about half under load in a cluster, with the same throughput.
 
-- [x] **Throughput and latency on Kubernetes.** `tests/bench/cluster.sh` load-tests MinIO and Buckets on the same volumes and nodes. Profiling it on the shared cluster found two round trips on every read, fixed in 1.1.1; since then Buckets leads MinIO on every GET case there (64 KiB: 3,850 against 2,800 op/s) and on small PUTs. See `docs/performance.md`.
-- [x] **Memory measured** at idle and under load: `tests/bench/warp.sh` on one server against MinIO `RELEASE.2025-10-15T17-29-55Z`, `tests/bench/cluster.sh` on the shared cluster. Idle, Buckets uses about a tenth of MinIO's memory (9–12 MiB against 80–120 MiB per server), and on one server it peaks 40–73% lower under load. In the cluster it peaks higher (about 990 MiB per server against 650–720) and keeps it afterwards, almost all as free buffers cached by glibc's malloc. See `docs/performance.md`.
-- [ ] **Memory under load in a cluster:** find why distributed load costs Buckets more than MinIO, and give freed buffers back once a server is quiet, without losing throughput. The footprint claim waits for this.
+- [x] **Throughput and latency on Kubernetes.** `tests/bench/cluster.sh` load-tests MinIO and Buckets on the same volumes and nodes. Profiling it on the shared cluster found two round trips on every read, fixed in 1.1.1; since then Buckets leads MinIO on small GETs in every run there (64 KiB: about 3,750 against 3,100–3,400 op/s) and on small PUTs; on 1 MiB and 10 MiB GETs the two trade places from run to run. See `docs/performance.md`.
+- [x] **Memory measured** at idle and under load: `tests/bench/warp.sh` on one server against MinIO `RELEASE.2025-10-15T17-29-55Z`, `tests/bench/cluster.sh` on the shared cluster. Idle, Buckets uses about a seventh of MinIO's memory (9–15 MiB against 75–120 MiB per server). See `docs/performance.md`.
+- [x] **Memory under load in a cluster** (Unreleased). Buckets 1.18.1 peaked higher than MinIO in the cluster (1,000–1,100 MiB per server against 650–730), though lower on one server. The cause was glibc's malloc, which after the first large freed buffer kept every buffer in its arenas and gave little back. `bucketsd` now fixes glibc's thresholds, and two buffers (aws-chunked uploads, idle connections) no longer start or stay large: Buckets peaks at about half of MinIO's memory in the cluster (360–390 MiB against 670–700) and a third or less on one server, with the same throughput.
 - Publish the method and the raw results with each comparison.
 - Market footprint or speed only where the numbers show a clear difference.
 
