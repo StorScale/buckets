@@ -6,6 +6,9 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **OpenID providers that can't be reached are retried.** A server that couldn't fetch a provider's discovery document when it started (or when the configuration changed) logged an error and went without that provider until it restarted, so sign-ins through it failed on that server alone: after the 1.20.0 rolling update, one of four servers on a test cluster lost a TLS handshake with Entra ID and refused about a quarter of its sign-ins. The build is now retried after 1 s, then twice as long each time up to a minute, until it succeeds.
+
 ## [1.20.0] - 2026-10-12
 
 ### Added

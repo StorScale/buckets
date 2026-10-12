@@ -191,4 +191,22 @@ if [[ -n "${MC_BIN:-}" ]]; then
   out=$(mc idp openid info root dex 2>&1 || true)
   grep "does not exist\|not found\|No such" >/dev/null <<<"$out" || fail "info after rm: $out"
 fi
+
+echo "== a provider down when the server starts is retried"
+kill "${PIDS[0]}"; wait "${PIDS[0]}" 2>/dev/null || true
+PORT2=$((PORT + 2)); EP2="http://127.0.0.1:$PORT2"
+mkdir -p "$WORK"/e{1..4}
+BUCKETS_ROOT_USER=rootadmin BUCKETS_ROOT_PASSWORD=rootsecret123 \
+  MINIO_IDENTITY_OPENID_CONFIG_URL="$ISS/.well-known/openid-configuration" MINIO_IDENTITY_OPENID_CLIENT_ID=buckets-app \
+  "$BIN" server --address "127.0.0.1:$PORT2" "$WORK/e{1...4}" 2>>"$WORK/log2" &
+PIDS+=($!)
+for _ in $(seq 100); do grep -q "ERROR.*identity_openid" "$WORK/log2" 2>/dev/null && break; sleep 0.1; done
+grep -q "ERROR.*identity_openid" "$WORK/log2" || fail "no failed build: $(tail -5 "$WORK/log2")"
+python3 "$WORK/idp.py" serve "$WORK" "$ISS" "$OPORT" &
+PIDS+=($!)
+for _ in $(seq 100); do grep -q "OpenID configured" "$WORK/log2" && break; sleep 0.1; done
+grep -q "OpenID configured" "$WORK/log2" || fail "not retried: $(tail -5 "$WORK/log2")"
+tok=$(mint '{"sub":"u11","iss":"'"$ISS"'","aud":"buckets-app","exp":"+600","policy":"readonly"}')
+r=$(EP=$EP2 sts AssumeRoleWithWebIdentity "$tok")
+grep -q "<AccessKeyId>" <<<"$r" || fail "sign-in after the retry: $r"
 echo "PASS"

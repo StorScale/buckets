@@ -674,13 +674,20 @@ static bool authz_hook(void *ud, const buckets_iam_ident *id, bool owner, const 
   return handled;
 }
 
+/* Builds the OpenID providers from the configuration. A build that fails
+ * (a provider's discovery document or keys can't be fetched) keeps what was
+ * there and is retried by openid_retry_main. Builds take turns, so the
+ * latest configuration is the one installed. */
 static void rebuild_openid(buckets_s3_server *s) {
+  pthread_mutex_lock(&s->oidc_build_mu);
   buckets_config *cfg = buckets_config_sys_snapshot(s->config);
   char err[512];
   buckets_openid *o = buckets_openid_build(cfg, s->region, err, sizeof(err));
   buckets_config_free(cfg);
+  atomic_store(&s->oidc_failed, o == NULL);
   if (!o) {
-    buckets_log_error("identity_openid: %s", err);
+    pthread_mutex_unlock(&s->oidc_build_mu);
+    buckets_log_error("identity_openid: %s; retrying", err);
     return;
   }
   if (buckets_openid_enabled(o)) buckets_log_info("identity_openid: OpenID configured");
@@ -688,7 +695,30 @@ static void rebuild_openid(buckets_s3_server *s) {
   buckets_openid *old = s->openid;
   s->openid = o;
   pthread_mutex_unlock(&s->oidc_mu);
+  pthread_mutex_unlock(&s->oidc_build_mu);
   buckets_openid_release(old);
+}
+
+/* Retries a failed OpenID build, after 1 s and then twice as long each time up
+ * to a minute: otherwise a provider unreachable when the server starts (or
+ * when the configuration changes) leaves its sign-ins failing on this server
+ * until it restarts. */
+static void *openid_retry_main(void *arg) {
+  buckets_s3_server *s = arg;
+  long wait_ms = 1000, waited_ms = 0;
+  while (bg_sleep(s, 1000)) {
+    if (!atomic_load(&s->oidc_failed)) {
+      wait_ms = 1000;
+      waited_ms = 0;
+      continue;
+    }
+    waited_ms += 1000;
+    if (waited_ms < wait_ms) continue;
+    rebuild_openid(s);
+    waited_ms = 0;
+    if (wait_ms < 60000) wait_ms *= 2;
+  }
+  return NULL;
 }
 
 /* mc admin config set identity_openid: the providers must be reachable. */
@@ -845,6 +875,7 @@ void buckets_s3_server_init(buckets_s3_server *s, buckets_objlayer *layer, const
   buckets_config_sys_set_kms(s->config, s->kms);
   buckets_config_sys_set_hook(s->config, config_changed, s);
   pthread_mutex_init(&s->oidc_mu, NULL);
+  pthread_mutex_init(&s->oidc_build_mu, NULL);
   pthread_mutex_init(&s->freeze_mu, NULL);
   pthread_cond_init(&s->freeze_cv, NULL);
   pthread_mutex_init(&s->bg_mu, NULL);
@@ -885,6 +916,7 @@ static void *iam_start_main(void *arg) {
     if (delay_ms < 5000) delay_ms *= 2;
   }
   rebuild_openid(s);
+  s->oidc_retry_thread_started = pthread_create(&s->oidc_retry_thread, NULL, openid_retry_main, s) == 0;
   rebuild_plugins(s);
   configure_notify(s);
   configure_logger(s, NULL);
@@ -1429,6 +1461,8 @@ void buckets_s3_server_stop(buckets_s3_server *s) {
   pthread_mutex_unlock(&s->bg_mu);
   if (s->iam_thread_started) pthread_join(s->iam_thread, NULL); /* it starts the others */
   s->iam_thread_started = false;
+  if (s->oidc_retry_thread_started) pthread_join(s->oidc_retry_thread, NULL);
+  s->oidc_retry_thread_started = false;
   if (s->ldap_thread_started) pthread_join(s->ldap_thread, NULL);
   s->ldap_thread_started = false;
   if (s->idsync_thread_started) pthread_join(s->idsync_thread, NULL);
@@ -1470,6 +1504,7 @@ void buckets_s3_server_free(buckets_s3_server *s) {
   buckets_config_sys_free(s->config);
   if (s->kms) buckets_kms_free(s->kms); /* last: IAM and the configuration use it */
   pthread_mutex_destroy(&s->oidc_mu);
+  pthread_mutex_destroy(&s->oidc_build_mu);
   pthread_mutex_destroy(&s->freeze_mu);
   pthread_cond_destroy(&s->freeze_cv);
   pthread_mutex_destroy(&s->bg_mu);
