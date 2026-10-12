@@ -1,11 +1,32 @@
 # Third-party dependencies, pinned. Everything is fetched and built from source so
 # a bare toolchain (cc + cmake) is enough to build buckets.
 include(FetchContent)
+include(Download)
 set(FETCHCONTENT_QUIET ON)
 
+# FetchContent_Declare(name URL url ...), with the archive downloaded by
+# buckets_download (retried) into BUCKETS_DEPS_PREFIX/src, shared by every build
+# dir. A FETCHCONTENT_SOURCE_DIR_<NAME> override skips the download.
+function(buckets_fetch_declare name url)
+  string(TOUPPER "${name}" _up)
+  if(FETCHCONTENT_SOURCE_DIR_${_up})
+    FetchContent_Declare(${name} URL "${url}" ${ARGN})
+    return()
+  endif()
+  get_filename_component(_base "${url}" NAME)
+  if(NOT _base MATCHES "^${name}")
+    set(_base "${name}-${_base}") # GitHub's tag archives: v1.24.tar.gz
+  endif()
+  set(_file "${BUCKETS_DEPS_PREFIX}/src/archives/${_base}")
+  buckets_download("${_file}" URLS "${url}")
+  if(NOT EXISTS "${_file}")
+    message(FATAL_ERROR "could not download ${name} from ${url}: ${BUCKETS_DOWNLOAD_ERROR}")
+  endif()
+  FetchContent_Declare(${name} URL "${_file}" ${ARGN})
+endfunction()
+
 # llhttp: HTTP/1.1 request parser (the release/* tags ship generated C sources).
-FetchContent_Declare(llhttp
-  URL https://github.com/nodejs/llhttp/archive/refs/tags/release/v9.4.3.tar.gz
+buckets_fetch_declare(llhttp https://github.com/nodejs/llhttp/archive/refs/tags/release/v9.4.3.tar.gz
   DOWNLOAD_EXTRACT_TIMESTAMP ON)
 set(LLHTTP_BUILD_SHARED_LIBS OFF CACHE INTERNAL "")
 set(LLHTTP_BUILD_STATIC_LIBS ON CACHE INTERNAL "")
@@ -13,15 +34,13 @@ set(BUILD_SHARED_LIBS OFF CACHE INTERNAL "")
 FetchContent_MakeAvailable(llhttp)
 
 # yyjson: JSON read/write (format.json, admin API, IAM documents).
-FetchContent_Declare(yyjson
-  URL https://github.com/ibireme/yyjson/archive/refs/tags/0.13.0.tar.gz
+buckets_fetch_declare(yyjson https://github.com/ibireme/yyjson/archive/refs/tags/0.13.0.tar.gz
   DOWNLOAD_EXTRACT_TIMESTAMP ON)
 set(YYJSON_BUILD_TESTS OFF CACHE INTERNAL "")
 FetchContent_MakeAvailable(yyjson)
 
 # libdeflate: raw DEFLATE, zlib and gzip (zip archives, compression, S3 Select input).
-FetchContent_Declare(libdeflate
-  URL https://github.com/ebiggers/libdeflate/archive/refs/tags/v1.24.tar.gz
+buckets_fetch_declare(libdeflate https://github.com/ebiggers/libdeflate/archive/refs/tags/v1.24.tar.gz
   DOWNLOAD_EXTRACT_TIMESTAMP ON)
 set(LIBDEFLATE_BUILD_SHARED_LIB OFF CACHE INTERNAL "")
 set(LIBDEFLATE_BUILD_STATIC_LIB ON CACHE INTERNAL "")
@@ -44,8 +63,7 @@ endif()
 
 # libyaml: YAML parsing (batch job definitions). Its own CMakeLists predates
 # CMake 3.5, so only the sources are fetched and built here.
-FetchContent_Declare(libyaml
-  URL https://github.com/yaml/libyaml/archive/refs/tags/0.2.5.tar.gz
+buckets_fetch_declare(libyaml https://github.com/yaml/libyaml/archive/refs/tags/0.2.5.tar.gz
   DOWNLOAD_EXTRACT_TIMESTAMP ON
   SOURCE_SUBDIR no-cmake)
 FetchContent_MakeAvailable(libyaml)
@@ -61,7 +79,7 @@ target_compile_options(buckets_libyaml PRIVATE -w)
 # Streaming decompressors (S3 Select input, snowball archives): zlib for gzip,
 # bzip2, zstd and LZ4 frames. Only their library sources are built.
 macro(buckets_fetch_sources name url)
-  FetchContent_Declare(${name} URL ${url} DOWNLOAD_EXTRACT_TIMESTAMP ON SOURCE_SUBDIR no-cmake)
+  buckets_fetch_declare(${name} ${url} DOWNLOAD_EXTRACT_TIMESTAMP ON SOURCE_SUBDIR no-cmake)
   FetchContent_MakeAvailable(${name})
 endmacro()
 macro(buckets_static_lib target)

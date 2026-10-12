@@ -11,6 +11,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 - **GETs read the shards on the server's own drives first** ([docs/performance.md](docs/performance.md#calls-between-servers)), data or parity, and rebuild the data shards they skipped, as MinIO does. In a four-server cluster (EC 4+4, 2 drives per server) a GET fetches 2 of its 4 shards from other servers rather than 3, and 1 MiB and 10 MiB GETs went up 17% and 25% on a cluster whose links between nodes were full.
+- **PUTs make two calls to each drive on another server, as MinIO's do** ([docs/performance.md](docs/performance.md#calls-between-servers)), where they made about seven one after another. A `write` call creates the shard file, carries its data and syncs it, and a `commit` call merges the new version into xl.meta on the drive's own server, moves the data in and removes the staging directory. The bucket is checked on the server's own drives. Servers fall back to the old calls with peers that predate these. On a four-server cluster 1 MiB PUTs from 4 clients went up about 13%, level with MinIO from 1 to 32 clients.
+
+### Fixed
+- **Dependency downloads are retried.** CMake retries a download only on network errors, so a 502/503/504 from GitHub's archive servers failed the build at once (it failed CI's image builds twice in a row). The sources, OpenSSL and libssh are now downloaded with up to six attempts and backoff, each trying every mirror, into `BUCKETS_DEPS_PREFIX/src` where every build dir shares them; `scripts/build-fips-provider.sh` retries as well.
 
 ## [1.19.0] - 2026-10-11
 
