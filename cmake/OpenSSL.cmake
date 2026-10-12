@@ -5,7 +5,6 @@
 set(BUCKETS_OPENSSL_MIN 3.2)
 set(BUCKETS_OPENSSL_VERSION 3.5.4)
 set(BUCKETS_OPENSSL_SHA256 967311f84955316969bdb1d8d4b983718ef42338639c621ec4c34fddef355e99)
-set(BUCKETS_DEPS_PREFIX "${CMAKE_SOURCE_DIR}/.deps" CACHE PATH "Where source-built dependencies are installed")
 
 find_package(OpenSSL ${BUCKETS_OPENSSL_MIN} QUIET)
 if(NOT OPENSSL_FOUND)
@@ -24,9 +23,11 @@ if(NOT OPENSSL_FOUND)
     message(STATUS "buckets: building OpenSSL ${BUCKETS_OPENSSL_VERSION} into ${_ossl_prefix} (one time)")
     set(_src "${BUCKETS_DEPS_PREFIX}/src")
     set(_tar "${_src}/openssl-${BUCKETS_OPENSSL_VERSION}.tar.gz")
-    file(DOWNLOAD
-      "https://github.com/openssl/openssl/releases/download/openssl-${BUCKETS_OPENSSL_VERSION}/openssl-${BUCKETS_OPENSSL_VERSION}.tar.gz"
-      "${_tar}" EXPECTED_HASH SHA256=${BUCKETS_OPENSSL_SHA256} TLS_VERIFY ON)
+    buckets_download("${_tar}" SHA256 ${BUCKETS_OPENSSL_SHA256} URLS
+      "https://github.com/openssl/openssl/releases/download/openssl-${BUCKETS_OPENSSL_VERSION}/openssl-${BUCKETS_OPENSSL_VERSION}.tar.gz")
+    if(NOT EXISTS "${_tar}")
+      message(FATAL_ERROR "could not download OpenSSL ${BUCKETS_OPENSSL_VERSION}: ${BUCKETS_DOWNLOAD_ERROR}")
+    endif()
     file(ARCHIVE_EXTRACT INPUT "${_tar}" DESTINATION "${_src}")
     set(_dir "${_src}/openssl-${BUCKETS_OPENSSL_VERSION}")
     cmake_host_system_information(RESULT _ncpu QUERY NUMBER_OF_LOGICAL_CORES)

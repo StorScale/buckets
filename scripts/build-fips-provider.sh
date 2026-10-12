@@ -13,7 +13,7 @@ if [[ ${1:-} == --version ]]; then echo "$VERSION"; exit 0; fi
 PREFIX=${1:?usage: build-fips-provider.sh PREFIX}
 WORK=${FIPS_BUILD_DIR:-$(mktemp -d)}
 TAR="$WORK/openssl-$VERSION.tar.gz"
-[[ -f $TAR ]] || curl -fsSL -o "$TAR" "https://github.com/openssl/openssl/releases/download/openssl-$VERSION/openssl-$VERSION.tar.gz"
+[[ -f $TAR ]] || curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 -o "$TAR" "https://github.com/openssl/openssl/releases/download/openssl-$VERSION/openssl-$VERSION.tar.gz"
 echo "$SHA256  $TAR" | sha256sum -c - >/dev/null
 JOBS=$(nproc 2>/dev/null || echo 4)
 rm -rf "$WORK/module" "$WORK/tool" && mkdir -p "$WORK/module" "$WORK/tool"

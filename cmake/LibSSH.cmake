@@ -13,25 +13,11 @@ if(NOT EXISTS "${_ssh_prefix}/lib/libssh.a")
   # www.libssh.org is unreachable from some networks; snapshot.debian.org
   # serves the identical upstream tarball (Debian's 0.11.1 orig), checked
   # against the same hash.
-  set(_ok FALSE)
-  foreach(_url
-      "https://www.libssh.org/files/0.11/libssh-${BUCKETS_LIBSSH_VERSION}.tar.xz"
-      "https://snapshot.debian.org/file/1ddc90daacc4aedd3ab1c5407adc44925e0ba28e")
-    file(DOWNLOAD "${_url}" "${_tar}" TIMEOUT 60 INACTIVITY_TIMEOUT 30 TLS_VERIFY ON STATUS _st)
-    list(GET _st 0 _rc)
-    if(_rc EQUAL 0)
-      file(SHA256 "${_tar}" _sum)
-      if(_sum STREQUAL BUCKETS_LIBSSH_SHA256)
-        set(_ok TRUE)
-        break()
-      endif()
-      message(STATUS "buckets: libssh from ${_url}: SHA256 mismatch (${_sum})")
-    else()
-      message(STATUS "buckets: libssh from ${_url}: ${_st}")
-    endif()
-  endforeach()
-  if(NOT _ok)
-    message(FATAL_ERROR "could not download libssh ${BUCKETS_LIBSSH_VERSION}")
+  buckets_download("${_tar}" SHA256 ${BUCKETS_LIBSSH_SHA256} TIMEOUT 60 URLS
+    "https://www.libssh.org/files/0.11/libssh-${BUCKETS_LIBSSH_VERSION}.tar.xz"
+    "https://snapshot.debian.org/file/1ddc90daacc4aedd3ab1c5407adc44925e0ba28e")
+  if(NOT EXISTS "${_tar}")
+    message(FATAL_ERROR "could not download libssh ${BUCKETS_LIBSSH_VERSION}: ${BUCKETS_DOWNLOAD_ERROR}")
   endif()
   file(ARCHIVE_EXTRACT INPUT "${_tar}" DESTINATION "${_src}")
   get_filename_component(_ossl_root "${OPENSSL_INCLUDE_DIR}" DIRECTORY)

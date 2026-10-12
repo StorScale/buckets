@@ -36,7 +36,7 @@ Real MinIO and Buckets can serve each other's drives, clusters included.
 
 ## Build
 
-You need a C17 compiler and CMake 3.20+ (Ninja is recommended). Dependencies (llhttp, yyjson, libssh and others) are fetched and pinned at configure time; cmocka too when tests are built.
+You need a C17 compiler and CMake 3.20+ (Ninja is recommended). Dependencies (llhttp, yyjson, libssh and others) are fetched and pinned at configure time; cmocka too when tests are built. Their archives are kept in `.deps/src` (`-DBUCKETS_DEPS_PREFIX=` moves it), shared by every build directory, and a failed download is retried.
 
 OpenSSL must be 3.2 or later (madmin's encrypted admin payloads need its Argon2id). The system's is used when it is new enough; otherwise (for example Ubuntu 24.04, which has 3.0) a pinned release is built once from source into `.deps/`, which needs perl and make.
 
