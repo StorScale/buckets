@@ -114,8 +114,10 @@ expect "large object spread over all 8 drives" "$shards" 8
 metric() { # node name op
   curl -s ${CURLTLS[@]+"${CURLTLS[@]}"} "$(ep "$1")/minio/v2/metrics/node" | awk -v m="$2{op=\"$3\"," 'index($1, m) == 1 {print ($2 > 0) ? "counted" : "zero"}'
 }
-expect "node 2 counts the shard files it created on other nodes" "$(metric 2 buckets_node_internode_calls_total storage/create)" counted
-expect "node 2 counts the time it waited for them" "$(metric 2 buckets_node_internode_call_seconds_total storage/create)" counted
+expect "node 2 counts the shard files it wrote on other nodes" "$(metric 2 buckets_node_internode_calls_total storage/write)" counted
+expect "node 2 counts the time it waited for them" "$(metric 2 buckets_node_internode_call_seconds_total storage/write)" counted
+expect "node 2 committed each drive in one call" "$(metric 2 buckets_node_internode_calls_total storage/commit)" counted
+expect "node 2's puts made none of the older calls" "$(metric 2 buckets_node_internode_calls_total storage/create)$(metric 2 buckets_node_internode_calls_total storage/rename_data)" ""
 expect "node 4 counts the shard reads it handled" "$(metric 4 buckets_node_internode_served_total storage/read_all)" counted
 expect "node 1 counts its lock calls" "$(metric 1 buckets_node_internode_calls_total lock/lock)" counted
 keys=$(curl -s "${S3[@]}" "$(ep 3)/clusterbucket?list-type=2" | grep -o '<Key>' | wc -l | tr -d ' ')

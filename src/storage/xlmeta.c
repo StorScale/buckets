@@ -811,3 +811,24 @@ bool buckets_xl_object_uses_data_dir(const buckets_xl_object *o) {
 bool buckets_xl_is_free_version(const buckets_xl_header *h) {
   return h->type == BUCKETS_XL_TYPE_DELETE && (h->flags & BUCKETS_XL_FLAG_FREE_VERSION);
 }
+
+void buckets_xlmeta_add_free_version(buckets_xlmeta *x, const buckets_xl_object *cur, const uint8_t *fv_id) {
+  if (!fv_id || cur->type != BUCKETS_XL_TYPE_OBJECT || !buckets_xl_transitioned(cur)) return;
+  buckets_xl_object fv;
+  memset(&fv, 0, sizeof(fv));
+  fv.type = BUCKETS_XL_TYPE_DELETE;
+  memcpy(fv.version_id, fv_id, 16);
+  fv.mod_time = cur->mod_time;
+  buckets_xl_kv_set(&fv.meta_sys, &fv.nmeta_sys, BUCKETS_XL_META_FREE_VERSION, "", 0);
+  static const char *const keep[] = {BUCKETS_XL_META_TIER_NAME, BUCKETS_XL_META_TIER_OBJECT,
+                                     BUCKETS_XL_META_TIER_VERSION};
+  for (size_t k = 0; k < 3; k++) {
+    const buckets_xl_kv *kv = buckets_xl_kv_get(cur->meta_sys, cur->nmeta_sys, keep[k]);
+    if (kv) buckets_xl_kv_set(&fv.meta_sys, &fv.nmeta_sys, kv->key, kv->value, kv->value_len);
+  }
+  buckets_buf meta = BUCKETS_BUF_INIT;
+  buckets_xl_header hdr;
+  buckets_xl_object_encode(&fv, &meta, &hdr);
+  buckets_xlmeta_put_version(x, &hdr, (uint8_t *)meta.data, meta.len);
+  buckets_xl_object_free(&fv);
+}

@@ -8,6 +8,7 @@
 #include "core/query.h"
 #include "dist/internode.h"
 #include "dist/rpcstats.h"
+#include "storage/xlmeta.h"
 
 struct buckets_storage_server {
   buckets_drive **drives;
@@ -95,6 +96,51 @@ void buckets_storage_server_handle(const buckets_http_request *req, buckets_http
     e = read_body(req, &body) ? buckets_drive_append(d, Q("vol"), Q("path"), QI("off"), body.data ? body.data : "",
                                                      body.len)
                               : BUCKETS_DRIVE_ERR_IO;
+  } else if (strcmp(op, "write") == 0) { /* create, append and fsync in one call */
+    bool create = QI("create") != 0, sync = QI("sync") != 0;
+    if (!read_body(req, &body)) {
+      e = BUCKETS_DRIVE_ERR_IO;
+    } else if (create && sync) { /* the whole file: one fsync */
+      buckets_drive_writer *w;
+      if (!(e = buckets_drive_create_file(d, Q("vol"), Q("path"), &w))) {
+        e = body.len ? buckets_drive_writer_write(w, body.data, body.len) : BUCKETS_DRIVE_OK;
+        if (e) buckets_drive_writer_abort(w);
+        else e = buckets_drive_writer_close(w);
+      }
+    } else {
+      if (create) {
+        buckets_drive_writer *w;
+        if (!(e = buckets_drive_create_file(d, Q("vol"), Q("path"), &w))) e = buckets_drive_writer_close(w);
+      }
+      if (!e && body.len) e = buckets_drive_append(d, Q("vol"), Q("path"), QI("off"), body.data, body.len);
+      if (!e && sync) e = buckets_drive_fsync_file(d, Q("vol"), Q("path"));
+    }
+  } else if (strcmp(op, "commit") == 0) {
+    buckets_xlmeta x;
+    memset(&x, 0, sizeof(x));
+    uint8_t fv_id[16];
+    const char *fv = buckets_query_get(&q, "fv");
+    if (!read_body(req, &body) || buckets_xlmeta_parse(body.data ? body.data : "", body.len, &x) != BUCKETS_XL_OK ||
+        x.n != 1 || (fv && !buckets_xl_version_id_parse(fv, fv_id))) {
+      e = BUCKETS_DRIVE_ERR_IO;
+    } else {
+      char key[37];
+      buckets_xl_version_id_string(x.versions[0].hdr.version_id, key);
+      buckets_str inl = {0};
+      buckets_commit_args a = {.bucket = Q("bucket"), .path = Q("path"), .src_dir = Q("src_dir"),
+                               .data_dir = Q("data_dir"), .move_data = QI("move") != 0,
+                               .remove_src = QI("remove_src") != 0, .check_bucket = QI("check_bucket") != 0,
+                               .hdr = &x.versions[0].hdr,
+                               .meta = x.versions[0].meta, .meta_len = x.versions[0].meta_len,
+                               .has_inline = QI("inline") != 0, .fv_id = fv ? fv_id : NULL};
+      if (a.has_inline && buckets_xlmeta_inline_get(&x, key, &inl)) {
+        a.inl = inl.p;
+        a.inl_len = inl.n;
+      }
+      bool replaced = false;
+      if (!(e = buckets_drive_commit(d, &a, &replaced))) buckets_buf_append_c(&resp->body, replaced ? "1" : "0");
+    }
+    buckets_xlmeta_free(&x);
   } else if (strcmp(op, "fsync") == 0) {
     e = buckets_drive_fsync_file(d, Q("vol"), Q("path"));
   } else if (strcmp(op, "read_at") == 0) {

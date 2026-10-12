@@ -31,7 +31,7 @@
 /* MinIO release timestamp recorded as the writer version (WrittenByVersion). */
 #define BUCKETS_XL_WRITTEN_BY 1760549395ull
 
-typedef struct {
+typedef struct buckets_xl_header_s {
   uint8_t version_id[16]; /* all zero for the "null" version */
   int64_t mod_time;       /* unix nanoseconds */
   uint8_t signature[4];
@@ -151,6 +151,11 @@ bool buckets_xl_object_uses_data_dir(const buckets_xl_object *o);
 /* A free version: what is left of a deleted transitioned version until its
  * remote copy is removed; never shown. */
 bool buckets_xl_is_free_version(const buckets_xl_header *h);
+/* xlMetaV2Object.InitFreeVersion: a transitioned version that goes away
+ * leaves a free version (fv_id, same on every drive) naming its remote
+ * copy, for the scanner to delete. Nothing when fv_id is NULL or cur is
+ * not transitioned. */
+void buckets_xlmeta_add_free_version(buckets_xlmeta *x, const buckets_xl_object *cur, const uint8_t *fv_id);
 /* parseRestoreObjStatus: `ongoing-request="true"` or
  * `ongoing-request="false", expiry-date="<http date>"`. */
 bool buckets_restore_parse(const char *hdr, bool *ongoing, int64_t *expiry_sec);

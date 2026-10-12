@@ -196,6 +196,20 @@ buckets_obj_err buckets_ep_stat_bucket(buckets_epool *L, const char *bucket) {
   return BUCKETS_OBJ_ERR_READ_QUORUM;
 }
 
+/* For writes, whose commit checks the bucket again on every drive: this
+ * server's own drives answer without a round trip, and the rest are asked
+ * only when they disagree or there are none. */
+static buckets_obj_err stat_bucket_for_write(buckets_epool *L, const char *bucket) {
+  size_t local = 0;
+  for (size_t i = 0; i < L->nall; i++) {
+    buckets_drive *d = L->all[i];
+    if (!d || d->remote) continue;
+    if (buckets_drive_stat_vol(d, bucket, NULL) != BUCKETS_DRIVE_OK) return buckets_ep_stat_bucket(L, bucket);
+    local++;
+  }
+  return local ? BUCKETS_OBJ_OK : buckets_ep_stat_bucket(L, bucket);
+}
+
 buckets_obj_err buckets_ep_make_bucket(buckets_epool *L, const char *bucket) {
   size_t made = 0, exists = 0;
   for (size_t i = 0; i < L->nall; i++) {
@@ -811,6 +825,9 @@ static void encoder_free(encoder *e) {
 /* Rejects keys whose parent path is an object, or that shadow a non-empty prefix. */
 static buckets_obj_err check_namespace(buckets_eset *s, const char *bucket, const char *object) {
   buckets_drive *d = NULL;
+  for (size_t i = 0; i < s->n && !d; i++) { /* one of this server's own, if it has one: no round trips */
+    if (s->drives[i] && !s->drives[i]->remote) d = s->drives[i];
+  }
   for (size_t i = 0; i < s->n && !d; i++) d = s->drives[i];
   if (!d) return BUCKETS_OBJ_ERR_WRITE_QUORUM;
   for (const char *p = object; (p = strchr(p, '/')) != NULL && p[1]; p++) {
@@ -844,113 +861,87 @@ typedef struct {
   const int *dist;
   const bool *alive;
   const buckets_buf *ibuf;
-  bool has_data_dir;
-  char key[37], data_dir[37];
+  bool has_data_dir, remove_src, check_bucket;
+  char data_dir[37];
   const uint8_t *fv_id; /* free version for a replaced transitioned version */
   bool ok[MAX_SET];
+  buckets_drive_err err[MAX_SET];
   bool replaced[MAX_SET]; /* the key had a current version (not a delete marker) on that drive */
 } commit_ctx;
 
 static void new_uuid_bytes(uint8_t id[16], char str[37]);
-static void add_free_version(buckets_xlmeta *x, const buckets_xl_object *cur, const uint8_t *fv_id);
 
 static void commit_one(void *ctx, size_t i) {
   commit_ctx *c = ctx;
   c->ok[i] = false;
   if (!c->alive[i] || !c->s->drives[i]) return;
   buckets_drive *d = c->s->drives[i];
-  buckets_buf raw = BUCKETS_BUF_INIT;
-  char *mpath = join(c->op, XL_META);
-  buckets_xlmeta x;
-  memset(&x, 0, sizeof(x));
-  if (buckets_drive_read_all(d, c->bucket, mpath, &raw) == BUCKETS_DRIVE_OK &&
-      buckets_xlmeta_parse(raw.data, raw.len, &x) != BUCKETS_XL_OK) {
-    memset(&x, 0, sizeof(x)); /* unreadable: replaced (healing would do the same) */
-  }
-  buckets_buf_free(&raw);
-  free(mpath);
-  for (size_t v = 0; v < x.n; v++) { /* the newest that is not a free version: what this write replaces */
-    if (buckets_xl_is_free_version(&x.versions[v].hdr)) continue;
-    c->replaced[i] = x.versions[v].hdr.type == BUCKETS_XL_TYPE_OBJECT || x.versions[v].hdr.type == BUCKETS_XL_TYPE_LEGACY;
-    break;
-  }
-  char old_dir[37] = "";
-  long prev = buckets_xlmeta_find(&x, c->o->version_id);
-  if (prev >= 0) {
-    buckets_xl_object po;
-    if (buckets_xl_object_decode(&x.versions[prev], &po) == BUCKETS_XL_OK) {
-      if (po.type == BUCKETS_XL_TYPE_OBJECT && !buckets_xl_kv_get(po.meta_sys, po.nmeta_sys, BUCKETS_XL_META_INLINE)) {
-        buckets_xl_version_id_string(po.data_dir, old_dir);
-      }
-      /* an overwritten transitioned version: its remote copy is swept
-       * later (not when the same version is reinstalled: heal, restore) */
-      const buckets_xl_kv *was = buckets_xl_kv_get(po.meta_sys, po.nmeta_sys, BUCKETS_XL_META_TIER_OBJECT);
-      const buckets_xl_kv *now = buckets_xl_kv_get(c->o->meta_sys, c->o->nmeta_sys, BUCKETS_XL_META_TIER_OBJECT);
-      bool same = was && now && was->value_len == now->value_len && memcmp(was->value, now->value, was->value_len) == 0;
-      if (!same) add_free_version(&x, &po, c->fv_id);
-      buckets_xl_object_free(&po);
-    }
-  }
   buckets_xl_object mine = *c->o; /* shallow: only this drive's EcIndex differs */
   mine.ec_index = c->dist[i];
   buckets_buf meta = BUCKETS_BUF_INIT;
   buckets_xl_header hdr;
   buckets_xl_object_encode(&mine, &meta, &hdr);
-  buckets_xlmeta_put_version(&x, &hdr, (uint8_t *)meta.data, meta.len);
-  if (c->ibuf) buckets_xlmeta_inline_put(&x, c->key, c->ibuf[i].data ? c->ibuf[i].data : "", c->ibuf[i].len);
-  else buckets_xlmeta_inline_remove(&x, c->key);
-  buckets_buf bytes = BUCKETS_BUF_INIT;
-  buckets_xlmeta_serialize(&x, &bytes);
-  buckets_xlmeta_free(&x);
-  if (buckets_drive_rename_data(d, BUCKETS_META_BUCKET, c->src_dir, c->has_data_dir ? c->data_dir : NULL, c->bucket,
-                                c->op, bytes.data, bytes.len) == BUCKETS_DRIVE_OK) {
-    c->ok[i] = true;
-    if (old_dir[0] && strcmp(old_dir, c->data_dir) != 0) {
-      char *stale = join(c->op, old_dir);
-      buckets_drive_delete(d, c->bucket, stale, true, false);
-      free(stale);
-    }
-  } else {
-    buckets_log_warn("commit of %s/%s failed on %s", c->bucket, c->object, d->root);
+  buckets_commit_args a = {.bucket = c->bucket, .path = c->op, .src_dir = c->src_dir, .data_dir = c->data_dir,
+                           .move_data = c->has_data_dir, .remove_src = c->remove_src,
+                           .check_bucket = c->check_bucket, .hdr = &hdr, .meta = (const uint8_t *)meta.data,
+                           .meta_len = meta.len, .has_inline = c->ibuf != NULL, .fv_id = c->fv_id};
+  if (c->ibuf) {
+    a.inl = c->ibuf[i].data;
+    a.inl_len = c->ibuf[i].len;
   }
-  buckets_buf_free(&bytes);
+  c->err[i] = buckets_drive_commit(d, &a, &c->replaced[i]);
+  if (c->err[i] == BUCKETS_DRIVE_OK) c->ok[i] = true;
+  else if (c->err[i] != BUCKETS_DRIVE_ERR_NOT_FOUND) buckets_log_warn("commit of %s/%s failed on %s", c->bucket, c->object, d->root);
+  buckets_buf_free(&meta);
 }
+
+static void cleanup_tmp_where(buckets_eset *s, const char *tmp_dir, const bool *skip);
 
 /* Installs version o on every live drive: merges it into that drive's xl.meta
  * (with the drive's own EcIndex and inline shard) and moves the staged data
- * directory <.minio.sys>/<src_dir>/<data_dir> into place. */
+ * directory <.minio.sys>/<src_dir>/<data_dir> into place, each drive in one
+ * call (buckets_drive_commit). With put, src_dir is removed from every drive
+ * (by the commit on those that took it), and a bucket missing on the drives
+ * is NO_SUCH_BUCKET rather than created. */
 static buckets_obj_err commit_version(buckets_eset *s, const char *bucket, const char *object, buckets_xl_object *o,
                                       const int *dist, const bool *alive, const buckets_buf *ibuf,
                                       const char *src_dir, bool has_data_dir, int quorum, size_t *committed,
-                                      bool *replaced) {
+                                      bool *replaced, bool put) {
   char *op = obj_path(object);
   uint8_t fv_id[16];
   char fv_s[37];
   new_uuid_bytes(fv_id, fv_s);
   commit_ctx c = {.s = s, .bucket = bucket, .object = object, .op = op, .src_dir = src_dir, .o = o,
-                  .dist = dist, .alive = alive, .ibuf = ibuf, .has_data_dir = has_data_dir, .fv_id = fv_id};
-  buckets_xl_version_id_string(o->version_id, c.key);
+                  .dist = dist, .alive = alive, .ibuf = ibuf, .has_data_dir = has_data_dir,
+                  .remove_src = put && has_data_dir, .check_bucket = put, .fv_id = fv_id};
   buckets_xl_version_id_string(o->data_dir, c.data_dir);
   buckets_io_parallel(s->n, commit_one, &c);
-  int ok = 0;
-  for (size_t i = 0; i < s->n; i++) ok += c.ok[i];
+  int ok = 0, missing = 0;
+  for (size_t i = 0; i < s->n; i++) {
+    ok += c.ok[i];
+    missing += c.alive[i] && c.s->drives[i] && c.err[i] == BUCKETS_DRIVE_ERR_NOT_FOUND;
+  }
+  if (c.remove_src && ok < (int)s->n) cleanup_tmp_where(s, src_dir, c.ok);
   if (committed) *committed = (size_t)ok;
   if (replaced) { /* any drive that took the write saw an object there */
     *replaced = false;
     for (size_t i = 0; i < s->n; i++) *replaced |= c.ok[i] && c.replaced[i];
   }
   free(op);
-  return ok >= quorum ? BUCKETS_OBJ_OK : BUCKETS_OBJ_ERR_WRITE_QUORUM;
+  if (ok >= quorum) return BUCKETS_OBJ_OK;
+  return missing >= quorum ? BUCKETS_OBJ_ERR_NO_SUCH_BUCKET : BUCKETS_OBJ_ERR_WRITE_QUORUM;
 }
 
 typedef struct {
   buckets_eset *s;
   const char *tmp_dir;
+  const bool *skip;
 } cleanup_ctx;
 
 static void cleanup_one(void *ctx, size_t i) {
   cleanup_ctx *c = ctx;
-  if (c->s->drives[i]) buckets_drive_delete(c->s->drives[i], BUCKETS_META_BUCKET, c->tmp_dir, true, false);
+  if (c->s->drives[i] && !(c->skip && c->skip[i]))
+    buckets_drive_delete(c->s->drives[i], BUCKETS_META_BUCKET, c->tmp_dir, true, false);
 }
 
 /* A write that reached quorum but not every online drive goes to the MRF queue. */
@@ -964,10 +955,12 @@ static void report_partial(buckets_epool *L, buckets_eset *s, const char *bucket
   report_degraded(L, bucket, object, vid, false);
 }
 
-static void cleanup_tmp(buckets_eset *s, const char *tmp_dir) {
-  cleanup_ctx c = {s, tmp_dir};
+static void cleanup_tmp_where(buckets_eset *s, const char *tmp_dir, const bool *skip) {
+  cleanup_ctx c = {s, tmp_dir, skip};
   buckets_io_parallel(s->n, cleanup_one, &c);
 }
+
+static void cleanup_tmp(buckets_eset *s, const char *tmp_dir) { cleanup_tmp_where(s, tmp_dir, NULL); }
 
 static void new_uuid_bytes(uint8_t id[16], char str[37]) {
   buckets_random_bytes(id, 16);
@@ -991,30 +984,6 @@ static void init_version(buckets_xl_object *o, const uint8_t data_dir[16], int64
   o->ec_dist_n = n;
 }
 
-/* xlMetaV2Object.InitFreeVersion: a transitioned version that goes away
- * leaves a free version (fv_id, same on every drive) naming its remote
- * copy, for the scanner to delete. Nothing when fv_id is NULL (skipped). */
-static void add_free_version(buckets_xlmeta *x, const buckets_xl_object *cur, const uint8_t *fv_id) {
-  if (!fv_id || cur->type != BUCKETS_XL_TYPE_OBJECT || !buckets_xl_transitioned(cur)) return;
-  buckets_xl_object fv;
-  memset(&fv, 0, sizeof(fv));
-  fv.type = BUCKETS_XL_TYPE_DELETE;
-  memcpy(fv.version_id, fv_id, 16);
-  fv.mod_time = cur->mod_time;
-  buckets_xl_kv_set(&fv.meta_sys, &fv.nmeta_sys, BUCKETS_XL_META_FREE_VERSION, "", 0);
-  static const char *const keep[] = {BUCKETS_XL_META_TIER_NAME, BUCKETS_XL_META_TIER_OBJECT,
-                                     BUCKETS_XL_META_TIER_VERSION};
-  for (size_t k = 0; k < 3; k++) {
-    const buckets_xl_kv *kv = buckets_xl_kv_get(cur->meta_sys, cur->nmeta_sys, keep[k]);
-    if (kv) buckets_xl_kv_set(&fv.meta_sys, &fv.nmeta_sys, kv->key, kv->value, kv->value_len);
-  }
-  buckets_buf meta = BUCKETS_BUF_INIT;
-  buckets_xl_header hdr;
-  buckets_xl_object_encode(&fv, &meta, &hdr);
-  buckets_xlmeta_put_version(x, &hdr, (uint8_t *)meta.data, meta.len);
-  buckets_xl_object_free(&fv);
-}
-
 /* ---- put --------------------------------------------------------------------------- */
 
 static buckets_obj_err still_expected(buckets_epool *L, const char *bucket, const char *object,
@@ -1022,7 +991,7 @@ static buckets_obj_err still_expected(buckets_epool *L, const char *bucket, cons
 
 buckets_obj_err buckets_ep_put(buckets_epool *L, const char *bucket, const char *object, buckets_read_fn rd,
                                 void *rd_ud, int64_t size, const buckets_put_opts *opts, buckets_object_info *out) {
-  buckets_obj_err err = buckets_ep_stat_bucket(L, bucket);
+  buckets_obj_err err = stat_bucket_for_write(L, bucket);
   if (err) return err;
   if ((err = buckets_obj_check_name(object)) != BUCKETS_OBJ_OK) return err;
   buckets_eset *s = buckets_ep_set_for(L, object);
@@ -1106,7 +1075,7 @@ buckets_obj_err buckets_ep_put(buckets_epool *L, const char *bucket, const char 
       if (!err && opts && opts->expect_mod_time_ns) err = still_expected(L, bucket, object, opts);
       if (!err) {
         err = commit_version(s, bucket, object, &o, e.dist, e.alive, e.inline_mode ? e.ibuf : NULL, tmp_dir.data,
-                             !e.inline_mode, write_quorum(e.data, e.parity), &committed, &replaced);
+                             !e.inline_mode, write_quorum(e.data, e.parity), &committed, &replaced, true);
       }
       buckets_nslock_unlock(lk);
       if (!err && committed < s->n) report_partial(L, s, bucket, object, &o, committed);
@@ -1118,7 +1087,7 @@ buckets_obj_err buckets_ep_put(buckets_epool *L, const char *bucket, const char 
     }
     buckets_xl_object_free(&o);
   }
-  if (!e.inline_mode || err) cleanup_tmp(s, tmp_dir.data);
+  if (err) cleanup_tmp(s, tmp_dir.data); /* the commit removed it from the drives that took it */
   encoder_free(&e);
   buckets_buf_free(&file);
   buckets_buf_free(&tmp_dir);
@@ -1796,7 +1765,7 @@ static void delete_one(void *ctx, size_t i) {
   buckets_xlmeta_remove_version(&m->x, c->id);
   buckets_xlmeta_inline_remove(&m->x, c->key);
   if (decoded) {
-    add_free_version(&m->x, &o, c->fv_id);
+    buckets_xlmeta_add_free_version(&m->x, &o, c->fv_id);
     buckets_xl_object_free(&o);
   }
   buckets_drive *d = c->s->drives[i];
@@ -1893,7 +1862,7 @@ static void marker_one(void *ctx, size_t i) {
       if (po.type == BUCKETS_XL_TYPE_OBJECT && !buckets_xl_kv_get(po.meta_sys, po.nmeta_sys, BUCKETS_XL_META_INLINE)) {
         buckets_xl_version_id_string(po.data_dir, old_dir);
       }
-      add_free_version(&x, &po, c->fv_id);
+      buckets_xlmeta_add_free_version(&x, &po, c->fv_id);
       buckets_xl_object_free(&po);
     }
   }
@@ -2149,7 +2118,7 @@ static bool xl_delete_version(buckets_xlmeta *x, const delfi *f, char dd[37]) {
       buckets_xl_version_id_string(uv, key);
       buckets_xlmeta_remove_version(x, uv);
       buckets_xlmeta_inline_remove(x, key);
-      if (dec) add_free_version(x, &cur, f->fv_id);
+      if (dec) buckets_xlmeta_add_free_version(x, &cur, f->fv_id);
       if (f->deleted) put_decoded(x, &ventry);
       if (dec && !inl && !shared_data_dir(x, uv, ddir)) buckets_xl_version_id_string(ddir, dd);
       if (strcmp(dd, "null") == 0) dd[0] = '\0';
@@ -2584,7 +2553,7 @@ buckets_obj_err buckets_ep_rehydrate(buckets_epool *L, const char *bucket, const
     size_t committed = 0;
     err = !lk ? BUCKETS_OBJ_ERR_TIMEOUT
               : commit_version(s, bucket, object, &o, e.dist, alive_all, e.inline_mode ? e.ibuf : NULL, tmp_dir.data,
-                               !e.inline_mode, write_quorum(e.data, e.parity), &committed, NULL);
+                               !e.inline_mode, write_quorum(e.data, e.parity), &committed, NULL, false);
     buckets_nslock_unlock(lk);
   }
   if (!e.inline_mode || err) cleanup_tmp(s, tmp_dir.data);
@@ -2693,7 +2662,7 @@ buckets_obj_err buckets_ep_import_version(buckets_epool *L, const char *bucket, 
     int q = o.type == BUCKETS_XL_TYPE_OBJECT ? write_quorum(e.data, e.parity) : write_quorum(set_data(s), s->parity);
     err = !lk ? BUCKETS_OBJ_ERR_TIMEOUT
               : commit_version(s, bucket, object, &o, e.dist, alive_all, e.inline_mode ? e.ibuf : NULL, tmp_dir.data,
-                               has_data && !e.inline_mode, q, &committed, NULL);
+                               has_data && !e.inline_mode, q, &committed, NULL, false);
     buckets_nslock_unlock(lk);
     if (!err) report_partial(L, s, bucket, object, &o, committed);
   }
@@ -3804,7 +3773,7 @@ static buckets_obj_err mpu_complete(buckets_epool *L, const char *bucket, const 
     err = !lk ? BUCKETS_OBJ_ERR_TIMEOUT : check_namespace(u.set, bucket, object);
     if (!err) {
       err = commit_version(u.set, bucket, object, &o, u.dist, u.has, NULL, dir, true,
-                           write_quorum(u.up.ec_m, u.up.ec_n), &committed, &replaced);
+                           write_quorum(u.up.ec_m, u.up.ec_n), &committed, &replaced, false);
     }
     buckets_nslock_unlock(lk);
     if (!err && committed < u.set->n) report_partial(L, u.set, bucket, object, &o, committed);
@@ -4156,7 +4125,7 @@ static buckets_obj_err rebuild(buckets_epool *L, buckets_eset *s, const char *bu
     }
     buckets_xl_object copy = *o; /* commit_version only reads it */
     err = commit_version(s, bucket, object, &copy, dist, outdated, is_inline ? e.ibuf : NULL, tmp_dir.data, has_data, 1,
-                         committed, NULL);
+                         committed, NULL, false);
   }
   if (has_data || err) cleanup_tmp(s, tmp_dir.data);
   encoder_free(&e);
