@@ -6,6 +6,9 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **A lost distributed lock is let go and taken again.** When the other servers restart, they forget the locks they granted, and a lock refresh that most servers refuse means the lock is lost, as MinIO treats it. Buckets kept the lock and logged `lost its quorum while held` every 10 s: after a rolling restart, the server holding the cluster's leader lock warned until it was restarted itself. The lock is now marked lost and no longer refreshed, and the leader lock is taken again. Servers that don't answer still don't count against a lock.
+
 ## [1.20.0] - 2026-10-12
 
 ### Added

@@ -421,7 +421,8 @@ typedef struct {
 
 /* The cluster's leader lock (MinIO's globalLeaderLock, a sharedLock on
  * .minio.sys/leader.lock): one node holds it for good, and another takes
- * it over if that node goes away and its lock expires. */
+ * it over if that node goes away and its lock expires. A holder whose lock
+ * is lost (the other nodes restarted and forgot it) takes it again. */
 typedef struct {
   buckets_dsync *d;
   atomic_bool stop, held;
@@ -443,7 +444,7 @@ static void *leader_run(void *arg) {
       continue;
     }
     atomic_store(&l->held, true);
-    while (!atomic_load(&l->stop)) {
+    while (!atomic_load(&l->stop) && !buckets_dsync_lost(h)) {
       struct timespec ts = {0, 100000000L};
       nanosleep(&ts, NULL);
     }
