@@ -58,11 +58,14 @@ Four servers of four 8 TB drives, 16 drives in all, at 6+3 with 1024 placement g
 - 9216 stripes over 16 drives: 576 per drive;
 - usable space: 16 × 8 TB × 6/9 ≈ 85 TB.
 
-**A 16 TB drive is added to server 2.** By weight it should hold 16/144 of all stripes, about 1020.
-- The new map moves about 1020 stripes onto it, one from each of about 1020 groups. Each other drive gives up about
-  64. Nothing else moves.
-- On a half-full cluster that copies about 7 TB: a few hours at a throttled 500 MB/s.
-- Usable space grows by about 10.7 TB.
+**A 16 TB drive is added to server 2.** By weight it should hold 16/144 of all stripes: 1024, one in every group,
+which is also the most one drive can hold.
+- The new map moves stripes onto it, one from each group that takes it. Nothing else moves.
+- A group whose stripes on server 2 already number 3 can't take one, so the simulation
+  ([Performance](#performance)) placed 795, not 1024. That copies about 5.5 TB of a half-full cluster: a few hours
+  at a throttled 500 MB/s.
+- Usable space grows by about 8 TB (10.7 TB if all 1024 could be placed).
+- The drive is now in most objects, so it is the busiest drive by far: see [Performance](#performance).
 - Server 2 now holds a third of the weight, which is also the most any server may hold of a group (3 of 9). A larger
   drive there could not be used in full. **Uneven servers are where weighting meets its limit**, and the preview
   says so.
@@ -127,6 +130,55 @@ metadata. Moving between epochs is the same work for one group's objects, per st
   space when servers are uneven.
 - **Admin API, console and operator:** add, drain and preview operations; the move's progress; alerts for a move
   that stalls, and for a pool that cannot place its groups as its failure domains require.
+
+## Performance
+
+Estimates, not measurements: `tools/placement-sim.py` builds and changes maps as above (1024 groups, 6+3, at most 3
+stripes of a group per server, least movement) and works out what limits speed and space when every drive is
+equally fast. On the shared cluster, PUTs were limited by the storage's syncs, two per drive per PUT
+([docs/performance.md](../performance.md#calls-between-servers)), so the drive used by the most objects saturates first.
+Throughput is relative to one MinIO set over the same 16 drives at 12+4, which uses every drive for every object.
+
+| Layout | Drives | Objects using a drive | Small objects | Large objects | Syncs per PUT | Usable / raw | Busiest server | Stripes moved |
+|---|---|---|---|---|---|---|---|---|
+| MinIO set: 16 drives, 12+4 | 16 | 100% | 1.00× | 1.00× | 32 | 96 / 128 TB | 1.00× | |
+| MinIO pool: 2 sets of 8, 4+4 | 16 | 50% | 2.00× | 0.67× | 16 | 64 / 128 TB | 1.00× | |
+| Elastic 6+3, 16 × 8 TB | 16 | 56% | 1.78× | 0.89× | 18 | 85 / 128 TB | 1.00× | |
+| + a 16 TB drive on server 2, by size | 17 | 51–78% | 1.29× | 0.64× | 18 | 93 / 144 TB | 1.26× | 795 |
+| + a 16 TB drive, weighted as an 8 TB | 17 | 53% | 1.89× | 0.94× | 18 | 91 / 144 TB | 1.18× | 542 |
+| + a 5th server, 4 × 8 TB | 20 | 45% | 2.22× | 1.11× | 18 | 107 / 160 TB | 1.00× | 1840 |
+| one 8 TB drive drained | 15 | 60% | 1.67× | 0.83× | 18 | 80 / 120 TB | 1.07× | 576 |
+| Elastic 6+3, 4 × (2 × 8 + 2 × 16 TB), by size | 16 | 38–75% | 1.33× | 0.67× | 18 | 128 / 192 TB | 1.00× | |
+| the same, weighted equally | 16 | 56% | 1.78× | 0.89× | 18 | 85 / 192 TB | 1.00× | |
+
+Small objects: objects per second until the busiest drive's syncs are saturated. Large objects: the same in bytes
+(a drive writes size/data of each object it is in). Busiest server: its share of stripes against an even share.
+
+What it shows:
+- **The map itself costs nothing measurable.** Finding a group's drives is a table lookup. A PUT still makes two calls
+  per remote drive and a GET reads as today, and a server holds on average 1/servers of an object's shards either
+  way, so the bytes between servers (which set GET throughput on the shared cluster) are the same. Listing already
+  reads every drive of a pool (`buckets_ep_list`), so it reads no more.
+- **The stripe width moves performance more than the map.** At 6+3 an object uses 9 of 16 drives rather than all 16,
+  so storage limited by syncs takes 1.78× the small objects, and large objects write 12% more bytes per drive (6+3
+  stores 1.5× the data, 12+4 1.33×). A MinIO pool can also have narrower sets: two of 8 at 4+4 do 2× the small
+  objects, with 64 TB usable against 85.
+- **Weighting by size makes large drives the bottleneck.** A drive's share of stripes is its share of I/O. The 16 TB
+  drive added by size is in 78% of objects against about 51% for the others, and small-object throughput falls from
+  1.89× (the same drive weighted as an 8 TB) to 1.29×: 32% less for 2 TB more usable space. A pool of mixed 8 and 16
+  TB drives weighted by size loses a quarter of its small-object throughput and a quarter of its large-object
+  throughput against equal weights, and gains 43 TB. Unless the large drives are also faster, weights by size trade
+  speed for space, and the preview must show both.
+- **A drive's share has a ceiling.** It holds at most one stripe per group, 1/width of all stripes. A drive much
+  larger than the others reaches it (the 16 TB drive above should hold one stripe in every group), and the per-server
+  limit stops even that being placed with least movement.
+- **Growth moves the least possible.** A server added moves exactly its share (1840 stripes), a drain exactly the
+  drive's stripes (576), and throughput rises with each drive added, which a MinIO pool gets only from a whole new
+  pool.
+- **During a move,** copies are throttled background traffic, competing with clients for the links between servers
+  (on the shared cluster about 220 MiB/s between two nodes). Writing to both layouts costs little if it is done per
+  stripe: when a drive is added, one stripe of a group moves, so a write to a moving group writes 10 stripes, not 9.
+  Writing the whole object to both layouts would double those writes.
 
 ## Setting it up
 
@@ -195,9 +247,14 @@ A cluster with both kinds runs both: MinIO pools as today, elastic pools by thei
    cost more. **Recommended: fixed at creation,** from the largest size expected, about 50 to 100 groups per drive
    then: 1024 to 4096. Splitting groups later is possible but complex.
 5. **Writes during a move: to both layouts, or to the new one only with reads falling back?** **Recommended: both,**
-   until the group settles. It costs extra writes for the minutes a group moves, and no read can miss an object.
+   until the group settles, per stripe: only a stripe whose drive changes is written twice (10 of 9 when a drive is
+   added). It costs extra writes for the minutes a group moves, and no read can miss an object.
 6. **The smallest elastic pool?** **Recommended: the stripe width plus one server's drives,** so that a server can be
    drained without the pool falling below its width.
 7. **A smaller first step?** Groups moved between whole sets (drives added and drained a set at a time) need the map
    and the moves but not per-drive placement or weights. **Recommended: only if the full design proves too large.**
    It gives less, and most of the work is the same.
+8. **Weights by size or by speed?** By size, a large drive is filled in full but is in more objects than the others
+   and limits the pool's throughput ([Performance](#performance)). **Recommended: by size by default only among
+   drives of one speed;** for a larger drive the preview shows both outcomes, and a weight can be set per drive (as
+   Ceph's reweighting does).

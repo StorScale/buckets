@@ -116,6 +116,7 @@ A C server in a distroless image should use less memory than the Go original, wh
 Not agreed or scheduled: written down to be weighed. Today a pool's drives are fixed when it is created, as in MinIO, so storage grows only by a whole new pool, and a drive leaves only by failing. An elastic pool would place objects through a map of placement groups instead, so drives could be added or drained one at a time, with drives of any size filled by weight.
 
 - [ ] **Elastic pools** ([the design](design/elastic-pools.md)): add or drain single drives and servers, with a preview of what moves; moves throttled and resumable; failure domains kept.
+- Performance, estimated by simulation ([the design](design/elastic-pools.md#performance)): the map itself costs nothing measurable, and a 6+3 stripe over 16 drives takes about 1.8× the small objects of one 16-drive MinIO set. Weighting drives by size makes a larger drive the busiest one: a 16 TB drive among 8 TB ones costs about a third of small-object throughput.
 - It leaves MinIO's on-disk format: an elastic pool cannot be rolled back to MinIO. Existing pools stay MinIO pools, and a cluster moves only by choosing to decommission them into an elastic pool, so the 1.x promise holds for everyone else.
 - The largest new pieces are agreement on the map between servers, and moving data safely while it is read and written.
 
