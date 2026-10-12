@@ -110,7 +110,16 @@ On the cluster above (4 servers × 2 drives, EC 4+4), they showed:
 | 64 KiB × 32 clients | 3557, 3581 op/s | 3602, 3586 op/s (inline: no shard reads) |
 
   On one machine, where the CPU rather than the network is the limit, rebuilding costs some throughput (10 MiB GETs on four local servers: about 1,300 MiB/s rather than 1,600).
-- **The rest is round trips.** A PUT makes these calls to each other server's drives, one after another: `stat_vol` (the bucket), `create`, `append` (every 4 MiB), `fsync`, then under the lock `read_all` and `rename_data`, then `delete` (the staging directory). MinIO streams each shard in one call and renames it in another, which reads the old metadata and removes the staging directory on the drive's own server. A 10 MiB GET reads each remote shard block by block (10 calls per drive). See [Known headroom](#known-headroom).
+- **PUTs now make two calls per remote drive, as MinIO's do.** They used to make about seven, one after another: `stat_vol` (the bucket), `create`, `append` (every 4 MiB), `fsync`, then under the lock `read_all` and `rename_data`, then `delete` (the staging directory). Now a `write` call creates the shard file, carries its data and syncs it (one call for a shard up to 4 MiB), and a `commit` call does the rename on the drive's own server: it reads the old xl.meta, merges the new version, moves the data in, and removes the replaced data and the staging directory. The bucket is checked on the server's own drives. A server talking to a peer that predates these calls falls back to the old ones. On the same cluster, image switched back and forth (1 MiB PUTs):
+
+| 1 MiB PUT | Before (two runs) | Two calls (two runs) | MinIO, same cluster (two runs) |
+|---|---|---|---|
+| 1 client | 29, 32 MiB/s | 33, 32 MiB/s | 26, 36 MiB/s |
+| 4 clients | 99, 104 MiB/s (p50 38–40 ms) | 114, 117 MiB/s (p50 34 ms) | 103, 112 MiB/s (p50 35–38 ms) |
+| 32 clients | 224–252 MiB/s | 235–247 MiB/s | 230, 236 MiB/s |
+
+  The MinIO column is a separate run on the same cluster (Buckets made 26–31, 98–107 and 235–241 MiB/s alongside it). Below saturation the two calls cut a 1 MiB PUT's waits on each remote drive from about 20 ms to 16 ms; at 32 clients both servers are held by the volumes' syncs (two per drive per PUT, Cinder network block storage here), so the builds and MinIO land within each other's run-to-run spread. With 32 clients, latency is set by throughput (32 ÷ requests per second), so a p50 that moves while throughput doesn't is a change in the latencies' spread, not in a PUT's cost.
+- **GETs read remote shards block by block** (a 10 MiB GET makes 10 calls per drive). See [Known headroom](#known-headroom).
 
 ## Memory
 
@@ -199,4 +208,4 @@ The starting point was PUT at 0.80–1.03 s per 256 MiB (2.6–3.3× MinIO) and 
 
 - **Single-stream PUT:** bound by MD5, as it is for MinIO. The only ways around it would change the ETag's meaning, which S3 clients rely on.
 - **AVX2:** the x86 paths use SSSE3 (128-bit). AVX2 versions would roughly double RS and HighwayHash throughput on x86 servers.
-- **Round trips between servers** ([Calls between servers](#calls-between-servers)): a PUT makes about seven calls, one after another, to each remote drive, where MinIO's design needs two; large GETs read remote shards block by block rather than as one stream; listing a remote drive stats each entry with a call of its own.
+- **Round trips between servers** ([Calls between servers](#calls-between-servers)): large GETs read remote shards block by block rather than as one stream; listing a remote drive stats each entry with a call of its own.
