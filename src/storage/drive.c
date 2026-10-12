@@ -8,6 +8,7 @@
 #include <stdarg.h>
 #include "storage/remote.h"
 #include "storage/health.h"
+#include "storage/xlmeta.h"
 
 #include <dirent.h>
 #include <ftw.h>
@@ -915,6 +916,91 @@ buckets_drive_err buckets_drive_rename_data(buckets_drive *d, const char *src_vo
   clock_gettime(CLOCK_MONOTONIC, &t1);
   buckets_drive_stats_end(d, BUCKETS_DOP_RENAME_DATA, (t1.tv_sec - t0.tv_sec) * 1000000000LL + (t1.tv_nsec - t0.tv_nsec), e);
   if (buckets_trace_wanted(BUCKETS_TRACE_STORAGE)) drive_trace(d, BUCKETS_DOP_RENAME_DATA, t0, t1, e, 5, src_vol, src_dir, data_dir, dst_vol, dst_path);
+  return e;
+}
+
+/* The commit from the drive's own primitives: on a local drive, or on a
+ * remote one whose server predates the commit call. */
+static buckets_drive_err commit_here(buckets_drive *d, const buckets_commit_args *a, bool *replaced) {
+  *replaced = false;
+  buckets_drive_err e = a->check_bucket ? buckets_drive_stat_vol(d, a->bucket, NULL) : BUCKETS_DRIVE_OK;
+  if (e) return e;
+  buckets_buf raw = BUCKETS_BUF_INIT, mpath = BUCKETS_BUF_INIT;
+  buckets_buf_appendf(&mpath, "%s/xl.meta", a->path);
+  buckets_xlmeta x;
+  memset(&x, 0, sizeof(x));
+  if (buckets_drive_read_all(d, a->bucket, mpath.data, &raw) == BUCKETS_DRIVE_OK &&
+      buckets_xlmeta_parse(raw.data, raw.len, &x) != BUCKETS_XL_OK) {
+    memset(&x, 0, sizeof(x)); /* unreadable: replaced (healing would do the same) */
+  }
+  buckets_buf_free(&raw);
+  buckets_buf_free(&mpath);
+  for (size_t v = 0; v < x.n; v++) { /* the newest that is not a free version: what this write replaces */
+    if (buckets_xl_is_free_version(&x.versions[v].hdr)) continue;
+    *replaced = x.versions[v].hdr.type == BUCKETS_XL_TYPE_OBJECT || x.versions[v].hdr.type == BUCKETS_XL_TYPE_LEGACY;
+    break;
+  }
+  char old_dir[37] = "";
+  long prev = buckets_xlmeta_find(&x, a->hdr->version_id);
+  if (prev >= 0) {
+    buckets_xl_object po;
+    if (buckets_xl_object_decode(&x.versions[prev], &po) == BUCKETS_XL_OK) {
+      if (po.type == BUCKETS_XL_TYPE_OBJECT && !buckets_xl_kv_get(po.meta_sys, po.nmeta_sys, BUCKETS_XL_META_INLINE)) {
+        buckets_xl_version_id_string(po.data_dir, old_dir);
+      }
+      /* an overwritten transitioned version: its remote copy is swept
+       * later (not when the same version is reinstalled: heal, restore) */
+      if (po.type == BUCKETS_XL_TYPE_OBJECT && buckets_xl_transitioned(&po)) {
+        buckets_xl_version nv = {*a->hdr, (uint8_t *)a->meta, a->meta_len};
+        buckets_xl_object no;
+        bool same = false;
+        if (buckets_xl_object_decode(&nv, &no) == BUCKETS_XL_OK) {
+          const buckets_xl_kv *was = buckets_xl_kv_get(po.meta_sys, po.nmeta_sys, BUCKETS_XL_META_TIER_OBJECT);
+          const buckets_xl_kv *now = buckets_xl_kv_get(no.meta_sys, no.nmeta_sys, BUCKETS_XL_META_TIER_OBJECT);
+          same = was && now && was->value_len == now->value_len && memcmp(was->value, now->value, was->value_len) == 0;
+          buckets_xl_object_free(&no);
+        }
+        if (!same) buckets_xlmeta_add_free_version(&x, &po, a->fv_id);
+      }
+      buckets_xl_object_free(&po);
+    }
+  }
+  uint8_t *meta = buckets_xmalloc(a->meta_len ? a->meta_len : 1);
+  if (a->meta_len) memcpy(meta, a->meta, a->meta_len);
+  buckets_xlmeta_put_version(&x, a->hdr, meta, a->meta_len);
+  char key[37];
+  buckets_xl_version_id_string(a->hdr->version_id, key);
+  if (a->has_inline) buckets_xlmeta_inline_put(&x, key, a->inl ? a->inl : "", a->inl_len);
+  else buckets_xlmeta_inline_remove(&x, key);
+  buckets_buf bytes = BUCKETS_BUF_INIT;
+  buckets_xlmeta_serialize(&x, &bytes);
+  buckets_xlmeta_free(&x);
+  e = buckets_drive_rename_data(d, BUCKETS_META_BUCKET, a->src_dir, a->move_data ? a->data_dir : NULL, a->bucket,
+                                a->path, bytes.data, bytes.len);
+  buckets_buf_free(&bytes);
+  if (e) return e == BUCKETS_DRIVE_ERR_NOT_FOUND ? BUCKETS_DRIVE_ERR_IO : e; /* NOT_FOUND: the bucket's alone */
+  if (old_dir[0] && strcmp(old_dir, a->data_dir) != 0) {
+    buckets_buf stale = BUCKETS_BUF_INIT;
+    buckets_buf_appendf(&stale, "%s/%s", a->path, old_dir);
+    buckets_drive_delete(d, a->bucket, stale.data, true, false);
+    buckets_buf_free(&stale);
+  }
+  if (a->remove_src) buckets_drive_delete(d, BUCKETS_META_BUCKET, a->src_dir, true, false);
+  return BUCKETS_DRIVE_OK;
+}
+
+buckets_drive_err buckets_drive_commit(buckets_drive *d, const buckets_commit_args *a, bool *replaced) {
+  if (!d->remote) return commit_here(d, a, replaced); /* each step counted as its own call */
+  if (buckets_drive_health_refuses(d)) return BUCKETS_DRIVE_ERR_OFFLINE; /* storage/health.c */
+  struct timespec t0, t1;
+  buckets_drive_stats_begin(d);
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+  bool unsupported = false;
+  buckets_drive_err e = buckets_rdrive_commit(d, a, replaced, &unsupported);
+  if (unsupported) e = commit_here(d, a, replaced);
+  clock_gettime(CLOCK_MONOTONIC, &t1);
+  buckets_drive_stats_end(d, BUCKETS_DOP_RENAME_DATA, (t1.tv_sec - t0.tv_sec) * 1000000000LL + (t1.tv_nsec - t0.tv_nsec), e);
+  if (buckets_trace_wanted(BUCKETS_TRACE_STORAGE)) drive_trace(d, BUCKETS_DOP_RENAME_DATA, t0, t1, e, 3, a->src_dir, a->bucket, a->path);
   return e;
 }
 

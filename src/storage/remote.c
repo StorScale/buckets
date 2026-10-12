@@ -11,15 +11,20 @@
 #include "core/log.h"
 #include "dist/internode.h"
 #include "dist/rpcstats.h"
+#include "storage/xlmeta.h"
 
 #define OFFLINE_BACKOFF_MS 1000
 #define WRITE_BUFFER (4u * 1024 * 1024)
+/* How long a peer that refused a call this node added (it runs an older
+ * release, as during a rolling upgrade) is sent the older calls instead. */
+#define LEGACY_RETRY_MS 60000
 
 struct buckets_remote {
   buckets_http_client *peer;
   char *disk_path;
   _Atomic int64_t offline_until_ms;
   _Atomic bool logged_offline;
+  _Atomic int64_t legacy_until_ms; /* see LEGACY_RETRY_MS */
 };
 
 static int64_t now_ms(void) {
@@ -62,9 +67,10 @@ static void arg(args *a, const char *k, const char *v) {
 
 static void argi(args *a, const char *k, long long v) { buckets_buf_appendf(&a->q, "&%s=%lld", k, v); }
 
-/* Runs op on the peer. The response body goes to out (if given). */
-static buckets_drive_err call(buckets_drive *d, const char *op, args *a, const void *body, size_t blen,
-                              buckets_buf *out) {
+/* Runs op on the peer. The response body goes to out (if given). With
+ * unsupported, a peer that does not know op (400) sets it. */
+static buckets_drive_err call_ex(buckets_drive *d, const char *op, args *a, const void *body, size_t blen,
+                                 buckets_buf *out, bool *unsupported) {
   struct buckets_remote *r = d->remote;
   buckets_drive_err err = BUCKETS_DRIVE_ERR_OFFLINE;
   if (atomic_load(&r->offline_until_ms) > now_ms()) {
@@ -97,6 +103,10 @@ static buckets_drive_err call(buckets_drive *d, const char *op, args *a, const v
       *out = res.body;
       memset(&res.body, 0, sizeof(res.body));
     }
+  } else if (res.status == 400 && unsupported) {
+    *unsupported = true;
+    atomic_store(&r->legacy_until_ms, now_ms() + LEGACY_RETRY_MS);
+    err = BUCKETS_DRIVE_ERR_IO;
   } else {
     size_t n;
     const char *code = buckets_http_result_header(&res, BUCKETS_INTERNODE_ERR, &n);
@@ -109,6 +119,14 @@ static buckets_drive_err call(buckets_drive *d, const char *op, args *a, const v
   buckets_buf_free(&target);
   return err;
 }
+
+static buckets_drive_err call(buckets_drive *d, const char *op, args *a, const void *body, size_t blen,
+                              buckets_buf *out) {
+  return call_ex(d, op, a, body, blen, out, NULL);
+}
+
+/* The peer refused a newer call a moment ago: send it the older ones. */
+static bool legacy(buckets_drive *d) { return atomic_load(&d->remote->legacy_until_ms) > now_ms(); }
 
 buckets_drive_err buckets_rdrive_make_vol(buckets_drive *d, const char *name) {
   args a = {BUCKETS_BUF_INIT};
@@ -219,6 +237,48 @@ buckets_drive_err buckets_rdrive_rename_data(buckets_drive *d, const char *src_v
   return call(d, "rename_data", &a, xlmeta, xlmeta_len, NULL);
 }
 
+/* The version travels as an xl.meta holding just it (and its inline shard). */
+buckets_drive_err buckets_rdrive_commit(buckets_drive *d, const buckets_commit_args *c, bool *replaced,
+                                        bool *unsupported) {
+  *replaced = false;
+  if (legacy(d)) {
+    *unsupported = true;
+    return BUCKETS_DRIVE_ERR_IO;
+  }
+  args a = {BUCKETS_BUF_INIT};
+  arg(&a, "bucket", c->bucket);
+  arg(&a, "path", c->path);
+  arg(&a, "src_dir", c->src_dir);
+  arg(&a, "data_dir", c->data_dir);
+  argi(&a, "move", c->move_data);
+  argi(&a, "remove_src", c->remove_src);
+  argi(&a, "check_bucket", c->check_bucket);
+  argi(&a, "inline", c->has_inline);
+  if (c->fv_id) {
+    char fv[37];
+    buckets_xl_version_id_string(c->fv_id, fv);
+    arg(&a, "fv", fv);
+  }
+  buckets_xlmeta x;
+  memset(&x, 0, sizeof(x));
+  uint8_t *meta = buckets_xmalloc(c->meta_len ? c->meta_len : 1);
+  if (c->meta_len) memcpy(meta, c->meta, c->meta_len);
+  buckets_xlmeta_put_version(&x, c->hdr, meta, c->meta_len);
+  if (c->has_inline) {
+    char key[37];
+    buckets_xl_version_id_string(c->hdr->version_id, key);
+    buckets_xlmeta_inline_put(&x, key, c->inl ? c->inl : "", c->inl_len);
+  }
+  buckets_buf body = BUCKETS_BUF_INIT, out = BUCKETS_BUF_INIT;
+  buckets_xlmeta_serialize(&x, &body);
+  buckets_xlmeta_free(&x);
+  buckets_drive_err e = call_ex(d, "commit", &a, body.data, body.len, &out, unsupported);
+  if (!e) *replaced = out.data && out.data[0] == '1';
+  buckets_buf_free(&body);
+  buckets_buf_free(&out);
+  return e;
+}
+
 buckets_drive_err buckets_rdrive_rename_file(buckets_drive *d, const char *src_vol, const char *src, const char *dst_vol,
                                              const char *dst) {
   args a = {BUCKETS_BUF_INIT};
@@ -308,20 +368,21 @@ buckets_drive_err buckets_rdrive_stat_info(buckets_drive *d, const char *vol, co
 
 /* ---- writer: buffered appends --------------------------------------------------------- */
 
+/* The file is created by the first "write" call, which carries the first
+ * WRITE_BUFFER bytes, and the last one flushes it to stable storage: a shard
+ * of up to WRITE_BUFFER bytes takes one call where create, append and fsync
+ * took three. */
 struct buckets_rwriter {
   buckets_drive *d;
   char *vol, *path;
   int64_t off;
+  bool created;
   buckets_buf buf;
 };
 
 buckets_drive_err buckets_rdrive_create_file(buckets_drive *d, const char *vol, const char *path,
                                              buckets_drive_writer **w) {
-  args a = {BUCKETS_BUF_INIT};
-  arg(&a, "vol", vol);
-  arg(&a, "path", path);
-  buckets_drive_err e = call(d, "create", &a, NULL, 0, NULL);
-  if (e) return e;
+  if (atomic_load(&d->remote->offline_until_ms) > now_ms()) return BUCKETS_DRIVE_ERR_OFFLINE;
   struct buckets_rwriter *rw = buckets_xcalloc(1, sizeof(*rw));
   rw->d = d;
   rw->vol = buckets_xstrdup(vol);
@@ -330,9 +391,32 @@ buckets_drive_err buckets_rdrive_create_file(buckets_drive *d, const char *vol, 
   return BUCKETS_DRIVE_OK;
 }
 
-static buckets_drive_err flush(struct buckets_rwriter *w) {
-  if (!w->buf.len) return BUCKETS_DRIVE_OK;
-  buckets_drive_err e = buckets_rdrive_append(w->d, w->vol, w->path, w->off, w->buf.data, w->buf.len);
+/* Sends the buffer; with sync, also flushes the file to stable storage. */
+static buckets_drive_err flush(struct buckets_rwriter *w, bool sync) {
+  if (!w->buf.len && !sync && w->created) return BUCKETS_DRIVE_OK;
+  buckets_drive_err e = BUCKETS_DRIVE_OK;
+  bool unsupported = legacy(w->d);
+  if (!unsupported) {
+    args a = {BUCKETS_BUF_INIT};
+    arg(&a, "vol", w->vol);
+    arg(&a, "path", w->path);
+    argi(&a, "off", w->off);
+    argi(&a, "create", !w->created);
+    argi(&a, "sync", sync);
+    e = call_ex(w->d, "write", &a, w->buf.data, w->buf.len, NULL, &unsupported);
+    if (!unsupported && !e) w->created = true;
+  }
+  if (unsupported) { /* an older peer */
+    e = BUCKETS_DRIVE_OK;
+    if (!w->created) {
+      args a = {BUCKETS_BUF_INIT};
+      arg(&a, "vol", w->vol);
+      arg(&a, "path", w->path);
+      if (!(e = call(w->d, "create", &a, NULL, 0, NULL))) w->created = true;
+    }
+    if (!e && w->buf.len) e = buckets_rdrive_append(w->d, w->vol, w->path, w->off, w->buf.data, w->buf.len);
+    if (!e && sync) e = buckets_rdrive_fsync_file(w->d, w->vol, w->path);
+  }
   if (!e) w->off += (int64_t)w->buf.len;
   buckets_buf_reset(&w->buf);
   return e;
@@ -347,17 +431,16 @@ static void rwriter_free(struct buckets_rwriter *w) {
 
 buckets_drive_err buckets_rwriter_write(struct buckets_rwriter *w, const void *data, size_t n) {
   buckets_buf_append(&w->buf, data, n);
-  return w->buf.len >= WRITE_BUFFER ? flush(w) : BUCKETS_DRIVE_OK;
+  return w->buf.len >= WRITE_BUFFER ? flush(w, false) : BUCKETS_DRIVE_OK;
 }
 
 buckets_drive_err buckets_rwriter_close(struct buckets_rwriter *w) {
-  buckets_drive_err e = flush(w);
-  if (!e) e = buckets_rdrive_fsync_file(w->d, w->vol, w->path);
+  buckets_drive_err e = flush(w, true);
   rwriter_free(w);
   return e;
 }
 
 void buckets_rwriter_abort(struct buckets_rwriter *w) {
-  buckets_rdrive_delete(w->d, w->vol, w->path, false, false);
+  if (w->created) buckets_rdrive_delete(w->d, w->vol, w->path, false, false);
   rwriter_free(w);
 }

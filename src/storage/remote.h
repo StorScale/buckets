@@ -37,6 +37,9 @@ buckets_drive_err buckets_rdrive_read_at(buckets_drive *d, const char *vol, cons
 buckets_drive_err buckets_rdrive_rename_data(buckets_drive *d, const char *src_vol, const char *src_dir,
                                              const char *data_dir, const char *dst_vol, const char *dst_path,
                                              const void *xlmeta, size_t xlmeta_len);
+/* *unsupported: the peer predates the call (or did a moment ago); nothing was done. */
+buckets_drive_err buckets_rdrive_commit(buckets_drive *d, const buckets_commit_args *c, bool *replaced,
+                                        bool *unsupported);
 buckets_drive_err buckets_rdrive_rename_file(buckets_drive *d, const char *src_vol, const char *src, const char *dst_vol,
                                              const char *dst);
 buckets_drive_err buckets_rdrive_delete(buckets_drive *d, const char *vol, const char *path, bool recursive, bool prune);

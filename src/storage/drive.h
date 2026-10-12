@@ -116,6 +116,30 @@ buckets_drive_err buckets_drive_rename_data(buckets_drive *d, const char *src_vo
                                             const char *data_dir, const char *dst_vol, const char *dst_path,
                                             const void *xlmeta, size_t xlmeta_len);
 
+/* The commit of a new version on one drive: MinIO's RenameData, given the
+ * version rather than the whole xl.meta, so a remote drive does it in one
+ * call. Merges the version into <bucket>/<path>/xl.meta (a version with the
+ * same ID is replaced, and a replaced transitioned version leaves a free
+ * version fv_id when set), moves <.minio.sys>/<src_dir>/<data_dir> beside it
+ * when move_data, removes the data directory of the version it replaced, and
+ * src_dir when remove_src. */
+typedef struct {
+  const char *bucket, *path, *src_dir;
+  const char *data_dir; /* the new version's */
+  bool move_data, remove_src;
+  bool check_bucket; /* NOT_FOUND when the bucket is missing, rather than creating it */
+  const struct buckets_xl_header_s *hdr;
+  const uint8_t *meta; /* the encoded version */
+  size_t meta_len;
+  bool has_inline; /* the version's inline shard, stored under its ID */
+  const void *inl;
+  size_t inl_len;
+  const uint8_t *fv_id;
+} buckets_commit_args;
+/* *replaced: the key's newest version on the drive was an object (not a
+ * delete marker). */
+buckets_drive_err buckets_drive_commit(buckets_drive *d, const buckets_commit_args *a, bool *replaced);
+
 /* Renames a single file (parents of dst created). */
 buckets_drive_err buckets_drive_rename_file(buckets_drive *d, const char *src_vol, const char *src,
                                             const char *dst_vol, const char *dst);
