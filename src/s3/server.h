@@ -26,6 +26,10 @@ typedef struct buckets_s3_server {
   struct buckets_config_sys *config;    /* the server configuration, once loaded */
   pthread_mutex_t oidc_mu;
   struct buckets_openid *openid; /* identity_openid providers (guarded by oidc_mu) */
+  pthread_mutex_t oidc_build_mu;  /* one build of the providers at a time */
+  _Atomic bool oidc_failed;       /* the last build failed: it is retried */
+  pthread_t oidc_retry_thread;
+  bool oidc_retry_thread_started;
   struct buckets_plugins *plugins; /* policy/identity plugins (guarded by oidc_mu) */
   struct buckets_ldapidp *ldap;    /* identity_ldap, fixed once IAM starts (guarded by oidc_mu) */
   const char *ca_path;             /* extra trusted CAs (certs/CAs), or NULL */

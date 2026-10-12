@@ -8,6 +8,7 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 - **A lost distributed lock is let go and taken again.** When the other servers restart, they forget the locks they granted, and a lock refresh that most servers refuse means the lock is lost, as MinIO treats it. Buckets kept the lock and logged `lost its quorum while held` every 10 s: after a rolling restart, the server holding the cluster's leader lock warned until it was restarted itself. The lock is now marked lost and no longer refreshed, and the leader lock is taken again. Servers that don't answer still don't count against a lock.
+- **OpenID providers that can't be reached are retried.** A server that couldn't fetch a provider's discovery document when it started (or when the configuration changed) logged an error and went without that provider until it restarted, so sign-ins through it failed on that server alone: after the 1.20.0 rolling update, one of four servers on a test cluster lost a TLS handshake with Entra ID and refused about a quarter of its sign-ins. The build is now retried after 1 s, then twice as long each time up to a minute, until it succeeds.
 
 ## [1.20.0] - 2026-10-12
 
