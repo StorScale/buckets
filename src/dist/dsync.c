@@ -287,6 +287,7 @@ typedef struct dlock {
   char *resource;
   char uid[BUCKETS_UUID_STR_LEN + 1];
   bool write;
+  atomic_bool lost; /* refused by too many lock servers: no longer refreshed */
 } dlock;
 
 struct buckets_dsync {
@@ -392,6 +393,47 @@ static void release_run(void *ctx, size_t i) {
   free(j);
 }
 
+/* Refreshes every held lock once. A lock is lost, as in MinIO's refreshLock,
+ * when more lock servers answer that they don't hold it than a quorum can
+ * spare (they restarted, or expired it): it is no longer refreshed and its
+ * holder sees it with buckets_dsync_lost. Servers that don't answer don't
+ * count, so a lock outlives its servers' restarts unless they forget it. */
+void buckets_dsync_refresh(buckets_dsync *d) {
+  pthread_mutex_lock(&d->mu);
+  size_t n = 0;
+  for (dlock *l = d->held; l; l = l->next) n++;
+  dlock *snap = buckets_xcalloc(n ? n : 1, sizeof(dlock));
+  size_t k = 0;
+  for (dlock *l = d->held; l; l = l->next) {
+    if (atomic_load(&l->lost)) continue;
+    memcpy(snap[k].uid, l->uid, sizeof(l->uid));
+    snap[k].write = l->write;
+    snap[k].resource = buckets_xstrdup(l->resource);
+    k++;
+  }
+  /* Refresh without holding the list lock. */
+  pthread_mutex_unlock(&d->mu);
+  for (size_t i = 0; i < k; i++) {
+    fan f = {.d = d, .op = "refresh", .resource = snap[i].resource, .uid = snap[i].uid, .write = snap[i].write};
+    size_t need = quorum(d, snap[i].write), ok = run(d, &f), refused = 0;
+    for (size_t j = 0; j < nodes(d); j++) refused += !f.ok[j] && !f.down[j];
+    if (refused > nodes(d) - need) {
+      buckets_log_warn("distributed lock on %s lost: %zu of %zu nodes no longer hold it", snap[i].resource, refused,
+                       nodes(d));
+      pthread_mutex_lock(&d->mu);
+      for (dlock *l = d->held; l; l = l->next) {
+        if (strcmp(l->uid, snap[i].uid) == 0) atomic_store(&l->lost, true);
+      }
+      pthread_mutex_unlock(&d->mu);
+    } else if (ok < need) {
+      buckets_log_warn("distributed lock on %s refreshed on %zu of %zu nodes, the others don't answer",
+                       snap[i].resource, ok, nodes(d));
+    }
+    free(snap[i].resource);
+  }
+  free(snap);
+}
+
 static void *refresh_loop(void *arg) {
   buckets_dsync *d = arg;
   pthread_mutex_lock(&d->mu);
@@ -401,25 +443,8 @@ static void *refresh_loop(void *arg) {
     ts.tv_sec += REFRESH_MS / 1000;
     pthread_cond_timedwait(&d->cv, &d->mu, &ts);
     if (d->stop) break;
-    /* Snapshot, then refresh without holding the list lock. */
-    size_t n = 0;
-    for (dlock *l = d->held; l; l = l->next) n++;
-    dlock *snap = buckets_xcalloc(n ? n : 1, sizeof(dlock));
-    size_t k = 0;
-    for (dlock *l = d->held; l; l = l->next) {
-      snap[k] = *l;
-      snap[k].resource = buckets_xstrdup(l->resource);
-      k++;
-    }
     pthread_mutex_unlock(&d->mu);
-    for (size_t i = 0; i < k; i++) {
-      fan f = {.d = d, .op = "refresh", .resource = snap[i].resource, .uid = snap[i].uid, .write = snap[i].write};
-      if (run(d, &f) < quorum(d, snap[i].write)) {
-        buckets_log_warn("distributed lock on %s lost its quorum while held", snap[i].resource);
-      }
-      free(snap[i].resource);
-    }
-    free(snap);
+    buckets_dsync_refresh(d);
     pthread_mutex_lock(&d->mu);
   }
   pthread_mutex_unlock(&d->mu);
@@ -507,6 +532,11 @@ void *buckets_dsync_lock_src(buckets_dsync *d, const char *resource, bool write,
   d->held = l;
   pthread_mutex_unlock(&d->mu);
   return l;
+}
+
+bool buckets_dsync_lost(void *handle) {
+  dlock *l = handle;
+  return l && atomic_load(&l->lost);
 }
 
 void buckets_dsync_unlock(buckets_dsync *d, void *handle) {

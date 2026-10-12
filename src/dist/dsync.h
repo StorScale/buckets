@@ -13,7 +13,8 @@
  * a quorum granted it (writes: n/2+1; reads: n - n/2), otherwise it releases
  * what it got and retries with jitter until its deadline. Held locks are
  * refreshed every 10 s; a lock server drops holders silent for 60 s, so a
- * crashed node's locks expire. */
+ * crashed node's locks expire, and a lock that too many lock servers no
+ * longer hold is lost. */
 
 typedef struct buckets_lock_server buckets_lock_server;
 buckets_lock_server *buckets_lock_server_new(void);
@@ -40,5 +41,11 @@ void *buckets_dsync_lock(buckets_dsync *d, const char *resource, bool write, int
 /* The same, recording where the lock was taken (top locks' "source"). */
 void *buckets_dsync_lock_src(buckets_dsync *d, const char *resource, bool write, int timeout_ms, const char *source);
 void buckets_dsync_unlock(buckets_dsync *d, void *handle);
+/* Whether a held lock was lost: too many lock servers no longer hold it (they
+ * restarted). It is no longer refreshed; its holder should unlock it and, to
+ * keep holding the resource, lock it again. */
+bool buckets_dsync_lost(void *handle);
+/* Refreshes every held lock now (the refresher does every 10 s). */
+void buckets_dsync_refresh(buckets_dsync *d);
 
 #endif
