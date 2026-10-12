@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.20.0] - 2026-10-12
+
 ### Added
 - **Internode calls by operation** ([docs/performance.md](docs/performance.md#calls-between-servers)). Each server counts the calls it makes to other servers and handles for them, by operation (`storage/read_at`, `lock/lock`, ...), with the time waited, queued and handled: `buckets_node_internode_{calls,call_seconds,served,served_seconds,queued_seconds}_total`. `tests/bench/s3bench -metrics` reports them per request, and `tests/bench/cluster.sh` lists them for Buckets' rounds.
 

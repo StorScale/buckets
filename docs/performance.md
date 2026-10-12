@@ -52,7 +52,7 @@ S3BENCH=/tmp/s3bench MINIO_IMAGE=<mirror>/minio:RELEASE.2024-10-13T13-34-11Z \
   REGISTRY=ghcr.io/storscale BUCKETS_TAG=<tag> tests/bench/cluster.sh
 ```
 
-A development cluster on OpenStack (16-vCPU VMs, Cinder network volumes shared with other workloads), MinIO `RELEASE.2024-10-13`, Buckets after 1.19.0 (local shards first, below), 20 s per phase, one run of `cluster.sh`:
+A development cluster on OpenStack (16-vCPU VMs, Cinder network volumes shared with other workloads), MinIO `RELEASE.2024-10-13`, Buckets between 1.19.0 and 1.20.0 (local shards first, below), 20 s per phase, one run of `cluster.sh`:
 
 | Case | MinIO | Buckets | MinIO again |
 |---|---|---|---|
