@@ -49,24 +49,39 @@ Apple M-series laptop (12 cores, shared with warp), 4 drives (EC 2+2) on one SSD
 
 ```bash
 S3BENCH=/tmp/s3bench MINIO_IMAGE=<mirror>/minio:RELEASE.2024-10-13T13-34-11Z \
-  REGISTRY=ghcr.io/storscale BUCKETS_TAG=1.1.1 tests/bench/cluster.sh
+  REGISTRY=ghcr.io/storscale BUCKETS_TAG=<tag> tests/bench/cluster.sh
 ```
 
-A development cluster on OpenStack (16-vCPU VMs, Cinder network volumes shared with other workloads), MinIO `RELEASE.2024-10-13`, Buckets 1.1.1, 20 s per phase, Buckets and MinIO measured back to back:
+A development cluster on OpenStack (16-vCPU VMs, Cinder network volumes shared with other workloads), MinIO `RELEASE.2024-10-13`, Buckets after 1.19.0 (local shards first, below), 20 s per phase, one run of `cluster.sh`:
 
-| Case | Buckets PUT | MinIO PUT | Buckets GET | MinIO GET |
-|---|---|---|---|---|
-| 64 KiB × 32 clients | 1016 op/s | 430 op/s | 3853 op/s | 2816 op/s |
-| 1 MiB × 32 clients | 211 MiB/s | 177 MiB/s | 604 MiB/s | 544 MiB/s |
-| 10 MiB × 16 clients | 193 MiB/s | 205 MiB/s | 583 MiB/s | 514 MiB/s |
+| Case | MinIO | Buckets | MinIO again |
+|---|---|---|---|
+| 10 MiB GET × 16 clients | 619 MiB/s | 834 MiB/s | 652 MiB/s |
+| 1 MiB GET × 32 clients | 620 MiB/s | 859 MiB/s | 697 MiB/s |
+| 64 KiB GET × 32 clients | 3213 op/s | 3680 op/s | 3182 op/s |
+| 10 MiB PUT × 16 clients | 210 MiB/s | 197 MiB/s | 197 MiB/s |
+| 1 MiB PUT × 32 clients | 210 MiB/s | 194 MiB/s | 196 MiB/s |
+| 64 KiB PUT × 32 clients | 1154 op/s | 1164 op/s | 777 op/s |
 
-- **PUTs** are bound by the shared network storage: the same MinIO tenant measured twice differed by up to 40%. Treat PUT differences under that as noise.
-- **GETs** moved by 5–13% between MinIO's own runs; Buckets leads in every case, with lower p99 latency.
-- **Before 1.1.1** Buckets trailed MinIO on every GET here (64 KiB: about 2,000 op/s against 2,800), the reverse of the laptop results. In a distributed cluster most drives are on other servers, so every per-request round trip to them costs about 2 ms (pod network, conntrack, VM wake-ups). Profiling found two of them on every read:
-  1. **The bucket was checked on every drive, one after another** (7.6 internode round trips, 6.6 ms of a 12.7 ms GET, measured with uprobes on live requests). Reads now check the bucket only when the object is missing, and the check asks every drive at once.
-  2. **The read lock's release was waited for** (2.5 ms per GET). It is now released in the background, as MinIO does.
+- **GETs:** Buckets leads MinIO's better round by 28% on 10 MiB, 23% on 1 MiB and 15% on 64 KiB, with lower median latency (1 MiB: 29.5 ms against 33–51 ms; 10 MiB: 155 ms against 157–277 ms). Single runs here swing by about 15%.
+- **PUTs** are bound by the shared network storage: MinIO's two rounds differed by up to a third (1,154 and 777 op/s on 64 KiB), and earlier runs by 40%. Treat PUT differences under that as noise.
+- **Memory** per server pod peaked at 403 MiB for Buckets (the mean of four) against 732 and 676 for MinIO, and idled at 11 against 76–80 (see [Memory](#memory)).
 
-  With both, 64 KiB GETs went from about 2,000 to 3,850 op/s and 1 MiB GETs from 384 to 604 MiB/s.
+The same cluster has itself grown faster since it was first measured, so compare runs by their margins over MinIO rather than by raw numbers:
+
+| GET, Buckets' lead over MinIO | 1.1.1 | 1.19.0 ([Memory](#memory)) | Local shards first |
+|---|---|---|---|
+| 10 MiB × 16 clients | +13% (583 vs 514 MiB/s) | about even (546–612 vs 503–644) | +28% (834 vs 619–652) |
+| 1 MiB × 32 clients | +11% (604 vs 544 MiB/s) | about even (529–618 vs 575–734) | +23% (859 vs 620–697) |
+| 64 KiB × 32 clients | +37% (3853 vs 2816 op/s) | +10–18% (3746–3759 vs 3164–3397) | +15% (3680 vs 3182–3213) |
+
+64 KiB objects are stored inline, so reading local shards first doesn't change them; MinIO's 64 KiB GETs rose from about 2,800 to 3,200 op/s on its unchanged image between the 1.1.1 run and later ones.
+
+**Before 1.1.1** Buckets trailed MinIO on every GET here (64 KiB: about 2,000 op/s against 2,800), the reverse of the laptop results. In a distributed cluster most drives are on other servers, so every per-request round trip to them costs about 2 ms (pod network, conntrack, VM wake-ups). Profiling found two of them on every read:
+1. **The bucket was checked on every drive, one after another** (7.6 internode round trips, 6.6 ms of a 12.7 ms GET, measured with uprobes on live requests). Reads now check the bucket only when the object is missing, and the check asks every drive at once.
+2. **The read lock's release was waited for** (2.5 ms per GET). It is now released in the background, as MinIO does.
+
+With both, 64 KiB GETs went from about 2,000 to 3,850 op/s and 1 MiB GETs from 384 to 604 MiB/s.
 
 ### Calls between servers
 
