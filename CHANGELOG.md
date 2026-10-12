@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Internode calls by operation** ([docs/performance.md](docs/performance.md#calls-between-servers)). Each server counts the calls it makes to other servers and handles for them, by operation (`storage/read_at`, `lock/lock`, ...), with the time waited, queued and handled: `buckets_node_internode_{calls,call_seconds,served,served_seconds,queued_seconds}_total`. `tests/bench/s3bench -metrics` reports them per request, and `tests/bench/cluster.sh` lists them for Buckets' rounds.
+
+### Changed
+- **GETs read the shards on the server's own drives first** ([docs/performance.md](docs/performance.md#calls-between-servers)), data or parity, and rebuild the data shards they skipped, as MinIO does. In a four-server cluster (EC 4+4, 2 drives per server) a GET fetches 2 of its 4 shards from other servers rather than 3, and 1 MiB and 10 MiB GETs went up 17% and 25% on a cluster whose links between nodes were full.
+
 ## [1.19.0] - 2026-10-11
 
 ### Added

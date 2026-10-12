@@ -43,6 +43,7 @@ typedef struct {
    * before the body is complete); read it with buckets_http_body_read. */
   struct buckets_body_pipe *pipe;
   const char *remote_addr;
+  int64_t dispatched_ns; /* CLOCK_MONOTONIC when handed to its handler's pool (or run) */
 } buckets_http_request;
 
 /* Case-insensitive header lookup. Returns a slice with p == NULL when absent. */

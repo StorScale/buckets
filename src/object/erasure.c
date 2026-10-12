@@ -1139,6 +1139,7 @@ struct buckets_obj_reader {
   int data, parity, total;
   buckets_rs *rs;
   int drive_of_shard[MAX_SET]; /* -1 when no agreeing drive holds it */
+  int order[MAX_SET];          /* shards in the order to read them (see read_order) */
   bool bad[MAX_SET];           /* drive failed a read or bitrot check */
   uint8_t *inl[MAX_SET];       /* inline shard per drive */
   size_t inl_len[MAX_SET];
@@ -1170,6 +1171,7 @@ struct buckets_obj_reader {
 };
 
 static bool prefetch_wait(buckets_obj_reader *r, int64_t bi);
+static void read_order(buckets_obj_reader *r);
 
 void buckets_obj_reader_free(buckets_obj_reader *r) {
   if (!r) return;
@@ -1301,6 +1303,7 @@ static buckets_obj_reader *reader_new(buckets_epool *L, buckets_eset *s, const c
     }
     r->drive_of_shard[shard] = (int)i;
   }
+  read_order(r);
   r->parts = buckets_xcalloc(o->nparts ? o->nparts : 1, sizeof(buckets_xl_part));
   for (size_t i = 0; i < o->nparts; i++) {
     r->parts[i] = (buckets_xl_part){o->parts[i].number, o->parts[i].size, o->parts[i].actual_size, NULL, NULL, 0};
@@ -1373,6 +1376,22 @@ static buckets_obj_err obj_open(buckets_epool *L, const char *bucket, const char
   return BUCKETS_OBJ_OK;
 }
 
+/* The order to read shards in: first those on this server's own drives, data
+ * or parity, since rebuilding a data shard from local parity costs less than
+ * fetching it from another server; then other servers' data shards, then their
+ * parity (MinIO's preferReaders). On one server, and for inline objects (all
+ * in memory already), that is the data shards first. */
+static void read_order(buckets_obj_reader *r) {
+  int n = 0;
+  for (int pass = 0; pass < 3; pass++) {
+    for (int k = 0; k < r->total; k++) {
+      int i = r->drive_of_shard[k];
+      bool local = !r->is_inline && i >= 0 && r->set->drives[i] && !r->set->drives[i]->remote;
+      if (pass == 0 ? local : !local && (pass == 1) == (k < r->data)) r->order[n++] = k;
+    }
+  }
+}
+
 /* Reads one verified shard block from the drive holding shard k into frames[k]. */
 static bool read_shard(buckets_obj_reader *r, uint8_t *const *frames, int k, int64_t bi, size_t sl) {
   int i = r->drive_of_shard[k];
@@ -1441,11 +1460,12 @@ static bool load_block_into(buckets_obj_reader *r, int64_t bi, uint8_t *const *f
   bool present[MAX_SET] = {false}, tried[MAX_SET] = {false};
   int have = 0;
   fetch_ctx c = {.r = r, .frames = frames, .bi = bi, .sl = sl};
-  /* Data shards first, all at once; then as many parity shards as are still
-   * missing, in waves, until enough verified shards are in hand. */
+  /* As many shards as it takes, all at once, in read_order; then more, in
+   * waves, for any that failed, until enough verified shards are in hand. */
   for (;;) {
     size_t nw = 0;
-    for (int k = 0; k < r->total && have + (int)nw < r->data; k++) {
+    for (int j = 0; j < r->total && have + (int)nw < r->data; j++) {
+      int k = r->order[j];
       if (tried[k]) continue;
       tried[k] = true;
       int i = r->drive_of_shard[k];

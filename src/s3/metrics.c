@@ -23,6 +23,7 @@
 #include "crypto/jwt.h"
 #include "dist/dsync.h"
 #include "dist/peer.h"
+#include "dist/rpcstats.h"
 #include "heal/healer.h"
 #include "iam/plugins.h"
 #include "net/client.h"
@@ -1017,6 +1018,25 @@ static void idsync_metrics(mctx *m) {
   ADD1(m, "buckets_node_identity_sync_actions_total", (double)s->idsync_roles, "action", "roles");
 }
 
+/* Internode calls by operation (dist/rpcstats.h), on distributed servers */
+static void rpc_called(void *ud, const buckets_rpcstat *st) {
+  ADD1((mctx *)ud, "buckets_node_internode_calls_total", (double)st->calls, "op", st->op);
+  ADD1((mctx *)ud, "buckets_node_internode_call_seconds_total", (double)st->ns / 1e9, "op", st->op);
+}
+static void rpc_served(void *ud, const buckets_rpcstat *st) {
+  ADD1((mctx *)ud, "buckets_node_internode_served_total", (double)st->calls, "op", st->op);
+  ADD1((mctx *)ud, "buckets_node_internode_served_seconds_total", (double)st->ns / 1e9, "op", st->op);
+}
+static void rpc_queued(void *ud, const buckets_rpcstat *st) {
+  ADD1((mctx *)ud, "buckets_node_internode_queued_seconds_total", (double)st->ns / 1e9, "op", st->op);
+}
+static void rpc_metrics(mctx *m) {
+  if (!m->s->cluster || !m->s->cluster->distributed) return;
+  buckets_rpcstats_each(BUCKETS_RPC_CALLED, rpc_called, m);
+  buckets_rpcstats_each(BUCKETS_RPC_SERVED, rpc_served, m);
+  buckets_rpcstats_each(BUCKETS_RPC_QUEUED, rpc_queued, m);
+}
+
 /* SCIM (s3/scimhandlers.c): requests here, and the people it named at the last sync here */
 static void scim_metrics(mctx *m) {
   if (!buckets_scim_enabled()) return;
@@ -1031,6 +1051,7 @@ static void scim_metrics(mctx *m) {
 static void iam_node_metrics(mctx *m) {
   idsync_metrics(m);
   scim_metrics(m);
+  rpc_metrics(m);
   ADD0(m, "buckets_node_fips_mode", buckets_fips_mode() ? 1 : 0); /* crypto/fips.h */
   for (int k = 0; k < 3; k++) /* opened by this server, when it led (s3/ransomguard.h) */
     ADD1(m, "buckets_ransomware_incidents_total", (double)m->s->rw_incidents[k], "kind",

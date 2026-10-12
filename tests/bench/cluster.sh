@@ -26,6 +26,9 @@
 # AVOID_NODES  node names the pods must not run on
 # KEEP=1       leaves the namespace
 # Results: tables at the end, and one JSON line per run in $RESULTS if set.
+# Buckets' rounds also list each case's internode calls per request, by
+# operation, with the time waited for each and the time its server took to
+# handle it (buckets_node_internode_* metrics, read by s3bench -metrics).
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 NS=${NS:-buckets-bench}
@@ -152,8 +155,11 @@ mem_watch() { # samples every 2 s into $WORK/mem-peak while $WORK/watching exist
 }
 
 round() { # label
-  local c size clients out watcher
+  local c size clients out watcher metrics=
   echo "== $1"
+  # Buckets' servers also report their internode calls per request (s3bench -metrics)
+  [[ $1 == Buckets* ]] && metrics=$(k get pods -o jsonpath='{range .items[*]}{.metadata.name} {.status.podIP}{"\n"}{end}' \
+    | awk -v p="$T-pool-" 'index($1, p) == 1 {printf "%s%s:9000", n++ ? "," : "", $2}')
   mem_idle "$WORK/mem-before"
   : >"$WORK/mem-peak"
   touch "$WORK/watching"
@@ -161,7 +167,7 @@ round() { # label
   for c in $CASES; do
     size=${c%%:*} clients=${c##*:}
     out=$(k exec bench -- /s3bench -endpoint "$T.$NS.svc.cluster.local:9000" -access "$AK" -secret "$SK" \
-      -size "$size" -concurrent "$clients" -duration "$DURATION" -bucket "bench-$size")
+      -size "$size" -concurrent "$clients" -duration "$DURATION" -bucket "bench-$size" ${metrics:+-metrics "$metrics"})
     echo "{\"server\": \"$1\", \"size\": $size, \"clients\": $clients, \"phases\": $out}" >>"$OUT"
     python3 "$ROOT/tests/bench/warpfmt.py" "$1" "$size" "$clients" "$out" | sed 's/^/   /'
   done

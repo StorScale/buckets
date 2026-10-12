@@ -39,7 +39,7 @@ ep() { echo "$SCHEME://127.0.0.1:$((BASE + $1))"; }
 ENDPOINTS=()
 for n in 1 2 3 4; do for d in 1 2; do ENDPOINTS+=("$(ep "$n")$WORK/n$n/d$d"); done; done
 start() { # node
-  BUCKETS_SCANNER_INTERVAL=1 BUCKETS_ROOT_USER=$AK BUCKETS_ROOT_PASSWORD=$SK "$BIN" server --address "127.0.0.1:$((BASE + $1))" \
+  BUCKETS_SCANNER_INTERVAL=1 BUCKETS_PROMETHEUS_AUTH_TYPE=public BUCKETS_ROOT_USER=$AK BUCKETS_ROOT_PASSWORD=$SK "$BIN" server --address "127.0.0.1:$((BASE + $1))" \
     ${TLSARGS[@]+"${TLSARGS[@]}"} "${ENDPOINTS[@]}" 2>>"$WORK/log$1" &
   PIDS[$1]=$!
 }
@@ -110,6 +110,14 @@ expect "read large via node 4" "$(curl -s "${S3[@]}" "$(ep 4)/clusterbucket/big.
 expect "read small via node 1" "$(curl -s "${S3[@]}" "$(ep 1)/clusterbucket/small.bin" | md5of)" "$SMALL"
 shards=0; for n in 1 2 3 4; do for d in 1 2; do [[ -f "$WORK/n$n/d$d/clusterbucket/big.bin/xl.meta" ]] && shards=$((shards + 1)); done; done
 expect "large object spread over all 8 drives" "$shards" 8
+# the internode calls made and handled, by operation (buckets_node_internode_*)
+metric() { # node name op
+  curl -s ${CURLTLS[@]+"${CURLTLS[@]}"} "$(ep "$1")/minio/v2/metrics/node" | awk -v m="$2{op=\"$3\"," 'index($1, m) == 1 {print ($2 > 0) ? "counted" : "zero"}'
+}
+expect "node 2 counts the shard files it created on other nodes" "$(metric 2 buckets_node_internode_calls_total storage/create)" counted
+expect "node 2 counts the time it waited for them" "$(metric 2 buckets_node_internode_call_seconds_total storage/create)" counted
+expect "node 4 counts the shard reads it handled" "$(metric 4 buckets_node_internode_served_total storage/read_all)" counted
+expect "node 1 counts its lock calls" "$(metric 1 buckets_node_internode_calls_total lock/lock)" counted
 keys=$(curl -s "${S3[@]}" "$(ep 3)/clusterbucket?list-type=2" | grep -o '<Key>' | wc -l | tr -d ' ')
 expect "listing via node 3" "$keys" 2
 

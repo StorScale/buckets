@@ -6,6 +6,8 @@
 //	cp -r tests/bench/s3bench ~/minio/internal/ && (cd ~/minio && go build -o /tmp/s3bench ./internal/s3bench)
 //
 // usage: s3bench -endpoint host:port -access A -secret S [-concurrent 16] [-size 10MiB-in-bytes] [-duration 20s]
+//
+//	[-metrics host:port,...]  Buckets servers whose internode calls each phase reports (metrics.go)
 package main
 
 import (
@@ -18,6 +20,7 @@ import (
 	"math/rand"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -35,6 +38,8 @@ type phase struct {
 	P50ms     float64 `json:"p50_ms"`
 	P99ms     float64 `json:"p99_ms"`
 	FirstErr  string  `json:"first_error,omitempty"`
+	// with -metrics: internode calls between servers, by operation
+	Internode map[string]*rpcOp `json:"internode,omitempty"`
 }
 
 func main() {
@@ -46,7 +51,13 @@ func main() {
 	dur := flag.Duration("duration", 20*time.Second, "per phase")
 	bucket := flag.String("bucket", "s3bench", "")
 	objects := flag.Int("objects", 64, "objects the GET phase reads, uploaded beforehand (as warp get prepares them)")
+	metrics := flag.String("metrics", "", "Buckets servers (host:port,...) whose internode calls to report per phase")
 	flag.Parse()
+	var hosts []string
+	if *metrics != "" {
+		hosts = strings.Split(*metrics, ",")
+	}
+	token := promToken(*ak, *sk)
 	c, err := minio.New(*ep, &minio.Options{Creds: credentials.NewStaticV4(*ak, *sk, ""),
 		Transport: &customTransport})
 	if err != nil {
@@ -63,6 +74,20 @@ func main() {
 		var ops, errs, bytesDone atomic.Int64
 		var lat []time.Duration
 		var firstErr atomic.Value
+		var rpcBefore map[string]*rpcOp
+		if hosts != nil {
+			var err error
+			for try := 0; ; try++ { // servers answer 503 until they are ready
+				if rpcBefore, err = scrapeRPC(hosts, token); err == nil {
+					break
+				}
+				if try == 30 {
+					fmt.Fprintln(os.Stderr, err)
+					os.Exit(1)
+				}
+				time.Sleep(time.Second)
+			}
+		}
 		deadline := time.Now().Add(*dur)
 		start := time.Now()
 		var wg sync.WaitGroup
@@ -90,6 +115,12 @@ func main() {
 		}
 		wg.Wait()
 		el := time.Since(start).Seconds()
+		var rpc map[string]*rpcOp
+		if hosts != nil {
+			if after, err := scrapeRPC(hosts, token); err == nil {
+				rpc = diffRPC(rpcBefore, after, ops.Load()+errs.Load())
+			}
+		}
 		sort.Slice(lat, func(i, j int) bool { return lat[i] < lat[j] })
 		pct := func(p float64) float64 {
 			if len(lat) == 0 {
@@ -98,7 +129,7 @@ func main() {
 			return float64(lat[int(p*float64(len(lat)-1))].Microseconds()) / 1000
 		}
 		p := phase{Op: op, Ops: ops.Load(), Errors: errs.Load(), MiBps: float64(bytesDone.Load()) / el / (1 << 20),
-			OpsPerSec: float64(ops.Load()) / el, P50ms: pct(0.5), P99ms: pct(0.99)}
+			OpsPerSec: float64(ops.Load()) / el, P50ms: pct(0.5), P99ms: pct(0.99), Internode: rpc}
 		if v := firstErr.Load(); v != nil {
 			p.FirstErr = v.(string)
 		}
