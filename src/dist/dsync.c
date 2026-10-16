@@ -417,15 +417,21 @@ void buckets_dsync_refresh(buckets_dsync *d) {
     fan f = {.d = d, .op = "refresh", .resource = snap[i].resource, .uid = snap[i].uid, .write = snap[i].write};
     size_t need = quorum(d, snap[i].write), ok = run(d, &f), refused = 0;
     for (size_t j = 0; j < nodes(d); j++) refused += !f.ok[j] && !f.down[j];
-    if (refused > nodes(d) - need) {
+    /* A lock released meanwhile is refused by the servers that already let
+     * it go: only one still held (unlocking takes it off d->held before
+     * telling the servers) can be lost. */
+    bool held = false;
+    pthread_mutex_lock(&d->mu);
+    for (dlock *l = d->held; l && !held; l = l->next) {
+      if (strcmp(l->uid, snap[i].uid) != 0) continue;
+      held = true;
+      if (refused > nodes(d) - need) atomic_store(&l->lost, true);
+    }
+    pthread_mutex_unlock(&d->mu);
+    if (held && refused > nodes(d) - need) {
       buckets_log_warn("distributed lock on %s lost: %zu of %zu nodes no longer hold it", snap[i].resource, refused,
                        nodes(d));
-      pthread_mutex_lock(&d->mu);
-      for (dlock *l = d->held; l; l = l->next) {
-        if (strcmp(l->uid, snap[i].uid) == 0) atomic_store(&l->lost, true);
-      }
-      pthread_mutex_unlock(&d->mu);
-    } else if (ok < need) {
+    } else if (held && ok < need) {
       buckets_log_warn("distributed lock on %s refreshed on %zu of %zu nodes, the others don't answer",
                        snap[i].resource, ok, nodes(d));
     }

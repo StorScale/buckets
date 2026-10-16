@@ -6,6 +6,9 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **No more false `distributed lock ... lost` warnings.** A lock released while the background refresh was renewing it was refused by the servers that had already let it go, and was reported lost. The dev cluster logged this about once a day, for ordinary objects. Only a lock its holder still holds is now reported lost (1.20.0 logged the same race as `lost its quorum while held`).
+
 ## [1.20.1] - 2026-10-12
 
 ### Fixed
