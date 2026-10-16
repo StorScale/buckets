@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.20.2] - 2026-10-16
+
+### Added
+- **A test of rolling updates** (`tests/e2e-k8s/rolling.sh`). It rolls a 4-server cluster with an OpenID provider on a real cluster, once plainly and once with the provider down, and checks that every server has the provider, that there is one leader lock and that no warnings keep coming. It catches both bugs fixed in 1.20.1.
+
 ### Fixed
 - **No more false `distributed lock ... lost` warnings.** A lock released while the background refresh was renewing it was refused by the servers that had already let it go, and was reported lost. The dev cluster logged this about once a day, for ordinary objects. Only a lock its holder still holds is now reported lost (1.20.0 logged the same race as `lost its quorum while held`).
 
