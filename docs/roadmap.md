@@ -10,7 +10,7 @@ The order below leads with what builds on work that already exists (MinIO on-dis
 
 A successor can't depend on what it replaces. MinIO no longer publishes its images or binaries, so Buckets now ships its own key server (`buckets-kes`) in place of MinIO's KES, and keeps mirrors of MinIO's last images only for adoption and rollback.
 
-**Where things stand (2026-10-16):** Buckets 1.20.2 is released, and the main repository is https://github.com/StorScale/buckets. Phases 0, 2, 3 and 4 are done. Every item of Phase 1 is done too.
+**Where things stand (2026-10-16):** Buckets 1.20.3 is released, and the main repository is https://github.com/StorScale/buckets. Phases 0, 2, 3 and 4 are done. Every item of Phase 1 is done too.
 
 - **Left in Phase 1:** its gate, the round trip in CI. The job (`adopt-roundtrip`) is built and waits for access to the cluster it runs on.
 - **Phase 2 is done (1.2.0 to 1.18.0):** guided sign-in setup (1.2.0) for Entra ID, Okta, Keycloak, other OpenID providers and LDAP, per-team roles (1.3.0), the access review (1.4.0), removing people who leave Entra ID (1.9.0), Keycloak and Okta (1.10.0), SCIM for providers that push changes (1.17.0), and roles kept current (1.18.0).
@@ -173,6 +173,7 @@ The roadmap builds on what exists: MinIO's exact on-disk format, 220 of 222 MinI
 
 | Date | Change | What it gives |
 | --- | --- | --- |
+| 2026-10-16 | 1.20.3: security parity with AIStor | Four issues MinIO fixed after the public release Buckets forked from, checked and closed: a reserved bucket (`.minio.sys`) refused as a copy source (was a real info-disclosure hole), batch jobs blocked from link-local/metadata addresses (SSRF), all batch credentials redacted from describe output, and `..` rejected in the storage REST layer. `tests/integration/security-parity.sh` and `test_security_parity`. |
 | 2026-10-16 | 1.20.2: no false lock warnings | A lock released while it was being refreshed is no longer reported lost (the dev cluster logged this about once a day). `tests/e2e-k8s/rolling.sh` rolls a real cluster and checks what a rollout leaves behind; it catches both bugs fixed in 1.20.1. |
 | 2026-10-12 | 1.20.1: locks and sign-in after restarts | A server whose lock was forgotten by restarted peers lets it go and takes the leader lock again, rather than warning every 10 s; an OpenID provider that can't be reached is retried, rather than leaving that server without it until it restarts. Both showed after deploying 1.20.0 to the dev cluster. |
 | 2026-10-12 | 1.20.0: fewer calls between servers | GETs read the shards on their own server first (1 MiB and 10 MiB GETs up 17–25%), and PUTs make two calls per remote drive rather than seven, as MinIO's do, level with MinIO; internode call metrics; dependency downloads retried |

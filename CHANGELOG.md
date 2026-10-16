@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.20.3] - 2026-10-16
+
+### Security
+From a survey of what MinIO's commercial line (AIStor) fixed after the public release Buckets forked from (`RELEASE.2026-07-24`), four issues checked and closed:
+- **A reserved bucket is refused as a copy source.** `CopyObject` and `UploadPartCopy` only policy-checked the copy source, while the route guard refuses a reserved bucket (`.minio.sys`) as a request bucket. A caller with the stock `readwrite` policy (resource `*`) could copy internal data such as `.minio.sys/config/iam/...` into a readable bucket. Both handlers now refuse a reserved source. (MinIO #6339.)
+- **Batch jobs can't be aimed at instance metadata.** A batch replicate source/target endpoint, or a notify webhook, is refused when its host resolves to a link-local address (169.254.0.0/16, which holds the cloud metadata address, or `fe80::/10`). Private ranges stay allowed, so on-prem replication is unaffected. (MinIO #5777, #5808.)
+- **Batch describe redacts all credentials.** The job describe output masked only the replicate target credentials and the expire notify token; it now also redacts the replicate source secret key and session token and the replicate and keyrotate notify tokens. (MinIO #5775.)
+- **No path traversal in the storage REST layer.** The internode storage server rejects a `..` component in any path parameter, defense in depth behind its existing authentication. (MinIO #5103, #5772.)
+
+The non-expiring OIDC/STS credential issue AIStor also fixed does not affect Buckets, which already requires an expiry on every temporary credential.
+
 ## [1.20.2] - 2026-10-16
 
 ### Added
