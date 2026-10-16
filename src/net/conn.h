@@ -19,6 +19,11 @@ typedef struct buckets_conn buckets_conn;
  * connect: connection refused" and the like. */
 buckets_conn *buckets_conn_dial(const char *host, int port, buckets_tls_client *tls, int timeout_ms, char *err,
                                 size_t errlen);
+/* True if host (optionally "host:port" or "[v6]:port") resolves to an IPv4
+ * link-local address (169.254.0.0/16, which holds the cloud metadata address
+ * 169.254.169.254) or an IPv6 link-local address (fe80::/10). Batch jobs
+ * refuse such endpoints so a job cannot be aimed at instance metadata (SSRF). */
+bool buckets_net_host_is_linklocal(const char *host);
 void buckets_conn_close(buckets_conn *c);
 /* Upgrades a connected plain stream to TLS (STARTTLS-style protocols). */
 bool buckets_conn_start_tls(buckets_conn *c, buckets_tls_client *tls, const char *host);

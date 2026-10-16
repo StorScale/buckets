@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "core/query.h"
+#include "core/str.h"
 #include "dist/internode.h"
 #include "dist/rpcstats.h"
 #include "storage/xlmeta.h"
@@ -35,6 +36,7 @@ static void fail(buckets_http_response *resp, int status, buckets_drive_err e) {
   buckets_http_resp_headerf(resp, BUCKETS_INTERNODE_ERR, "%d", (int)e);
 }
 
+
 static bool read_body(const buckets_http_request *req, buckets_buf *out) {
   buckets_http_body_cursor c = {req, 0};
   buckets_buf_reserve(out, (size_t)req->body_len);
@@ -56,6 +58,15 @@ void buckets_storage_server_handle(const buckets_http_request *req, buckets_http
   snprintf(op, sizeof(op), "%.*s", (int)(req->path.n > pl ? req->path.n - pl : 0), req->path.p + pl);
   buckets_query q;
   buckets_query_parse(req->query, &q);
+  /* A ".." in any path parameter could escape a drive's root once joined under
+   * it; reject it even though internode RPC is authenticated (defense in depth). */
+  for (size_t i = 0; i < q.n; i++) {
+    if (buckets_path_has_dotdot(q.items[i].value)) {
+      fail(resp, 400, BUCKETS_DRIVE_ERR_IO);
+      buckets_query_free(&q);
+      return;
+    }
+  }
   const char *dp = buckets_query_get(&q, "drive");
   buckets_drive *d = NULL;
   for (size_t i = 0; dp && i < s->n && !d; i++) {

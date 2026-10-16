@@ -121,11 +121,11 @@ From a survey of the field on 2026-10-16 (AIStor, AWS S3, Ceph, SeaweedFS, Garag
 MinIO's commercial line (AIStor) kept fixing security issues after the public release Buckets forked from, so Buckets may carry the same bugs. Keeping current with them is the cheapest way to hold the promise that Buckets is the safe place to land. Checked against AIStor `RELEASE.2026-07-24`:
 
 - [x] Non-expiring OIDC/STS credentials. Already refused: a temporary user needs an expiry (`buckets_iam_set_temp_user`), and the OIDC path rejects a missing or invalid `exp`. This was AIStor's headline fix; we don't have it.
-- [ ] CopyObject and UploadPartCopy with a source in `.minio.sys`. The destination bucket is refused as reserved, but the copy *source* is only policy-checked; confirm a source in a reserved bucket is refused, with a test either way.
-- [ ] Batch-job SSRF. Block replicate and expire endpoints pointed at link-local and cloud metadata addresses (169.254.0.0/16, `fd00:ec2::254`), map a refused dial to a clear error, and redact source credentials from describe output.
-- [ ] Path traversal in the storage REST layer. Reject `..` in the volume and path parameters of the internode storage server.
+- [x] CopyObject and UploadPartCopy with a source in `.minio.sys`. Was a real hole: a caller with the stock `readwrite` policy could copy `.minio.sys/config/...` into a readable bucket (confirmed, status 200 before the fix). Both copy handlers now refuse a reserved source bucket; `tests/integration/security-parity.sh` proves it end to end and that ordinary copies still work.
+- [x] Batch-job SSRF. Replicate source/target endpoints and notify webhooks are refused when the host resolves to a link-local address (169.254.0.0/16, which holds the metadata address, and `fe80::/10`). Private ranges (10/8, 192.168/16) stay allowed so on-prem replication works. `buckets_net_host_is_linklocal`, unit-tested in `test_security_parity`. The job *describe* output now also redacts the replicate source credentials and the replicate and keyrotate notify tokens, not only the target credentials (`test_batch`).
+- [x] Path traversal in the storage REST layer. The internode storage server now rejects a `..` component in any path parameter (`buckets_path_has_dotdot`, unit-tested), defense in depth behind the existing internode authentication.
 
-Each open item is a day or two, and the first is a test that either passes or finds a hole.
+All three are fixed on `bugfix/security-parity`, awaiting a patch release.
 
 ### Rate limiting and quotas
 

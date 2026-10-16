@@ -28,6 +28,7 @@
 #include "crypto/base64.h"
 #include "dist/peer.h"
 #include "kms/kms.h"
+#include "net/conn.h"
 #include "net/fetch.h"
 #include "net/s3client.h"
 #include "notify/event.h"
@@ -209,6 +210,19 @@ static void info_json(const buckets_batch_info *ri, buckets_buf *b) {
  * Content-Type replicate and keyrotate jobs send. */
 static void notify(run *r, const buckets_batch_notify *n, bool json_ct) {
   if (!n->endpoint || !*n->endpoint) return;
+  { /* refuse a link-local or metadata target, as for a replicate endpoint (SSRF) */
+    const char *hp = n->endpoint;
+    if (strncasecmp(hp, "https://", 8) == 0) hp += 8;
+    else if (strncasecmp(hp, "http://", 7) == 0) hp += 7;
+    char host[512];
+    snprintf(host, sizeof(host), "%s", hp);
+    char *slash = strchr(host, '/');
+    if (slash) *slash = '\0';
+    if (buckets_net_host_is_linklocal(host)) {
+      buckets_log_warn("batch: refusing to notify %s (link-local or metadata address)", n->endpoint);
+      return;
+    }
+  }
   buckets_buf body = BUCKETS_BUF_INIT;
   pthread_mutex_lock(&r->mu);
   info_json(&r->ri, &body);
@@ -960,6 +974,10 @@ static buckets_s3c *remote_client(buckets_s3_server *s, const char *endpoint, co
   if (slash) *slash = '\0';
   if (!*host) {
     snprintf(err, errlen, "invalid endpoint %s", endpoint);
+    return NULL;
+  }
+  if (buckets_net_host_is_linklocal(host)) {
+    snprintf(err, errlen, "endpoint %s resolves to a link-local or metadata address", endpoint);
     return NULL;
   }
   char app[256];

@@ -34,6 +34,7 @@
 #include "s3/tiering.h"
 #include "select/select.h"
 #include "s3/zipindex.h"
+#include "s3/bucketname.h"
 #include "core/mime.h"
 #include "tier/tier.h"
 
@@ -2679,6 +2680,14 @@ static void copy_object(s3_ctx *c) {
     buckets_s3_write_error(c, BUCKETS_ERR_INVALID_COPY_SOURCE);
     return;
   }
+  /* A reserved bucket (.minio.sys) is refused as a copy source, as it is as a
+   * request bucket: the route guard only sees the destination, so without this
+   * a caller allowed s3:GetObject on * could read internal data through it. */
+  if (buckets_bucket_name_reserved(src_bucket)) {
+    free(decoded);
+    buckets_s3_write_error(c, BUCKETS_ERR_ALL_ACCESS_DISABLED);
+    return;
+  }
   if (!buckets_s3_require(c, "s3:GetObject", src_bucket, src_object, NULL)) {
     free(decoded);
     return;
@@ -3065,6 +3074,11 @@ static void mpu_put_part(s3_ctx *c, const char *upload_id) {
     if (!parse_copy_source(copy_src, &decoded, &sb, &so, &sv)) {
       free(decoded);
       buckets_s3_write_error(c, BUCKETS_ERR_INVALID_COPY_SOURCE);
+      return;
+    }
+    if (buckets_bucket_name_reserved(sb)) { /* reserved bucket refused as a source, as in CopyObject */
+      free(decoded);
+      buckets_s3_write_error(c, BUCKETS_ERR_ALL_ACCESS_DISABLED);
       return;
     }
     if (!buckets_s3_require(c, "s3:GetObject", sb, so, NULL)) {

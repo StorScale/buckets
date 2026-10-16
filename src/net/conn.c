@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
+#include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
@@ -27,6 +28,37 @@ static void set_timeouts(int fd, int timeout_ms) {
   struct timeval tv = {timeout_ms / 1000, (timeout_ms % 1000) * 1000};
   setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
   setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+}
+
+bool buckets_net_host_is_linklocal(const char *hostport) {
+  char host[256];
+  snprintf(host, sizeof(host), "%s", hostport ? hostport : "");
+  if (host[0] == '[') { /* [v6] or [v6]:port */
+    char *rb = strchr(host, ']');
+    if (rb) {
+      *rb = '\0';
+      memmove(host, host + 1, strlen(host + 1) + 1);
+    }
+  } else { /* strip a ":port" only when there's a single colon (not a bare v6 literal) */
+    char *colon = strrchr(host, ':');
+    if (colon && strchr(host, ':') == colon) *colon = '\0';
+  }
+  struct addrinfo hints = {0}, *res = NULL;
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+  if (getaddrinfo(host, NULL, &hints, &res) != 0) return false;
+  bool blocked = false;
+  for (struct addrinfo *a = res; a && !blocked; a = a->ai_next) {
+    if (a->ai_family == AF_INET) {
+      uint32_t ip = ntohl(((struct sockaddr_in *)a->ai_addr)->sin_addr.s_addr);
+      if ((ip & 0xffff0000u) == 0xa9fe0000u) blocked = true; /* 169.254.0.0/16 */
+    } else if (a->ai_family == AF_INET6) {
+      const uint8_t *b = ((struct sockaddr_in6 *)a->ai_addr)->sin6_addr.s6_addr;
+      if (b[0] == 0xfe && (b[1] & 0xc0) == 0x80) blocked = true; /* fe80::/10 */
+    }
+  }
+  freeaddrinfo(res);
+  return blocked;
 }
 
 buckets_conn *buckets_conn_dial(const char *host, int port, buckets_tls_client *tls, int timeout_ms, char *err,
