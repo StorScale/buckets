@@ -43,6 +43,7 @@ buckets_unit_test(test_audit)
 buckets_unit_test(test_scim)
 buckets_unit_test(test_drive_health)
 buckets_unit_test(test_dsync)
+buckets_unit_test(test_security_parity)
 
 # scripts/adopt_kes.py (the adoption script's KES carry-over)
 find_package(Python3 COMPONENTS Interpreter)

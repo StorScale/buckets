@@ -36,4 +36,8 @@ long buckets_url_decode(buckets_str src, char *dst, bool plus_is_space);
  * slashes, no "." elements, ".." resolved lexically. Malloc'd. */
 char *buckets_path_clean(const char *p);
 
+/* True if the slash-separated path has a ".." component, so joining it under a
+ * base directory could escape it. Used to reject traversal in request paths. */
+bool buckets_path_has_dotdot(const char *path);
+
 #endif

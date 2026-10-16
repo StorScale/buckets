@@ -85,6 +85,17 @@ bool buckets_str_has_suffix(buckets_str s, const char *suffix) {
   return s.n >= n && memcmp(s.p + s.n - n, suffix, n) == 0;
 }
 
+bool buckets_path_has_dotdot(const char *path) {
+  for (const char *p = path; p && *p;) {
+    const char *slash = strchr(p, '/');
+    size_t len = slash ? (size_t)(slash - p) : strlen(p);
+    if (len == 2 && p[0] == '.' && p[1] == '.') return true;
+    if (!slash) break;
+    p = slash + 1;
+  }
+  return false;
+}
+
 char *buckets_path_clean(const char *p) {
   size_t n = strlen(p), r = 0, w = 0, dotdot = 0;
   char *out = buckets_xmalloc(n + 2);
