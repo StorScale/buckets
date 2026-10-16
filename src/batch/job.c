@@ -116,22 +116,28 @@ const char *buckets_batch_job_type(const buckets_batch_job *j) {
   return "unknown";
 }
 
+static void redact_str(char **s) {
+  if (*s && **s) {
+    free(*s);
+    *s = buckets_xstrdup(BUCKETS_BATCH_REDACTED);
+  }
+}
+
+static void redact_creds(buckets_batch_creds *c) {
+  redact_str(&c->secret_key);
+  redact_str(&c->session_token);
+}
+
 void buckets_batch_job_redact(buckets_batch_job *j) {
   if (j->replicate) {
-    buckets_batch_creds *c = &j->replicate->target.creds;
-    if (c->secret_key && *c->secret_key) {
-      free(c->secret_key);
-      c->secret_key = buckets_xstrdup(BUCKETS_BATCH_REDACTED);
-    }
-    if (c->session_token && *c->session_token) {
-      free(c->session_token);
-      c->session_token = buckets_xstrdup(BUCKETS_BATCH_REDACTED);
-    }
+    /* both ends: a remote-to-local job holds the source's secret key, a
+     * local-to-remote job the target's */
+    redact_creds(&j->replicate->source.creds);
+    redact_creds(&j->replicate->target.creds);
+    redact_str(&j->replicate->flags.notify.token);
   }
-  if (j->expire && j->expire->notify.token && *j->expire->notify.token) {
-    free(j->expire->notify.token);
-    j->expire->notify.token = buckets_xstrdup(BUCKETS_BATCH_REDACTED);
-  }
+  if (j->expire) redact_str(&j->expire->notify.token);
+  if (j->keyrotate) redact_str(&j->keyrotate->flags.notify.token);
 }
 
 void buckets_batch_job_defaults(buckets_batch_job *j) {
