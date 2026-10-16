@@ -1,6 +1,6 @@
 # Buckets Roadmap
 
-As of 2026-10-11 · Russell Myers
+As of 2026-10-16 · Russell Myers
 
 ## Summary
 
@@ -16,6 +16,7 @@ A successor can't depend on what it replaces. MinIO no longer publishes its imag
 - **Phase 2 is done (1.2.0 to 1.18.0):** guided sign-in setup (1.2.0) for Entra ID, Okta, Keycloak, other OpenID providers and LDAP, per-team roles (1.3.0), the access review (1.4.0), removing people who leave Entra ID (1.9.0), Keycloak and Okta (1.10.0), SCIM for providers that push changes (1.17.0), and roles kept current (1.18.0).
 - **Phase 3 is done (1.5.0 to 1.8.0):** monitoring and drive health, runtime drive replacement, console scheduling, cert-manager, and buckets, replication and site replication as resources.
 - **Phase 4 is done (1.11.0 to 1.16.0):** the retention and encryption coverage reports (1.11.0), the usage and chargeback reports (1.12.0), FIPS mode (1.13.0), ransomware alerts (1.14.0), the audit log (1.15.0) and the lifecycle and replication editor (1.16.0).
+- **Next:** security parity with AIStor and multi-tenancy (rate limiting and quotas), from a survey of the field on 2026-10-16. The lakehouse (managed Iceberg tables) is weighed for 2.0 beside elastic pools, and smaller survey items are in the backlog.
 
 ## Priorities at a glance
 
@@ -111,14 +112,60 @@ A C server in a distroless image should use less memory than the Go original, wh
 - Publish the method and the raw results with each comparison.
 - Market footprint or speed only where the numbers show a clear difference.
 
-## Under consideration for 2.0: elastic pools
+## Next: security parity and multi-tenancy
 
-Not agreed or scheduled: written down to be weighed. Today a pool's drives are fixed when it is created, as in MinIO, so storage grows only by a whole new pool, and a drive leaves only by failing. An elastic pool would place objects through a map of placement groups instead, so drives could be added or drained one at a time, with drives of any size filled by weight.
+From a survey of the field on 2026-10-16 (AIStor, AWS S3, Ceph, SeaweedFS, Garage, RustFS and the enterprise appliances). Most of what competitors added in 2026 is the lakehouse, weighed for 2.0 below; these two pieces are smaller and carry the "maintained successor" promise directly, so they come first.
+
+### Security parity with AIStor
+
+MinIO's commercial line (AIStor) kept fixing security issues after the public release Buckets forked from, so Buckets may carry the same bugs. Keeping current with them is the cheapest way to hold the promise that Buckets is the safe place to land. Checked against AIStor `RELEASE.2026-07-24`:
+
+- [x] Non-expiring OIDC/STS credentials. Already refused: a temporary user needs an expiry (`buckets_iam_set_temp_user`), and the OIDC path rejects a missing or invalid `exp`. This was AIStor's headline fix; we don't have it.
+- [ ] CopyObject and UploadPartCopy with a source in `.minio.sys`. The destination bucket is refused as reserved, but the copy *source* is only policy-checked; confirm a source in a reserved bucket is refused, with a test either way.
+- [ ] Batch-job SSRF. Block replicate and expire endpoints pointed at link-local and cloud metadata addresses (169.254.0.0/16, `fd00:ec2::254`), map a refused dial to a clear error, and redact source credentials from describe output.
+- [ ] Path traversal in the storage REST layer. Reject `..` in the volume and path parameters of the internode storage server.
+
+Each open item is a day or two, and the first is a test that either passes or finds a hole.
+
+### Rate limiting and quotas
+
+A runaway or hostile credential can saturate a cluster, and teams sharing one have no ceilings. Ceph's Tentacle release added token-bucket rate limits per user, bucket, global and anonymous scope, and IAM accounts with per-account quotas; MinIO has API rate limits. Buckets has neither.
+
+- [ ] Request-rate and bandwidth limits per credential, bucket and cluster, returning 503 when exceeded, surfaced as metrics.
+- [ ] Tie into the ransomware response: throttle a credential that runs over its usual rate, rather than only alerting or turning it off.
+- [ ] Account-level user caps and storage quotas for teams sharing a cluster.
+
+## Under consideration for 2.0
+
+Not agreed or scheduled: written down to be weighed. Two large themes, each ending MinIO on-disk compatibility or standing on its own; a small team probably takes one, not both.
+
+### Elastic pools
+
+Today a pool's drives are fixed when it is created, as in MinIO, so storage grows only by a whole new pool, and a drive leaves only by failing. An elastic pool would place objects through a map of placement groups instead, so drives could be added or drained one at a time, with drives of any size filled by weight.
 
 - [ ] **Elastic pools** ([the design](design/elastic-pools.md)): add or drain single drives and servers, with a preview of what moves; moves throttled and resumable; failure domains kept.
 - Performance, estimated by simulation ([the design](design/elastic-pools.md#performance)): the map itself costs nothing measurable, and a 6+3 stripe over 16 drives takes about 1.8× the small objects of one 16-drive MinIO set. Weighting drives by size makes a larger drive the busiest one: a 16 TB drive among 8 TB ones costs about a third of small-object throughput.
 - It leaves MinIO's on-disk format: an elastic pool cannot be rolled back to MinIO. Existing pools stay MinIO pools, and a cluster moves only by choosing to decommission them into an elastic pool, so the 1.x promise holds for everyone else.
 - The largest new pieces are agreement on the map between servers, and moving data safely while it is read and written.
+
+### Managed tables (Apache Iceberg)
+
+The field has settled on the lakehouse. AIStor's Tables — a managed Iceberg REST catalog with distributed compaction, snapshot expiration, orphan-file cleanup and site replication — moved to its stable line in July 2026 as a paid feature; AWS S3 Tables reached Iceberg V3; even SeaweedFS ships a built-in Iceberg catalog. Buckets has none. This is the feature MinIO is upselling its community users on, so it is the strongest long-term reason they might choose AIStor over Buckets.
+
+- [ ] An Iceberg REST catalog backed by Buckets, so Spark, Trino and DuckDB query tables stored as objects.
+- [ ] Server-side maintenance: compaction, snapshot expiration, orphaned-file cleanup.
+- [ ] Table-level access control and replication to a DR site.
+- The largest pieces are the catalog's transactional commits and coordinating compaction across servers. A theme in its own right, and a far bigger build than elastic pools.
+
+## Backlog
+
+Smaller or lower-priority items from the same survey, not tied to a phase. Each is picked up when it earns its place.
+
+- [ ] **Conditional-write policy enforcement.** `If-Match` and `If-None-Match` work on PutObject and CompleteMultipartUpload today; AWS also lets a bucket policy *require* them through the `s3:if-match` and `s3:if-none-match` condition keys. Confirm our coverage and add the condition keys if they're missing.
+- [ ] **SPIFFE workload identity.** We already have `AssumeRoleWithCertificate`; AIStor extended it to accept SPIFFE SVID certificates for zero-trust workload identity. An extension of what we have, not a new API.
+- [ ] **50 TB objects.** AWS raised the maximum object size from 5 TB to 50 TB. Check our ceiling and lift it if a limit is in the way.
+- [ ] **S3 Annotations.** AWS added mutable, searchable per-object context beyond tags and headers. Niche for our audience; track it.
+- [ ] **NFS and SMB access.** AWS S3 Files exposes a bucket as a POSIX filesystem; we already ship FTP, SFTP and S3FS. Only if a user asks for it.
 
 ## Already delivered
 
