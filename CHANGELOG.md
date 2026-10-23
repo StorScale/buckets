@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.20.4] - 2026-10-23
+
 ### Fixed
 - **Deleting many versions of one object is no longer quadratic.** `DeleteObjects` removed each version with its own read-modify-write of the object's `xl.meta`, so clearing a key with thousands of versions rewrote a large record once per version (≈n² work — over 12 hours to clear 90,000 versions across 60 keys on a dev cluster). It now groups a request's versions by object and removes each object's versions in a single rewrite per drive, as MinIO's `DeleteVersions` does. The two other per-version metadata reads are gone as well: the object-lock retention check is skipped when the bucket has no object lock configured, and a removed transitioned version's remote tier copy is now read from the batch's own metadata pass rather than a separate stat per version, so the path stays linear even for tiered, heavily-versioned keys. In an end-to-end test, removing 200 versions of a key dropped from ~3.7 s (one at a time) to ~50 ms (batched).
 
