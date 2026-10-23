@@ -521,6 +521,38 @@ buckets_obj_err buckets_obj_delete_ex(buckets_objlayer *L, const char *bucket, c
   return result;
 }
 
+buckets_obj_err buckets_obj_delete_versions(buckets_objlayer *L, const char *bucket, const char *object,
+                                            buckets_obj_vdel *v, size_t n) {
+  buckets_audit_tags *at = buckets_audit_tags_current();
+  const char *dop = at && at->delete_op ? at->delete_op : "DeleteObject";
+  if (L->npools == 1) {
+    buckets_obj_err err = buckets_ep_delete_versions(L->pools[0], bucket, object, v, n);
+    if (err != BUCKETS_OBJ_ERR_NO_SUCH_KEY) audit_op(L, dop, bucket, object, 0);
+    return err;
+  }
+  audit_op(L, dop, bucket, object, 0);
+  /* Explicit versions are removed from every pool that has them; a version
+   * absent from all pools stays NO_SUCH_VERSION. */
+  buckets_obj_vdel *cur = buckets_xcalloc(n, sizeof(*cur));
+  for (size_t j = 0; j < n; j++) v[j].err = BUCKETS_OBJ_ERR_NO_SUCH_VERSION;
+  buckets_obj_err result = BUCKETS_OBJ_OK;
+  for (size_t p = 0; p < L->npools; p++) {
+    for (size_t j = 0; j < n; j++) cur[j] = (buckets_obj_vdel){.version_id = v[j].version_id};
+    buckets_obj_err err = buckets_ep_delete_versions(L->pools[p], bucket, object, cur, n);
+    if (err && err != BUCKETS_OBJ_ERR_NO_SUCH_KEY) result = err;
+    for (size_t j = 0; j < n; j++) {
+      if (cur[j].err == BUCKETS_OBJ_ERR_NO_SUCH_VERSION) continue; /* not in this pool */
+      v[j].delete_marker = cur[j].delete_marker;
+      free(v[j].tier), free(v[j].remote), free(v[j].tier_version); /* a key lives in one pool */
+      v[j].tier = cur[j].tier, v[j].remote = cur[j].remote, v[j].tier_version = cur[j].tier_version;
+      cur[j].tier = cur[j].remote = cur[j].tier_version = NULL;
+      if (v[j].err == BUCKETS_OBJ_ERR_NO_SUCH_VERSION || cur[j].err) v[j].err = cur[j].err;
+    }
+  }
+  free(cur);
+  return result;
+}
+
 buckets_obj_err buckets_obj_update_meta(buckets_objlayer *L, const char *bucket, const char *object,
                                         const char *version_id, buckets_meta_edit_fn fn, void *ud,
                                         buckets_object_info *out) {

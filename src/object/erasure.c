@@ -1826,6 +1826,157 @@ buckets_obj_err buckets_ep_delete(buckets_epool *L, const char *bucket, const ch
   return err;
 }
 
+/* ---- batched version delete --------------------------------------------------------
+ * Removing N versions of one object one at a time rewrites the whole xl.meta N
+ * times (quadratic when a key holds thousands of versions). This removes them
+ * all in a single read-modify-write per drive, as MinIO's xlStorage.DeleteVersions. */
+static bool shared_data_dir(const buckets_xlmeta *x, const uint8_t id[16], const uint8_t dd[16]);
+
+typedef struct {
+  buckets_eset *s;
+  const char *bucket, *op;
+  dmeta *m;
+  const uint8_t (*ids)[16];    /* n version ids */
+  const char (*keys)[37];      /* n version-id strings (for inline_remove) */
+  const uint8_t (*fv_ids)[16]; /* n free-version ids, one per requested version */
+  size_t n;
+  bool *found;  /* per drive x version: found[i * n + v] */
+  bool *marker; /* per drive x version: the removed version was a delete marker */
+  bool done[MAX_SET]; /* drive i's single record write (or dir delete) succeeded */
+} del_many_ctx;
+
+/* All requested versions removed from drive i's xl.meta, then one write back. */
+static void delete_many_one(void *ctx, size_t i) {
+  del_many_ctx *c = ctx;
+  size_t n = c->n;
+  dmeta *m = &c->m[i];
+  c->done[i] = false;
+  if (!m->loaded) return;
+  uint8_t(*dds)[16] = buckets_xcalloc(n, sizeof(*dds)); /* data dirs of removed versions */
+  size_t ndd = 0;
+  for (size_t v = 0; v < n; v++) {
+    long k = buckets_xlmeta_find(&m->x, c->ids[v]);
+    if (k < 0) continue;
+    c->found[i * n + v] = true;
+    buckets_xl_object o;
+    bool decoded = buckets_xl_object_decode(&m->x.versions[k], &o) == BUCKETS_XL_OK;
+    if (decoded) {
+      c->marker[i * n + v] = o.type == BUCKETS_XL_TYPE_DELETE;
+      if (o.type == BUCKETS_XL_TYPE_OBJECT && !buckets_xl_kv_get(o.meta_sys, o.nmeta_sys, BUCKETS_XL_META_INLINE))
+        memcpy(dds[ndd++], o.data_dir, 16);
+    }
+    buckets_xlmeta_remove_version(&m->x, c->ids[v]);
+    buckets_xlmeta_inline_remove(&m->x, c->keys[v]);
+    if (decoded) {
+      buckets_xlmeta_add_free_version(&m->x, &o, c->fv_ids[v]);
+      buckets_xl_object_free(&o);
+    }
+  }
+  buckets_drive *d = c->s->drives[i];
+  buckets_drive_err de;
+  if (m->x.n == 0) {
+    de = buckets_drive_delete(d, c->bucket, c->op, true, true);
+  } else {
+    buckets_buf bytes = BUCKETS_BUF_INIT;
+    buckets_xlmeta_serialize(&m->x, &bytes);
+    char *mp = join(c->op, XL_META);
+    de = buckets_drive_write_all(d, c->bucket, mp, bytes.data, bytes.len);
+    free(mp);
+    buckets_buf_free(&bytes);
+    /* A data dir is removed only when no surviving version still shares it
+     * (several removed versions may point at the same dir). */
+    for (size_t j = 0; !de && j < ndd; j++) {
+      bool dup = false;
+      for (size_t p = 0; p < j && !dup; p++) dup = memcmp(dds[p], dds[j], 16) == 0;
+      if (dup || shared_data_dir(&m->x, c->ids[0], dds[j])) continue;
+      char dstr[37];
+      buckets_xl_version_id_string(dds[j], dstr);
+      char *dp = join(c->op, dstr);
+      buckets_drive_delete(d, c->bucket, dp, true, false);
+      free(dp);
+    }
+  }
+  free(dds);
+  c->done[i] = de == BUCKETS_DRIVE_OK;
+}
+
+buckets_obj_err buckets_ep_delete_versions(buckets_epool *L, const char *bucket, const char *object,
+                                           buckets_obj_vdel *v, size_t n) {
+  buckets_obj_err err = buckets_ep_stat_bucket(L, bucket);
+  if (err) return err;
+  if ((err = buckets_obj_check_name(object)) != BUCKETS_OBJ_OK) return err;
+  if (n == 0) return BUCKETS_OBJ_OK;
+  uint8_t(*ids)[16] = buckets_xcalloc(n, sizeof(*ids));
+  char(*keys)[37] = buckets_xcalloc(n, sizeof(*keys));
+  uint8_t(*fv_ids)[16] = buckets_xcalloc(n, sizeof(*fv_ids));
+  bool *bad = buckets_xcalloc(n, sizeof(*bad)); /* an unparseable version id */
+  for (size_t j = 0; j < n; j++) {
+    if (v[j].version_id && buckets_xl_version_id_parse(v[j].version_id, ids[j])) {
+      buckets_xl_version_id_string(ids[j], keys[j]);
+      char fv_s[37];
+      new_uuid_bytes(fv_ids[j], fv_s);
+    } else {
+      bad[j] = true;
+      v[j].err = BUCKETS_OBJ_ERR_NO_SUCH_VERSION;
+    }
+  }
+  buckets_eset *s = buckets_ep_set_for(L, object);
+  char *op = obj_path(object);
+  buckets_nslock_entry *lk = lock_ns(L, bucket, object, true);
+  if (!lk) {
+    for (size_t j = 0; j < n; j++) v[j].err = BUCKETS_OBJ_ERR_TIMEOUT;
+    free(ids), free(keys), free(fv_ids), free(bad), free(op);
+    return BUCKETS_OBJ_ERR_TIMEOUT;
+  }
+  dmeta m[MAX_SET];
+  load_metas(s, bucket, op, m);
+  /* A transitioned version's remote tier copy is dropped by the caller; read
+   * it once here (the record is identical on every drive) so the caller need
+   * not stat each version, which would make the whole batch quadratic again. */
+  for (size_t i = 0; i < s->n; i++) {
+    if (!m[i].loaded) continue;
+    for (size_t j = 0; j < n; j++) {
+      long k = bad[j] ? -1 : buckets_xlmeta_find(&m[i].x, ids[j]);
+      buckets_xl_object o;
+      if (k < 0 || buckets_xl_object_decode(&m[i].x.versions[k], &o) != BUCKETS_XL_OK) continue;
+      if (buckets_xl_transitioned(&o)) {
+        const buckets_xl_kv *t = buckets_xl_kv_get(o.meta_sys, o.nmeta_sys, BUCKETS_XL_META_TIER_NAME);
+        const buckets_xl_kv *r = buckets_xl_kv_get(o.meta_sys, o.nmeta_sys, BUCKETS_XL_META_TIER_OBJECT);
+        const buckets_xl_kv *rv = buckets_xl_kv_get(o.meta_sys, o.nmeta_sys, BUCKETS_XL_META_TIER_VERSION);
+        v[j].tier = buckets_xstrndup(t ? (const char *)t->value : "", t ? t->value_len : 0);
+        v[j].remote = buckets_xstrndup(r ? (const char *)r->value : "", r ? r->value_len : 0);
+        v[j].tier_version = buckets_xstrndup(rv ? (const char *)rv->value : "", rv ? rv->value_len : 0);
+      }
+      buckets_xl_object_free(&o);
+    }
+    break; /* one loaded drive is enough */
+  }
+  del_many_ctx c = {.s = s, .bucket = bucket, .op = op, .m = m, .ids = (const uint8_t(*)[16])ids,
+                    .keys = (const char(*)[37])keys, .fv_ids = (const uint8_t(*)[16])fv_ids, .n = n,
+                    .found = buckets_xcalloc(s->n * n, 1), .marker = buckets_xcalloc(s->n * n, 1)};
+  buckets_io_parallel(s->n, delete_many_one, &c);
+  int wq = write_quorum(set_data(s), s->parity);
+  for (size_t j = 0; j < n; j++) {
+    if (bad[j]) continue;
+    int found = 0, done = 0;
+    bool marker = false;
+    for (size_t i = 0; i < s->n; i++) {
+      if (!c.found[i * n + j]) continue;
+      found++;
+      if (c.done[i]) done++;
+      if (c.marker[i * n + j]) marker = true;
+    }
+    v[j].delete_marker = marker;
+    if (found == 0) v[j].err = BUCKETS_OBJ_ERR_NO_SUCH_VERSION;
+    else v[j].err = done >= wq || done == found ? BUCKETS_OBJ_OK : BUCKETS_OBJ_ERR_WRITE_QUORUM;
+  }
+  buckets_nslock_unlock(lk);
+  free_metas(m, s->n);
+  free(c.found), free(c.marker);
+  free(ids), free(keys), free(fv_ids), free(bad), free(op);
+  return BUCKETS_OBJ_OK;
+}
+
 /* ---- delete markers ---------------------------------------------------------------- */
 
 typedef struct {

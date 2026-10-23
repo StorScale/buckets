@@ -40,6 +40,10 @@ buckets_obj_err buckets_ep_open(buckets_epool *P, const char *bucket, const char
 buckets_obj_err buckets_ep_delete(buckets_epool *P, const char *bucket, const char *object, const char *version_id);
 buckets_obj_err buckets_ep_delete_ex(buckets_epool *P, const char *bucket, const char *object,
                                      const buckets_delete_opts *opts, buckets_delete_result *res);
+/* Removes several versions of one object in a single read-modify-write per
+ * drive (buckets_obj_delete_versions for one pool). */
+buckets_obj_err buckets_ep_delete_versions(buckets_epool *P, const char *bucket, const char *object,
+                                           buckets_obj_vdel *v, size_t n);
 buckets_obj_err buckets_ep_update_meta(buckets_epool *P, const char *bucket, const char *object,
                                        const char *version_id, buckets_meta_edit_fn fn, void *ud,
                                        buckets_object_info *out);
