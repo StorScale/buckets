@@ -299,6 +299,25 @@ typedef struct {
 buckets_obj_err buckets_obj_delete_ex(buckets_objlayer *L, const char *bucket, const char *object,
                                       const buckets_delete_opts *opts, buckets_delete_result *res);
 
+/* One explicit version to remove in a batched delete, with its outcome. */
+typedef struct {
+  const char *version_id; /* in: an explicit version ID (never NULL/empty) */
+  buckets_obj_err err;    /* out: OK, NO_SUCH_VERSION, or a write-quorum error */
+  bool delete_marker;     /* out: the removed version was a delete marker */
+  /* out: a transitioned version's remote tier copy to drop (tier NULL when the
+   * version was not transitioned); the caller owns and frees these strings. */
+  char *tier, *remote, *tier_version;
+} buckets_obj_vdel;
+/* Removes several versions of one object in a single read-modify-write per
+ * drive, where the per-version path would rewrite the whole xl.meta once for
+ * each (MinIO's DeleteVersions, used by DeleteObjects). The object is locked
+ * once for the whole batch. Only for plain deletes: callers that need
+ * per-version replication decisions use buckets_obj_delete_ex. Returns OK when
+ * the record was processed (even if some versions were absent); per-version
+ * outcomes are in v[].err. */
+buckets_obj_err buckets_obj_delete_versions(buckets_objlayer *L, const char *bucket, const char *object,
+                                            buckets_obj_vdel *v, size_t n);
+
 typedef struct {
   buckets_object_info *objects;
   size_t nobjects;

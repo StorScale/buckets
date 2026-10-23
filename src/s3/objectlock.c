@@ -123,6 +123,11 @@ static bool bypass_requested(s3_ctx *c) {
 
 buckets_s3_error buckets_s3_lock_check_delete(s3_ctx *c, const char *object, const char *version_id) {
   if (!version_id || !*version_id) return BUCKETS_ERR_NONE;
+  /* Retention and legal holds can exist only on a lock-enabled bucket; skip
+   * the per-version stat otherwise (it is a full xl.meta read, so doing it per
+   * version turns a DeleteObjects of one key's versions quadratic). */
+  buckets_lock_config lcfg;
+  if (!bucket_lock(c, &lcfg)) return BUCKETS_ERR_NONE;
   buckets_object_info oi;
   if (buckets_obj_stat(c->s->layer, c->bucket, object, version_id, &oi) != BUCKETS_OBJ_OK) return BUCKETS_ERR_NONE;
   buckets_s3_error e = BUCKETS_ERR_NONE;

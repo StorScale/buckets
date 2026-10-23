@@ -4513,90 +4513,158 @@ void buckets_s3_delete_objects(s3_ctx *c) {
   bool replicates = bucket_replicates(c);
   deleted_ev *evs = buckets_xcalloc(count, sizeof(*evs));
   size_t nev = 0;
+
+  /* One parsed delete entry, carried across the three passes below. */
+  typedef struct {
+    buckets_buf key, ver;
+    buckets_s3_error e;        /* a per-entry error, else BUCKETS_ERR_NONE */
+    char detail[160];          /* appended to the error message */
+    buckets_delete_result res; /* the delete's outcome */
+    bool versioned, suspended;
+    bool batched; /* a plain explicit-version delete, removed via the batch */
+  } dobj;
+  dobj *ents = buckets_xcalloc(count, sizeof(*ents));
+  size_t ne = 0;
+
+  /* Pass 1: parse, authorize and object-lock-check every entry (all cheap).
+   * A plain explicit-version delete is deferred to the grouped batch; markers
+   * and replicated versioned deletes stay on the per-entry path. */
+  for (size_t i = doc.nodes[0].first_child; i; i = doc.nodes[i].next_sibling) {
+    if (!buckets_str_eq_c(doc.nodes[i].name, "Object")) continue;
+    dobj *d = &ents[ne++];
+    size_t kn = buckets_xml_child(&doc, i, "Key"), vn = buckets_xml_child(&doc, i, "VersionId");
+    bool ok = kn && buckets_xml_unescape(doc.nodes[kn].text, &d->key) && d->key.len > 0 &&
+              (!vn || buckets_xml_unescape(doc.nodes[vn].text, &d->ver));
+    uint8_t vid_bytes[16];
+    if (!ok) {
+      d->e = BUCKETS_ERR_INVALID_OBJECT_NAME;
+      continue;
+    }
+    if (d->ver.len && !buckets_xl_version_id_parse(d->ver.data, vid_bytes)) {
+      d->e = BUCKETS_ERR_NO_SUCH_VERSION; /* with uuid.Parse's reason, as MinIO */
+      if (d->ver.len != 36) snprintf(d->detail, sizeof(d->detail), " (invalid UUID length: %zu)", d->ver.len);
+      else snprintf(d->detail, sizeof(d->detail), " (invalid UUID format)");
+      continue;
+    }
+    if (c->audited) { /* the request info names this key, as MinIO's per-object check leaves it */
+      free(c->err_object);
+      c->err_object = buckets_xstrdup(d->key.data);
+    }
+    if ((d->e = buckets_s3_authorize(c, "s3:DeleteObject", c->bucket, d->key.data, d->ver.len ? d->ver.data : NULL)))
+      continue;
+    if ((d->e = buckets_s3_lock_check_delete(c, d->key.data, d->ver.len ? d->ver.data : NULL))) continue;
+    buckets_s3_versioning(c, d->key.data, &d->versioned, &d->suspended);
+    d->batched = d->ver.len > 0 && !(replicates && d->versioned);
+  }
+
+  /* Pass 2a: the per-entry path (markers and replicated versioned deletes). */
+  for (size_t j = 0; j < ne; j++) {
+    dobj *d = &ents[j];
+    if (d->e || d->batched) continue;
+    buckets_delete_opts o = {.version_id = d->ver.len ? d->ver.data : NULL, .versioned = d->versioned,
+                             .suspended = d->suspended};
+    char *saved = c->object;
+    c->object = d->key.data; /* delete_decide checks this key */
+    del_decide dd = {c, o.version_id, o.versioned};
+    if (replicates && o.versioned) {
+      o.decide = delete_decide;
+      o.decide_ud = &dd;
+    }
+    sweeper sw;
+    sweep_prepare(c, d->key.data, o.version_id, o.versioned, o.suspended, &sw);
+    buckets_obj_err oe = buckets_obj_delete_ex(c->s->layer, c->bucket, d->key.data, &o, &d->res);
+    sweep_done(c, &sw, !oe);
+    c->object = saved;
+    if (!oe && o.decide) buckets_repl_schedule_delete(c->s, c->bucket, d->key.data, &d->res, "replicate:incoming:delete");
+    if (oe && oe != BUCKETS_OBJ_ERR_NO_SUCH_KEY && oe != BUCKETS_OBJ_ERR_NO_SUCH_VERSION) d->e = buckets_s3_obj_error(oe);
+    if (oe == BUCKETS_OBJ_ERR_NO_SUCH_KEY && !d->ver.len && (o.versioned || o.suspended)) {
+      /* MinIO's DeleteObjects reports the marker it would have made for a
+       * key with no versions (a fresh ID when versioned), though none is stored. */
+      d->res.delete_marker = true;
+      if (o.versioned) buckets_uuid_v4(d->res.version_id);
+      else snprintf(d->res.version_id, sizeof(d->res.version_id), "null");
+    }
+  }
+
+  /* Pass 2b: the batched path. Group batchable entries by key and remove each
+   * key's versions in a single read-modify-write, instead of one per version. */
+  bool *handled = buckets_xcalloc(ne, sizeof(*handled));
+  for (size_t j = 0; j < ne; j++) {
+    if (ents[j].e || !ents[j].batched || handled[j]) continue;
+    const char *k = ents[j].key.data;
+    size_t *idx = buckets_xcalloc(ne, sizeof(*idx));
+    size_t ng = 0;
+    for (size_t g = j; g < ne; g++) {
+      if (ents[g].e || !ents[g].batched || handled[g] || strcmp(ents[g].key.data, k) != 0) continue;
+      handled[g] = true;
+      idx[ng++] = g;
+    }
+    buckets_obj_vdel *vd = buckets_xcalloc(ng, sizeof(*vd));
+    for (size_t g = 0; g < ng; g++) vd[g].version_id = ents[idx[g]].ver.data;
+    char *saved = c->object;
+    c->object = (char *)k;
+    buckets_obj_delete_versions(c->s->layer, c->bucket, k, vd, ng);
+    c->object = saved;
+    for (size_t g = 0; g < ng; g++) {
+      dobj *d = &ents[idx[g]];
+      buckets_obj_err oe = vd[g].err;
+      /* objSweeper: a removed transitioned version's remote copy is dropped
+       * now (the batch read the tier info, so no per-version stat is needed). */
+      if (!oe && vd[g].tier) buckets_tiering_remove_remote(c->s->tiering, vd[g].tier, vd[g].remote, vd[g].tier_version);
+      free(vd[g].tier);
+      free(vd[g].remote);
+      free(vd[g].tier_version);
+      d->res.delete_marker = vd[g].delete_marker;
+      snprintf(d->res.version_id, sizeof(d->res.version_id), "%s", d->ver.data);
+      if (oe && oe != BUCKETS_OBJ_ERR_NO_SUCH_KEY && oe != BUCKETS_OBJ_ERR_NO_SUCH_VERSION) d->e = buckets_s3_obj_error(oe);
+    }
+    free(vd);
+    free(idx);
+  }
+  free(handled);
+
+  /* Pass 3: write the result and collect events, in request order. */
   buckets_buf *b = &c->resp->body;
   buckets_xml_header(b);
   buckets_xml_open_ns(b, "DeleteResult", BUCKETS_S3_XMLNS);
-  for (size_t i = doc.nodes[0].first_child; i; i = doc.nodes[i].next_sibling) {
-    if (!buckets_str_eq_c(doc.nodes[i].name, "Object")) continue;
-    size_t kn = buckets_xml_child(&doc, i, "Key"), vn = buckets_xml_child(&doc, i, "VersionId");
-    buckets_buf key = BUCKETS_BUF_INIT, ver = BUCKETS_BUF_INIT;
-    bool ok = kn && buckets_xml_unescape(doc.nodes[kn].text, &key) && key.len > 0 &&
-              (!vn || buckets_xml_unescape(doc.nodes[vn].text, &ver));
-    buckets_s3_error e = BUCKETS_ERR_NONE;
-    buckets_delete_result res = {0};
-    uint8_t vid_bytes[16];
-    char detail[160] = "";
-    if (!ok) {
-      e = BUCKETS_ERR_INVALID_OBJECT_NAME;
-    } else if (ver.len && !buckets_xl_version_id_parse(ver.data, vid_bytes)) {
-      e = BUCKETS_ERR_NO_SUCH_VERSION; /* with uuid.Parse's reason, as MinIO */
-      if (ver.len != 36) snprintf(detail, sizeof(detail), " (invalid UUID length: %zu)", ver.len);
-      else snprintf(detail, sizeof(detail), " (invalid UUID format)");
-    } else if ((c->audited ? (free(c->err_object), c->err_object = buckets_xstrdup(key.data)) : NULL),
-               (e = buckets_s3_authorize(c, "s3:DeleteObject", c->bucket, key.data, ver.len ? ver.data : NULL))) {
-      /* reported for this key (the request info now names it, as MinIO's per-object check leaves it) */
-    } else if ((e = buckets_s3_lock_check_delete(c, key.data, ver.len ? ver.data : NULL))) {
-      /* locked */
-    } else {
-      buckets_delete_opts o = {.version_id = ver.len ? ver.data : NULL};
-      buckets_s3_versioning(c, key.data, &o.versioned, &o.suspended);
-      char *saved = c->object;
-      c->object = key.data; /* delete_decide checks this key */
-      del_decide dd = {c, o.version_id, o.versioned};
-      if (replicates && o.versioned) {
-        o.decide = delete_decide;
-        o.decide_ud = &dd;
-      }
-      sweeper sw;
-      sweep_prepare(c, key.data, o.version_id, o.versioned, o.suspended, &sw);
-      buckets_obj_err oe = buckets_obj_delete_ex(c->s->layer, c->bucket, key.data, &o, &res);
-      sweep_done(c, &sw, !oe);
-      c->object = saved;
-      if (!oe && o.decide) buckets_repl_schedule_delete(c->s, c->bucket, key.data, &res, "replicate:incoming:delete");
-      if (oe && oe != BUCKETS_OBJ_ERR_NO_SUCH_KEY && oe != BUCKETS_OBJ_ERR_NO_SUCH_VERSION) e = buckets_s3_obj_error(oe);
-      if (oe == BUCKETS_OBJ_ERR_NO_SUCH_KEY && !ver.len && (o.versioned || o.suspended)) {
-        /* MinIO's DeleteObjects reports the marker it would have made for a
-         * key with no versions (a fresh ID when versioned), though none is stored. */
-        res.delete_marker = true;
-        if (o.versioned) buckets_uuid_v4(res.version_id);
-        else snprintf(res.version_id, sizeof(res.version_id), "null");
-      }
-    }
-    if (e) {
+  for (size_t j = 0; j < ne; j++) {
+    dobj *d = &ents[j];
+    if (d->e) {
       /* DeleteError: Code, Message, Key, VersionId */
-      const buckets_s3_error_info *info = buckets_s3_error_get(e);
+      const buckets_s3_error_info *info = buckets_s3_error_get(d->e);
       buckets_buf msg = BUCKETS_BUF_INIT;
-      buckets_buf_appendf(&msg, "%s%s", info->message, detail);
+      buckets_buf_appendf(&msg, "%s%s", info->message, d->detail);
       buckets_xml_open(b, "Error");
       buckets_xml_elem(b, "Code", info->code);
       buckets_xml_elem(b, "Message", msg.data);
-      buckets_xml_elem(b, "Key", key.data ? key.data : "");
-      if (ver.len) buckets_xml_elem(b, "VersionId", ver.data);
+      buckets_xml_elem(b, "Key", d->key.data ? d->key.data : "");
+      if (d->ver.len) buckets_xml_elem(b, "VersionId", d->ver.data);
       buckets_xml_close(b, "Error");
       buckets_buf_free(&msg);
     } else {
       /* the event goes out once the response is written (extractRespElements) */
-      deleted_ev *d = &evs[nev++];
-      d->key = buckets_xstrdup(key.data);
-      snprintf(d->version, sizeof(d->version), "%s",
-               res.delete_marker ? (ver.len ? ver.data : res.version_id) : (ver.len ? ver.data : ""));
-      d->marker = res.delete_marker;
-    }
-    if (!e && !quiet) {
-      /* DeletedObject: DeleteMarker, DeleteMarkerVersionId, Key, VersionId (omitempty) */
-      buckets_xml_open(b, "Deleted");
-      if (res.delete_marker) {
-        buckets_xml_elem(b, "DeleteMarker", "true");
-        const char *dmv = ver.len ? ver.data : res.version_id;
-        if (strcmp(dmv, "null") != 0) buckets_xml_elem(b, "DeleteMarkerVersionId", dmv);
+      deleted_ev *ev = &evs[nev++];
+      ev->key = buckets_xstrdup(d->key.data);
+      snprintf(ev->version, sizeof(ev->version), "%s",
+               d->res.delete_marker ? (d->ver.len ? d->ver.data : d->res.version_id) : (d->ver.len ? d->ver.data : ""));
+      ev->marker = d->res.delete_marker;
+      if (!quiet) {
+        /* DeletedObject: DeleteMarker, DeleteMarkerVersionId, Key, VersionId (omitempty) */
+        buckets_xml_open(b, "Deleted");
+        if (d->res.delete_marker) {
+          buckets_xml_elem(b, "DeleteMarker", "true");
+          const char *dmv = d->ver.len ? d->ver.data : d->res.version_id;
+          if (strcmp(dmv, "null") != 0) buckets_xml_elem(b, "DeleteMarkerVersionId", dmv);
+        }
+        buckets_xml_elem(b, "Key", d->key.data);
+        if (d->ver.len) buckets_xml_elem(b, "VersionId", d->ver.data);
+        buckets_xml_close(b, "Deleted");
       }
-      buckets_xml_elem(b, "Key", key.data);
-      if (ver.len) buckets_xml_elem(b, "VersionId", ver.data);
-      buckets_xml_close(b, "Deleted");
     }
-    buckets_buf_free(&key);
-    buckets_buf_free(&ver);
+    buckets_buf_free(&d->key);
+    buckets_buf_free(&d->ver);
   }
+  free(ents);
   buckets_xml_close(b, "DeleteResult");
   buckets_xml_doc_free(&doc);
   buckets_s3_write_xml(c, 200);
